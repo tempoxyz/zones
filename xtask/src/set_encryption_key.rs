@@ -1,20 +1,16 @@
 //! Registers the sequencer's encryption key on the ZonePortal.
 //!
-//! Derives the secp256k1 public key from the private key, constructs a
-//! proof-of-possession (POP) ECDSA signature, and calls
-//! `setSequencerEncryptionKey` on the portal contract.
+//! Calls the shared sequencer registration helper, which derives the secp256k1
+//! public key, constructs the proof-of-possession signature, and submits it to
+//! the portal contract.
 
 use alloy::{
-    network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, U256, keccak256},
-    providers::ProviderBuilder,
-    signers::{Signer, local::PrivateKeySigner},
-    sol_types::SolValue,
+    network::EthereumWallet, primitives::Address, providers::ProviderBuilder,
+    signers::local::PrivateKeySigner,
 };
-use eyre::{WrapErr as _, eyre};
-use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
+use eyre::WrapErr as _;
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::ZonePortal;
+use zone_sequencer::register_encryption_key;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct SetEncryptionKey {
@@ -42,27 +38,7 @@ impl SetEncryptionKey {
         // The sequencer key is used both to sign the tx and as the encryption key
         let signer: PrivateKeySigner = key_str.parse()?;
 
-        // Derive compressed public key coordinates
-        let enc_key = k256::SecretKey::from_slice(&const_hex::decode(key_str)?)?;
-        let scalar: Scalar = *enc_key.to_nonzero_scalar();
-        let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-        let encoded = pub_point.to_encoded_point(true);
-        let x = B256::from_slice(encoded.x().unwrap().as_slice());
-        let y_parity: u8 = encoded.as_bytes()[0]; // 0x02 or 0x03
-
-        println!("Encryption key x: {x}");
-        println!("Encryption key yParity: {y_parity:#x}");
-
-        // Build POP message and sign BEFORE moving signer into wallet
-        let message = keccak256((self.portal, x, U256::from(y_parity)).abi_encode());
-        let sig = signer.sign_hash(&message).await?;
-
-        let pop_v = sig.v() as u8 + 27;
-        let pop_r = B256::from(sig.r().to_be_bytes::<32>());
-        let pop_s = B256::from(sig.s().to_be_bytes::<32>());
-
-        // Now move signer into wallet (no clone needed)
-        let wallet = EthereumWallet::from(signer);
+        let wallet = EthereumWallet::from(signer.clone());
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
             .connect(&self.l1_rpc_url)
@@ -72,17 +48,9 @@ impl SetEncryptionKey {
             "Sending setSequencerEncryptionKey to portal {}...",
             self.portal
         );
-        let portal = ZonePortal::new(self.portal, &provider);
-        let receipt = portal
-            .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-            .send_sync()
+        let tx_hash = register_encryption_key(&provider, self.portal, &signer)
             .await
             .wrap_err("failed to send setSequencerEncryptionKey")?;
-
-        let tx_hash = receipt.transaction_hash;
-        if !receipt.status() {
-            return Err(eyre!("setSequencerEncryptionKey reverted (tx: {tx_hash})"));
-        }
 
         println!("Encryption key registered!");
         println!("Explorer: https://explore.moderato.tempo.xyz/tx/{tx_hash}");

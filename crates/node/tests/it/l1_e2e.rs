@@ -15,6 +15,7 @@ use alloy::{
 use std::time::Duration;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS};
+use zone_node::dev::{ProvisionConfig, provision_zone};
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
@@ -138,6 +139,50 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
         tempo_hash,
         B256::ZERO,
         "tempoBlockHash should be set from real L1 headers"
+    );
+
+    Ok(())
+}
+
+/// The dev provisioner anchors immediately before `createZone`, so the zone
+/// replays the creation block and initializes a custom initial token from the
+/// portal constructor's `TokenEnabled` event.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let initial_token = l1
+        .create_tip20("DevUSD", "dUSD", B256::with_last_byte(0xD0))
+        .await?;
+
+    let provisioned = provision_zone(ProvisionConfig {
+        l1_rpc_url: l1.ws_url().to_string(),
+        dev_key: l1.dev_signer(),
+        factory: None,
+        initial_token,
+        rpc_url: String::new(),
+    })
+    .await?;
+
+    let latest_l1_block = l1.provider().get_block_number().await?;
+    assert!(latest_l1_block > provisioned.anchor_block_number);
+
+    let zone = ZoneTestNode::start_from_l1_at_block_with_initial_tokens(
+        l1.http_url(),
+        l1.ws_url(),
+        provisioned.portal,
+        provisioned.anchor_block_number,
+        None,
+    )
+    .await?;
+    zone.wait_for_l2_tempo_finalized(latest_l1_block, L1_TIMEOUT)
+        .await?;
+
+    let code = zone.provider().get_code_at(initial_token).await?;
+    assert!(
+        !code.is_empty(),
+        "custom initial token should be initialized from TokenEnabled"
     );
 
     Ok(())

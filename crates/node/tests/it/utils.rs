@@ -41,7 +41,6 @@ use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
 use zone_node::ZoneNode;
-use zone_precompiles::tempo_state::slots;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -618,8 +617,8 @@ impl ZoneTestNode {
         let l1_provider_url = l1_ws_url.clone();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
-            serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))
-                .expect("valid zone test genesis")
+            serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
+                .expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
@@ -1744,20 +1743,7 @@ impl L1TestNode {
 
 /// Build a zone test genesis anchored to a real L1 block.
 ///
-/// The base `zone-test-genesis.json` is a standalone genesis with:
-/// - TempoState anchored at block 0 with a zero block hash
-/// - ZoneInbox compiled with `tempoPortal = Address::ZERO` (Solidity immutable)
-///
-/// When connecting to a real L1, two things must be patched:
-///
-/// 1. **TempoState storage** — `tempoBlockHash` (slot 0) and the packed header fields
-///    in slot 7 must reflect the L1 block that serves as the zone's genesis anchor.
-///    Without this, `finalizeTempo` rejects the first L1 block for parent hash mismatch.
-///
-/// 2. **ZoneInbox bytecode** — the `tempoPortal` immutable (embedded in deployed bytecode
-///    as `PUSH32` instructions) must be replaced with the real portal address. Without this,
-///    `readTempoStorageSlot` reads L1 state from `Address::ZERO` instead of the portal,
-///    causing `_readEncryptionKey` to revert with `InvalidSharedSecretProof`.
+/// Delegates to [`zone_node::genesis::l1_anchored_genesis`] with the latest L1 header.
 ///
 /// Returns `(genesis, genesis_block_number)`.
 async fn build_l1_anchored_genesis(
@@ -1772,7 +1758,7 @@ async fn build_l1_anchored_genesis(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
-    build_l1_anchored_genesis_from_header(l1_header, portal_address)
+    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address)
 }
 
 /// Build a zone test genesis anchored to a specific L1 block number.
@@ -1789,98 +1775,7 @@ async fn build_l1_anchored_genesis_at_block(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
-    build_l1_anchored_genesis_from_header(l1_header, portal_address)
-}
-
-fn build_l1_anchored_genesis_from_header(
-    l1_header: &TempoHeader,
-    portal_address: Address,
-) -> eyre::Result<(Genesis, u64)> {
-    use alloy_primitives::address;
-
-    let genesis_block_number = l1_header.inner.number;
-
-    let mut rlp_buf = Vec::new();
-    l1_header.encode(&mut rlp_buf);
-    let l1_genesis_hash = keccak256(&rlp_buf);
-
-    let mut genesis: Genesis =
-        serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))?;
-
-    // --- Patch 1: TempoState storage ---
-    // TempoState is at 0x1c00...0000
-    let tempo_state_addr = address!("0x1c00000000000000000000000000000000000000");
-    let tempo_state_account = genesis
-        .alloc
-        .get_mut(&tempo_state_addr)
-        .ok_or_else(|| eyre::eyre!("TempoState not found in genesis alloc"))?;
-    let storage = tempo_state_account
-        .storage
-        .get_or_insert_with(Default::default);
-
-    storage.insert(
-        B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-        l1_genesis_hash,
-    );
-    storage.insert(
-        B256::from(slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
-        B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
-    );
-
-    // --- Patch 2: Portal address immutables in ZoneInbox and ZoneConfig ---
-    // Solidity immutables are baked into deployed bytecode as `PUSH32 <value>`.
-    // The default genesis has tempoPortal = Address::ZERO. We replace the 32-byte
-    // zero-padded needle at the byte level. Both ZoneInbox (0x...0001) and
-    // ZoneConfig (0x...0003) have `tempoPortal` as an immutable.
-    if !portal_address.is_zero() {
-        let needle = [0u8; 32]; // Address::ZERO left-padded to 32 bytes
-        let mut replacement = [0u8; 32];
-        replacement[12..].copy_from_slice(portal_address.as_slice());
-
-        let contracts_to_patch: &[(Address, usize)] = &[
-            (address!("0x1c00000000000000000000000000000000000001"), 4), // ZoneInbox
-            (address!("0x1c00000000000000000000000000000000000003"), 5), // ZoneConfig
-        ];
-
-        for &(addr, expected_count) in contracts_to_patch {
-            let account = genesis
-                .alloc
-                .get_mut(&addr)
-                .unwrap_or_else(|| panic!("contract {addr} missing in genesis alloc"));
-            if let Some(code) = &account.code {
-                let mut buf = code.to_vec();
-                let count = patch_bytes(&mut buf, &needle, &replacement);
-                assert_eq!(
-                    count, expected_count,
-                    "expected {expected_count} tempoPortal immutable(s) in {addr}, found {count} \
-                     — contract bytecode may have changed, update expected_count"
-                );
-                account.code = Some(buf.into());
-            }
-        }
-    }
-
-    Ok((genesis, genesis_block_number))
-}
-
-/// Replace all non-overlapping occurrences of `needle` with `replacement` in `buf`.
-///
-/// Both must have the same length. Returns the number of replacements made.
-fn patch_bytes(buf: &mut [u8], needle: &[u8], replacement: &[u8]) -> usize {
-    assert_eq!(needle.len(), replacement.len());
-    let len = needle.len();
-    let mut count = 0;
-    let mut i = 0;
-    while i + len <= buf.len() {
-        if buf[i..i + len] == *needle {
-            buf[i..i + len].copy_from_slice(replacement);
-            count += 1;
-            i += len;
-        } else {
-            i += 1;
-        }
-    }
-    count
+    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address)
 }
 
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.

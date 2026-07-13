@@ -16,6 +16,7 @@ pub mod abi {
     pub use tempo_zone_contracts::*;
 }
 
+mod encryption_key;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
@@ -23,6 +24,7 @@ mod rpc;
 pub mod settlement;
 pub mod withdrawals;
 
+pub use encryption_key::register_encryption_key;
 pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};

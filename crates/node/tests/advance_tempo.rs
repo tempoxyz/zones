@@ -237,12 +237,12 @@ fn setup_zone_evm_with_contracts_for_portal(
 
 fn genesis_predeploy_code(addr: Address) -> Vec<u8> {
     let genesis: serde_json::Value =
-        serde_json::from_str(include_str!("assets/zone-test-genesis.json"))
-            .expect("zone test genesis should parse");
+        serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
+            .expect("zone genesis template should parse");
     let key = format!("{addr:#x}");
     let code = genesis["alloc"][&key]["code"]
         .as_str()
-        .unwrap_or_else(|| panic!("missing code for {key} in zone-test-genesis.json"));
+        .unwrap_or_else(|| panic!("missing code for {key} in zone-dev-genesis.json"));
     const_hex::decode(code.strip_prefix("0x").unwrap_or(code)).expect("decode genesis bytecode")
 }
 
@@ -312,8 +312,11 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
     // can differ across build environments while the executable bytecode matches.
     let mut evm = setup_zone_evm_with_contracts_for_portal(1337, Address::ZERO);
 
+    // TempoState is a native precompile. The genesis generator intentionally uses
+    // the non-empty native-account marker instead of deploying its Solidity shim.
+    assert_eq!(genesis_predeploy_code(TEMPO_STATE_ADDRESS), [0xef]);
+
     for (name, addr) in [
-        ("TempoState", TEMPO_STATE_ADDRESS),
         ("ZoneConfig", ZONE_CONFIG_ADDRESS),
         ("ZoneInbox", ZONE_INBOX_ADDRESS),
         ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
@@ -337,7 +340,7 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
             let first_diff = first_diff_index(actual_view.compared, expected_view.compared)
                 .map_or_else(|| "none".to_string(), |index| index.to_string());
             panic!(
-                "{name} bytecode in zone-test-genesis.json does not match the freshly deployed \
+                "{name} bytecode in zone-dev-genesis.json does not match the freshly deployed \
                  Foundry artifact at {addr:#x}\n\
                  first compared-byte difference: {first_diff}\n\
                  genesis: raw_len={} compared_len={} metadata_footer={} raw_keccak={} \

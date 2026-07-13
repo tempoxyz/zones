@@ -14,6 +14,7 @@ workspace = true
 # zones
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-l1.workspace = true
+zone-primitives.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 
 # tempo

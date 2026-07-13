@@ -53,9 +53,10 @@ reth-transaction-pool.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
+alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
-alloy-provider.workspace = true
+alloy-provider = { workspace = true, features = ["ws"] }
 alloy-rpc-client.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -67,6 +68,7 @@ clap = { workspace = true, optional = true }
 eyre.workspace = true
 futures.workspace = true
 k256.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url = "2"
@@ -96,7 +98,6 @@ reth-tracing.workspace = true
 reqwest.workspace = true
 revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 sha2.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }

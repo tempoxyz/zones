@@ -164,6 +164,7 @@ alloy-consensus = { version = "2.1.0", default-features = false }
 alloy-contract = { version = "2.1.0", default-features = false }
 alloy-eips = { version = "2.1.0", default-features = false }
 alloy-evm = { version = "0.37.1", default-features = false }
+alloy-genesis = { version = "2.1.0", default-features = false }
 alloy-network = { version = "2.1.0", default-features = false }
 alloy-primitives = { version = "1.6.0", default-features = false }
 alloy-provider = { version = "2.1.0", default-features = false }

@@ -3,11 +3,8 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloy::{
-    network::{
-        EthereumWallet,
-        primitives::{HeaderResponse, ReceiptResponse},
-    },
-    primitives::{Address, B256, address},
+    network::{EthereumWallet, primitives::ReceiptResponse},
+    primitives::{Address, B256, address, keccak256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol,
@@ -125,11 +122,18 @@ impl CreateZone {
         let verifier = Address::from(factory.verifier().call().await?.0);
         println!("Verifier: {verifier}");
 
-        // We cannot know the confirmation block number before sending, so we pass
-        // the current block number. The tx typically confirms in the next block, but
-        // zone.json records the actual confirmation block for the zone node to use
-        // via --l1.genesis-block-number.
-        let current_block = provider.get_block_number().await?;
+        // Anchor before createZone so the zone replays the creation block and its
+        // initial TokenEnabled event during L1 backfill.
+        let anchor_block_number = provider.get_block_number().await?;
+        let anchor_header = provider
+            .get_header_by_number(anchor_block_number.into())
+            .await?
+            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
+            .inner
+            .inner;
+        let mut genesis_header_rlp = Vec::new();
+        anchor_header.encode(&mut genesis_header_rlp);
+        let anchor_hash = keccak256(&genesis_header_rlp);
 
         println!("Admin: {}", self.admin);
         println!("Sequencer: {}", self.sequencer);
@@ -141,8 +145,8 @@ impl CreateZone {
             verifier,
             zoneParams: ZoneParams {
                 genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: B256::ZERO,
-                genesisTempoBlockNumber: current_block,
+                genesisTempoBlockHash: anchor_hash,
+                genesisTempoBlockNumber: anchor_block_number,
             },
             rpcUrl: self.rpc_url.clone(),
         };
@@ -178,25 +182,9 @@ impl CreateZone {
         let portal = event.portal;
         let chain_id = zone_chain_id(zone_id);
 
-        // Re-fetch the header from the block that included the `createZone` tx.
-        // The portal (and its sequencer storage slot) only exists from this block onward,
-        // so using the pre-tx header would cause `readTempoStorageSlot` to read empty state.
-        let confirm_block_number = receipt
-            .block_number
-            .ok_or_else(|| eyre!("receipt missing block number"))?;
-        let confirm_block = provider
-            .get_block_by_number(confirm_block_number.into())
-            .await?
-            .ok_or_else(|| eyre!("confirmation block {confirm_block_number} not found"))?;
-        let confirm_header = confirm_block.header.as_ref();
-        let confirm_hash = confirm_block.header.hash();
-
-        let mut genesis_header_rlp = Vec::new();
-        confirm_header.encode(&mut genesis_header_rlp);
-
         println!(
-            "Using confirmation block {} (hash: {confirm_hash}) as genesis anchor",
-            confirm_header.inner.number
+            "Using pre-creation block {} (hash: {anchor_hash}) as genesis anchor",
+            anchor_header.inner.number
         );
 
         let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
@@ -207,13 +195,14 @@ impl CreateZone {
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
             tempo_portal: portal,
-            tempo_genesis_header_rlp: header_rlp_hex,
+            tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
             sequencer: Some(self.sequencer),
             specs_out: self.specs_out.clone(),
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
+            with_zone_factory_bytecode: false,
         };
         genesis_cmd.run().await?;
 
@@ -225,7 +214,7 @@ impl CreateZone {
             "initialToken": format!("{}", self.initial_token),
             "admin": format!("{}", self.admin),
             "sequencer": format!("{}", self.sequencer),
-            "tempoAnchorBlock": confirm_header.inner.number,
+            "tempoAnchorBlock": anchor_header.inner.number,
             "zoneFactory": format!("{}", self.zone_factory),
             "rpcUrl": self.rpc_url,
         });
@@ -247,7 +236,7 @@ impl CreateZone {
         if !self.rpc_url.is_empty() {
             println!("  RPC URL: {}", self.rpc_url);
         }
-        println!("  Tempo anchor block: {}", confirm_header.inner.number);
+        println!("  Tempo anchor block: {}", anchor_header.inner.number);
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()

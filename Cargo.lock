@@ -11408,6 +11408,7 @@ dependencies = [
  "tokio",
  "zone-precompiles",
  "zone-primitives",
+ "zone-sequencer",
 ]
 
 [[package]]
@@ -13264,6 +13265,7 @@ dependencies = [
  "tracing",
  "zone-l1",
  "zone-precompiles",
+ "zone-primitives",
 ]
 
 [[package]]
@@ -13319,6 +13321,7 @@ dependencies = [
  "alloy-contract",
  "alloy-eips",
  "alloy-evm",
+ "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
@@ -13496,6 +13499,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "url",
+ "zone-primitives",
 ]
 
 [[package]]
@@ -13509,11 +13513,13 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
+ "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
  "eyre",
  "futures",
+ "k256",
  "metrics",
  "parking_lot",
  "reth-metrics",

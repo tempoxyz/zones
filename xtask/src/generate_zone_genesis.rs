@@ -38,6 +38,7 @@ use tempo_precompiles::{
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
 };
+use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
 use zone_precompiles::{TempoState as NativeTempoState, ZoneTokenFactory};
 
@@ -65,8 +66,9 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long)]
     pub(crate) tempo_portal: Address,
 
+    /// RLP-encoded Tempo genesis header. Defaults to `TempoHeader::default()`.
     #[arg(long)]
-    pub(crate) tempo_genesis_header_rlp: String,
+    pub(crate) tempo_genesis_header_rlp: Option<String>,
 
     #[arg(long)]
     pub(crate) admin: Address,
@@ -90,6 +92,10 @@ pub(crate) struct GenerateZoneGenesis {
     /// controls whether it remains in the final genesis state.
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
+
+    /// Bundle ZoneFactory creation bytecode as dev-only top-level metadata.
+    #[arg(long)]
+    pub(crate) with_zone_factory_bytecode: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -108,8 +114,12 @@ impl GenerateZoneGenesis {
             return Err(eyre!("--admin must not be the zero address"));
         }
 
-        let header_rlp = const_hex::decode(&self.tempo_genesis_header_rlp)
-            .wrap_err("failed to decode hex string")?;
+        let header_rlp = match &self.tempo_genesis_header_rlp {
+            Some(header_rlp) => {
+                const_hex::decode(header_rlp).wrap_err("failed to decode hex string")?
+            }
+            None => alloy_rlp::encode(TempoHeader::default()),
+        };
 
         let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
 
@@ -302,8 +312,21 @@ impl GenerateZoneGenesis {
         genesis.alloc = genesis_alloc;
         genesis.config = chain_config;
 
-        let json =
-            serde_json::to_string_pretty(&genesis).wrap_err("failed encoding genesis as JSON")?;
+        let mut genesis_json =
+            serde_json::to_value(&genesis).wrap_err("failed encoding genesis as JSON")?;
+        if self.with_zone_factory_bytecode {
+            let factory_bytecode = load_artifact(&self.specs_out, "ZoneFactory")?;
+            genesis_json
+                .as_object_mut()
+                .ok_or_else(|| eyre!("encoded genesis is not a JSON object"))?
+                .insert(
+                    "zoneFactoryBytecode".to_owned(),
+                    serde_json::Value::String(format!("0x{}", const_hex::encode(factory_bytecode))),
+                );
+        }
+        let mut json = serde_json::to_string_pretty(&genesis_json)
+            .wrap_err("failed encoding genesis as JSON")?;
+        json.push('\n');
 
         std::fs::create_dir_all(&self.output).wrap_err_with(|| {
             format!(

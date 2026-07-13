@@ -3,6 +3,7 @@ cargo_build_binary := if cross_compile == "true" { "cross" } else { "cargo" }
 act_debug_mode := env("ACT", "false")
 zone_rpc := env("ZONE_RPC_URL", "http://localhost:8546")
 zone_http_port := env("ZONE_HTTP_PORT", "8546")
+zone_dev_genesis_tmp := "./target/zone-dev-genesis"
 
 [group('deps')]
 install-cross:
@@ -20,6 +21,26 @@ build-release binary extra_args="": (build binary "-r " + extra_args)
 
 build binary extra_args="":
     {{cargo_build_binary}} build {{extra_args}} --bin {{binary}}
+
+[group('zone')]
+[doc('Regenerates the bundled zone dev genesis and ZoneFactory bytecode from the current Solidity artifacts')]
+regen-zone-dev-genesis:
+    #!/bin/bash
+    set -euo pipefail
+    rm -rf {{zone_dev_genesis_tmp}}
+    forge build --root specs/ref-impls --no-lint
+    cargo run -p tempo-xtask -- generate-zone-genesis \
+        --output {{zone_dev_genesis_tmp}} \
+        --chain-id 1337 \
+        --tempo-portal 0x0000000000000000000000000000000000000000 \
+        --admin 0xaAaAaAaa00000000000000000000000000000000 \
+        --specs-out specs/ref-impls/out \
+        --with-createx \
+        --with-safe-deployer \
+        --with-create2-factory \
+        --with-zone-factory-bytecode
+    mv {{zone_dev_genesis_tmp}}/genesis.json crates/node/assets/zone-dev-genesis.json
+    rm -rf {{zone_dev_genesis_tmp}}
 
 [group('localnet')]
 [doc('Generates a genesis file')]

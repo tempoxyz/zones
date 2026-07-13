@@ -20,6 +20,7 @@ tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-primitives.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
+zone-sequencer.workspace = true
 tempo-revm.workspace = true
 
 alloy = { workspace = true, features = [

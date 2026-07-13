@@ -10,6 +10,9 @@
 mod executor;
 pub mod precompiles;
 mod tx_context;
+mod zone_evm;
+
+pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
     executor::ZoneBlockExecutor,
@@ -152,7 +155,7 @@ impl ZoneEvmFactory {
 }
 
 impl EvmFactory for ZoneEvmFactory {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = TempoEvm<DB, I>;
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I>;
     type Context<DB: Database> = TempoCtx<DB>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
     type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
@@ -167,7 +170,7 @@ impl EvmFactory for ZoneEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let evm = TempoEvm::new(db, input);
-        self.register_precompiles(evm)
+        ZoneEvm::new(self.register_precompiles(evm))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -177,7 +180,7 @@ impl EvmFactory for ZoneEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        self.register_precompiles(evm)
+        ZoneEvm::new(self.register_precompiles(evm))
     }
 }
 
@@ -299,7 +302,7 @@ impl BlockExecutorFactory for ZoneEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: TempoEvm<DB, I>,
+        evm: ZoneEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> Self::Executor<'a, DB, I>
     where

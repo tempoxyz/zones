@@ -21,9 +21,9 @@ pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// `create-zone`, `deploy-router`, and `zone-info` use this as their default
 /// factory unless the caller overrides `--zone-factory` or `ZONE_FACTORY`, or
 /// `zone.json` already provides a zone-specific value.
-/// Explorer: https://explore.moderato.tempo.xyz/address/0xC63EF0DbaB04b0242C2898AaF0BeF81f8f9cA7c5
+/// Explorer: https://explore.moderato.tempo.xyz/address/0x179B44a4B7eC74f3957Ed5137Dc4F1a6dEeBB19b
 pub(crate) const MODERATO_ZONE_FACTORY: Address =
-    address!("0xC63EF0DbaB04b0242C2898AaF0BeF81f8f9cA7c5");
+    address!("0x179B44a4B7eC74f3957Ed5137Dc4F1a6dEeBB19b");
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
