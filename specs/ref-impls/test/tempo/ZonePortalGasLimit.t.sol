@@ -51,7 +51,8 @@ contract ZonePortalGasLimitTest is Test {
 
     function setUp() public {
         token = new MockPortalToken();
-        portal = new ZonePortal(
+        portal = new ZonePortal();
+        portal.initialize(
             1,
             address(token),
             address(0x400),

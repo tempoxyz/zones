@@ -72,9 +72,10 @@ contract ZoneFactory is IZoneFactory {
 
         address predictedPortal = _computeCreateAddress(address(this), currentNonce);
 
-        // Deploy portal with the shared messenger address and initial token
-        // The portal constructor enables the initial token automatically
-        ZonePortal portalContract = new ZonePortal(
+        // Deploy and atomically initialize the portal. The portal binds this factory as its only
+        // initializer authority when it is created.
+        ZonePortal portalContract = new ZonePortal();
+        portalContract.initialize(
             zoneId,
             params.initialToken,
             _messenger,
