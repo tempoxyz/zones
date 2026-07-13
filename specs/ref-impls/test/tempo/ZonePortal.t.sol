@@ -196,17 +196,7 @@ contract ZonePortalProxyStorageTest is Test {
             initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
         );
 
-        ZonePortal implementation = new ZonePortal(
-            99,
-            initialToken,
-            makeAddr("implementation messenger"),
-            makeAddr("implementation admin"),
-            makeAddr("implementation sequencer"),
-            makeAddr("implementation verifier"),
-            keccak256("implementation genesis"),
-            999,
-            ""
-        );
+        ZonePortal implementation = new ZonePortal();
 
         address proxyA = makeAddr("portal proxy A");
         address proxyB = makeAddr("portal proxy B");
@@ -222,8 +212,25 @@ contract ZonePortalProxyStorageTest is Test {
         address messengerB = makeAddr("messenger B");
         address verifierA = makeAddr("verifier A");
         address verifierB = makeAddr("verifier B");
-        _storePortalMetadata(proxyA, 1, messengerA, verifierA, 100);
-        _storePortalMetadata(proxyB, 2, messengerB, verifierB, 200);
+        vm.prank(makeAddr("not factory"));
+        vm.expectRevert(IZonePortal.NotFactory.selector);
+        ZonePortal(proxyA).initialize(
+            1,
+            initialToken,
+            messengerA,
+            makeAddr("admin A"),
+            makeAddr("sequencer A"),
+            verifierA,
+            keccak256("genesis A"),
+            100,
+            ""
+        );
+
+        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
+        _initializePortal(proxyB, initialToken, 2, messengerB, verifierB, 200);
+
+        vm.expectRevert(IZonePortal.AlreadyInitialized.selector);
+        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
 
         assertEq(ZonePortal(proxyA).zoneId(), 1);
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
@@ -236,22 +243,24 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyB).genesisTempoBlockNumber(), 200);
     }
 
-    function _storePortalMetadata(
+    function _initializePortal(
         address target,
+        address initialToken,
         uint32 id,
         address portalMessenger,
         address portalVerifier,
         uint64 genesisBlockNumber
     ) internal {
-        vm.store(
-            target,
-            bytes32(uint256(17)),
-            bytes32(uint256(id) | (uint256(uint160(portalMessenger)) << 32))
-        );
-        vm.store(
-            target,
-            bytes32(uint256(18)),
-            bytes32(uint256(uint160(portalVerifier)) | (uint256(genesisBlockNumber) << 160))
+        ZonePortal(target).initialize(
+            id,
+            initialToken,
+            portalMessenger,
+            makeAddr(string.concat("admin ", vm.toString(id))),
+            makeAddr(string.concat("sequencer ", vm.toString(id))),
+            portalVerifier,
+            keccak256(abi.encode("genesis", id)),
+            genesisBlockNumber,
+            ""
         );
     }
 }
@@ -3013,7 +3022,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 6: deposit counters
     ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
     ///        slot 17: zoneId (uint32) + messenger (address) [packed]
-    ///        slot 18: verifier (address) + genesisTempoBlockNumber (uint64) [packed]
+    ///        slot 18: verifier + genesisTempoBlockNumber + _initialized [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: sequencer ---
         bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
@@ -3095,6 +3104,7 @@ contract ZonePortalTest is BaseTest {
             portal.genesisTempoBlockNumber(),
             "slot 18: genesisTempoBlockNumber mismatch"
         );
+        assertEq(uint8(uint256(slot18) >> 224), 1, "slot 18: initialized mismatch");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

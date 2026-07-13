@@ -62,6 +62,10 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @dev The contract that deployed this implementation is the only initializer authority.
+    ///      This is protocol-wide code configuration and does not consume proxy storage.
+    address internal immutable _factory = msg.sender;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -133,12 +137,13 @@ contract ZonePortal is IZonePortal {
     address public messenger;
     address public verifier;
     uint64 public genesisTempoBlockNumber;
+    bool internal _initialized;
 
     /*//////////////////////////////////////////////////////////////
-                              CONSTRUCTOR
+                             INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
+    function initialize(
         uint32 _zoneId,
         address _initialToken,
         address _messenger,
@@ -147,8 +152,12 @@ contract ZonePortal is IZonePortal {
         address _verifier,
         bytes32 _genesisBlockHash,
         uint64 _genesisTempoBlockNumber,
-        string memory _rpcUrl
-    ) {
+        string calldata _rpcUrl
+    ) external {
+        if (msg.sender != _factory) revert NotFactory();
+        if (_initialized) revert AlreadyInitialized();
+
+        _initialized = true;
         zoneId = _zoneId;
         messenger = _messenger;
         admin = _admin;
@@ -322,7 +331,7 @@ contract ZonePortal is IZonePortal {
         emit DepositsResumed(_token);
     }
 
-    /// @notice Internal function to enable a token (used by constructor and enableToken)
+    /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
         _enabledTokens.push(_token);
