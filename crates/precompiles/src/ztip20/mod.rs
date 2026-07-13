@@ -243,7 +243,6 @@ mod tests {
     use revm::precompile::{PrecompileHalt, PrecompileResult};
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
-        storage::evm::EvmPrecompileStorageProvider,
         tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
     };
 
@@ -361,45 +360,47 @@ mod tests {
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
             let mut ctx = test_context();
 
-            let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
-            StorageCtx::enter(&mut storage, || -> TestResult {
-                let mut token_contract =
-                    TIP20Token::from_address(token).expect("PATH_USD must be valid");
-                token_contract.initialize(
-                    admin,
-                    "Zone USD",
-                    "zUSD",
-                    "USD",
-                    Address::ZERO,
-                    admin,
-                )?;
-                token_contract.grant_role_internal(admin, *ISSUER_ROLE)?;
-                token_contract.grant_role_internal(issuer, *ISSUER_ROLE)?;
-                token_contract.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-                token_contract.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
-                token_contract.mint(
-                    admin,
-                    ITIP20::mintCall {
-                        to: alice,
-                        amount: U256::from(1_000_000u64),
-                    },
-                )?;
-                token_contract.mint(
-                    admin,
-                    ITIP20::mintCall {
-                        to: ZONE_OUTBOX_ADDRESS,
-                        amount: U256::from(10_000u64),
-                    },
-                )?;
-                token_contract.approve(
-                    alice,
-                    ITIP20::approveCall {
-                        spender,
-                        amount: U256::from(300_000u64),
-                    },
-                )?;
-                Ok(())
-            })?;
+            {
+                let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+                StorageCtx::enter(&mut storage, || -> TestResult {
+                    let mut token_contract =
+                        TIP20Token::from_address(token).expect("PATH_USD must be valid");
+                    token_contract.initialize(
+                        admin,
+                        "Zone USD",
+                        "zUSD",
+                        "USD",
+                        Address::ZERO,
+                        admin,
+                    )?;
+                    token_contract.grant_role_internal(admin, *ISSUER_ROLE)?;
+                    token_contract.grant_role_internal(issuer, *ISSUER_ROLE)?;
+                    token_contract.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+                    token_contract.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+                    token_contract.mint(
+                        admin,
+                        ITIP20::mintCall {
+                            to: alice,
+                            amount: U256::from(1_000_000u64),
+                        },
+                    )?;
+                    token_contract.mint(
+                        admin,
+                        ITIP20::mintCall {
+                            to: ZONE_OUTBOX_ADDRESS,
+                            amount: U256::from(10_000u64),
+                        },
+                    )?;
+                    token_contract.approve(
+                        alice,
+                        ITIP20::approveCall {
+                            spender,
+                            amount: U256::from(300_000u64),
+                        },
+                    )?;
+                    Ok(())
+                })?;
+            }
 
             let precompile = ZoneTip20Token::create(
                 token,
