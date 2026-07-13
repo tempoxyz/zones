@@ -76,7 +76,7 @@ pub struct L1StateCacheInner {
     invalidations: HashMap<Address, BTreeSet<u64>>,
     /// First canonical L1 block where each observed Tempo hardfork is active.
     hardfork_schedule: BTreeSet<(u64, TempoHardfork)>,
-    /// Highest block covered by the cached activation schedule.
+    /// Highest block for which the activation schedule is known to be complete.
     hardfork_schedule_head: Option<u64>,
     /// Latest L1 block the cache has received data for, used for reorg detection.
     anchor: NumHash,
@@ -135,10 +135,16 @@ impl L1StateCacheInner {
         if self.hardfork_schedule_head? < block_number {
             return None;
         }
+        self.latest_hardfork_activation_at(block_number)
+            .map(|(_, hardfork)| hardfork)
+    }
+
+    fn latest_hardfork_activation_at(&self, block_number: u64) -> Option<(u64, TempoHardfork)> {
+        let latest = TempoHardfork::VARIANTS.last().copied()?;
         self.hardfork_schedule
-            .range(..=(block_number, TempoHardfork::T9))
+            .range(..=(block_number, latest))
             .next_back()
-            .map(|(_, hardfork)| *hardfork)
+            .copied()
     }
 
     /// Extends the known Tempo activation schedule through `block_number`.
@@ -155,11 +161,11 @@ impl L1StateCacheInner {
         );
     }
 
-    /// Advance an initialized schedule from a contiguous confirmed L1 block.
+    /// Extends an initialized schedule with the next confirmed L1 block.
     ///
-    /// A single observation cannot initialize historical activation boundaries. Until a full
-    /// schedule has been resolved, observations are ignored and the provider remains responsible
-    /// for initialization through canonical constants/RPC.
+    /// An observed active hardfork does not reveal its historical activation block, so it cannot
+    /// initialize the schedule. After provider initialization, a contiguous observation either
+    /// advances coverage or records a newly activated fork; gaps and downgrades are ignored.
     pub fn observe_hardfork(&mut self, block_number: u64, hardfork: TempoHardfork) {
         let Some(head) = self.hardfork_schedule_head else {
             return;
@@ -169,20 +175,15 @@ impl L1StateCacheInner {
         }
 
         let previous = self
-            .hardfork_schedule
-            .range(..=(head, TempoHardfork::T9))
-            .next_back()
-            .map(|(_, hardfork)| *hardfork);
+            .latest_hardfork_activation_at(head)
+            .map(|(_, hardfork)| hardfork);
         let Some(previous) = previous else {
             return;
         };
-        if hardfork < previous {
-            // Tempo hardforks never downgrade. Leave the head unchanged so the provider resolves
-            // this block instead of extending the cache from stale/incorrect chain metadata.
-            return;
-        }
         if hardfork > previous {
             self.hardfork_schedule.insert((block_number, hardfork));
+        } else if hardfork < previous {
+            return; // Tempo hardforks never downgrade.
         }
         self.hardfork_schedule_head = Some(block_number);
     }
@@ -238,11 +239,7 @@ impl L1StateCacheInner {
 
         // Keep the latest activation before the pruning boundary as the baseline, plus all newer
         // activations. This preserves hardfork lookup for every retained block.
-        let baseline = self
-            .hardfork_schedule
-            .range(..=(min_block, TempoHardfork::T9))
-            .next_back()
-            .copied();
+        let baseline = self.latest_hardfork_activation_at(min_block);
         self.hardfork_schedule.retain(|(block, hardfork)| {
             *block >= min_block || Some((*block, *hardfork)) == baseline
         });
@@ -313,6 +310,7 @@ mod tests {
 
         cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1));
         cache.invalidate(PORTAL, 101);
+        cache.extend_hardfork_schedule(101, [(0, TempoHardfork::T0)]);
         cache.update_anchor(NumHash {
             number: 100,
             hash: B256::with_last_byte(0xab),
@@ -322,6 +320,8 @@ mod tests {
 
         assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
         assert!(cache.invalidations.is_empty());
+        assert_eq!(cache.hardfork_at(100), None);
+        assert_eq!(cache.hardfork_schedule_head, None);
         assert_eq!(cache.anchor(), NumHash::default());
     }
 

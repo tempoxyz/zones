@@ -21,7 +21,7 @@ use reth_chainspec::ForkCondition;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{
     hardfork::TempoHardfork,
-    spec::{DEV, TempoHardforks, chainspec_from_chain_id},
+    spec::{TempoHardforks, chainspec_from_chain_id},
 };
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StorageReader, SequencerExt};
@@ -281,7 +281,8 @@ impl L1StateProvider {
                 .get_block_by_number(BlockNumberOrTag::Number(block_number)),
         )?;
         let block = block.ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
-        let chain_spec = chainspec_from_chain_id(chain_id).unwrap_or_else(|| DEV.clone());
+        let chain_spec = chainspec_from_chain_id(chain_id)
+            .ok_or_else(|| eyre::eyre!("unsupported Tempo L1 chain ID {chain_id}"))?;
         let block_ts = block.header.timestamp();
         let mut activations = Vec::new();
 
@@ -293,10 +294,14 @@ impl L1StateProvider {
             if fork_ts > block_ts {
                 continue;
             }
-            let activation_block = if let Some(block) = known_activation_block(chain_id, hardfork) {
-                block
-            } else {
-                self.first_block_at_or_after(fork_ts, block_number).await?
+            let known_block = match chain_id {
+                4217 => hardfork.mainnet_activation_block(),
+                42431 => hardfork.moderato_activation_block(),
+                _ => None,
+            };
+            let activation_block = match known_block {
+                Some(block) => block,
+                None => self.first_block_at_or_after(fork_ts, block_number).await?,
             };
             activations.push((activation_block, hardfork));
         }
@@ -304,9 +309,8 @@ impl L1StateProvider {
         Ok(activations)
     }
 
-    async fn first_block_at_or_after(&self, timestamp: u64, high: u64) -> Result<u64> {
+    async fn first_block_at_or_after(&self, timestamp: u64, mut high: u64) -> Result<u64> {
         let mut low = 0u64;
-        let mut high = high;
         while low < high {
             let mid = low + (high - low) / 2;
             let block = self
@@ -338,14 +342,6 @@ impl L1StateProvider {
     }
 }
 
-fn known_activation_block(chain_id: u64, hardfork: TempoHardfork) -> Option<u64> {
-    match chain_id {
-        4217 => hardfork.mainnet_activation_block(),
-        42431 => hardfork.moderato_activation_block(),
-        _ => None,
-    }
-}
-
 impl L1StorageReader for L1StateProvider {
     fn read_l1_storage(
         &self,
@@ -370,23 +366,54 @@ impl SequencerExt for L1StateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_transport::mock::Asserter;
 
-    #[test]
-    fn known_activation_blocks_come_from_tempo_hardfork_constants() {
-        assert_eq!(
-            known_activation_block(4217, TempoHardfork::T2),
-            TempoHardfork::T2.mainnet_activation_block()
-        );
-        assert_eq!(
-            known_activation_block(42431, TempoHardfork::T2),
-            TempoHardfork::T2.moderato_activation_block()
-        );
-        assert_eq!(known_activation_block(1337, TempoHardfork::T2), None);
-    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_hardfork_fetches_exact_block_writes_back_and_hits_cache() {
+        let asserter = Asserter::new();
+        asserter.push_success(&4217u64);
+        let consensus = tempo_primitives::TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 0,
+                timestamp: 0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let header = tempo_alloy::rpc::TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header::new(consensus),
+            timestamp_millis: 0,
+        };
+        let block: <TempoNetwork as alloy_network::Network>::BlockResponse =
+            alloy_rpc_types_eth::Block::empty(header);
+        asserter.push_success(&Some(block));
 
-    #[test]
-    fn unknown_future_activation_blocks_fall_back_to_rpc_resolution() {
-        assert_eq!(known_activation_block(4217, TempoHardfork::T8), None);
-        assert_eq!(known_activation_block(42431, TempoHardfork::T8), None);
+        let cache = L1StateCache::default();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter)
+            .erased();
+        let provider = L1StateProvider::new_raw(
+            L1StateProviderConfig::default(),
+            cache.clone(),
+            provider,
+            tokio::runtime::Handle::current(),
+        );
+        let fetched = tokio::task::spawn_blocking({
+            let provider = provider.clone();
+            move || provider.get_hardfork(0)
+        })
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(fetched, TempoHardfork::T0);
+        assert_eq!(cache.read().hardfork_at(0), Some(TempoHardfork::T0));
+
+        // No further mock response is configured, so this can only succeed from the cache.
+        let cached = tokio::task::spawn_blocking(move || provider.get_hardfork(0))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cached, TempoHardfork::T0);
     }
 }

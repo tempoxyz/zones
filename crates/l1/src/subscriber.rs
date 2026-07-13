@@ -402,23 +402,16 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, policy_events, invalidated_accounts) =
+            let (portal_events, policy_events, mutated_accounts) =
                 self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(
-                block_number,
-                sealed.hash(),
-                sealed.parent_hash(),
-                chain_id,
-                sealed.timestamp(),
-                &invalidated_accounts,
-            );
+            self.update_l1_state_anchor(&sealed, chain_id, &mutated_accounts);
             self.apply_policy_events(block_number, &policy_events);
-            self.apply_portal_state_events(block_number, &events);
+            self.apply_portal_state_events(block_number, &portal_events);
             self.deposit_queue
-                .enqueue_sealed(sealed, events, policy_events);
+                .enqueue_sealed(sealed, portal_events, policy_events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
 
@@ -482,9 +475,7 @@ impl L1Subscriber {
         #[allow(clippy::type_complexity)]
         let mut unconfirmed_tip: Option<(
             SealedHeader<TempoHeader>,
-            L1PortalEvents,
-            Vec<PolicyEvent>,
-            HashSet<Address>,
+            (L1PortalEvents, Vec<PolicyEvent>, HashSet<Address>),
         )> = None;
 
         loop {
@@ -498,32 +489,23 @@ impl L1Subscriber {
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let (events, policy_events, mutated_acc) = self.extract_events(block_number, &receipts);
+            let events = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, tip_events, tip_policy_events, tip_mutated_acc)) =
+            if let Some((tip_header, (portal_events, policy_events, mutated_accounts))) =
                 unconfirmed_tip.take()
             {
                 if sealed.parent_hash() == tip_header.hash() {
                     // Confirmed — update the L1 state anchor, apply events, and
                     // flush to the queue.
                     let tip_number = tip_header.number();
-                    let tip_hash = tip_header.hash();
-                    let tip_parent = tip_header.parent_hash();
-                    self.update_l1_state_anchor(
-                        tip_number,
-                        tip_hash,
-                        tip_parent,
-                        chain_id,
-                        tip_header.timestamp(),
-                        &tip_mutated_acc,
-                    );
-                    self.apply_policy_events(tip_number, &tip_policy_events);
-                    self.apply_portal_state_events(tip_number, &tip_events);
+                    self.update_l1_state_anchor(&tip_header, chain_id, &mutated_accounts);
+                    self.apply_policy_events(tip_number, &policy_events);
+                    self.apply_portal_state_events(tip_number, &portal_events);
                     match self
                         .deposit_queue
-                        .try_enqueue(tip_header, tip_events, tip_policy_events)
+                        .try_enqueue(tip_header, portal_events, policy_events)
                     {
                         EnqueueOutcome::Accepted => {
                             self.subscriber_metrics.blocks_enqueued.increment(1);
@@ -559,7 +541,7 @@ impl L1Subscriber {
             }
 
             // Buffer the new block as unconfirmed tip.
-            unconfirmed_tip = Some((sealed, events, policy_events, mutated_acc));
+            unconfirmed_tip = Some((sealed, events));
         }
 
         warn!("L1 block subscription stream ended");
@@ -567,7 +549,7 @@ impl L1Subscriber {
     }
 
     /// Extract portal and policy events from pre-fetched receipts (no RPC) and mutated accounts.
-    fn extract_events(
+    pub(crate) fn extract_events(
         &mut self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
@@ -603,7 +585,7 @@ impl L1Subscriber {
                 } else if self.tracked_tokens.contains(&addr)
                     && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
                 {
-                    // TODO: remove once tempo migrated policy ids to the 403 registry.
+                    // TODO: Remove once Tempo has migrated policy IDs to the TIP-403 registry.
                     mutated_accounts.insert(addr);
                     if let Some(event) = PolicyEvent::decode_tip20(log) {
                         policy_events.push(event);
@@ -710,33 +692,32 @@ impl L1Subscriber {
     /// against the current anchor and clears the cache when they diverge.
     pub(crate) fn update_l1_state_anchor(
         &self,
-        number: u64,
-        hash: B256,
-        parent_hash: B256,
+        header: &SealedHeader<TempoHeader>,
         chain_id: u64,
-        timestamp: u64,
         mutated_accounts: &HashSet<Address>,
     ) {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
-        if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
+        if anchor.hash != B256::ZERO && header.parent_hash() != anchor.hash {
             self.subscriber_metrics.reorgs_detected.increment(1);
             warn!(
                 old_anchor = %anchor.hash,
-                new_parent = %parent_hash,
-                block_number = number,
+                new_parent = %header.parent_hash(),
+                block_number = header.number(),
                 "Reorg detected, clearing L1 state cache"
             );
             guard.clear();
             self.config.policy_cache.write().clear();
         }
         for &address in mutated_accounts {
-            guard.invalidate(address, number);
+            guard.invalidate(address, header.number());
         }
-        if let Some(hardfork) = TempoHardfork::from_chain_and_timestamp(chain_id, timestamp) {
-            guard.observe_hardfork(number, hardfork);
+        if let Some(hardfork) =
+            TempoHardfork::from_chain_and_timestamp(chain_id, header.timestamp())
+        {
+            guard.observe_hardfork(header.number(), hardfork);
         }
-        guard.update_anchor(NumHash::new(number, hash));
+        guard.update_anchor(header.num_hash());
     }
 }
 
