@@ -173,7 +173,8 @@ contract ZoneBridgeTest is BaseTest {
         // mock factory registry so the shared messenger can authenticate the source portal.
         MockZoneFactoryForBridgeMessenger messengerFactory = new MockZoneFactoryForBridgeMessenger();
         ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
-        l1Portal = new ZonePortal(
+        l1Portal = new ZonePortal();
+        l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
             address(messengerContract),
