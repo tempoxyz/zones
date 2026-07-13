@@ -355,6 +355,17 @@ impl L1StorageReader for L1StateProvider {
             ))
         })
     }
+
+    fn hardfork_at(
+        &self,
+        block_number: u64,
+    ) -> std::result::Result<TempoHardfork, revm::precompile::PrecompileError> {
+        self.get_hardfork(block_number).map_err(|e| {
+            zone_precompiles::zone_rpc_error(format!(
+                "L1 hardfork unavailable for block={block_number}: {e}"
+            ))
+        })
+    }
 }
 
 impl SequencerExt for L1StateProvider {

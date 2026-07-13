@@ -233,18 +233,14 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{TestCtx, test_context, test_storage_provider};
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::{
         EvmInternals,
         precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
     };
     use alloy_sol_types::SolCall;
-    use revm::{
-        Context,
-        database::{CacheDB, EmptyDB},
-        precompile::{PrecompileHalt, PrecompileResult},
-    };
-    use tempo_chainspec::hardfork::TempoHardfork;
+    use revm::precompile::{PrecompileHalt, PrecompileResult};
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
         storage::evm::EvmPrecompileStorageProvider,
@@ -252,12 +248,6 @@ mod tests {
     };
 
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-    type TestContext = Context<
-        revm::context::BlockEnv,
-        revm::context::TxEnv,
-        revm::context::CfgEnv<TempoHardfork>,
-        CacheDB<EmptyDB>,
-    >;
 
     #[derive(Clone, Default)]
     struct MockPolicyProvider {
@@ -342,7 +332,7 @@ mod tests {
     }
 
     struct PrecompileHarness {
-        ctx: TestContext,
+        ctx: TestCtx,
         token: Address,
         alice: Address,
         bob: Address,
@@ -369,7 +359,7 @@ mod tests {
             let spender = address!("0x00000000000000000000000000000000000000a4");
             let issuer = address!("0x00000000000000000000000000000000000000a5");
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
-            let mut ctx = Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default());
+            let mut ctx = test_context();
 
             Self::with_storage(&mut ctx, u64::MAX, |storage| {
                 StorageCtx::enter(storage, || -> TestResult {
@@ -434,24 +424,11 @@ mod tests {
         }
 
         fn with_storage<T>(
-            ctx: &mut TestContext,
+            ctx: &mut TestCtx,
             gas_limit: u64,
             f: impl FnOnce(&mut EvmPrecompileStorageProvider<'_>) -> TestResult<T>,
         ) -> TestResult<T> {
-            let spec = ctx.cfg.spec;
-            let amsterdam_eip8037_enabled = ctx.cfg.enable_amsterdam_eip8037;
-            let gas_params = ctx.cfg.gas_params.clone();
-            let internals = EvmInternals::from_context(ctx);
-            let mut storage = EvmPrecompileStorageProvider::new(
-                internals,
-                gas_limit,
-                0,
-                spec,
-                amsterdam_eip8037_enabled,
-                false,
-                gas_params,
-            );
-            f(&mut storage)
+            f(&mut test_storage_provider(ctx, gas_limit, false))
         }
 
         fn call(
@@ -602,8 +579,7 @@ mod tests {
         let token = address!("20C0000000000000000000000000000000000999");
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let to = address!("0x00000000000000000000000000000000000000a3");
-        let mut ctx: TestContext =
-            Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default());
+        let mut ctx = test_context();
         let precompile = ZoneTip20Token::create(
             token,
             &ctx.cfg,

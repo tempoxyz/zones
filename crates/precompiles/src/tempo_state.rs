@@ -3,14 +3,15 @@
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
 //! preserving the zone-facing checkpoint and Tempo storage read ABI.
 
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
+use crate::storage::L1StorageReader;
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost, dispatch,
     error::TempoPrecompileError,
@@ -27,17 +28,6 @@ use zone_primitives::constants::{
 alloy_sol_types::sol! {
     error Error(string);
     error StaticCallNotAllowed();
-}
-
-/// L1 storage access needed by `readTempoStorageSlot(s)`.
-pub trait L1StorageReader: Clone + Send + Sync + 'static {
-    /// Read `account[slot]` at `block_number` on Tempo L1.
-    fn read_l1_storage(
-        &self,
-        account: Address,
-        slot: B256,
-        block_number: u64,
-    ) -> Result<B256, PrecompileError>;
 }
 
 #[contract(addr = TEMPO_STATE_ADDRESS)]
@@ -255,6 +245,7 @@ impl TempoState {
 mod tests {
     use super::*;
 
+    use crate::test_utils::{MockL1Reader, TestCtx, test_context, test_storage_provider};
     use alloy_evm::{
         EvmInternals,
         precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
@@ -262,35 +253,7 @@ mod tests {
     use alloy_primitives::{U256, address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
-    use revm::{
-        Context,
-        database::{CacheDB, EmptyDB},
-    };
-    use tempo_chainspec::hardfork::TempoHardfork;
-
-    type TestContext = Context<
-        revm::context::BlockEnv,
-        revm::context::TxEnv,
-        revm::context::CfgEnv<TempoHardfork>,
-        CacheDB<EmptyDB>,
-    >;
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-    #[derive(Clone)]
-    struct MockL1Reader {
-        value: B256,
-    }
-
-    impl L1StorageReader for MockL1Reader {
-        fn read_l1_storage(
-            &self,
-            _account: Address,
-            _slot: B256,
-            _block_number: u64,
-        ) -> Result<B256, PrecompileError> {
-            Ok(self.value)
-        }
-    }
 
     fn encode_header(header: &TempoHeader) -> Bytes {
         let mut encoded = Vec::new();
@@ -298,30 +261,15 @@ mod tests {
         encoded.into()
     }
 
-    fn test_context() -> TestContext {
-        Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
-    }
-
-    fn initialize(ctx: &mut TestContext, header: &[u8]) -> TestResult {
-        let spec = ctx.cfg.spec;
-        let amsterdam_eip8037_enabled = ctx.cfg.enable_amsterdam_eip8037;
-        let gas_params = ctx.cfg.gas_params.clone();
-        let mut storage = EvmPrecompileStorageProvider::new(
-            EvmInternals::from_context(ctx),
-            u64::MAX,
-            0,
-            spec,
-            amsterdam_eip8037_enabled,
-            false,
-            gas_params,
-        );
+    fn initialize(ctx: &mut TestCtx, header: &[u8]) -> TestResult {
+        let mut storage = test_storage_provider(ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || TempoState::new().initialize(header))?;
         Ok(())
     }
 
     fn call(
-        ctx: &mut TestContext,
+        ctx: &mut TestCtx,
         precompile: &DynPrecompile,
         caller: Address,
         calldata: Bytes,
@@ -338,7 +286,7 @@ mod tests {
     }
 
     fn call_with_bytecode_address(
-        ctx: &mut TestContext,
+        ctx: &mut TestCtx,
         precompile: &DynPrecompile,
         caller: Address,
         calldata: Bytes,
@@ -398,7 +346,7 @@ mod tests {
     }
 
     fn assert_checkpoint(
-        ctx: &mut TestContext,
+        ctx: &mut TestCtx,
         precompile: &DynPrecompile,
         expected_hash: B256,
         expected_number: u64,
@@ -436,7 +384,7 @@ mod tests {
         let mut ctx = test_context();
         initialize(&mut ctx, &header_rlp)?;
 
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         assert_checkpoint(&mut ctx, &precompile, keccak256(&header_rlp), 42)?;
 
         Ok(())
@@ -453,7 +401,7 @@ mod tests {
         let child = child_header(genesis_hash, 1);
         let child_rlp = encode_header(&child);
         let child_hash = keccak256(&child_rlp);
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
 
         let output = call(
             &mut ctx,
@@ -477,7 +425,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,
@@ -498,7 +446,7 @@ mod tests {
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
 
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call_with_bytecode_address(
             &mut ctx,
             &precompile,
@@ -522,7 +470,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,
@@ -545,7 +493,7 @@ mod tests {
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
 
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,
@@ -571,7 +519,7 @@ mod tests {
         let child_rlp = encode_header(&child_header(genesis_hash, 1));
         let mut malformed = child_rlp.to_vec();
         malformed.push(0);
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,
@@ -595,7 +543,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(B256::ZERO, 1));
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,
@@ -619,7 +567,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(genesis_hash, 2));
-        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,
@@ -641,7 +589,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let expected = b256!("0xabababababababababababababababababababababababababababababababab");
-        let precompile = TempoState::create(MockL1Reader { value: expected }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::returning(expected), &ctx.cfg.clone());
         let calldata: Bytes = TempoStateAbi::readTempoStorageSlotCall {
             account: address!("0x0000000000000000000000000000000000009999"),
             slot: B256::ZERO,
@@ -674,7 +622,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let expected = b256!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
-        let precompile = TempoState::create(MockL1Reader { value: expected }, &ctx.cfg.clone());
+        let precompile = TempoState::create(MockL1Reader::returning(expected), &ctx.cfg.clone());
         let output = call(
             &mut ctx,
             &precompile,

@@ -117,33 +117,16 @@ pub fn decrypt_aes_gcm(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::{test_context, test_storage_provider};
     use alloy_evm::{
         EvmInternals,
         precompiles::{Precompile, PrecompileInput},
     };
     use alloy_primitives::{Bytes, U256};
     use alloy_sol_types::SolCall;
-    use revm::{
-        Context,
-        database::{CacheDB, EmptyDB},
-        precompile::PrecompileOutput,
-    };
+    use revm::precompile::PrecompileOutput;
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_precompiles::{
-        charge_input_cost,
-        storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-    };
-
-    type TestContext = Context<
-        revm::context::BlockEnv,
-        revm::context::TxEnv,
-        revm::context::CfgEnv<TempoHardfork>,
-        CacheDB<EmptyDB>,
-    >;
-
-    fn test_context() -> TestContext {
-        Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
-    }
+    use tempo_precompiles::{charge_input_cost, storage::StorageCtx};
 
     fn encrypt(plaintext: &[u8], aad: &[u8]) -> decryptCall {
         let key = [0x42u8; 32];
@@ -191,16 +174,7 @@ mod tests {
 
     fn charged_input_gas(calldata: &[u8]) -> u64 {
         let mut ctx = test_context();
-        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let mut provider = EvmPrecompileStorageProvider::new(
-            EvmInternals::from_context(&mut ctx),
-            u64::MAX,
-            0,
-            cfg.spec,
-            cfg.enable_amsterdam_eip8037,
-            true,
-            cfg.gas_params,
-        );
+        let mut provider = test_storage_provider(&mut ctx, u64::MAX, true);
         StorageCtx::enter(&mut provider, || {
             let mut storage = StorageCtx::default();
             let gas_before = storage.gas_used();

@@ -22,13 +22,14 @@
 
 extern crate alloc;
 
-// Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).
-pub(crate) use tempo_precompiles::{error, storage};
+// Required by the `#[contract]` proc macro expansion (references `crate::error`).
+pub(crate) use tempo_precompiles::error;
 
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
 pub mod policy;
+pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
 pub mod tip403_proxy;
@@ -36,7 +37,8 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
-pub use tempo_state::{L1StorageReader, TempoState};
+pub use storage::L1StorageReader;
+pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
 pub use ztip20::{SequencerExt, ZoneTip20Token};
