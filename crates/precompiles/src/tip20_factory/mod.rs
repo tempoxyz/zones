@@ -17,7 +17,6 @@
 mod dispatch;
 
 use alloy_primitives::Address;
-use alloy_sol_types::SolError;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     tip20::{ISSUER_ROLE, TIP20Token},
@@ -80,47 +79,5 @@ impl ZoneTokenFactory {
         token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
 
         Ok(())
-    }
-
-    /// Wraps this precompile in a [`DynPrecompile`] for registration in the zone EVM.
-    ///
-    /// The returned precompile handles delegate-call rejection, EVM storage
-    /// context setup, and dispatches to [`TempoPrecompile::call`].
-    pub fn create(
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> alloy_evm::precompiles::DynPrecompile {
-        use revm::precompile::{PrecompileId, PrecompileOutput};
-        use tempo_precompiles::{
-            DelegateCallNotAllowed, Precompile as _,
-            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-        };
-
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-        alloy_evm::precompiles::DynPrecompile::new_stateful(
-            PrecompileId::Custom("ZoneTokenFactory".into()),
-            move |input| {
-                if !input.is_direct_call() {
-                    return Ok(PrecompileOutput::revert(
-                        0,
-                        SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-                        input.reservoir,
-                    ));
-                }
-
-                let mut storage = EvmPrecompileStorageProvider::new(
-                    input.internals,
-                    input.gas,
-                    input.reservoir,
-                    spec,
-                    amsterdam_eip8037_enabled,
-                    input.is_static,
-                    gas_params.clone(),
-                );
-
-                StorageCtx::enter(&mut storage, || Self::new().call(input.data, input.caller))
-            },
-        )
     }
 }

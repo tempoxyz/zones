@@ -5,7 +5,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use alloy_evm::EvmInternals;
+use alloy_evm::{
+    EvmInternals,
+    precompiles::{DynPrecompile, Precompile as _, PrecompileInput},
+};
 use alloy_primitives::{Address, B256, U256};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
@@ -15,7 +18,7 @@ use revm::{
     Context,
     context::{BlockEnv, CfgEnv, TxEnv},
     database::{CacheDB, EmptyDB},
-    precompile::PrecompileError,
+    precompile::{PrecompileError, PrecompileResult},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::storage::evm::EvmPrecompileStorageProvider;
@@ -54,6 +57,30 @@ pub(crate) fn test_storage_provider(
         is_static,
         cfg.gas_params,
     )
+}
+
+/// Call a dynamic precompile with test defaults for value and reservoir.
+pub(crate) fn call_precompile(
+    ctx: &mut TestContext,
+    precompile: &DynPrecompile,
+    caller: Address,
+    data: &[u8],
+    gas: u64,
+    is_static: bool,
+    target: Address,
+    bytecode_address: Address,
+) -> PrecompileResult {
+    precompile.call(PrecompileInput {
+        data,
+        gas,
+        reservoir: 0,
+        caller,
+        value: U256::ZERO,
+        target_address: target,
+        is_static,
+        bytecode_address,
+        internals: EvmInternals::from_context(ctx),
+    })
 }
 
 /// In-memory exact-block L1 reader shared by precompile tests.

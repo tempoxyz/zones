@@ -7,16 +7,12 @@ use alloc::{format, vec::Vec};
 
 use crate::storage::L1StorageReader;
 use alloy_consensus::BlockHeader;
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    DelegateCallNotAllowed, charge_input_cost, dispatch,
-    error::TempoPrecompileError,
-    storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
-    view,
+    charge_input_cost, dispatch, error::TempoPrecompileError, storage::Handler, view,
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
@@ -178,41 +174,8 @@ impl TempoState {
         ))
     }
 
-    /// Wraps this precompile for registration in the zone EVM.
-    pub fn create<P: L1StorageReader>(
-        provider: P,
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> DynPrecompile {
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-
-        DynPrecompile::new_stateful(PrecompileId::Custom("TempoState".into()), move |input| {
-            if !input.is_direct_call() {
-                return Ok(PrecompileOutput::revert(
-                    0,
-                    SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-                    input.reservoir,
-                ));
-            }
-
-            let mut storage = EvmPrecompileStorageProvider::new(
-                input.internals,
-                input.gas,
-                input.reservoir,
-                spec,
-                amsterdam_eip8037_enabled,
-                input.is_static,
-                gas_params.clone(),
-            );
-
-            StorageCtx::enter(&mut storage, || {
-                Self::new().call_with_provider(&provider, input.data, input.caller)
-            })
-        })
-    }
-
-    fn call_with_provider<P: L1StorageReader>(
+    /// Dispatch a `TempoState` call using `provider` for anchored Tempo storage reads.
+    pub(crate) fn call_with_provider<P: L1StorageReader>(
         &mut self,
         provider: &P,
         calldata: &[u8],
@@ -245,14 +208,14 @@ impl TempoState {
 mod tests {
     use super::*;
 
-    use crate::test_utils::{MockL1Reader, TestContext, test_context, test_storage_provider};
-    use alloy_evm::{
-        EvmInternals,
-        precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
+    use crate::test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_storage_provider,
     };
-    use alloy_primitives::{U256, address, b256};
+    use alloy_evm::precompiles::DynPrecompile;
+    use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
+    use tempo_precompiles::storage::StorageCtx;
     type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     fn encode_header(header: &TempoHeader) -> Bytes {
@@ -275,37 +238,15 @@ mod tests {
         calldata: Bytes,
         is_static: bool,
     ) -> PrecompileResult {
-        call_with_bytecode_address(
+        call_precompile(
             ctx,
             precompile,
             caller,
-            calldata,
+            &calldata,
+            u64::MAX,
             is_static,
             TEMPO_STATE_ADDRESS,
-        )
-    }
-
-    fn call_with_bytecode_address(
-        ctx: &mut TestContext,
-        precompile: &DynPrecompile,
-        caller: Address,
-        calldata: Bytes,
-        is_static: bool,
-        bytecode_address: Address,
-    ) -> PrecompileResult {
-        AlloyEvmPrecompile::call(
-            precompile,
-            PrecompileInput {
-                data: &calldata,
-                gas: u64::MAX,
-                reservoir: 0,
-                caller,
-                value: U256::ZERO,
-                target_address: TEMPO_STATE_ADDRESS,
-                is_static,
-                bytecode_address,
-                internals: EvmInternals::from_context(ctx),
-            },
+            TEMPO_STATE_ADDRESS,
         )
     }
 
@@ -447,16 +388,20 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
-        let output = call_with_bytecode_address(
+        let calldata = TempoStateAbi::tempoBlockHashCall {}.abi_encode();
+        let output = call_precompile(
             &mut ctx,
             &precompile,
             Address::ZERO,
-            TempoStateAbi::tempoBlockHashCall {}.abi_encode().into(),
+            &calldata,
+            u64::MAX,
             true,
+            TEMPO_STATE_ADDRESS,
             address!("0x000000000000000000000000000000000000dEaD"),
         )?;
 
         assert!(output.is_revert());
+        assert_eq!(output.gas_used, 0);
 
         Ok(())
     }
