@@ -1,6 +1,6 @@
 //! Zone runtime EVM and its private execution policies.
 
-mod contract_creation;
+pub(crate) mod contract_creation;
 
 use crate::TempoCtx;
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};

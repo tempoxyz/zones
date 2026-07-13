@@ -27,7 +27,7 @@ use reth_node_builder::{
         PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{SealedHeader, transaction::error::InvalidTransactionError};
+use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
@@ -50,7 +50,7 @@ use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
     amm::AmmLiquidityCache,
     ordering::TempoTipOrdering,
-    transaction::TempoPooledTransaction,
+    transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{
@@ -889,13 +889,11 @@ where
         .build::<TempoPooledTransaction, _>(blob_store.clone());
 
         validator.set_additional_stateless_validation(|_origin, tx| {
-            use alloy_consensus::Transaction;
-            if tx.is_create() {
-                return Err(InvalidPoolTransactionError::Consensus(
-                    InvalidTransactionError::TxTypeNotSupported,
-                ));
-            }
-            Ok(())
+            zone_evm::validate_transaction(
+                tx.tx_env(),
+                zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST,
+            )
+            .map_err(|err| InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(err)))
         });
 
         let validator =
@@ -940,5 +938,74 @@ where
         debug!(target: "reth::cli", "Spawned txpool maintenance task");
 
         Ok(transaction_pool)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Signed, TxEip1559};
+    use alloy_primitives::{Bytes, Signature, TxKind, U256};
+    use reth_primitives_traits::Recovered;
+    use tempo_primitives::transaction::{
+        AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
+    };
+
+    fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
+        TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))
+    }
+
+    fn aa_transaction(sender: Address, calls: Vec<Call>) -> TempoPooledTransaction {
+        let transaction = TempoTransaction {
+            calls,
+            ..Default::default()
+        };
+        let signature =
+            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
+        pooled_transaction(
+            AASigned::new_unhashed(transaction, signature).into(),
+            sender,
+        )
+    }
+
+    #[test]
+    fn pool_policy_allows_allowlisted_plain_create() {
+        let sender = Address::repeat_byte(0x11);
+        let envelope = TempoTxEnvelope::Eip1559(Signed::new_unhashed(
+            TxEip1559 {
+                to: TxKind::Create,
+                ..Default::default()
+            },
+            Signature::test_signature(),
+        ));
+        let transaction = pooled_transaction(envelope, sender);
+
+        let err = zone_evm::validate_transaction(transaction.tx_env(), &[]).unwrap_err();
+        assert!(matches!(
+            err,
+            tempo_revm::TempoInvalidTransaction::CallsValidation(_)
+        ));
+        assert!(zone_evm::validate_transaction(transaction.tx_env(), &[sender]).is_ok());
+    }
+
+    #[test]
+    fn pool_policy_rejects_create_in_non_first_aa_call() {
+        let transaction = aa_transaction(
+            Address::repeat_byte(0x11),
+            vec![
+                Call {
+                    to: TxKind::Call(Address::repeat_byte(0x22)),
+                    value: U256::ZERO,
+                    input: Bytes::new(),
+                },
+                Call {
+                    to: TxKind::Create,
+                    value: U256::ZERO,
+                    input: Bytes::new(),
+                },
+            ],
+        );
+
+        assert!(zone_evm::validate_transaction(transaction.tx_env(), &[]).is_err());
     }
 }

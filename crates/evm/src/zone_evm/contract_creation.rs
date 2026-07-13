@@ -48,26 +48,14 @@ fn create<const IS_CREATE2: bool, DB: Database>(
     revm_create::<IS_CREATE2, EthInterpreter, TempoContext<DB>>(context)
 }
 
-/// Reject transaction-level code creation unless its deployer is explicitly allowed.
-pub(super) fn validate_transaction(
+/// Reject transaction-level contract creation unless its deployer is explicitly allowed.
+pub fn validate_transaction(
     tx: &TempoTxEnv,
     allowlist: &[Address],
 ) -> Result<(), TempoInvalidTransaction> {
     if contract_creation_deployer(tx).is_some_and(|deployer| !allowlist.contains(&deployer)) {
         return Err(TempoInvalidTransaction::CallsValidation(
             "contract creation is not supported",
-        ));
-    }
-
-    let has_code_authorization = tx.authorization_list_len() != 0
-        || tx
-            .tempo_tx_env
-            .as_ref()
-            .is_some_and(|aa| !aa.tempo_authorization_list.is_empty());
-
-    if has_code_authorization {
-        return Err(TempoInvalidTransaction::CallsValidation(
-            "code authorization is not supported",
         ));
     }
 
@@ -87,24 +75,19 @@ mod tests {
     use super::*;
     use crate::ZoneEvm;
     use alloy_evm::{Evm, EvmEnv};
-    use alloy_primitives::{Address, Bytes, Signature, TxKind, U256, bytes};
+    use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use revm::{
         bytecode::Bytecode,
         context::{
             TxEnv,
-            either::Either,
             result::{EVMError, ExecutionResult},
-            transaction::{Authorization, SignedAuthorization},
         },
         database::{EmptyDB, in_memory_db::CacheDB},
         inspector::NoOpInspector,
         state::AccountInfo,
     };
     use tempo_evm::{TempoBlockEnv, TempoHaltReason};
-    use tempo_primitives::transaction::{
-        Call, PrimitiveSignature, RecoveredTempoAuthorization, TempoSignature,
-        TempoSignedAuthorization,
-    };
+    use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
 
     type TestDb = CacheDB<EmptyDB>;
@@ -325,40 +308,5 @@ mod tests {
 
         assert!(validate_transaction(&tx, &[]).is_err());
         assert!(validate_transaction(&tx, &[caller]).is_ok());
-    }
-
-    #[test]
-    fn code_authorizations_are_rejected() {
-        let authorization = Authorization {
-            chain_id: U256::ONE,
-            address: Address::repeat_byte(0x44),
-            nonce: 0,
-        };
-        let signed =
-            SignedAuthorization::new_unchecked(authorization.clone(), 0, U256::ONE, U256::ONE);
-        let ethereum_tx = TempoTxEnv {
-            inner: TxEnv {
-                authorization_list: vec![Either::Left(signed)],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        let tempo_authorization = TempoSignedAuthorization::new_unchecked(
-            authorization,
-            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature())),
-        );
-        let tempo_tx = TempoTxEnv {
-            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
-                tempo_authorization_list: vec![RecoveredTempoAuthorization::new(
-                    tempo_authorization,
-                )],
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
-
-        assert!(validate_transaction(&ethereum_tx, CONTRACT_DEPLOYER_ALLOWLIST).is_err());
-        assert!(validate_transaction(&tempo_tx, CONTRACT_DEPLOYER_ALLOWLIST).is_err());
     }
 }

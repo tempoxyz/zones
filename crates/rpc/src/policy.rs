@@ -30,7 +30,6 @@ where
 {
     enforce_from(request, auth)?;
     enforce_contract_creation(request, auth.caller)?;
-    enforce_no_code_authorization(request)?;
     enforce_zone_inbox_refund_call_privacy(request, auth, is_sequencer).await
 }
 
@@ -78,26 +77,6 @@ fn enforce_contract_creation_with_allowlist(
     if outer_create || implicit_plain_create || tempo_create {
         return Err(JsonRpcError::invalid_params(
             "contract creation not supported on zones",
-        ));
-    }
-
-    Ok(())
-}
-
-/// Reject Ethereum and Tempo authorization lists that can mutate account code.
-pub fn enforce_no_code_authorization(
-    request: &TempoTransactionRequest,
-) -> Result<(), JsonRpcError> {
-    let empty_auth_list = request
-        .inner
-        .authorization_list
-        .as_ref()
-        .is_none_or(|auth| auth.is_empty());
-    let empty_tempo_auth_list = request.tempo_authorization_list.is_empty();
-
-    if !empty_auth_list || !empty_tempo_auth_list {
-        return Err(JsonRpcError::invalid_params(
-            "code authorization is not supported",
         ));
     }
 
@@ -180,19 +159,16 @@ pub fn verify_raw_tx_sender(data: &[u8], auth: &AuthContext) -> Result<(), JsonR
 
 #[cfg(test)]
 mod tests {
-    use alloy_eips::eip7702::{Authorization, SignedAuthorization};
-    use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
+    use alloy_primitives::{Address, Bytes, TxKind, U256};
     use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
     use alloy_sol_types::SolCall;
     use tempo_alloy::rpc::TempoTransactionRequest;
-    use tempo_primitives::transaction::{
-        Call, PrimitiveSignature, TempoSignature, TempoSignedAuthorization,
-    };
+    use tempo_primitives::transaction::Call;
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox};
 
     use super::{
         enforce_contract_creation, enforce_contract_creation_with_allowlist,
-        enforce_no_code_authorization, zone_inbox_refunds_mismatched_owner,
+        zone_inbox_refunds_mismatched_owner,
     };
 
     fn call_target(byte: u8) -> TxKind {
@@ -283,31 +259,6 @@ mod tests {
 
         assert!(enforce_contract_creation_with_allowlist(&request, caller, &[]).is_err());
         assert!(enforce_contract_creation_with_allowlist(&request, caller, &[caller]).is_ok());
-    }
-
-    #[test]
-    fn no_code_authorization_rejects_ethereum_and_tempo_lists() {
-        let authorization = Authorization {
-            chain_id: U256::ONE,
-            address: Address::repeat_byte(0x44),
-            nonce: 0,
-        };
-
-        let mut ethereum_request = call_request(Some(call_target(0x11)));
-        ethereum_request.inner.authorization_list = Some(vec![SignedAuthorization::new_unchecked(
-            authorization.clone(),
-            0,
-            U256::ONE,
-            U256::ONE,
-        )]);
-        assert!(enforce_no_code_authorization(&ethereum_request).is_err());
-
-        let mut tempo_request = call_request(Some(call_target(0x11)));
-        tempo_request.tempo_authorization_list = vec![TempoSignedAuthorization::new_unchecked(
-            authorization,
-            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature())),
-        )];
-        assert!(enforce_no_code_authorization(&tempo_request).is_err());
     }
 
     #[test]
