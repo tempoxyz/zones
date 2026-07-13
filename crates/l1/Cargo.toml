@@ -19,6 +19,7 @@ zone-primitives = { workspace = true, features = ["std", "serde"] }
 # tempo
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
+tempo-chainspec = { workspace = true, features = ["reth"] }
 tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
 tempo-revm.workspace = true
@@ -28,6 +29,7 @@ tempo-transaction-pool.workspace = true
 reth-metrics.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
+reth-chainspec.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-transaction-pool.workspace = true

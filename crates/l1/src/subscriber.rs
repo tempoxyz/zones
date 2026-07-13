@@ -1,4 +1,6 @@
 use super::*;
+use std::collections::HashSet;
+use tempo_chainspec::hardfork::TempoHardfork;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -283,6 +285,7 @@ impl L1Subscriber {
     async fn sync_to_l1_tip(
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
+        chain_id: u64,
     ) -> eyre::Result<()> {
         let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
@@ -318,7 +321,7 @@ impl L1Subscriber {
             "Backfilling deposit events"
         );
         let start = std::time::Instant::now();
-        let result = self.backfill(l1_provider, from, tip).await;
+        let result = self.backfill(l1_provider, chain_id, from, tip).await;
         self.subscriber_metrics
             .backfill_duration_seconds
             .record(start.elapsed().as_secs_f64());
@@ -338,6 +341,7 @@ impl L1Subscriber {
     async fn backfill(
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
+        chain_id: u64,
         from: u64,
         to: u64,
     ) -> eyre::Result<()> {
@@ -398,11 +402,19 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, policy_events) = self.extract_events(block_number, &receipts);
+            let (events, policy_events, invalidated_accounts) =
+                self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
+            self.update_l1_state_anchor(
+                block_number,
+                sealed.hash(),
+                sealed.parent_hash(),
+                chain_id,
+                sealed.timestamp(),
+                &invalidated_accounts,
+            );
             self.apply_policy_events(block_number, &policy_events);
             self.apply_portal_state_events(block_number, &events);
             self.deposit_queue
@@ -454,10 +466,11 @@ impl L1Subscriber {
         self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
 
         let provider = self.connect().await?;
+        let chain_id = provider.get_chain_id().await?;
 
         // Backfill to the current tip before subscribing.
         // Backfilled blocks are historical and considered confirmed.
-        self.sync_to_l1_tip(&provider).await?;
+        self.sync_to_l1_tip(&provider, chain_id).await?;
 
         info!(portal = %self.config.portal_address, "Listening for L1 blocks");
         let mut stream = self.l1_block_stream(&provider).await?;
@@ -466,10 +479,12 @@ impl L1Subscriber {
         // A block is only flushed to the deposit queue once the NEXT block
         // arrives with a matching parent hash, proving the buffered block
         // is on the canonical chain.
+        #[allow(clippy::type_complexity)]
         let mut unconfirmed_tip: Option<(
             SealedHeader<TempoHeader>,
             L1PortalEvents,
             Vec<PolicyEvent>,
+            HashSet<Address>,
         )> = None;
 
         loop {
@@ -483,18 +498,27 @@ impl L1Subscriber {
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let (events, policy_events) = self.extract_events(block_number, &receipts);
+            let (events, policy_events, mutated_acc) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
+            if let Some((tip_header, tip_events, tip_policy_events, tip_mutated_acc)) =
+                unconfirmed_tip.take()
+            {
                 if sealed.parent_hash() == tip_header.hash() {
                     // Confirmed — update the L1 state anchor, apply events, and
                     // flush to the queue.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
-                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
+                    self.update_l1_state_anchor(
+                        tip_number,
+                        tip_hash,
+                        tip_parent,
+                        chain_id,
+                        tip_header.timestamp(),
+                        &tip_mutated_acc,
+                    );
                     self.apply_policy_events(tip_number, &tip_policy_events);
                     self.apply_portal_state_events(tip_number, &tip_events);
                     match self
@@ -515,7 +539,7 @@ impl L1Subscriber {
                                 tip = tip_number,
                                 "Backfilling gap before confirmed tip"
                             );
-                            self.backfill(&provider, from, tip_number).await?;
+                            self.backfill(&provider, chain_id, from, tip_number).await?;
                         }
                     }
                 } else {
@@ -535,24 +559,25 @@ impl L1Subscriber {
             }
 
             // Buffer the new block as unconfirmed tip.
-            unconfirmed_tip = Some((sealed, events, policy_events));
+            unconfirmed_tip = Some((sealed, events, policy_events, mutated_acc));
         }
 
         warn!("L1 block subscription stream ended");
         Ok(())
     }
 
-    /// Extract portal and policy events from pre-fetched receipts (no RPC).
+    /// Extract portal and policy events from pre-fetched receipts (no RPC) and mutated accounts.
     fn extract_events(
         &mut self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> (L1PortalEvents, Vec<PolicyEvent>) {
+    ) -> (L1PortalEvents, Vec<PolicyEvent>, HashSet<Address>) {
         use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut policy_events = Vec::new();
+        let mut mutated_accounts = HashSet::new();
 
         for receipt in receipts {
             for log in receipt.logs() {
@@ -571,20 +596,24 @@ impl L1Subscriber {
                         }
                     }
                 } else if addr == TIP403_REGISTRY_ADDRESS {
+                    mutated_accounts.insert(addr);
                     if let Some(event) = PolicyEvent::decode_registry(log) {
                         policy_events.push(event);
                     }
                 } else if self.tracked_tokens.contains(&addr)
                     && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
-                    && let Some(event) = PolicyEvent::decode_tip20(log)
                 {
-                    policy_events.push(event);
+                    // TODO: remove once tempo migrated policy ids to the 403 registry.
+                    mutated_accounts.insert(addr);
+                    if let Some(event) = PolicyEvent::decode_tip20(log) {
+                        policy_events.push(event);
+                    }
                 }
             }
         }
 
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, policy_events)
+        (portal_events, policy_events, mutated_accounts)
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -677,10 +706,17 @@ impl L1Subscriber {
         );
     }
 
-    /// Update the L1 state cache anchor. Detects reorgs by comparing
-    /// `parent_hash` against the current anchor and clears the cache when they
-    /// diverge.
-    pub(crate) fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
+    /// Update the L1 state cache anchor. Detects reorgs by comparing `parent_hash`
+    /// against the current anchor and clears the cache when they diverge.
+    pub(crate) fn update_l1_state_anchor(
+        &self,
+        number: u64,
+        hash: B256,
+        parent_hash: B256,
+        chain_id: u64,
+        timestamp: u64,
+        mutated_accounts: &HashSet<Address>,
+    ) {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
         if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
@@ -693,6 +729,12 @@ impl L1Subscriber {
             );
             guard.clear();
             self.config.policy_cache.write().clear();
+        }
+        for &address in mutated_accounts {
+            guard.invalidate(address, number);
+        }
+        if let Some(hardfork) = TempoHardfork::from_chain_and_timestamp(chain_id, timestamp) {
+            guard.observe_hardfork(number, hardfork);
         }
         guard.update_anchor(NumHash::new(number, hash));
     }

@@ -10,13 +10,19 @@
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
 //! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
 
+use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
-use alloy_rpc_types_eth::BlockId;
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag};
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
+use reth_chainspec::ForkCondition;
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::{
+    hardfork::TempoHardfork,
+    spec::{DEV, TempoHardforks, chainspec_from_chain_id},
+};
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StorageReader, SequencerExt};
 
@@ -243,9 +249,78 @@ impl L1StateProvider {
         Ok(value)
     }
 
+    /// Resolve the Tempo hardfork active at an exact L1 block, using cached metadata first.
+    pub fn get_hardfork(&self, block_number: u64) -> Result<TempoHardfork> {
+        if let Some(hardfork) = self.cache.read().hardfork_at(block_number) {
+            return Ok(hardfork);
+        }
+
+        let activations = tokio::task::block_in_place(|| {
+            self.runtime_handle
+                .block_on(self.fetch_hardfork_schedule(block_number))
+        })?;
+        let mut cache = self.cache.write();
+        cache.extend_hardfork_schedule(block_number, activations);
+        cache
+            .hardfork_at(block_number)
+            .ok_or_else(|| eyre::eyre!("no Tempo hardfork active at L1 block {block_number}"))
+    }
+
     /// Expose the shared cache handle for external use (e.g. the engine).
     pub fn cache(&self) -> &L1StateCache {
         &self.cache
+    }
+
+    async fn fetch_hardfork_schedule(
+        &self,
+        block_number: u64,
+    ) -> Result<Vec<(u64, TempoHardfork)>> {
+        let (chain_id, block) = tokio::try_join!(
+            self.provider.get_chain_id(),
+            self.provider
+                .get_block_by_number(BlockNumberOrTag::Number(block_number)),
+        )?;
+        let block = block.ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
+        let chain_spec = chainspec_from_chain_id(chain_id).unwrap_or_else(|| DEV.clone());
+        let block_ts = block.header.timestamp();
+        let mut activations = Vec::new();
+
+        for &hardfork in TempoHardfork::VARIANTS {
+            let ForkCondition::Timestamp(fork_ts) = chain_spec.tempo_fork_activation(hardfork)
+            else {
+                continue;
+            };
+            if fork_ts > block_ts {
+                continue;
+            }
+            let activation_block = if let Some(block) = known_activation_block(chain_id, hardfork) {
+                block
+            } else {
+                self.first_block_at_or_after(fork_ts, block_number).await?
+            };
+            activations.push((activation_block, hardfork));
+        }
+
+        Ok(activations)
+    }
+
+    async fn first_block_at_or_after(&self, timestamp: u64, high: u64) -> Result<u64> {
+        let mut low = 0u64;
+        let mut high = high;
+        while low < high {
+            let mid = low + (high - low) / 2;
+            let block = self
+                .provider
+                .get_block_by_number(BlockNumberOrTag::Number(mid))
+                .await?
+                .ok_or_else(|| eyre::eyre!("L1 block {mid} not found"))?;
+            if block.header.timestamp() < timestamp {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        Ok(low)
     }
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
@@ -260,6 +335,14 @@ impl L1StateProvider {
         let result = B256::from(value.to_be_bytes());
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
         Ok(result)
+    }
+}
+
+fn known_activation_block(chain_id: u64, hardfork: TempoHardfork) -> Option<u64> {
+    match chain_id {
+        4217 => hardfork.mainnet_activation_block(),
+        42431 => hardfork.moderato_activation_block(),
+        _ => None,
     }
 }
 
@@ -281,5 +364,29 @@ impl L1StorageReader for L1StateProvider {
 impl SequencerExt for L1StateProvider {
     fn latest_sequencer(&self) -> Option<Address> {
         self.get_latest_sequencer().ok()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_activation_blocks_come_from_tempo_hardfork_constants() {
+        assert_eq!(
+            known_activation_block(4217, TempoHardfork::T2),
+            TempoHardfork::T2.mainnet_activation_block()
+        );
+        assert_eq!(
+            known_activation_block(42431, TempoHardfork::T2),
+            TempoHardfork::T2.moderato_activation_block()
+        );
+        assert_eq!(known_activation_block(1337, TempoHardfork::T2), None);
+    }
+
+    #[test]
+    fn unknown_future_activation_blocks_fall_back_to_rpc_resolution() {
+        assert_eq!(known_activation_block(4217, TempoHardfork::T8), None);
+        assert_eq!(known_activation_block(42431, TempoHardfork::T8), None);
     }
 }

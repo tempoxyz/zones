@@ -412,7 +412,20 @@ fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
 
     let old_header = make_test_header(10);
     let old_hash = header_hash(&old_header);
-    subscriber.update_l1_state_anchor(10, old_hash, old_header.inner.parent_hash);
+    subscriber.update_l1_state_anchor(
+        10,
+        old_hash,
+        old_header.inner.parent_hash,
+        4217,
+        old_header.timestamp(),
+        &HashSet::new(),
+    );
+    subscriber.config.l1_state_cache.write().set(
+        token,
+        B256::with_last_byte(1),
+        10,
+        B256::with_last_byte(0xaa),
+    );
     {
         let mut cache = subscriber.config.policy_cache.write();
         cache.set_token_policy(token, 10, 2);
@@ -423,7 +436,23 @@ fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
 
     let replacement_parent = B256::with_last_byte(0x44);
     let replacement_header = make_chained_header(11, replacement_parent);
-    subscriber.update_l1_state_anchor(11, header_hash(&replacement_header), replacement_parent);
+    subscriber.update_l1_state_anchor(
+        11,
+        header_hash(&replacement_header),
+        replacement_parent,
+        4217,
+        replacement_header.timestamp(),
+        &HashSet::new(),
+    );
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .read()
+            .get(token, B256::with_last_byte(1), 10),
+        None,
+        "reorg must clear raw L1 state"
+    );
     subscriber.apply_policy_events(
         11,
         &[
