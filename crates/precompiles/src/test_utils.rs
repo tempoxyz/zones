@@ -29,18 +29,18 @@ use crate::{
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// EVM context used by precompile tests.
-pub(crate) type TestCtx = Context<BlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+pub(crate) type TestContext = Context<BlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 type L1Slot = (Address, B256, u64);
 type Shared<T> = Arc<Mutex<T>>;
 
 /// Create an empty test EVM context at the default Tempo hardfork.
-pub(crate) fn test_context() -> TestCtx {
+pub(crate) fn test_context() -> TestContext {
     Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.
 pub(crate) fn test_storage_provider(
-    ctx: &mut TestCtx,
+    ctx: &mut TestContext,
     gas_limit: u64,
     is_static: bool,
 ) -> EvmPrecompileStorageProvider<'_> {

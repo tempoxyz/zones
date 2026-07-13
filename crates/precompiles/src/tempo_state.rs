@@ -245,7 +245,7 @@ impl TempoState {
 mod tests {
     use super::*;
 
-    use crate::test_utils::{MockL1Reader, TestCtx, test_context, test_storage_provider};
+    use crate::test_utils::{MockL1Reader, TestContext, test_context, test_storage_provider};
     use alloy_evm::{
         EvmInternals,
         precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
@@ -261,7 +261,7 @@ mod tests {
         encoded.into()
     }
 
-    fn initialize(ctx: &mut TestCtx, header: &[u8]) -> TestResult {
+    fn initialize(ctx: &mut TestContext, header: &[u8]) -> TestResult {
         let mut storage = test_storage_provider(ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || TempoState::new().initialize(header))?;
@@ -269,7 +269,7 @@ mod tests {
     }
 
     fn call(
-        ctx: &mut TestCtx,
+        ctx: &mut TestContext,
         precompile: &DynPrecompile,
         caller: Address,
         calldata: Bytes,
@@ -286,7 +286,7 @@ mod tests {
     }
 
     fn call_with_bytecode_address(
-        ctx: &mut TestCtx,
+        ctx: &mut TestContext,
         precompile: &DynPrecompile,
         caller: Address,
         calldata: Bytes,
@@ -346,7 +346,7 @@ mod tests {
     }
 
     fn assert_checkpoint(
-        ctx: &mut TestCtx,
+        ctx: &mut TestContext,
         precompile: &DynPrecompile,
         expected_hash: B256,
         expected_number: u64,

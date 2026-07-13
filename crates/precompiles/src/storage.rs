@@ -292,14 +292,14 @@ fn merge_transfer_policy_id(local_slot: U256, l1_slot: U256) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{MockL1Reader, TestCtx, test_context, test_storage_provider};
+    use crate::test_utils::{MockL1Reader, TestContext, test_context, test_storage_provider};
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
         storage::{StorageAction, actions::StorageActions},
     };
 
     fn with_zone_provider<T>(
-        ctx: &mut TestCtx,
+        ctx: &mut TestContext,
         l1: MockL1Reader,
         actions: StorageActions,
         f: impl FnOnce(&mut ZonePrecompileStorageProvider<'_, MockL1Reader>) -> T,

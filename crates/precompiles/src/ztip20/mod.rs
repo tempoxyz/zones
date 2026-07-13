@@ -233,7 +233,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{TestCtx, test_context, test_storage_provider};
+    use crate::test_utils::{TestContext, test_context, test_storage_provider};
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::{
         EvmInternals,
@@ -332,7 +332,7 @@ mod tests {
     }
 
     struct PrecompileHarness {
-        ctx: TestCtx,
+        ctx: TestContext,
         token: Address,
         alice: Address,
         bob: Address,
@@ -361,45 +361,44 @@ mod tests {
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
             let mut ctx = test_context();
 
-            Self::with_storage(&mut ctx, u64::MAX, |storage| {
-                StorageCtx::enter(storage, || -> TestResult {
-                    let mut token_contract =
-                        TIP20Token::from_address(token).expect("PATH_USD must be valid");
-                    token_contract.initialize(
-                        admin,
-                        "Zone USD",
-                        "zUSD",
-                        "USD",
-                        Address::ZERO,
-                        admin,
-                    )?;
-                    token_contract.grant_role_internal(admin, *ISSUER_ROLE)?;
-                    token_contract.grant_role_internal(issuer, *ISSUER_ROLE)?;
-                    token_contract.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-                    token_contract.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
-                    token_contract.mint(
-                        admin,
-                        ITIP20::mintCall {
-                            to: alice,
-                            amount: U256::from(1_000_000u64),
-                        },
-                    )?;
-                    token_contract.mint(
-                        admin,
-                        ITIP20::mintCall {
-                            to: ZONE_OUTBOX_ADDRESS,
-                            amount: U256::from(10_000u64),
-                        },
-                    )?;
-                    token_contract.approve(
-                        alice,
-                        ITIP20::approveCall {
-                            spender,
-                            amount: U256::from(300_000u64),
-                        },
-                    )?;
-                    Ok(())
-                })
+            let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || -> TestResult {
+                let mut token_contract =
+                    TIP20Token::from_address(token).expect("PATH_USD must be valid");
+                token_contract.initialize(
+                    admin,
+                    "Zone USD",
+                    "zUSD",
+                    "USD",
+                    Address::ZERO,
+                    admin,
+                )?;
+                token_contract.grant_role_internal(admin, *ISSUER_ROLE)?;
+                token_contract.grant_role_internal(issuer, *ISSUER_ROLE)?;
+                token_contract.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+                token_contract.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+                token_contract.mint(
+                    admin,
+                    ITIP20::mintCall {
+                        to: alice,
+                        amount: U256::from(1_000_000u64),
+                    },
+                )?;
+                token_contract.mint(
+                    admin,
+                    ITIP20::mintCall {
+                        to: ZONE_OUTBOX_ADDRESS,
+                        amount: U256::from(10_000u64),
+                    },
+                )?;
+                token_contract.approve(
+                    alice,
+                    ITIP20::approveCall {
+                        spender,
+                        amount: U256::from(300_000u64),
+                    },
+                )?;
+                Ok(())
             })?;
 
             let precompile = ZoneTip20Token::create(
@@ -421,14 +420,6 @@ mod tests {
                 issuer,
                 precompile,
             })
-        }
-
-        fn with_storage<T>(
-            ctx: &mut TestCtx,
-            gas_limit: u64,
-            f: impl FnOnce(&mut EvmPrecompileStorageProvider<'_>) -> TestResult<T>,
-        ) -> TestResult<T> {
-            f(&mut test_storage_provider(ctx, gas_limit, false))
         }
 
         fn call(
@@ -455,20 +446,18 @@ mod tests {
         }
 
         fn balance_of(&mut self, account: Address) -> TestResult<U256> {
-            Self::with_storage(&mut self.ctx, u64::MAX, |storage| {
-                StorageCtx::enter(storage, || {
-                    let token = TIP20Token::from_address(self.token).expect("token must exist");
-                    Ok(token.balance_of(ITIP20::balanceOfCall { account })?)
-                })
+            let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || {
+                let token = TIP20Token::from_address(self.token).expect("token must exist");
+                Ok(token.balance_of(ITIP20::balanceOfCall { account })?)
             })
         }
 
         fn allowance(&mut self, owner: Address, spender: Address) -> TestResult<U256> {
-            Self::with_storage(&mut self.ctx, u64::MAX, |storage| {
-                StorageCtx::enter(storage, || {
-                    let token = TIP20Token::from_address(self.token).expect("token must exist");
-                    Ok(token.allowance(ITIP20::allowanceCall { owner, spender })?)
-                })
+            let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || {
+                let token = TIP20Token::from_address(self.token).expect("token must exist");
+                Ok(token.allowance(ITIP20::allowanceCall { owner, spender })?)
             })
         }
     }
