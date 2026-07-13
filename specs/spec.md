@@ -1450,7 +1450,9 @@ interface IChaumPedersenVerify {
 
 Verifies that an ECDH shared secret was correctly derived from the sequencer's private key and an ephemeral public key, without exposing the private key. Used during [onchain decryption verification](#onchain-decryption-verification) of encrypted deposits.
 
-The verifier reconstructs commitments `R1 = s*G - c*pubSeq` and `R2 = s*ephemeralPub - c*sharedSecretPoint`, recomputes the Fiat-Shamir challenge `c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`, and checks `c == c'`.
+Proof generation uses a deterministic, domain-separated nonce so that independently built versions of the same zone block contain identical `advanceTempo` calldata. The prover derives `k` by rejection-sampling HMAC-SHA256 outputs keyed by `privSeq` over the domain `tempo-zone-chaum-pedersen-nonce-v1`, the compressed encodings of `ephemeralPub`, `pubSeq`, and `sharedSecretPoint`, and a retry counter.
+
+The prover computes `R1 = k*G`, `R2 = k*ephemeralPub`, `c = keccak256(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`, and `s = k + c*privSeq`. The verifier reconstructs `R1 = s*G - c*pubSeq` and `R2 = s*ephemeralPub - c*sharedSecretPoint`, recomputes c' and checks `c == c'`.
 
 ### AES-GCM Decrypt
 

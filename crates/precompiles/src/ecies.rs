@@ -27,6 +27,8 @@ pub const AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE: usize = 52;
 /// Total encoded size of `encryptedSender`.
 pub const AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE: usize = 33 + 12 + 52 + 16;
 
+const CP_NONCE_DOMAIN: &[u8] = b"tempo-zone-chaum-pedersen-nonce-v1";
+
 /// Result of sequencer-side ECDH + Chaum-Pedersen proof derivation.
 ///
 /// This is always producible as long as the ephemeral public key is valid
@@ -63,7 +65,7 @@ pub struct DecryptedDeposit {
 /// on-chain contract with a valid proof — enabling the refund path for deposits
 /// with garbage ciphertext instead of reverting.
 ///
-/// Returns `None` only if the ephemeral public key cannot be recovered (invalid point).
+/// Returns `None` if the ephemeral public key cannot be recovered or proof generation fails.
 pub fn compute_ecdh_proof(
     sequencer_privkey: &k256::SecretKey,
     ephemeral_pub_x: &B256,
@@ -88,7 +90,7 @@ pub fn compute_ecdh_proof(
         &ephemeral_pub,
         &shared_secret_affine,
         &sequencer_pub,
-    );
+    )?;
 
     Some(EcdhProofResult {
         shared_secret: B256::from(shared_secret_x),
@@ -307,13 +309,11 @@ fn generate_chaum_pedersen_proof(
     ephemeral_pub: &AffinePoint,
     shared_secret: &AffinePoint,
     sequencer_pub: &AffinePoint,
-) -> (Scalar, Scalar) {
-    use k256::elliptic_curve::Field;
-
-    let mut rng = rand::thread_rng();
-
-    // 1. Prover picks random k
-    let k = Scalar::random(&mut rng);
+) -> Option<(Scalar, Scalar)> {
+    // The proof is included in advanceTempo calldata, so runtime randomness here
+    // would make otherwise identical zone blocks diverge. Derive the blinding
+    // scalar from the encryption key and the complete public statement instead.
+    let k = deterministic_cp_nonce(priv_seq, ephemeral_pub, sequencer_pub, shared_secret)?;
     let r1 = AffinePoint::from(ProjectivePoint::GENERATOR * k);
     let r2 = AffinePoint::from(ProjectivePoint::from(*ephemeral_pub) * k);
 
@@ -323,7 +323,45 @@ fn generate_chaum_pedersen_proof(
     // 3. Response: s = k + c * privSeq
     let s = k + c * priv_seq;
 
-    (s, c)
+    Some((s, c))
+}
+
+/// Domain-separated deterministic Chaum-Pedersen nonce derivation.
+///
+/// Invalid scalar candidates are retried with a counter.
+fn deterministic_cp_nonce(
+    priv_seq: &Scalar,
+    ephemeral_pub: &AffinePoint,
+    sequencer_pub: &AffinePoint,
+    shared_secret: &AffinePoint,
+) -> Option<Scalar> {
+    // Although the latter two points are derived from `priv_seq` and `ephemeral_pub`,
+    // include the complete public statement so every challenge input also binds the nonce.
+    let ephemeral_pub = ephemeral_pub.to_encoded_point(true);
+    let sequencer_pub = sequencer_pub.to_encoded_point(true);
+    let shared_secret = shared_secret.to_encoded_point(true);
+    let mut input = Vec::with_capacity(CP_NONCE_DOMAIN.len() + 33 * 3 + 4);
+    input.extend_from_slice(CP_NONCE_DOMAIN);
+    input.extend_from_slice(ephemeral_pub.as_bytes());
+    input.extend_from_slice(sequencer_pub.as_bytes());
+    input.extend_from_slice(shared_secret.as_bytes());
+
+    let secret = priv_seq.to_bytes();
+    for counter in 0..=u32::MAX {
+        input.extend_from_slice(&counter.to_be_bytes());
+        let candidate = hmac_sha256(secret.as_ref(), &input);
+
+        if let Ok(nonce) = k256::SecretKey::from_slice(&candidate) {
+            return Some(*nonce.to_nonzero_scalar());
+        }
+
+        // Reset to try another counter
+        input.truncate(input.len() - 4);
+    }
+
+    // Astronomically impossible that we didn't find a valid scalar, so if we're here, its a bug,
+    // return None
+    None
 }
 
 /// HMAC-SHA256 implementation matching ZoneInbox._hmacSha256.
@@ -437,7 +475,7 @@ pub fn encrypt_plaintext(aes_key: &[u8; 32], plaintext: &[u8]) -> (Vec<u8>, [u8;
 #[cfg(test)]
 mod tests {
     use super::{
-        AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, compressed_x_and_parity,
+        AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, compressed_x_and_parity, compute_ecdh_proof,
         decrypt_authenticated_withdrawal, decrypt_deposit, encrypt_authenticated_withdrawal,
         hkdf_sha256, hmac_sha256,
     };
@@ -453,6 +491,17 @@ mod tests {
         assert_eq!(dec.to, f.to);
         assert_eq!(dec.memo, f.memo);
         assert_cp_proof_valid(&dec, &f.eph_pub, &f.seq_pub);
+    }
+
+    #[test]
+    fn test_cp_proof_is_deterministic() {
+        let f = EncryptedDepositFixture::new();
+
+        let proof_a = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
+        let proof_b = compute_ecdh_proof(&f.seq_key, &f.eph_pub_x, f.eph_pub_y_parity).unwrap();
+
+        assert_eq!(proof_a.cp_proof_s, proof_b.cp_proof_s);
+        assert_eq!(proof_a.cp_proof_c, proof_b.cp_proof_c);
     }
 
     #[test]
