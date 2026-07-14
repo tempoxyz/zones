@@ -24,6 +24,8 @@ use crate::utils::{
     local_dev_zone_account, poll_until, seed_fixture_for_zone, start_local_zone_with_fixture,
 };
 
+const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
+
 /// Self-contained test: inject a deposit via the queue and verify the zone
 /// mints the corresponding pathUSD balance on L2.
 ///
@@ -84,7 +86,7 @@ async fn test_contract_creation_transaction_is_rejected() -> eyre::Result<()> {
 
     let mut request = TransactionRequest::default().input(Bytes::from_static(&[0x00]).into());
     request.to = Some(TxKind::Create);
-    request.gas = Some(100_000);
+    request.gas = Some(CONTRACT_CREATION_TX_GAS);
     request.gas_price = Some(TEMPO_T0_BASE_FEE as u128);
 
     let err = provider
@@ -554,7 +556,11 @@ async fn submit_withdrawal(
         .await?;
     fixture.inject_empty_block(zone.deposit_queue());
     let receipt = pending.get_receipt().await?;
-    assert!(receipt.status(), "withdrawal should succeed");
+    assert!(
+        receipt.status(),
+        "withdrawal should succeed (gas used: {})",
+        receipt.gas_used
+    );
     receipt
         .block_number
         .ok_or_else(|| eyre::eyre!("withdrawal receipt missing block number"))

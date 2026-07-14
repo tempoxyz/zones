@@ -31,7 +31,7 @@ use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TempoChainSpec};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ITIP20,
     account_keychain::IAccountKeychain::{
-        IAccountKeychainInstance, SignatureType as KeyInfoSignatureType,
+        IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
@@ -70,12 +70,15 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// Default poll interval for e2e tests.
 pub(crate) const DEFAULT_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Gas limit for ordinary TIP-20 calls under the current Tempo fork schedule.
+pub(crate) const TIP20_TX_GAS: u64 = 500_000;
+
 /// Gas limit for `ZoneOutbox.requestWithdrawal` test transactions.
 ///
-/// The call now needs enough headroom for a fixed-gas `transferFrom`, the
-/// subsequent `burn`, and storage writes for callback payloads in router-based
+/// The current Tempo fork schedule needs enough headroom for `transferFrom`, the subsequent
+/// `burn`, and storage writes for the encrypted callback payloads exercised by router-based
 /// withdrawals.
-pub(crate) const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
+pub(crate) const WITHDRAWAL_TX_GAS: u64 = 10_000_000;
 
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
@@ -107,7 +110,7 @@ where
     let approve_pending = zone_token
         .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
     fixture.inject_empty_block(zone.deposit_queue());
@@ -2308,7 +2311,7 @@ impl ZoneAccount {
         // Approve outbox for this token
         ITIP20::new(token, &self.l2_provider)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-            .gas(150_000)
+            .gas(TIP20_TX_GAS)
             .send()
             .await?
             .get_receipt()
@@ -2334,7 +2337,11 @@ impl ZoneAccount {
             .await?
             .get_receipt()
             .await?;
-        eyre::ensure!(receipt.status(), "L2 withdrawal request failed");
+        eyre::ensure!(
+            receipt.status(),
+            "L2 withdrawal request failed (gas used: {})",
+            receipt.gas_used
+        );
 
         Ok(())
     }
@@ -2832,7 +2839,17 @@ impl PrivateRpcTestCtx {
             .connect_http(self.zone.http_url().clone());
         let keychain = IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, &provider);
         let pending = keychain
-            .authorizeKey_0(key_id, signature_type, expiry, false, vec![])
+            .authorizeKey_1(
+                key_id,
+                signature_type,
+                KeyRestrictions {
+                    expiry,
+                    enforceLimits: false,
+                    limits: vec![],
+                    allowAnyCalls: true,
+                    allowedCalls: vec![],
+                },
+            )
             .send()
             .await?;
         self.fixture.inject_empty_block(self.zone.deposit_queue());

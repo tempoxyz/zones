@@ -12,7 +12,7 @@ use tempo_contracts::precompiles::{ITIP20, ITIP403Registry};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use zone_l1::state::tip403::{CompoundData, PolicyEvent};
 
-use crate::utils::{DEFAULT_TIMEOUT, TEST_MNEMONIC, start_local_zone_with_fixture};
+use crate::utils::{DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, start_local_zone_with_fixture};
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
 ///
@@ -54,7 +54,7 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
 
