@@ -13,11 +13,9 @@
 //!
 //! 1. L1-backed execution rejects delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Install the appropriate storage provider. L1-backed calls read their anchor once and fail
-//!    closed if the anchor, hardfork, or overlay cannot be resolved.
-//! 4. Apply [`CallRules`], including any local direct-call rule. Admitted calls receive the original
-//!    calldata and caller; rejected calls are returned without invoking the implementation.
-//! 5. Apply the configured fixed gas charge to successful precompile results.
+//! 3. Apply [`CallRules`] against local EVM storage. Rejected calls return without touching L1.
+//! 4. For admitted L1-backed calls, resolve the anchor, hardfork, and storage overlay.
+//! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Rule-level rejections include calldata input gas. Calls without a fixed charge retain normal
 //! provider metering, while successful fixed-price calls report exactly the configured charge.
@@ -121,8 +119,9 @@ pub(crate) enum CallCheck {
 
 /// Selector- and caller-dependent pre-execution rules for a storage-backed precompile.
 ///
-/// Checks receive [`ZoneCall`] because they run inside [`StorageCtx`], after the input's EVM
-/// internals have moved into the storage provider.
+/// Checks receive [`ZoneCall`] because they run inside a local [`StorageCtx`], after the input's EVM
+/// internals have moved into the storage provider. They run before any anchored L1 provider is
+/// constructed and therefore must not depend on the L1 storage overlay.
 pub(crate) trait CallRules: 'static {
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
@@ -186,7 +185,17 @@ pub(crate) fn create_local_precompile(
             gas_params.clone(),
         );
 
-        execute_with_storage(&mut storage, call, fixed_gas, &rules, &execute)
+        if let Some(check_result) =
+            StorageCtx::enter(&mut storage, || match rules.check_call(call) {
+                CallCheck::Continue => None,
+                CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
+            })
+        {
+            return apply_fixed_gas(check_result, fixed_gas);
+        }
+
+        let exec_result = StorageCtx::enter(&mut storage, || execute(call.data, call.caller));
+        apply_fixed_gas(exec_result, fixed_gas)
     })
 }
 
@@ -243,42 +252,36 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
         .with_actions(actions.clone())
         .with_non_creditable_slots(non_creditable_slots.clone());
 
+        if let Some(check_result) = StorageCtx::enter(&mut inner, || match rules.check_call(call) {
+            CallCheck::Continue => None,
+            CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
+        }) {
+            return apply_fixed_gas(check_result, fixed_gas);
+        }
+
         let l1_block_number = match read_l1_anchor(&mut inner) {
             Ok(block_number) => block_number,
             Err(err) => {
                 return err.into_precompile_result(inner.gas_used(), inner.reservoir());
             }
         };
-        let gas_used = inner.gas_used();
-        let reservoir = inner.reservoir();
+        let (gas_used, reservoir) = (inner.gas_used(), inner.reservoir());
         let mut storage =
             match ZonePrecompileStorageProvider::new(inner, l1_reader.clone(), l1_block_number) {
                 Ok(storage) => storage,
                 Err(err) => return err.into_precompile_result(gas_used, reservoir),
             };
 
-        execute_with_storage(&mut storage, call, fixed_gas, &rules, &execute)
+        let exec_result = StorageCtx::enter(&mut storage, || execute(call.data, call.caller));
+        apply_fixed_gas(exec_result, fixed_gas)
     })
 }
 
-/// Executes a call within the supplied storage context, enforcing call rules and gas accounting.
-fn execute_with_storage<S: PrecompileStorageProvider>(
-    storage: &mut S,
-    call: ZoneCall<'_>,
-    fixed_gas: Option<u64>,
-    rules: &impl CallRules,
-    execute: &impl Fn(&[u8], Address) -> PrecompileResult,
-) -> PrecompileResult {
-    StorageCtx::enter(storage, || {
-        let mut result = match rules.check_call(call) {
-            CallCheck::Continue => execute(call.data, call.caller),
-            CallCheck::Return(result) => add_input_cost(call.data, result),
-        };
-        if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
-            output.gas_used = gas;
-        }
-        result
-    })
+fn apply_fixed_gas(mut result: PrecompileResult, fixed_gas: Option<u64>) -> PrecompileResult {
+    if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
+        output.gas_used = gas;
+    }
+    result
 }
 
 fn add_input_cost(calldata: &[u8], mut result: PrecompileResult) -> PrecompileResult {
@@ -389,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn l1_backed_execution_uses_the_anchor_for_its_fallible_provider() {
+    fn l1_backed_admission_precedes_anchored_provider() {
         let anchor = 42;
         let reader = MockL1Reader::default();
         let observed_spec = Rc::new(Cell::new(None));
@@ -401,12 +404,28 @@ mod tests {
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
+        let checked = Rc::new(Cell::new(false));
+        let rejected = create_l1_backed_precompile(
+            "L1AdmissionTest",
+            env.clone(),
+            RejectRules(checked.clone()),
+            |_, _| panic!("rejected call must not execute"),
+        );
+        let mut ctx = test_context();
+        assert!(
+            rejected
+                .call(input(&mut ctx, &[1, 2, 3, 4], Address::ZERO, FIXED_GAS))
+                .unwrap()
+                .is_revert()
+        );
+        assert!(checked.get());
+        assert!(reader.hardfork_requests().is_empty());
+
         let precompile =
             create_l1_backed_precompile("L1BackedTest", env, NoCallRules, move |_, _| {
                 execute_spec.set(Some(StorageCtx::default().spec()));
                 Ok(StorageCtx::default().success_output(Bytes::new()))
             });
-        let mut ctx = test_context();
         test_storage_provider(&mut ctx, u64::MAX, false)
             .sstore(
                 tempo_zone_contracts::TEMPO_STATE_ADDRESS,
