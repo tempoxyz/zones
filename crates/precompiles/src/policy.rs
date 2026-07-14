@@ -40,6 +40,10 @@ pub trait PolicyCheck {
     /// Check whether a policy exists.
     fn policy_exists(&self, policy_id: u64) -> Result<bool, PrecompileError>;
 
-    /// Return the highest known policy ID counter.
-    fn policy_id_counter(&self) -> u64;
+    /// Return the current policy ID counter.
+    ///
+    /// Must be resolved deterministically (e.g. from the finalized L1 view at a fixed
+    /// block), not inferred from local cache contents, because the result is observable
+    /// by zone transactions and therefore affects the block state root.
+    fn policy_id_counter(&self) -> Result<u64, PrecompileError>;
 }
