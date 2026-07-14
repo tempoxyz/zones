@@ -149,7 +149,10 @@ impl<P: L1StorageReader> PrecompileStorageProvider for ZonePrecompileStorageProv
     }
 
     fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<()> {
-        if is_l1_slot(address, key) {
+        if address == TIP403_REGISTRY_ADDRESS
+            || is_tip20_policy_id_slot(address, key)
+                && value != merge_transfer_policy_id(value, self.read_l1_slot(address, key)?)
+        {
             return Err(l1_write_err(address, key));
         }
         self.inner.sstore(address, key, value)
@@ -410,7 +413,8 @@ mod tests {
 
                 for action in write_actions {
                     for (address, key) in l1_slots {
-                        let err = action(provider, address, key, U256::ONE).unwrap_err();
+                        let value = U256::ONE << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8);
+                        let err = action(provider, address, key, value).unwrap_err();
                         assert!(err.into_precompile_result(0, 0).unwrap().is_revert());
                     }
                 }
@@ -457,6 +461,14 @@ mod tests {
                     .unwrap();
                 assert_eq!(overlaid & U256::from(0xffff_u64), local_low_bits);
                 assert_eq!((overlaid >> offset_bits).to::<u64>(), 99);
+                // Allow setNextQuoteToken's RMW when its policy bits match L1.
+                provider
+                    .sstore(
+                        PATH_USD_ADDRESS,
+                        tip20_slots::TRANSFER_POLICY_ID,
+                        U256::from(0xbeef_u64) | l1_policy,
+                    )
+                    .unwrap();
                 assert_eq!(
                     provider
                         .sload(TIP403_REGISTRY_ADDRESS, U256::from(7))
@@ -493,7 +505,7 @@ mod tests {
             },
         );
         assert!(l1.storage_requests().iter().all(|request| request.2 == 123));
-        assert_eq!(l1.storage_requests().len(), 2);
+        assert_eq!(l1.storage_requests().len(), 3);
         assert_eq!(l1.hardfork_requests(), vec![123]);
     }
 
