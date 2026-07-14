@@ -2,7 +2,7 @@ use super::*;
 use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, FixedBytes, address};
-use alloy_rpc_types_eth::TransactionReceipt;
+use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
 use serde::Deserialize;
@@ -10,7 +10,7 @@ use std::{
     collections::{HashSet, VecDeque},
     time::Duration,
 };
-use tempo_alloy::rpc::TempoTransactionReceipt;
+use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
 use tempo_primitives::{TempoReceipt, TempoTxType};
 
 #[derive(Deserialize)]
@@ -188,6 +188,23 @@ fn seal(header: TempoHeader) -> SealedHeader<TempoHeader> {
 
 fn header_hash(header: &TempoHeader) -> B256 {
     keccak256(alloy_rlp::encode(header))
+}
+
+fn header_response(header: TempoHeader) -> TempoHeaderResponse {
+    TempoHeaderResponse {
+        inner: RpcHeader {
+            hash: header_hash(&header),
+            inner: header,
+            total_difficulty: None,
+            size: None,
+        },
+        timestamp_millis: 0,
+    }
+}
+
+fn push_header_and_empty_receipts(asserter: &Asserter, header: TempoHeader) {
+    asserter.push_success(&Some(header_response(header)));
+    asserter.push_success(&Some(Vec::<TempoTransactionReceipt>::new()));
 }
 
 fn make_test_receipt(
@@ -399,55 +416,19 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
-fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
-    use crate::state::tip403::AuthRole;
-    use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
+fn update_l1_state_anchor_tracks_latest_finalized_block() {
     let subscriber = test_subscriber(
         Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
         Some(0),
     );
-    let token = address!("0x0000000000000000000000000000000000000011");
-    let user = address!("0x0000000000000000000000000000000000000022");
+    let header = make_test_header(10);
+    let hash = header_hash(&header);
 
-    let old_header = make_test_header(10);
-    let old_hash = header_hash(&old_header);
-    subscriber.update_l1_state_anchor(10, old_hash, old_header.inner.parent_hash);
-    {
-        let mut cache = subscriber.config.policy_cache.write();
-        cache.set_token_policy(token, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
-        cache.set_policy_status(2, user, 10, true);
-        cache.advance(10);
-    }
+    subscriber.update_l1_state_anchor(10, hash);
 
-    let replacement_parent = B256::with_last_byte(0x44);
-    let replacement_header = make_chained_header(11, replacement_parent);
-    subscriber.update_l1_state_anchor(11, header_hash(&replacement_header), replacement_parent);
-    subscriber.apply_policy_events(
-        11,
-        &[
-            PolicyEvent::TokenPolicyChanged {
-                token,
-                policy_id: 3,
-            },
-            PolicyEvent::PolicyCreated {
-                policy_id: 3,
-                policy_type: PolicyType::WHITELIST,
-            },
-            PolicyEvent::MembershipChanged {
-                policy_id: 3,
-                account: user,
-                in_set: false,
-            },
-        ],
-    );
-
-    let cache = subscriber.config.policy_cache.read();
-    assert!(cache.policies().get(&2).is_none());
     assert_eq!(
-        cache.is_authorized(token, user, 11, AuthRole::Transfer),
-        Some(false)
+        subscriber.config.l1_state_cache.read().anchor(),
+        NumHash::new(10, hash)
     );
 }
 
@@ -513,6 +494,66 @@ async fn test_resolve_start_block_falls_back_to_genesis_override_when_local_stat
         subscriber.resolve_start_block(&l1_provider).await.unwrap(),
         Some(43)
     );
+}
+
+#[tokio::test]
+async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let header_12 = make_chained_header(12, header_hash(&header_11));
+
+    // Initial sync through finalized block 10.
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+
+    // One newHeads notification wakes the subscriber. The finalized tag has
+    // advanced by two blocks, so both missing blocks must be ingested.
+    asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_11);
+    push_header_and_empty_receipts(&asserter, header_12);
+
+    let err = subscriber
+        .follow_finalized(&l1_provider, futures::stream::iter([()]))
+        .await
+        .expect_err("finite trigger stream should end the subscriber");
+    assert!(err.to_string().contains("newHeads subscription ended"));
+
+    let blocks = subscriber.deposit_queue.drain();
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11, 12]
+    );
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
+    let mut subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new([10])),
+        None,
+    );
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(make_test_header(10))));
+
+    let next = subscriber
+        .sync_finalized_once(&l1_provider, 11)
+        .await
+        .unwrap();
+
+    assert_eq!(next, 11);
+    assert!(subscriber.deposit_queue.drain().is_empty());
+    assert!(asserter.read_q().is_empty());
 }
 
 #[test]
