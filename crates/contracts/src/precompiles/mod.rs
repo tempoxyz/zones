@@ -1,18 +1,18 @@
 pub mod common;
+pub mod outbox;
 pub mod swap_and_deposit_router;
 pub mod tempo_state;
 pub mod zone_factory;
 pub mod zone_inbox;
-pub mod zone_outbox;
 pub mod zone_portal;
 pub mod zone_tx_context;
 
 pub use common::*;
+pub use outbox::*;
 pub use swap_and_deposit_router::*;
 pub use tempo_state::*;
 pub use zone_factory::*;
 pub use zone_inbox::*;
-pub use zone_outbox::*;
 pub use zone_portal::*;
 pub use zone_tx_context::*;
 

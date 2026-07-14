@@ -37,6 +37,7 @@ pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
 mod execution;
+pub mod outbox;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
@@ -45,6 +46,7 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
+pub use outbox::ZoneOutbox;
 pub use storage::L1StorageReader;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};

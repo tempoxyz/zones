@@ -4,7 +4,7 @@ pub use ZonePortal::{
     BlockTransition, DepositQueueTransition, EncryptedDeposit, EncryptedDepositPayload, Withdrawal,
 };
 
-use crate::ZoneOutbox;
+use crate::IZoneOutbox;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 use zone_primitives::constants::EMPTY_SENTINEL;
@@ -360,7 +360,7 @@ impl Withdrawal {
 
     /// Reconstruct the public L1-facing withdrawal from a zone-side withdrawal request event.
     pub fn from_requested_event(
-        event: &ZoneOutbox::WithdrawalRequested,
+        event: &IZoneOutbox::WithdrawalRequested,
         tx_hash: B256,
         encrypted_sender: Bytes,
     ) -> Self {

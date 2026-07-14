@@ -67,6 +67,11 @@ impl TempoState {
         )
     }
 
+    /// Returns the finalized Tempo block number recorded in zone state.
+    pub fn current_tempo_block_number(&self) -> tempo_precompiles::Result<u64> {
+        self.tempo_block_number.read()
+    }
+
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
         Ok(self.storage.revert_output(error.abi_encode().into()))
     }
