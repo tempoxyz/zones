@@ -3370,6 +3370,20 @@ impl L1Fixture {
         }
     }
 
+    fn seed_enabled_token_policy_state(&self, block_number: u64, tokens: &[EnabledToken]) {
+        for cache in self.caches.lock().unwrap().iter() {
+            let mut cache = cache.write();
+            for token in tokens {
+                seed_raw_tip20_policy_id(
+                    &mut cache,
+                    block_number,
+                    token.token,
+                    ALLOW_ALL_POLICY_ID,
+                );
+            }
+        }
+    }
+
     /// Build a [`TempoHeader`] for the next L1 block.
     fn next_header(&mut self) -> TempoHeader {
         let number = self.next_block_number;
@@ -3426,6 +3440,13 @@ impl L1Fixture {
         queue: &DepositQueue,
         events: L1PortalEvents,
     ) {
+        let block_number = block.header.inner.number;
+        self.seed_enabled_token_policy_state(block_number, &events.enabled_tokens);
+        for deposit in &events.deposits {
+            if let L1Deposit::Regular(deposit) = deposit {
+                self.seed_no_receive_policy_at(block_number, deposit.to);
+            }
+        }
         queue.enqueue(block.header.clone(), events, vec![]);
     }
 
@@ -3454,6 +3475,7 @@ impl L1Fixture {
         tokens: Vec<EnabledToken>,
     ) {
         let header = self.next_header();
+        self.seed_enabled_token_policy_state(header.inner.number, &tokens);
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
