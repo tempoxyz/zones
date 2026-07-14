@@ -21,7 +21,7 @@ use reth_chainspec::ForkCondition;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{
     hardfork::TempoHardfork,
-    spec::{TempoHardforks, chainspec_from_chain_id},
+    spec::{DEV, TempoHardforks, chainspec_from_chain_id},
 };
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StorageReader, SequencerExt};
@@ -281,8 +281,7 @@ impl L1StateProvider {
                 .get_block_by_number(BlockNumberOrTag::Number(block_number)),
         )?;
         let block = block.ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
-        let chain_spec = chainspec_from_chain_id(chain_id)
-            .ok_or_else(|| eyre::eyre!("unsupported Tempo L1 chain ID {chain_id}"))?;
+        let chain_spec = chainspec_from_chain_id(chain_id).unwrap_or_else(|| DEV.clone());
         let block_ts = block.header.timestamp();
         let mut activations = Vec::new();
 

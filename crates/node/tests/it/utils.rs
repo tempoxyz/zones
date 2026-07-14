@@ -3299,6 +3299,17 @@ impl L1Fixture {
         let refunds_slot = B256::with_last_byte(10);
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
+        let outbox_receive_policy_slot =
+            ZONE_OUTBOX_ADDRESS.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
+
+        // Local fixtures have no RPC fallback. A withdrawal transfers to the outbox, so seed the
+        // absence of its address-level receive policy as baseline raw L1 state.
+        cache.set(
+            TIP403_REGISTRY_ADDRESS,
+            B256::from(outbox_receive_policy_slot.to_be_bytes()),
+            0,
+            B256::ZERO,
+        );
 
         for block in 0..=num_blocks {
             let mut sequencer_bytes = [0u8; 32];
