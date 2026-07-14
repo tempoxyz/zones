@@ -30,11 +30,11 @@ use revm::{
     state::{AccountInfo, Bytecode},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+use tempo_contracts::precompiles::{TIP403_REGISTRY_ADDRESS, TIP403RegistryError};
 use tempo_precompiles::{
     error::{Result, TempoPrecompileError},
     storage::evm::EvmPrecompileStorageProvider,
-    tip20::tip20_slots,
+    tip20::{TIP20Error, tip20_slots},
 };
 use tempo_primitives::{TempoAddressExt, TempoBlockEnv};
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -253,9 +253,11 @@ fn is_tip20_policy_id_slot(address: Address, key: U256) -> bool {
 }
 
 fn l1_write_err(address: Address, key: U256) -> TempoPrecompileError {
-    TempoPrecompileError::Fatal(format!(
-        "attempted to write L1-backed storage slot address={address} key={key}"
-    ))
+    if is_tip20_policy_id_slot(address, key) {
+        TIP20Error::invalid_transfer_policy_id().into()
+    } else {
+        TIP403RegistryError::unauthorized().into()
+    }
 }
 
 pub(super) fn trace_err(
@@ -265,7 +267,7 @@ pub(super) fn trace_err(
     block_number: u64,
 ) -> TempoPrecompileError {
     TempoPrecompileError::Fatal(format!(
-        "Tempo L1 storage read failed address={address} key={key} block={block_number}: {}",
+        "{}; Tempo L1 storage read failed address={address} key={key} block={block_number}",
         precompile_error_message(err)
     ))
 }
@@ -380,7 +382,7 @@ mod tests {
                 assert!(matches!(
                     err,
                     TempoPrecompileError::Fatal(msg)
-                        if msg.contains("RPC unavailable")
+                        if crate::is_zone_rpc_error(&msg)
                             && msg.contains(&TIP403_REGISTRY_ADDRESS.to_string())
                             && msg.contains("block=123")
                 ));
@@ -389,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn sstore_sinc_sdec_reject_l1_slots() {
+    fn sstore_sinc_sdec_reject_l1_slots_with_precompile_reverts() {
         let mut ctx = test_context();
         with_zone_provider(
             &mut ctx,
@@ -408,7 +410,8 @@ mod tests {
 
                 for action in write_actions {
                     for (address, key) in l1_slots {
-                        assert!(action(provider, address, key, U256::ONE).is_err());
+                        let err = action(provider, address, key, U256::ONE).unwrap_err();
+                        assert!(err.into_precompile_result(0, 0).unwrap().is_revert());
                     }
                 }
 

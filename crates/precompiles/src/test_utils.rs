@@ -117,7 +117,7 @@ impl L1StorageReader for MockL1Reader {
             .unwrap()
             .push((account, slot, block_number));
         if self.fail_storage {
-            return Err(PrecompileError::Fatal("RPC unavailable".into()));
+            return Err(crate::zone_rpc_error("RPC unavailable"));
         }
         Ok(self
             .slots
