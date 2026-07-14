@@ -13249,6 +13249,7 @@ dependencies = [
  "alloy-provider",
  "alloy-sol-types",
  "eyre",
+ "reth-chainspec",
  "reth-evm",
  "reth-primitives-traits",
  "reth-revm",

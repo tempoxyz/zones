@@ -84,6 +84,11 @@ pub struct L1StateProvider {
 }
 
 impl L1StateProvider {
+    /// Return the chain ID reported by the configured Tempo L1 provider.
+    pub async fn chain_id(&self) -> Result<u64> {
+        Ok(self.provider.get_chain_id().await?)
+    }
+
     /// Create a new provider.
     ///
     /// The provider is created eagerly from [`L1StateProviderConfig::l1_rpc_url`] and reused

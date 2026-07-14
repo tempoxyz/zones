@@ -39,7 +39,11 @@ use reth_evm::{
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::TempoChainSpec;
+use tempo_chainspec::{
+    TempoChainSpec,
+    hardfork::TempoHardfork,
+    spec::{DEV, TempoHardforks, chainspec_from_chain_id},
+};
 use tempo_evm::{
     TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmError,
     TempoHaltReason, TempoNextBlockEnvAttributes,
@@ -59,6 +63,63 @@ use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
+
+/// Zone execution chain spec composed with its parent Tempo chain spec.
+///
+/// Zone identity, genesis, and Ethereum fork configuration come from `zone`. Tempo-specific
+/// hardfork conditions come from `tempo`, allowing [`TempoEvmConfig`] to select the parent
+/// protocol rules from the Zone block timestamp without a separate L1 hardfork cache.
+#[derive(Debug, Clone)]
+pub struct ZoneChainSpec {
+    zone: Arc<TempoChainSpec>,
+    tempo: Arc<TempoChainSpec>,
+    execution: Arc<TempoChainSpec>,
+}
+
+impl ZoneChainSpec {
+    /// Compose a Zone chain spec with the Tempo hardfork schedule of its parent chain.
+    pub fn new(zone: Arc<TempoChainSpec>, tempo: Arc<TempoChainSpec>) -> Self {
+        let mut execution = zone.as_ref().clone();
+        for &hardfork in TempoHardfork::VARIANTS {
+            execution
+                .inner
+                .hardforks
+                .insert(hardfork, tempo.tempo_fork_activation(hardfork));
+        }
+
+        Self {
+            zone,
+            tempo,
+            execution: Arc::new(execution),
+        }
+    }
+
+    /// Original Zone chain spec, which owns chain identity and genesis state.
+    pub fn zone(&self) -> &Arc<TempoChainSpec> {
+        &self.zone
+    }
+
+    /// Parent Tempo chain spec, which owns the Tempo hardfork schedule.
+    pub fn tempo(&self) -> &Arc<TempoChainSpec> {
+        &self.tempo
+    }
+
+    /// Tempo-compatible execution spec consumed by [`TempoEvmConfig`].
+    pub fn execution(&self) -> &Arc<TempoChainSpec> {
+        &self.execution
+    }
+}
+
+/// Resolve the parent Tempo chain spec used for Zone hardfork selection.
+///
+/// Tempo Anvil uses chain ID 31337 but follows the native DEV protocol schedule, so both local
+/// chain IDs resolve to [`DEV`].
+pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
+    chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
+        1337 | 31337 => Some(DEV.clone()),
+        _ => None,
+    })
+}
 
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// zone-native precompiles.
@@ -241,6 +302,7 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
 /// Zone EVM configuration — wraps [`TempoEvmConfig`] with a [`ZoneEvmFactory`].
 #[derive(Debug, Clone)]
 pub struct ZoneEvmConfig {
+    chain_spec: ZoneChainSpec,
     inner: TempoEvmConfig,
     zone_factory: ZoneEvmFactory,
     block_assembler: ZoneBlockAssembler,
@@ -250,10 +312,21 @@ impl ZoneEvmConfig {
     /// Create a new zone EVM config with the given chain spec, L1 state
     /// provider.
     pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
+        Self::new_with_tempo_chain_spec(chain_spec.clone(), chain_spec, l1_provider)
+    }
+
+    /// Create a Zone EVM config whose Tempo hardforks follow the parent Tempo chain.
+    pub fn new_with_tempo_chain_spec(
+        zone_chain_spec: Arc<TempoChainSpec>,
+        tempo_chain_spec: Arc<TempoChainSpec>,
+        l1_provider: L1StateProvider,
+    ) -> Self {
+        let chain_spec = ZoneChainSpec::new(zone_chain_spec, tempo_chain_spec);
         let zone_factory = ZoneEvmFactory::new(l1_provider);
-        let inner = TempoEvmConfig::new(chain_spec.clone());
-        let block_assembler = ZoneBlockAssembler::new(chain_spec);
+        let inner = TempoEvmConfig::new(chain_spec.execution().clone());
+        let block_assembler = ZoneBlockAssembler::new(chain_spec.execution().clone());
         Self {
+            chain_spec,
             inner,
             zone_factory,
             block_assembler,
@@ -284,7 +357,12 @@ impl ZoneEvmConfig {
 
     /// Returns the chain spec.
     pub fn chain_spec(&self) -> &Arc<TempoChainSpec> {
-        self.inner.chain_spec()
+        self.chain_spec.execution()
+    }
+
+    /// Returns the composed Zone and parent Tempo chain specs.
+    pub fn zone_chain_spec(&self) -> &ZoneChainSpec {
+        &self.chain_spec
     }
 }
 
@@ -401,5 +479,68 @@ impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
         payload: &TempoExecutionData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         self.inner.tx_iterator_for_payload(payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reth_chainspec::{EthChainSpec, ForkCondition};
+    use tempo_chainspec::spec::MODERATO;
+
+    #[test]
+    fn zone_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
+        let composed = ZoneChainSpec::new(DEV.clone(), MODERATO.clone());
+
+        assert_eq!(
+            composed.execution().chain().id(),
+            composed.zone().chain().id()
+        );
+        assert_eq!(
+            composed.execution().genesis_hash(),
+            composed.zone().genesis_hash()
+        );
+        for &hardfork in TempoHardfork::VARIANTS {
+            assert_eq!(
+                composed.execution().tempo_fork_activation(hardfork),
+                composed.tempo().tempo_fork_activation(hardfork)
+            );
+        }
+    }
+
+    #[test]
+    fn tempo_evm_selects_parent_fork_from_zone_block_timestamp() {
+        let composed = ZoneChainSpec::new(DEV.clone(), MODERATO.clone());
+        let activation_timestamp = TempoHardfork::VARIANTS
+            .iter()
+            .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
+                ForkCondition::Timestamp(timestamp) if timestamp > 0 => Some(timestamp),
+                _ => None,
+            })
+            .expect("Moderato must have a post-genesis Tempo hardfork");
+        let header = TempoHeader {
+            inner: alloy_consensus::Header {
+                timestamp: activation_timestamp,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let config = TempoEvmConfig::new(composed.execution().clone());
+        let env = config.evm_env(&header).expect("valid EVM environment");
+
+        assert_eq!(
+            env.cfg_env.spec,
+            MODERATO.tempo_hardfork_at(activation_timestamp)
+        );
+    }
+
+    #[test]
+    fn resolves_public_and_local_tempo_l1_specs() {
+        assert_eq!(tempo_chain_spec_for_l1(4217).unwrap().chain().id(), 4217);
+        assert_eq!(tempo_chain_spec_for_l1(42431).unwrap().chain().id(), 42431);
+        assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
+        assert!(tempo_chain_spec_for_l1(999_999).is_none());
     }
 }

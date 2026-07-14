@@ -57,7 +57,7 @@ use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use tracing::{debug, info, warn};
-use zone_evm::ZoneEvmConfig;
+use zone_evm::{ZoneEvmConfig, tempo_chain_spec_for_l1};
 use zone_l1::{
     DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
     state::{
@@ -881,7 +881,14 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        let l1_chain_id = l1_provider.chain_id().await?;
+        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
+            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
+        let mut evm_config = ZoneEvmConfig::new_with_tempo_chain_spec(
+            ctx.chain_spec(),
+            tempo_chain_spec,
+            l1_provider,
+        );
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
