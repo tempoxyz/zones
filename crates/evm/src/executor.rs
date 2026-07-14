@@ -19,7 +19,7 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use tempo_revm::{TempoStateAccess, TempoTxEnv, evm::TempoContext};
 
 use crate::{ZoneEvm, tx_context};
 
@@ -53,13 +53,22 @@ where
 
     /// Overrides `validatorTokens[beneficiary]` to match the resolved fee token
     /// so the handler skips FeeAMM.
-    fn override_validator_token(&mut self) {
+    ///
+    /// The fee token is resolved from `tx_env` — the transaction that is about to
+    /// execute — rather than from `ctx.tx`. `ctx.tx` is only populated with the
+    /// current transaction later, inside revm's `transact_one`; before that it
+    /// still holds the *previous* transaction's env (or the block's default). The
+    /// override is committed into block state, so resolving it from the wrong
+    /// transaction produces a `validatorTokens[beneficiary]` value that depends on
+    /// execution order and on transactions that never make it into the block,
+    /// causing the sequencer's state root to diverge from re-executing nodes.
+    fn override_validator_token(&mut self, tx_env: &TempoTxEnv) {
         let ctx = self.inner.evm.ctx_mut();
-        let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());
+        let fee_payer = tx_env.fee_payer().unwrap_or(tx_env.caller());
         let spec = ctx.cfg.spec;
 
         let fee_token = match ctx.journaled_state.get_fee_token(
-            &ctx.tx,
+            tx_env,
             fee_payer,
             spec,
             StorageActions::disabled(),
@@ -100,7 +109,7 @@ where
 
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
-        self.override_validator_token();
+        self.override_validator_token(&tx_env);
 
         let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
         self.inner
