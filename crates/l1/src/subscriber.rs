@@ -1,9 +1,12 @@
 use super::*;
 
+/// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
+const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
-    /// WebSocket RPC URL of the certified L1 follower.
+    /// RPC URL of the L1 node (HTTP or WebSocket).
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
@@ -103,7 +106,9 @@ impl L1Subscriber {
         );
     }
 
-    /// Connect to the certified L1 follower used for `newHeads` notifications.
+    /// Connect to the L1 node.
+    ///
+    /// The transport (HTTP or WebSocket) is auto-detected from the URL scheme.
     #[instrument(skip(self), fields(l1_rpc_url = %self.config.l1_rpc_url))]
     async fn connect(&self) -> eyre::Result<DynProvider<TempoNetwork>> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
@@ -126,6 +131,39 @@ impl L1Subscriber {
             .erased();
         info!("Connected to L1 node");
         Ok(provider)
+    }
+
+    /// Return transport-appropriate L1 head notifications as unit triggers.
+    ///
+    /// WebSocket connections use `newHeads`. When pubsub is unavailable, HTTP
+    /// connections fall back to `eth_newBlockFilter` / `eth_getFilterChanges`.
+    /// Trigger payloads are ignored because block selection always comes from
+    /// the L1 `finalized` tag.
+    pub(crate) async fn head_triggers<'a>(
+        &self,
+        provider: &'a DynProvider<TempoNetwork>,
+    ) -> eyre::Result<Pin<Box<dyn Stream<Item = eyre::Result<()>> + Send + 'a>>> {
+        match provider.subscribe_blocks().await {
+            Ok(subscription) => {
+                info!("Using WebSocket newHeads notifications");
+                Ok(Box::pin(subscription.into_stream().map(|_| Ok(()))))
+            }
+            Err(err)
+                if err
+                    .as_transport_err()
+                    .is_some_and(|transport| transport.is_pubsub_unavailable()) =>
+            {
+                info!("Pubsub unavailable, using HTTP block filter polling");
+                let mut watcher = provider.watch_blocks().await?;
+                watcher.set_poll_interval(HTTP_POLL_INTERVAL);
+                Ok(Box::pin(
+                    watcher.into_stream().filter_map(|hashes| async move {
+                        (!hashes.is_empty()).then_some(Ok::<(), eyre::Report>(()))
+                    }),
+                ))
+            }
+            Err(err) => Err(err.into()),
+        }
     }
 
     /// Determine the starting block number for backfill.
@@ -237,7 +275,8 @@ impl L1Subscriber {
         Ok(finalized.saturating_add(1))
     }
 
-    /// Follow finalized L1 using `newHeads` notifications as wake-up signals.
+    /// Follow finalized L1 using transport-specific head notifications as
+    /// wake-up signals.
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
     /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
@@ -247,7 +286,7 @@ impl L1Subscriber {
         triggers: S,
     ) -> eyre::Result<()>
     where
-        S: Stream<Item = ()> + Send,
+        S: Stream<Item = eyre::Result<()>> + Send,
     {
         let mut triggers = Box::pin(triggers);
         let mut next_block = self.next_block_to_sync(l1_provider).await?;
@@ -256,11 +295,12 @@ impl L1Subscriber {
         // while catching up remains queued as another trigger.
         next_block = self.sync_finalized_once(l1_provider, next_block).await?;
 
-        while triggers.next().await.is_some() {
+        while let Some(trigger) = triggers.next().await {
+            trigger?;
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 
-        eyre::bail!("L1 newHeads subscription ended")
+        eyre::bail!("L1 head notification stream ended")
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -372,9 +412,10 @@ impl L1Subscriber {
 
     /// Run the L1 subscriber until an RPC operation fails.
     ///
-    /// The subscriber follows only the L1 `finalized` tag. `newHeads` is used
-    /// as a wake-up signal; each notification ingests the missing finalized
-    /// range in order, so no confirmation buffer or reorg handling is needed.
+    /// The subscriber follows only the L1 `finalized` tag. WebSocket
+    /// `newHeads` or HTTP block-filter updates are used as wake-up signals;
+    /// each notification ingests the missing finalized range in order, so no
+    /// confirmation buffer or reorg handling is needed.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(mut self) -> eyre::Result<()> {
@@ -384,12 +425,11 @@ impl L1Subscriber {
 
         let provider = self.connect().await?;
 
-        let subscription = provider.subscribe_blocks().await?;
+        let triggers = self.head_triggers(&provider).await?;
         info!(
             portal = %self.config.portal_address,
-            "Following finalized L1 blocks via newHeads"
+            "Following finalized L1 blocks"
         );
-        let triggers = subscription.into_stream().map(|_| ());
         self.follow_finalized(&provider, triggers).await
     }
 

@@ -519,10 +519,13 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     push_header_and_empty_receipts(&asserter, header_12);
 
     let err = subscriber
-        .follow_finalized(&l1_provider, futures::stream::iter([()]))
+        .follow_finalized(
+            &l1_provider,
+            futures::stream::iter([Ok::<_, eyre::Report>(())]),
+        )
         .await
         .expect_err("finite trigger stream should end the subscriber");
-    assert!(err.to_string().contains("newHeads subscription ended"));
+    assert!(err.to_string().contains("head notification stream ended"));
 
     let blocks = subscriber.deposit_queue.drain();
     assert_eq!(
@@ -532,6 +535,30 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
             .collect::<Vec<_>>(),
         vec![10, 11, 12]
     );
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_head_triggers_falls_back_to_http_block_filter() {
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new([10])),
+        None,
+    );
+    let asserter = Asserter::new();
+    let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_mocked_client(asserter.clone())
+        .erased();
+
+    asserter.push_success(&U256::from(1));
+    asserter.push_success(&vec![B256::with_last_byte(1)]);
+
+    let mut triggers = subscriber.head_triggers(&l1_provider).await.unwrap();
+    let trigger = tokio::time::timeout(Duration::from_secs(2), triggers.next())
+        .await
+        .expect("HTTP block filter should emit a trigger")
+        .expect("HTTP block filter stream should remain open");
+
+    trigger.expect("HTTP block filter request should succeed");
     assert!(asserter.read_q().is_empty());
 }
 
