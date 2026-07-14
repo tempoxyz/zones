@@ -1,7 +1,9 @@
 //! L1 chain subscription and deposit extraction.
 //!
-//! Uses L1 `newHeads` notifications to follow the finalized chain and extracts
+//! Uses L1 block notifications to follow the finalized chain and extracts
 //! deposit events from the ZonePortal contract for each finalized block.
+//! WebSocket connections use `newHeads`; HTTP connections use block-filter
+//! polling.
 //!
 //! The module is split into:
 //! - [`subscriber`] — the [`L1Subscriber`] background task and its config.
@@ -27,7 +29,7 @@ use futures::{Stream, StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::StateProviderFactory;
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, instrument, warn};
