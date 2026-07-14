@@ -325,8 +325,8 @@ mod tests {
             Ok(true)
         }
 
-        fn policy_id_counter(&self) -> u64 {
-            self.policy_id
+        fn policy_id_counter(&self) -> Result<u64, PrecompileError> {
+            Ok(self.policy_id)
         }
     }
 
