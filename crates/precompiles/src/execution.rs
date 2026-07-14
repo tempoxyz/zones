@@ -25,7 +25,7 @@
 use alloc::rc::Rc;
 use core::cell::RefCell;
 
-use alloy_evm::precompiles::DynPrecompile;
+use alloy_evm::precompiles::{DynPrecompile, PrecompileInput};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
@@ -86,12 +86,24 @@ impl<P> L1BackedPrecompileEnv<P> {
 pub(crate) struct ZoneCall<'a> {
     /// Input calldata.
     pub(crate) data: &'a [u8],
-    /// Decoded 4-byte selector, when calldata is long enough.
-    pub(crate) selector: Option<[u8; 4]>,
     /// EVM caller.
     pub(crate) caller: Address,
     /// Whether target and bytecode addresses match.
     pub(crate) is_direct: bool,
+}
+
+impl<'a> ZoneCall<'a> {
+    pub(crate) fn new(input: &PrecompileInput<'a>) -> Self {
+        Self {
+            data: input.data,
+            caller: input.caller,
+            is_direct: input.is_direct_call(),
+        }
+    }
+
+    pub(crate) fn selector(&self) -> Option<[u8; 4]> {
+        selector_from_calldata(self.data)
+    }
 }
 
 /// Result of applying zone-specific pre-execution rules.
@@ -144,23 +156,19 @@ impl CallRules for DirectCallOnly {
 ///
 /// This helper neither reads a Tempo anchor nor installs an L1 overlay. Calls admitted by `rules`
 /// are forwarded to `execute` with their original calldata and caller.
-pub(crate) fn create_local_precompile<Rules, Execute>(
+pub(crate) fn create_local_precompile(
     id: &'static str,
     cfg: &revm::context::CfgEnv<TempoHardfork>,
-    rules: Rules,
-    execute: Execute,
-) -> DynPrecompile
-where
-    Rules: CallRules,
-    Execute: Fn(&[u8], Address) -> PrecompileResult + 'static,
-{
+    rules: impl CallRules,
+    execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
+) -> DynPrecompile {
     let spec = cfg.spec;
     let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
     let gas_params = cfg.gas_params.clone();
 
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
-        let selector = selector_from_calldata(input.data);
-        let fixed_gas = rules.fixed_gas(selector);
+        let call = ZoneCall::new(&input);
+        let fixed_gas = rules.fixed_gas(call.selector());
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
@@ -168,7 +176,6 @@ where
             ));
         }
 
-        let is_direct = input.is_direct_call();
         let mut storage = EvmPrecompileStorageProvider::new(
             input.internals,
             fixed_gas.map_or(input.gas, |_| u64::MAX),
@@ -179,19 +186,7 @@ where
             gas_params.clone(),
         );
 
-        StorageCtx::enter(&mut storage, || {
-            let call = ZoneCall {
-                data: input.data,
-                selector,
-                caller: input.caller,
-                is_direct,
-            };
-            let result = match rules.check_call(call) {
-                CallCheck::Continue => execute(input.data, input.caller),
-                CallCheck::Return(result) => add_input_cost(input.data, result),
-            };
-            apply_fixed_gas(result, fixed_gas)
-        })
+        execute_with_storage(&mut storage, call, fixed_gas, &rules, &execute)
     })
 }
 
@@ -205,17 +200,12 @@ where
 ///
 /// Calls admitted by `rules` are forwarded to `execute` with their original calldata and caller
 /// while the L1 overlay is active.
-pub(crate) fn create_l1_backed_precompile<P, Rules, Execute>(
+pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
     id: &'static str,
     env: L1BackedPrecompileEnv<P>,
-    rules: Rules,
-    execute: Execute,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-    Rules: CallRules,
-    Execute: Fn(&[u8], Address) -> PrecompileResult + 'static,
-{
+    rules: impl CallRules,
+    execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
+) -> DynPrecompile {
     let zone_spec = env.cfg.spec;
     let amsterdam_eip8037_enabled = env.cfg.enable_amsterdam_eip8037;
     let gas_params = env.cfg.gas_params;
@@ -224,12 +214,16 @@ where
     let l1_reader = env.l1_reader;
 
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
-        if !input.is_direct_call() {
-            return delegate_call_not_allowed(input.reservoir);
+        let call = ZoneCall::new(&input);
+        if !call.is_direct {
+            return Ok(PrecompileOutput::revert(
+                0,
+                SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
+                input.reservoir,
+            ));
         }
 
-        let selector = selector_from_calldata(input.data);
-        let fixed_gas = rules.fixed_gas(selector);
+        let fixed_gas = rules.fixed_gas(call.selector());
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
@@ -263,51 +257,41 @@ where
                 Err(err) => return err.into_precompile_result(gas_used, reservoir),
             };
 
-        StorageCtx::enter(&mut storage, || {
-            let call = ZoneCall {
-                data: input.data,
-                selector,
-                caller: input.caller,
-                is_direct: true,
-            };
-            let result = match rules.check_call(call) {
-                CallCheck::Continue => execute(input.data, input.caller),
-                CallCheck::Return(result) => add_input_cost(input.data, result),
-            };
-            apply_fixed_gas(result, fixed_gas)
-        })
+        execute_with_storage(&mut storage, call, fixed_gas, &rules, &execute)
     })
 }
 
-fn delegate_call_not_allowed(reservoir: u64) -> PrecompileResult {
-    Ok(PrecompileOutput::revert(
-        0,
-        SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-        reservoir,
-    ))
+/// Executes a call within the supplied storage context, enforcing call rules and gas accounting.
+fn execute_with_storage<S: PrecompileStorageProvider>(
+    storage: &mut S,
+    call: ZoneCall<'_>,
+    fixed_gas: Option<u64>,
+    rules: &impl CallRules,
+    execute: &impl Fn(&[u8], Address) -> PrecompileResult,
+) -> PrecompileResult {
+    StorageCtx::enter(storage, || {
+        let mut result = match rules.check_call(call) {
+            CallCheck::Continue => execute(call.data, call.caller),
+            CallCheck::Return(result) => add_input_cost(call.data, result),
+        };
+        if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
+            output.gas_used = gas;
+        }
+        result
+    })
 }
 
-fn add_input_cost(calldata: &[u8], result: PrecompileResult) -> PrecompileResult {
+fn add_input_cost(calldata: &[u8], mut result: PrecompileResult) -> PrecompileResult {
     let mut storage = StorageCtx::default();
     let gas_before = storage.gas_used();
     if let Some(err) = charge_input_cost(&mut storage, calldata) {
         return err;
     }
-    let input_gas = storage.gas_used().saturating_sub(gas_before);
-    result.map(|mut output| {
+    if let Ok(output) = &mut result {
+        let input_gas = storage.gas_used().saturating_sub(gas_before);
         output.gas_used = output.gas_used.saturating_add(input_gas);
-        output
-    })
-}
-
-fn apply_fixed_gas(result: PrecompileResult, fixed_gas: Option<u64>) -> PrecompileResult {
-    match (result, fixed_gas) {
-        (Ok(mut output), Some(gas)) => {
-            output.gas_used = gas;
-            Ok(output)
-        }
-        (result, _) => result,
     }
+    result
 }
 
 #[cfg(test)]
@@ -340,7 +324,7 @@ mod tests {
         fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(call.data),
-                call.selector,
+                call.selector(),
                 call.caller,
             ));
             CallCheck::Continue
