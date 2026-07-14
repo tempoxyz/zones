@@ -583,6 +583,38 @@ impl PolicyProvider {
         })
     }
 
+    /// Resolve the policy ID counter from L1 (sync).
+    ///
+    /// Always queries the registry at `last_l1_block` rather than inferring the value
+    /// from cached policy keys. The cache is not a complete mirror of L1 — it holds only
+    /// policies seen via events plus ad-hoc RPC fallbacks — so its key set differs across
+    /// nodes and over time. Since the counter is observable by zone transactions and thus
+    /// feeds the block state root, a cache-derived value would diverge between the block
+    /// producer and re-executing nodes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context on the same tokio runtime.
+    pub fn policy_id_counter_sync(&self) -> Result<u64> {
+        let block_number = self.cache.read().last_l1_block();
+        debug!(block_number, "Resolving policyIdCounter from L1 RPC");
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &self.provider);
+        tokio::task::block_in_place(|| {
+            self.runtime_handle.block_on(async {
+                registry
+                    .policyIdCounter()
+                    .block(BlockId::number(block_number))
+                    .call()
+                    .await
+                    .map_err(|e| {
+                        self.metrics.rpc_errors.increment(1);
+                        warn!(block_number, %e, "policyIdCounter RPC failed");
+                        eyre::eyre!("policyIdCounter RPC failed: {e}")
+                    })
+            })
+        })
+    }
+
     /// Call `isAuthorized(policyId, user)` on the TIP403Registry via L1 RPC.
     async fn rpc_is_authorized(
         &self,
@@ -658,8 +690,9 @@ impl PolicyCheck for PolicyProvider {
         })
     }
 
-    fn policy_id_counter(&self) -> u64 {
-        let cache = self.cache.read();
-        cache.policies().keys().max().map_or(2, |max| max + 1)
+    fn policy_id_counter(&self) -> Result<u64, PrecompileError> {
+        self.policy_id_counter_sync().map_err(|e| {
+            zone_precompiles::zone_rpc_error(format!("policyIdCounter failed: {e}"))
+        })
     }
 }
