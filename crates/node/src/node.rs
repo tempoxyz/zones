@@ -177,7 +177,7 @@ pub struct ZonePrivateRpcConfig {
 pub struct ZoneNode {
     /// Queue of L1 deposit messages to be included in the next zone block.
     deposit_queue: DepositQueue,
-    /// Configuration for the L1 event subscriber (RPC endpoint, poll interval, etc.).
+    /// Configuration for the L1 event subscriber (RPC endpoint, retries, etc.).
     l1_config: L1SubscriberConfig,
     /// Configuration for the L1 state provider (contract addresses, query parameters).
     l1_state_provider_config: L1StateProviderConfig,

@@ -171,7 +171,7 @@ impl ZoneEngine {
     /// them, with no timer delays between blocks.
     ///
     /// Reorg safety is handled upstream by the L1 subscriber, which only
-    /// enqueues blocks once they are confirmed by a successor.
+    /// enqueues blocks exposed by L1's `finalized` tag.
     async fn advance_all_available(&mut self) {
         while let Some(l1_block) = self.deposit_queue.peek() {
             if let Err(e) = self.advance(l1_block).await {

@@ -14,15 +14,10 @@
 //! ## Write path
 //!
 //! - The [`L1Subscriber`](crate::l1::L1Subscriber) writes storage diffs for tracked contracts
-//!   as they arrive, tagged with the L1 tip block number.
+//!   as they arrive, tagged with the finalized L1 block number.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
 //!
-//! ## Reorg handling
-//!
-//! On reorgs the caller is expected to [`L1StateCacheInner::clear`] the entire cache and
-//! re-populate from the new canonical chain segment. There is no per-block rollback.
-
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
 use derive_more::Deref;
@@ -55,15 +50,14 @@ impl L1StateCache {
 /// i.e. the value that was current at that height. This allows the zone to read L1 state at
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
-/// The anchor tracks the latest L1 block the cache has received data for, used by the
-/// [`L1Subscriber`](crate::l1::L1Subscriber) for reorg detection.
+/// The anchor tracks the latest finalized L1 block the cache has received data for.
 #[derive(Debug, Default)]
 pub struct L1StateCacheInner {
     tracked_contracts: HashSet<Address>,
     /// Per-slot value history: `(address, slot) → { block_number → value }`.
     /// The `BTreeMap` enables efficient range lookups for "latest value at or before block N".
     slots: HashMap<(Address, B256), BTreeMap<u64, B256>>,
-    /// Latest L1 block the cache has received data for, used for reorg detection.
+    /// Latest finalized L1 block the cache has received data for.
     anchor: NumHash,
 }
 
