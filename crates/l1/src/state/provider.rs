@@ -84,7 +84,7 @@ pub struct L1StateProvider {
 }
 
 impl L1StateProvider {
-    /// Return the chain ID reported by the configured Tempo L1 provider.
+    /// Returns the chain ID reported by the configured L1 provider.
     pub async fn chain_id(&self) -> Result<u64> {
         Ok(self.provider.get_chain_id().await?)
     }

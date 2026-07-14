@@ -884,6 +884,7 @@ where
         let l1_chain_id = l1_provider.chain_id().await?;
         let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
+        // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
         let mut evm_config = ZoneEvmConfig::new_with_tempo_chain_spec(
             ctx.chain_spec(),
             tempo_chain_spec,

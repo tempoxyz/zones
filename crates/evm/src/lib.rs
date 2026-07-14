@@ -64,11 +64,10 @@ use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, Polic
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
-/// Zone execution chain spec composed with its parent Tempo chain spec.
+/// Chain specs used to configure Zone execution.
 ///
-/// Zone identity, genesis, and Ethereum fork configuration come from `zone`. Tempo-specific
-/// hardfork conditions come from `tempo`, allowing [`TempoEvmConfig`] to select the parent
-/// protocol rules from the Zone block timestamp without a separate L1 hardfork cache.
+/// `execution` is a copy of `zone` with its Tempo hardfork activation conditions replaced by
+/// those from `tempo`. All other Zone chain settings remain unchanged.
 #[derive(Debug, Clone)]
 pub struct ZoneChainSpec {
     zone: Arc<TempoChainSpec>,
@@ -77,7 +76,7 @@ pub struct ZoneChainSpec {
 }
 
 impl ZoneChainSpec {
-    /// Compose a Zone chain spec with the Tempo hardfork schedule of its parent chain.
+    /// Copies `zone` and applies the Tempo hardfork conditions from `tempo`.
     pub fn new(zone: Arc<TempoChainSpec>, tempo: Arc<TempoChainSpec>) -> Self {
         let mut execution = zone.as_ref().clone();
         for &hardfork in TempoHardfork::VARIANTS {
@@ -94,26 +93,25 @@ impl ZoneChainSpec {
         }
     }
 
-    /// Original Zone chain spec, which owns chain identity and genesis state.
+    /// Returns the unchanged Zone chain spec.
     pub fn zone(&self) -> &Arc<TempoChainSpec> {
         &self.zone
     }
 
-    /// Parent Tempo chain spec, which owns the Tempo hardfork schedule.
+    /// Returns the parent Tempo chain spec used for Tempo hardfork conditions.
     pub fn tempo(&self) -> &Arc<TempoChainSpec> {
         &self.tempo
     }
 
-    /// Tempo-compatible execution spec consumed by [`TempoEvmConfig`].
+    /// Returns the Zone chain spec with the parent Tempo hardfork conditions applied.
     pub fn execution(&self) -> &Arc<TempoChainSpec> {
         &self.execution
     }
 }
 
-/// Resolve the parent Tempo chain spec used for Zone hardfork selection.
+/// Returns a known Tempo chain spec for an L1 chain ID.
 ///
-/// Tempo Anvil uses chain ID 31337 but follows the native DEV protocol schedule, so both local
-/// chain IDs resolve to [`DEV`].
+/// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
 pub fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1337 | 31337 => Some(DEV.clone()),
@@ -299,7 +297,7 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
     }
 }
 
-/// Zone EVM configuration — wraps [`TempoEvmConfig`] with a [`ZoneEvmFactory`].
+/// Zone EVM configuration with Zone precompiles and parent Tempo hardfork conditions.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmConfig {
     chain_spec: ZoneChainSpec,
@@ -309,13 +307,12 @@ pub struct ZoneEvmConfig {
 }
 
 impl ZoneEvmConfig {
-    /// Create a new zone EVM config with the given chain spec, L1 state
-    /// provider.
+    /// Creates a Zone EVM config using the Zone spec's existing Tempo hardfork conditions.
     pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
         Self::new_with_tempo_chain_spec(chain_spec.clone(), chain_spec, l1_provider)
     }
 
-    /// Create a Zone EVM config whose Tempo hardforks follow the parent Tempo chain.
+    /// Creates a Zone EVM config using Tempo hardfork conditions from the parent L1 spec.
     pub fn new_with_tempo_chain_spec(
         zone_chain_spec: Arc<TempoChainSpec>,
         tempo_chain_spec: Arc<TempoChainSpec>,
@@ -333,11 +330,12 @@ impl ZoneEvmConfig {
         }
     }
 
-    /// Create a zone EVM config without a usable L1 provider.
+    /// Creates a Zone EVM config without a usable L1 provider.
     ///
     /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible
-    /// EVM config but don't have access to an L1 RPC connection. The portal address defaults to
-    /// the zero address in this mode, so sequencer reads are treated as unavailable.
+    /// EVM config but don't have access to an L1 RPC connection. Tempo hardfork conditions come
+    /// from `chain_spec` because the parent L1 spec cannot be resolved in this mode. The portal
+    /// address defaults to zero, so sequencer reads are unavailable.
     pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
         let cache = L1StateCache::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -355,12 +353,12 @@ impl ZoneEvmConfig {
         self
     }
 
-    /// Returns the chain spec.
+    /// Returns the chain spec used by Tempo execution.
     pub fn chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.chain_spec.execution()
     }
 
-    /// Returns the composed Zone and parent Tempo chain specs.
+    /// Returns the chain specs used to build the execution configuration.
     pub fn zone_chain_spec(&self) -> &ZoneChainSpec {
         &self.chain_spec
     }
