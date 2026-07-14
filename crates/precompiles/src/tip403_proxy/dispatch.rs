@@ -202,11 +202,11 @@ impl<P: PolicyCheck> ZoneTip403ProxyRegistry<P> {
 
     /// Handle `policyIdCounter() -> uint64`.
     fn handle_policy_id_counter(&self) -> PrecompileResult {
-        let counter = self.provider.policy_id_counter();
         let mut storage = StorageCtx::default();
         if storage.deduct_gas(POLICY_DATA_GAS).is_err() {
             return Ok(storage.halt_output(PrecompileHalt::OutOfGas));
         }
+        let counter = self.provider.policy_id_counter()?;
         let encoded = ITIP403Registry::policyIdCounterCall::abi_encode_returns(&counter);
         Ok(storage.success_output(encoded.into()))
     }
