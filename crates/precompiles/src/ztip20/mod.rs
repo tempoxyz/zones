@@ -283,6 +283,16 @@ mod tests {
                 ..Default::default()
             }
         }
+
+        /// Resolves a policy id successfully but denies every transfer/mint.
+        fn deny_all() -> Self {
+            Self {
+                transfer_authorized: false,
+                mint_authorized: false,
+                policy_id: 2,
+                fail_policy_id_resolution: false,
+            }
+        }
     }
 
     impl PolicyCheck for MockPolicyProvider {
@@ -1015,6 +1025,80 @@ mod tests {
         assert!(
             result.is_ok(),
             "mint must proceed when policy resolution errors (L1 enforces policy at deposit time)"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn reward_movements_enforce_transfer_policy() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::deny_all())?;
+        let forbidden = Bytes::from(TIP20Error::policy_forbids().selector().to_vec());
+
+        // claimRewards: L1 authorizes token -> caller, so a blacklisted claimer is rejected.
+        let claim = harness.call(
+            harness.alice,
+            ITIP20::claimRewardsCall {}.abi_encode().into(),
+            200_000,
+            false,
+        )?;
+        assert!(claim.is_revert(), "claimRewards must be policy-gated");
+        assert_eq!(claim.bytes, forbidden);
+
+        // distributeReward: L1 authorizes caller -> token.
+        let distribute = harness.call(
+            harness.alice,
+            ITIP20::distributeRewardCall {
+                amount: U256::from(1u64),
+            }
+            .abi_encode()
+            .into(),
+            200_000,
+            false,
+        )?;
+        assert!(distribute.is_revert(), "distributeReward must be policy-gated");
+        assert_eq!(distribute.bytes, forbidden);
+
+        // setRewardRecipient with a non-zero recipient: L1 authorizes caller -> recipient.
+        let set_recipient = harness.call(
+            harness.alice,
+            ITIP20::setRewardRecipientCall { recipient: harness.bob }
+                .abi_encode()
+                .into(),
+            200_000,
+            false,
+        )?;
+        assert!(
+            set_recipient.is_revert(),
+            "setRewardRecipient must be policy-gated for a non-zero recipient"
+        );
+        assert_eq!(set_recipient.bytes, forbidden);
+
+        Ok(())
+    }
+
+    #[test]
+    fn set_reward_recipient_zero_is_not_policy_gated() -> TestResult {
+        // Clearing the reward recipient (recipient == 0) is not a transfer authorization
+        // on L1, so the zone wrapper must not reject it via the policy layer. With a
+        // denying policy it should fall through to the vanilla token rather than
+        // returning the policy_forbids revert.
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::deny_all())?;
+        let forbidden = Bytes::from(TIP20Error::policy_forbids().selector().to_vec());
+
+        let cleared = harness.call(
+            harness.alice,
+            ITIP20::setRewardRecipientCall {
+                recipient: Address::ZERO,
+            }
+            .abi_encode()
+            .into(),
+            200_000,
+            false,
+        )?;
+        assert_ne!(
+            cleared.bytes, forbidden,
+            "clearing the reward recipient must not be blocked by the policy layer"
         );
 
         Ok(())
