@@ -138,6 +138,27 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
                 let call = decode_or_revert!(IRolesAuth::hasRoleCall, args);
                 self.enforce_balance_of(call.account, caller)
             }
+            // Reward token movements are TIP-403-gated on L1 (`ensure_transfer_authorized`
+            // in `tip20/rewards.rs`), but the vanilla token only consults the zone-local
+            // ALLOW_ALL policy. Mirror the exact L1 role mapping so a blacklisted party
+            // cannot distribute, claim, or redirect reward tokens on the zone.
+            ITIP20::distributeRewardCall::SELECTOR => {
+                // L1: ensure_transfer_authorized(msg_sender, token).
+                self.enforce_transfer(address, caller, address)
+            }
+            ITIP20::claimRewardsCall::SELECTOR => {
+                // L1: ensure_transfer_authorized(token, msg_sender).
+                self.enforce_transfer(address, address, caller)
+            }
+            ITIP20::setRewardRecipientCall::SELECTOR => {
+                let call = decode_or_revert!(ITIP20::setRewardRecipientCall, args);
+                // L1 only checks authorization when a non-zero recipient is set.
+                if call.recipient == Address::ZERO {
+                    None
+                } else {
+                    self.enforce_transfer(address, caller, call.recipient)
+                }
+            }
             _ => None,
         }
     }
