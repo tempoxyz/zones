@@ -67,6 +67,12 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
+    /// @notice Last nonce assigned to a user withdrawal fallback recipient
+    uint64 public lastFallbackNonce;
+
+    /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
+    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
+
     /// @notice Current withdrawal batch index (monotonically increasing)
     uint64 public withdrawalBatchIndex;
 
@@ -289,6 +295,8 @@ contract ZoneOutbox is IZoneOutbox {
         zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
+        uint64 fallbackNonce = ++lastFallbackNonce;
+        _fallbackRecipients[fallbackNonce] = fallbackRecipient;
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -299,7 +307,7 @@ contract ZoneOutbox is IZoneOutbox {
                 fee: fee,
                 memo: memo,
                 gasLimit: gasLimit,
-                fallbackRecipient: fallbackRecipient,
+                fallbackNonce: fallbackNonce,
                 callbackData: data,
                 revealTo: revealTo
             })
@@ -309,17 +317,7 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index,
-            msg.sender,
-            token,
-            to,
-            amount,
-            fee,
-            memo,
-            gasLimit,
-            fallbackRecipient,
-            data,
-            revealTo
+            index, msg.sender, token, to, amount, fee, memo, gasLimit, fallbackNonce, data, revealTo
         );
     }
 
@@ -344,7 +342,7 @@ contract ZoneOutbox is IZoneOutbox {
                 fee: 0,
                 memo: bytes32(0),
                 gasLimit: 0,
-                fallbackRecipient: address(0),
+                fallbackNonce: 0,
                 callbackData: "",
                 revealTo: ""
             })
@@ -352,18 +350,18 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint64 index = nextWithdrawalIndex++;
         emit WithdrawalRequested(
-            index,
-            address(0),
-            token,
-            bouncebackRecipient,
-            amount,
-            0,
-            bytes32(0),
-            0,
-            address(0),
-            "",
-            ""
+            index, address(0), token, bouncebackRecipient, amount, 0, bytes32(0), 0, 0, "", ""
         );
+    }
+
+    /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
+    /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
+    ///      in zone state. Only ZoneInbox may consume a mapping entry.
+    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+        if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
+        recipient = _fallbackRecipients[fallbackNonce];
+        if (recipient == address(0)) revert InvalidFallbackRecipient();
+        delete _fallbackRecipients[fallbackNonce];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -434,7 +432,7 @@ contract ZoneOutbox is IZoneOutbox {
                     fee: pendingWithdrawal.fee,
                     memo: pendingWithdrawal.memo,
                     gasLimit: pendingWithdrawal.gasLimit,
-                    fallbackRecipient: pendingWithdrawal.fallbackRecipient,
+                    fallbackNonce: pendingWithdrawal.fallbackNonce,
                     callbackData: pendingWithdrawal.callbackData,
                     encryptedSender: encryptedSender
                 });

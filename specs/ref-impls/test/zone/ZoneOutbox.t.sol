@@ -84,7 +84,8 @@ contract ZoneOutboxTest is Test {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address,
+        /* fallbackRecipient */
         bytes memory callbackData
     )
         internal
@@ -99,7 +100,7 @@ contract ZoneOutboxTest is Test {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -126,7 +127,7 @@ contract ZoneOutboxTest is Test {
 
         vm.expectEmit(true, true, false, true);
         emit IZoneOutbox.WithdrawalRequested(
-            0, address(0), address(zoneToken), bob, amount, 0, bytes32(0), 0, address(0), "", ""
+            0, address(0), address(zoneToken), bob, amount, 0, bytes32(0), 0, 0, "", ""
         );
 
         vm.prank(ZONE_INBOX);
@@ -140,7 +141,7 @@ contract ZoneOutboxTest is Test {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });
@@ -184,6 +185,38 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         assertEq(outbox.pendingWithdrawalsCount(), 2);
+    }
+
+    function test_requestWithdrawal_assignsMonotonicFallbackNonces() public {
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+        outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, alice, "");
+        outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, charlie, "");
+        vm.stopPrank();
+
+        PendingWithdrawal[] memory pending = outbox.getPendingWithdrawals();
+        assertEq(pending[0].fallbackNonce, 1);
+        assertEq(pending[1].fallbackNonce, 2);
+        assertEq(outbox.lastFallbackNonce(), 2);
+    }
+
+    function test_consumeFallbackRecipient_resolvesAndDeletesMapping() public {
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+        outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, charlie, "");
+        vm.stopPrank();
+
+        vm.prank(ZONE_INBOX);
+        assertEq(outbox.consumeFallbackRecipient(1), charlie);
+
+        vm.expectRevert(ZoneOutbox.InvalidFallbackRecipient.selector);
+        vm.prank(ZONE_INBOX);
+        outbox.consumeFallbackRecipient(1);
+    }
+
+    function test_consumeFallbackRecipient_revertsUnlessInbox() public {
+        vm.expectRevert(ZoneOutbox.OnlyZoneInbox.selector);
+        outbox.consumeFallbackRecipient(1);
     }
 
     function test_getPendingWithdrawals_returnsPendingInFifoOrder() public {
@@ -980,7 +1013,7 @@ contract ZoneOutboxTest is Test {
             expectedFee, // fee
             bytes32("memo"),
             50_000, // gasLimit
-            charlie, // fallbackRecipient
+            1, // fallbackNonce
             "data",
             ""
         );

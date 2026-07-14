@@ -191,7 +191,7 @@ contract ZoneIntegrationTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });

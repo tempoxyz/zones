@@ -242,7 +242,7 @@ contract ZoneBridgeTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -1161,7 +1161,7 @@ contract ZoneBridgeTest is BaseTest {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });

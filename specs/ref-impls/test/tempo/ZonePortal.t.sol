@@ -268,7 +268,7 @@ contract ZonePortalTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(uint160(fallbackRecipient)),
             callbackData: callbackData,
             encryptedSender: ""
         });
