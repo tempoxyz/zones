@@ -142,10 +142,7 @@ pub enum P2pEvent {
 
 /// Handle used to communicate with, supervise, and stop the dedicated P2P runtime.
 pub struct P2pHandle {
-    shutdown: CancellationToken,
-    stopped: oneshot::Receiver<Result<(), String>>,
-    commands: mpsc::Sender<P2pCommand>,
-    events: mpsc::Receiver<P2pEvent>,
+    parts: Option<P2pHandleParts>,
 }
 
 /// Cross-runtime channels and lifecycle controls returned by [`P2pHandle::into_parts`].
@@ -154,6 +151,8 @@ pub struct P2pHandleParts {
     pub shutdown: CancellationToken,
     /// Resolves when the dedicated P2P runtime exits.
     pub stopped: oneshot::Receiver<Result<(), String>>,
+    /// OS thread hosting the dedicated Commonware runtime.
+    pub thread: std::thread::JoinHandle<()>,
     /// Bounded outbound command channel into the dedicated P2P runtime.
     pub commands: mpsc::Sender<P2pCommand>,
     /// Bounded inbound event channel from the dedicated P2P runtime.
@@ -161,15 +160,56 @@ pub struct P2pHandleParts {
 }
 
 impl P2pHandle {
-    /// Splits the handle into the pieces needed by a node supervisor or test.
-    pub fn into_parts(self) -> P2pHandleParts {
-        P2pHandleParts {
-            shutdown: self.shutdown,
-            stopped: self.stopped,
-            commands: self.commands,
-            events: self.events,
+    /// Returns the inbound P2P event channel.
+    pub fn events_mut(&mut self) -> &mut mpsc::Receiver<P2pEvent> {
+        &mut self
+            .parts
+            .as_mut()
+            .expect("P2P handle already consumed")
+            .events
+    }
+
+    /// Requests shutdown, waits for the Commonware runtime, and joins its OS thread.
+    pub async fn shutdown(mut self) -> eyre::Result<()> {
+        let P2pHandleParts {
+            shutdown,
+            stopped,
+            thread,
+            commands,
+            events,
+        } = self.parts.take().expect("P2P handle already consumed");
+        shutdown.cancel();
+
+        // Close the caller-side channels while the runtime is winding down.
+        drop(commands);
+        drop(events);
+        let stopped_result = stopped.await;
+
+        join_runtime_thread(thread).await?;
+        stopped_result
+            .map_err(|err| eyre::eyre!("P2P runtime dropped its completion channel: {err}"))?
+            .map_err(|err| eyre::eyre!("P2P runtime failed: {err}"))
+    }
+
+    /// Splits the handle into the pieces needed by a node supervisor.
+    pub fn into_parts(mut self) -> P2pHandleParts {
+        self.parts.take().expect("P2P handle already consumed")
+    }
+}
+
+impl Drop for P2pHandle {
+    fn drop(&mut self) {
+        if let Some(parts) = &self.parts {
+            parts.shutdown.cancel();
         }
     }
+}
+
+async fn join_runtime_thread(thread: std::thread::JoinHandle<()>) -> eyre::Result<()> {
+    tokio::task::spawn_blocking(move || thread.join())
+        .await
+        .map_err(|err| eyre::eyre!("failed joining P2P runtime thread: {err}"))?
+        .map_err(|_| eyre::eyre!("P2P runtime thread panicked"))
 }
 
 /// Starts Commonware and the role-specific PoC heartbeat actor on a dedicated OS thread.
@@ -181,7 +221,7 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
     let runtime_commands = commands.clone();
     let (events_tx, events) = mpsc::channel(EVENT_BACKLOG);
 
-    std::thread::Builder::new()
+    let thread = std::thread::Builder::new()
         .name(format!("zone-p2p-{}", config.role()))
         .spawn(move || {
             let result = run(
@@ -198,10 +238,13 @@ pub fn spawn_p2p(config: P2pConfig, network_id: P2pNetworkId) -> eyre::Result<P2
         .map_err(|err| eyre::eyre!("failed spawning P2P runtime thread: {err}"))?;
 
     Ok(P2pHandle {
-        shutdown,
-        stopped,
-        commands,
-        events,
+        parts: Some(P2pHandleParts {
+            shutdown,
+            stopped,
+            thread,
+            commands,
+            events,
+        }),
     })
 }
 
@@ -499,7 +542,6 @@ mod tests {
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
                 )
                 .unwrap()
-                .into_parts()
             })
             .collect::<Vec<_>>();
 
@@ -507,7 +549,7 @@ mod tests {
             tokio::time::timeout(Duration::from_secs(15), async {
                 loop {
                     if matches!(
-                        handle.events.recv().await,
+                        handle.events_mut().recv().await,
                         Some(P2pEvent::HeartbeatAcknowledged { .. })
                     ) {
                         break;
@@ -518,14 +560,10 @@ mod tests {
             .expect("follower did not receive heartbeat acknowledgement");
         }
 
-        for handle in &handles {
-            handle.shutdown.cancel();
-        }
         for handle in handles {
-            tokio::time::timeout(Duration::from_secs(10), handle.stopped)
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
                 .await
                 .expect("P2P runtime did not stop")
-                .expect("P2P runtime dropped its completion channel")
                 .expect("P2P runtime failed");
         }
     }
