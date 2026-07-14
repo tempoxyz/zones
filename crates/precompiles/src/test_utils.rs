@@ -1,7 +1,9 @@
 //! Shared test utilities for precompile tests.
 
 use std::{
+    cell::RefCell,
     collections::HashMap,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
@@ -21,12 +23,20 @@ use revm::{
     precompile::{PrecompileError, PrecompileResult},
 };
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_precompiles::storage::evm::EvmPrecompileStorageProvider;
+use tempo_precompiles::{
+    storage::{
+        Handler, PrecompileStorageProvider, StorageCtx, actions::StorageActions,
+        evm::EvmPrecompileStorageProvider, hashmap::HashMapStorageProvider,
+    },
+    storage_credits::NonCreditableSlots,
+    tip403_registry::{CompoundPolicyData, PolicyData, TIP403Registry},
+};
 
 use crate::{
     L1StorageReader,
     chaum_pedersen::{challenge_hash, recover_point},
     ecies::DecryptedDeposit,
+    execution::L1BackedPrecompileEnv,
 };
 
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
@@ -59,6 +69,19 @@ pub(crate) fn test_storage_provider(
     )
 }
 
+/// Create the shared finalized-L1 execution environment for a precompile test.
+pub(crate) fn test_l1_env<P: L1StorageReader>(
+    ctx: &TestContext,
+    l1_reader: P,
+) -> L1BackedPrecompileEnv<P> {
+    L1BackedPrecompileEnv::new(
+        &ctx.cfg,
+        l1_reader,
+        StorageActions::disabled(),
+        Rc::new(RefCell::new(NonCreditableSlots::empty())),
+    )
+}
+
 /// Call a dynamic precompile with test defaults for value and reservoir.
 pub(crate) fn call_precompile(
     ctx: &mut TestContext,
@@ -83,18 +106,58 @@ pub(crate) fn call_precompile(
     })
 }
 
+// TODO(rusowsky): Remove once Tempo L1 stores transfer policy IDs in the TIP403 precompile.
+fn pack_transfer_policy_id(policy_id: u64) -> U256 {
+    U256::from(policy_id) << (tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8)
+}
+
 /// In-memory exact-block L1 reader shared by precompile tests.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct MockL1Reader {
     slots: Shared<HashMap<L1Slot, B256>>,
+    registry_storage: Shared<HashMapStorageProvider>,
     storage_requests: Shared<Vec<L1Slot>>,
     hardfork_requests: Shared<Vec<u64>>,
     fallback: B256,
+    policy_id: u64,
     fail_storage: bool,
     fail_hardfork: bool,
 }
 
+impl Default for MockL1Reader {
+    fn default() -> Self {
+        Self {
+            slots: Default::default(),
+            registry_storage: Arc::new(Mutex::new(HashMapStorageProvider::new(1))),
+            storage_requests: Default::default(),
+            hardfork_requests: Default::default(),
+            fallback: B256::ZERO,
+            policy_id: 0,
+            fail_storage: false,
+            fail_hardfork: false,
+        }
+    }
+}
+
 impl MockL1Reader {
+    pub(crate) fn allow_all() -> Self {
+        Self::with_policy_id(1)
+    }
+
+    pub(crate) fn failing() -> Self {
+        Self {
+            fail_storage: true,
+            ..Self::allow_all()
+        }
+    }
+
+    pub(crate) fn with_policy_id(policy_id: u64) -> Self {
+        Self {
+            policy_id,
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn returning(value: B256) -> Self {
         Self {
             fallback: value,
@@ -130,6 +193,78 @@ impl MockL1Reader {
     pub(crate) fn hardfork_requests(&self) -> Vec<u64> {
         self.hardfork_requests.lock().unwrap().clone()
     }
+
+    pub(crate) fn seed_transfer_policy_id(&self, token: Address, block_number: u64) {
+        let packed = pack_transfer_policy_id(self.policy_id);
+        self.set_u256(
+            token,
+            tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID,
+            block_number,
+            packed,
+        );
+    }
+
+    pub(crate) fn seed_simple_policy(
+        &self,
+        policy_id: u64,
+        policy_type: tempo_contracts::precompiles::ITIP403Registry::PolicyType,
+        accounts: &[Address],
+    ) -> tempo_precompiles::Result<()> {
+        let mut storage = self.registry_storage.lock().unwrap();
+        StorageCtx::enter(&mut *storage, || {
+            let mut registry = TIP403Registry::new();
+            let next_policy_id = registry.policy_id_counter()?.max(policy_id + 1);
+            registry.policy_id_counter.write(next_policy_id)?;
+            registry.policy_records[policy_id].base.write(PolicyData {
+                policy_type: policy_type as u8,
+                admin: Address::ZERO,
+            })?;
+            for account in accounts {
+                registry.policy_set[policy_id][*account].write(true)?;
+            }
+            Ok(())
+        })
+    }
+
+    pub(crate) fn seed_blacklist_policy(
+        &self,
+        policy_id: u64,
+        accounts: &[Address],
+    ) -> tempo_precompiles::Result<()> {
+        self.seed_simple_policy(
+            policy_id,
+            tempo_contracts::precompiles::ITIP403Registry::PolicyType::BLACKLIST,
+            accounts,
+        )
+    }
+
+    pub(crate) fn seed_compound_policy(
+        &self,
+        policy_id: u64,
+        sender_policy_id: u64,
+        recipient_policy_id: u64,
+        mint_recipient_policy_id: u64,
+    ) -> tempo_precompiles::Result<()> {
+        let mut storage = self.registry_storage.lock().unwrap();
+        StorageCtx::enter(&mut *storage, || {
+            let mut registry = TIP403Registry::new();
+            let next_policy_id = registry.policy_id_counter()?.max(policy_id + 1);
+            registry.policy_id_counter.write(next_policy_id)?;
+            registry.policy_records[policy_id].base.write(PolicyData {
+                policy_type: tempo_contracts::precompiles::ITIP403Registry::PolicyType::COMPOUND
+                    as u8,
+                admin: Address::ZERO,
+            })?;
+            registry.policy_records[policy_id]
+                .compound
+                .write(CompoundPolicyData {
+                    sender_policy_id,
+                    recipient_policy_id,
+                    mint_recipient_policy_id,
+                })?;
+            Ok(())
+        })
+    }
 }
 
 impl L1StorageReader for MockL1Reader {
@@ -146,13 +281,28 @@ impl L1StorageReader for MockL1Reader {
         if self.fail_storage {
             return Err(crate::zone_rpc_error("RPC unavailable"));
         }
-        Ok(self
+        if let Some(value) = self
             .slots
             .lock()
             .unwrap()
             .get(&(account, slot, block_number))
             .copied()
-            .unwrap_or(self.fallback))
+        {
+            return Ok(value);
+        }
+
+        let key = U256::from_be_bytes(slot.0);
+        let value = self
+            .registry_storage
+            .lock()
+            .unwrap()
+            .sload(account, key)
+            .map_err(|err| PrecompileError::Fatal(err.to_string()))?;
+        if value.is_zero() {
+            Ok(self.fallback)
+        } else {
+            Ok(B256::from(value.to_be_bytes()))
+        }
     }
 
     fn hardfork_at(&self, block_number: u64) -> Result<TempoHardfork, PrecompileError> {

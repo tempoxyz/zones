@@ -1,323 +1,187 @@
-//! Zone-specific TIP-20 token precompile with PolicyCheck-backed authorization.
+//! Zone pre-execution rules for the upstream Tempo TIP20 precompile.
 //!
-//! On L1, the vanilla [`TIP20Token`] checks transfer/mint authorization by
-//! instantiating a `TIP403Registry` in Rust which reads EVM storage at
-//! `0x403C…0000`. On the zone, that storage is empty (defaults to policy 1 =
-//! allow-all), so all transfers pass regardless of L1 blacklists.
+//! [`TIP20Token`] remains the source of truth for token and TIP403 policy behavior.
+//! Before forwarding a call to Tempo, [`TIP20Rules`] applies only zone-specific checks:
+//! privacy-gated reads, fixed gas for selected selectors, and bridge mint/burn callers.
 //!
-//! This wrapper intercepts transfer and mint calls, checks authorization
-//! against the zone's [`ZoneTip403ProxyRegistry`] (which delegates to
-//! [`PolicyCheck`] — cache-first, L1 RPC fallback), and only then delegates
-//! to the vanilla `TIP20Token` implementation.
+//! Accepted calldata and callers are forwarded unchanged to Tempo against the zone's
+//! L1-backed storage provider. The provider preserves ordinary zone-local token state
+//! while exposing selected policy values from finalized Tempo L1 state.
 
 use alloc::sync::Arc;
 
-mod dispatch;
-
 use alloy_primitives::Address;
-use alloy_sol_types::{SolError, SolInterface};
-use revm::precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
-use tempo_contracts::precompiles::TIP20Error;
+use alloy_sol_types::{SolCall, SolError};
+use revm::precompile::PrecompileOutput;
 use tempo_precompiles::{
-    Result as TempoResult,
-    storage::{ContractStorage, StorageCtx},
-    tip20::{RolesAuthError, TIP20Token},
+    storage::StorageCtx,
+    tip20::{IRolesAuth, ITIP20},
 };
 use tempo_zone_contracts::Unauthorized;
-use tracing::{trace, warn};
-use zone_primitives::{
-    constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
-    policy::AuthRole,
-};
+use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-use crate::{
-    policy::PolicyCheck,
-    tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry},
-};
+use crate::execution::{CallCheck, CallRules, ZoneCall};
 
-const FIXED_TRANSFER_GAS: u64 = 100_000;
+/// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
+pub const TIP20_FIXED_TRANSFER_GAS: u64 = 100_000;
+
+pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
+    ITIP20::transferCall::SELECTOR,
+    ITIP20::transferFromCall::SELECTOR,
+    ITIP20::transferWithMemoCall::SELECTOR,
+    ITIP20::transferFromWithMemoCall::SELECTOR,
+    ITIP20::approveCall::SELECTOR,
+];
+
+type CallCheckResult = Result<(), PrecompileOutput>;
+
+fn decode_and_check<C: SolCall>(
+    args: &[u8],
+    check: impl FnOnce(C) -> CallCheckResult,
+) -> CallCheckResult {
+    match C::abi_decode_raw_validate(args) {
+        Ok(decoded) => check(decoded),
+        Err(_) => Ok(()),
+    }
+}
 
 /// Capability trait for resolving the active zone sequencer.
 ///
-/// The zone runtime implements this for its L1-backed state provider so the
-/// precompile can enforce sequencer-visible reads without knowing about the
-/// concrete provider type.
+/// The zone runtime implements this for its L1-backed state provider so the precompile
+/// can enforce sequencer-visible reads without knowing about the concrete provider type.
 pub trait SequencerExt: Send + Sync {
     /// Return the latest known active sequencer.
     fn latest_sequencer(&self) -> Option<Address>;
 }
 
-/// Zone-specific TIP-20 token precompile.
-///
-/// Wraps the vanilla [`TIP20Token`] and the [`ZoneTip403ProxyRegistry`] to add
-/// optional PolicyCheck-backed authorization for transfers and mints, privacy-gated
-/// `balanceOf`/`allowance`, fixed gas for transfer-family calls and `approve`,
-/// and operation-specific bridge auth for mint/burn selectors.
-pub struct ZoneTip20Token<P> {
-    /// Optional TIP-403 registry wrapper used for transfer and mint-recipient policy checks.
-    registry: Option<ZoneTip403ProxyRegistry<P>>,
+/// Zone-specific rules applied before forwarding to upstream [`TIP20Token`].
+#[derive(Clone)]
+pub(crate) struct TIP20Rules {
     /// Sequencer-capable backend used to authorize private reads for the active sequencer.
     sequencer: Arc<dyn SequencerExt>,
 }
 
-impl<P: PolicyCheck> ZoneTip20Token<P> {
-    /// Create a new wrapper with the given registry.
-    pub fn new(
-        registry: Option<ZoneTip403ProxyRegistry<P>>,
-        sequencer: Arc<dyn SequencerExt>,
-    ) -> Self {
-        Self {
-            registry,
-            sequencer,
-        }
+impl TIP20Rules {
+    pub(crate) fn new(sequencer: Arc<dyn SequencerExt>) -> Self {
+        Self { sequencer }
+    }
+}
+
+impl CallRules for TIP20Rules {
+    fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
+        selector
+            .is_some_and(|selector| TIP20_FIXED_GAS_SELECTORS.contains(&selector))
+            .then_some(TIP20_FIXED_TRANSFER_GAS)
     }
 
-    /// Enforce the vanilla TIP-20 initialized-token check before zone policy logic.
-    fn ensure_initialized(tip20: &TIP20Token) -> TempoResult<()> {
-        if tip20.is_initialized()? {
-            Ok(())
-        } else {
-            Err(TIP20Error::uninitialized().into())
+    /// Apply zone privacy and bridge-path checks before upstream execution.
+    fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+        let Some(selector) = call.selector() else {
+            return CallCheck::Continue;
+        };
+        let args = &call.data[4..];
+
+        let result = match selector {
+            ITIP20::mintCall::SELECTOR | ITIP20::mintWithMemoCall::SELECTOR => {
+                self.check_mint_auth(call.caller)
+            }
+            ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
+                self.check_burn_auth(call.caller)
+            }
+            ITIP20::balanceOfCall::SELECTOR => {
+                decode_and_check::<ITIP20::balanceOfCall>(args, |decoded| {
+                    self.check_balance_read(decoded.account, call.caller)
+                })
+            }
+            ITIP20::allowanceCall::SELECTOR => {
+                decode_and_check::<ITIP20::allowanceCall>(args, |decoded| {
+                    self.check_allowance_read(decoded.owner, decoded.spender, call.caller)
+                })
+            }
+            IRolesAuth::hasRoleCall::SELECTOR => {
+                decode_and_check::<IRolesAuth::hasRoleCall>(args, |decoded| {
+                    self.check_balance_read(decoded.account, call.caller)
+                })
+            }
+            _ => Ok(()),
+        };
+
+        match result {
+            Ok(()) => CallCheck::Continue,
+            Err(output) => CallCheck::Return(Ok(output)),
         }
     }
+}
 
-    fn enforce_balance_of(&self, account: Address, caller: Address) -> Option<PrecompileResult> {
-        if caller == account || self.is_sequencer(caller) {
-            None
-        } else {
-            Some(Ok(Self::unauthorized_output()))
+fn unauthorized_output() -> PrecompileOutput {
+    StorageCtx::default().revert_output(Unauthorized {}.abi_encode().into())
+}
+
+impl TIP20Rules {
+    fn check_balance_read(&self, owner: Address, caller: Address) -> CallCheckResult {
+        if caller == owner {
+            return Ok(());
         }
+        self.check_sequencer(caller)
     }
 
-    fn enforce_allowance(
+    fn check_allowance_read(
         &self,
         owner: Address,
         spender: Address,
         caller: Address,
-    ) -> Option<PrecompileResult> {
-        if caller == owner || caller == spender || self.is_sequencer(caller) {
-            None
-        } else {
-            Some(Ok(Self::unauthorized_output()))
+    ) -> CallCheckResult {
+        if caller == spender {
+            return Ok(());
         }
+        self.check_balance_read(owner, caller)
     }
 
-    /// Check sender + recipient authorization for a transfer.
-    ///
-    /// Returns `Some(revert)` if forbidden, `None` if allowed.
-    fn enforce_transfer(
-        &self,
-        token: Address,
-        from: Address,
-        to: Address,
-    ) -> Option<PrecompileResult> {
-        let registry = self.registry.as_ref()?;
-        let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(
-                    target: "zone::precompile",
-                    %token, error = %e,
-                    "failed to resolve transfer_policy_id, rejecting transfer"
-                );
-                return Some(Err(e));
-            }
-        };
-
-        trace!(
-            target: "zone::precompile",
-            %token, %from, %to, policy_id,
-            "ZoneTip20Token: checking transfer authorization"
-        );
-
-        match registry.is_transfer_authorized(policy_id, from, to) {
-            Ok(true) => None,
-            Ok(false) => {
-                trace!(
-                    target: "zone::precompile",
-                    %from, %to, policy_id, "transfer not authorized"
-                );
-                Some(Ok(Self::policy_forbids_output()))
-            }
-            Err(e) => Some(Err(e)),
+    fn check_mint_auth(&self, caller: Address) -> CallCheckResult {
+        if caller != ZONE_INBOX_ADDRESS {
+            return Err(unauthorized_output());
         }
+        Ok(())
     }
 
-    /// Check mint recipient authorization.
-    ///
-    /// Returns `Some(revert)` if forbidden, `None` if allowed.
-    /// Resolution errors are treated as allow because mints are triggered by
-    /// deposit system transactions whose policy is already enforced on L1.
-    fn enforce_mint(&self, token: Address, to: Address) -> Option<PrecompileResult> {
-        let registry = self.registry.as_ref()?;
-        let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
-            Ok(id) => id,
-            Err(e) => {
-                warn!(
-                    target: "zone::precompile",
-                    %token, error = %e,
-                    "failed to resolve transfer_policy_id for mint, deferring to L1 enforcement"
-                );
-                return None;
-            }
-        };
-
-        trace!(
-            target: "zone::precompile",
-            %token, %to, policy_id,
-            "ZoneTip20Token: checking mint recipient authorization"
-        );
-
-        match registry.is_authorized(policy_id, to, AuthRole::MintRecipient) {
-            Ok(true) => None,
-            Ok(false) => {
-                trace!(target: "zone::precompile", %to, policy_id, "mint recipient not authorized");
-                Some(Ok(Self::policy_forbids_output()))
-            }
-            Err(e) => Some(Err(e)),
+    fn check_burn_auth(&self, caller: Address) -> CallCheckResult {
+        if caller != ZONE_OUTBOX_ADDRESS {
+            return Err(unauthorized_output());
         }
+        Ok(())
     }
 
-    /// Reject the system caller that is only allowed on the opposite bridge path.
-    fn reject_crossed_mint_caller(&self, caller: Address) -> Option<PrecompileResult> {
-        if caller == ZONE_OUTBOX_ADDRESS {
-            Some(Ok(Self::roles_unauthorized_output()))
-        } else {
-            None
-        }
-    }
-
-    /// Reject the system caller that is only allowed on the opposite bridge path.
-    fn reject_crossed_burn_caller(&self, caller: Address) -> Option<PrecompileResult> {
-        if caller == ZONE_INBOX_ADDRESS {
-            Some(Ok(Self::roles_unauthorized_output()))
-        } else {
-            None
-        }
-    }
-
-    /// Resolve the `transfer_policy_id` for a token.
-    fn resolve_transfer_policy_id(
-        registry: &ZoneTip403ProxyRegistry<P>,
-        token: Address,
-    ) -> Result<u64, PrecompileError> {
-        registry.resolve_transfer_policy_id(token)
-    }
-
-    fn is_sequencer(&self, caller: Address) -> bool {
-        self.sequencer
+    fn check_sequencer(&self, caller: Address) -> CallCheckResult {
+        if self
+            .sequencer
             .latest_sequencer()
-            .is_some_and(|sequencer| caller == sequencer)
-    }
-
-    fn unauthorized_output() -> PrecompileOutput {
-        StorageCtx::default().revert_output(Unauthorized {}.abi_encode().into())
-    }
-
-    fn roles_unauthorized_output() -> PrecompileOutput {
-        StorageCtx::default().revert_output(RolesAuthError::unauthorized().selector().into())
-    }
-
-    /// Build a reverted output with the `policyForbids()` error selector.
-    fn policy_forbids_output() -> PrecompileOutput {
-        PrecompileOutput::revert(
-            AUTH_CHECK_GAS,
-            tempo_contracts::precompiles::TIP20Error::policy_forbids()
-                .selector()
-                .into(),
-            StorageCtx::default().reservoir(),
-        )
+            .is_none_or(|sequencer| caller != sequencer)
+        {
+            return Err(unauthorized_output());
+        }
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{TestContext, test_context, test_storage_provider};
     use alloy::primitives::{Address, Bytes, U256, address};
-    use alloy_evm::{
-        EvmInternals,
-        precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
-    };
-    use alloy_sol_types::SolCall;
+    use alloy_evm::precompiles::DynPrecompile;
+    use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::{PrecompileHalt, PrecompileResult};
+    use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
-        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
+        storage::StorageCtx,
+        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, RolesAuthError, TIP20Token},
     };
+    use tempo_zone_contracts::Unauthorized;
 
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-    #[derive(Clone, Default)]
-    struct MockPolicyProvider {
-        transfer_authorized: bool,
-        mint_authorized: bool,
-        policy_id: u64,
-        fail_policy_id_resolution: bool,
-    }
-
-    impl MockPolicyProvider {
-        fn allow_all() -> Self {
-            Self {
-                transfer_authorized: true,
-                mint_authorized: true,
-                policy_id: 1,
-                fail_policy_id_resolution: false,
-            }
-        }
-
-        fn failing() -> Self {
-            Self {
-                fail_policy_id_resolution: true,
-                ..Default::default()
-            }
-        }
-    }
-
-    impl PolicyCheck for MockPolicyProvider {
-        fn is_authorized(
-            &self,
-            _policy_id: u64,
-            _user: Address,
-            role: AuthRole,
-        ) -> Result<bool, PrecompileError> {
-            let authorized = match role {
-                AuthRole::MintRecipient => self.mint_authorized,
-                _ => self.transfer_authorized,
-            };
-            Ok(authorized)
-        }
-
-        fn resolve_transfer_policy_id(&self, _token: Address) -> Result<u64, PrecompileError> {
-            if self.fail_policy_id_resolution {
-                return Err(PrecompileError::Fatal("RPC unavailable".into()));
-            }
-            Ok(self.policy_id)
-        }
-
-        fn policy_type_sync(
-            &self,
-            _policy_id: u64,
-        ) -> Result<tempo_contracts::precompiles::ITIP403Registry::PolicyType, PrecompileError>
-        {
-            Ok(tempo_contracts::precompiles::ITIP403Registry::PolicyType::BLACKLIST)
-        }
-
-        fn compound_policy_data(
-            &self,
-            _policy_id: u64,
-        ) -> Result<(u64, u64, u64), PrecompileError> {
-            Ok((self.policy_id, self.policy_id, self.policy_id))
-        }
-
-        fn policy_exists(&self, _policy_id: u64) -> Result<bool, PrecompileError> {
-            Ok(true)
-        }
-
-        fn policy_id_counter(&self) -> u64 {
-            self.policy_id
-        }
-    }
+    use crate::test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_l1_env,
+        test_storage_provider,
+    };
 
     #[derive(Clone, Copy)]
     struct MockSequencer {
@@ -337,20 +201,15 @@ mod tests {
         bob: Address,
         spender: Address,
         sequencer: Address,
-        issuer: Address,
         precompile: DynPrecompile,
     }
 
     impl PrecompileHarness {
-        fn new(policy: MockPolicyProvider) -> TestResult<Self> {
-            Self::new_with_registry(Some(policy))
+        fn new(l1_reader: MockL1Reader) -> eyre::Result<Self> {
+            Self::new_with_l1(l1_reader)
         }
 
-        fn new_without_registry() -> TestResult<Self> {
-            Self::new_with_registry(None)
-        }
-
-        fn new_with_registry(policy: Option<MockPolicyProvider>) -> TestResult<Self> {
+        fn new_with_l1(l1_reader: MockL1Reader) -> eyre::Result<Self> {
             let token = PATH_USD_ADDRESS;
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
@@ -362,7 +221,12 @@ mod tests {
 
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
-                StorageCtx::enter(&mut storage, || -> TestResult {
+                StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+                    StorageCtx::default().sstore(
+                        zone_primitives::constants::TEMPO_STATE_ADDRESS,
+                        crate::tempo_state::slots::TEMPO_BLOCK_NUMBER,
+                        U256::from(7u64),
+                    )?;
                     let mut token_contract =
                         TIP20Token::from_address(token).expect("PATH_USD must be valid");
                     token_contract.initialize(
@@ -402,10 +266,12 @@ mod tests {
                 })?;
             }
 
-            let precompile = ZoneTip20Token::create(
+            l1_reader.seed_transfer_policy_id(token, 7);
+
+            let env = test_l1_env(&ctx, l1_reader);
+            let precompile = crate::create_tip20_precompile(
                 token,
-                &ctx.cfg,
-                policy.map(ZoneTip403ProxyRegistry::new),
+                &env,
                 Arc::new(MockSequencer {
                     address: Some(sequencer),
                 }),
@@ -418,7 +284,6 @@ mod tests {
                 bob,
                 spender,
                 sequencer,
-                issuer,
                 precompile,
             })
         }
@@ -430,23 +295,19 @@ mod tests {
             gas: u64,
             is_static: bool,
         ) -> PrecompileResult {
-            AlloyEvmPrecompile::call(
+            call_precompile(
+                &mut self.ctx,
                 &self.precompile,
-                PrecompileInput {
-                    data: &calldata,
-                    caller,
-                    internals: EvmInternals::from_context(&mut self.ctx),
-                    gas,
-                    reservoir: 0,
-                    value: U256::ZERO,
-                    is_static,
-                    target_address: self.token,
-                    bytecode_address: self.token,
-                },
+                caller,
+                &calldata,
+                gas,
+                is_static,
+                self.token,
+                self.token,
             )
         }
 
-        fn balance_of(&mut self, account: Address) -> TestResult<U256> {
+        fn balance_of(&mut self, account: Address) -> eyre::Result<U256> {
             let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || {
                 let token = TIP20Token::from_address(self.token).expect("token must exist");
@@ -454,7 +315,7 @@ mod tests {
             })
         }
 
-        fn allowance(&mut self, owner: Address, spender: Address) -> TestResult<U256> {
+        fn allowance(&mut self, owner: Address, spender: Address) -> eyre::Result<U256> {
             let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || {
                 let token = TIP20Token::from_address(self.token).expect("token must exist");
@@ -464,8 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn balance_of_enforces_account_or_sequencer_access() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn balance_of_enforces_account_or_sequencer_access() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
         let calldata: Bytes = ITIP20::balanceOfCall {
             account: harness.alice,
         }
@@ -492,8 +353,8 @@ mod tests {
     }
 
     #[test]
-    fn allowance_enforces_owner_spender_or_sequencer_access() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn allowance_enforces_owner_spender_or_sequencer_access() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
         let calldata: Bytes = ITIP20::allowanceCall {
             owner: harness.alice,
             spender: harness.spender,
@@ -527,8 +388,8 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_without_policy_registry_still_enforces_privacy_and_fixed_gas() -> TestResult {
-        let mut harness = PrecompileHarness::new_without_registry()?;
+    fn wrapper_still_enforces_privacy_and_fixed_gas() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
 
         let private_balance = harness.call(
             harness.bob,
@@ -537,7 +398,7 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             true,
         )?;
         assert!(private_balance.is_revert());
@@ -554,28 +415,25 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
         assert!(transfer.is_success());
-        assert_eq!(transfer.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
 
         Ok(())
     }
 
     #[test]
-    fn uninitialized_token_rejects_before_policy_precheck() -> TestResult {
+    fn uninitialized_token_rejects_before_policy_read() -> eyre::Result<()> {
         let token = address!("20C0000000000000000000000000000000000999");
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let to = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
-        let precompile = ZoneTip20Token::create(
-            token,
-            &ctx.cfg,
-            Some(ZoneTip403ProxyRegistry::new(MockPolicyProvider::failing())),
-            Arc::new(MockSequencer { address: None }),
-        );
+        let env = test_l1_env(&ctx, MockL1Reader::failing());
+        let precompile =
+            crate::create_tip20_precompile(token, &env, Arc::new(MockSequencer { address: None }));
         let calldata: Bytes = ITIP20::transferCall {
             to,
             amount: U256::from(1u64),
@@ -583,19 +441,15 @@ mod tests {
         .abi_encode()
         .into();
 
-        let result = AlloyEvmPrecompile::call(
+        let result = call_precompile(
+            &mut ctx,
             &precompile,
-            PrecompileInput {
-                data: &calldata,
-                caller,
-                internals: EvmInternals::from_context(&mut ctx),
-                gas: FIXED_TRANSFER_GAS,
-                reservoir: 0,
-                value: U256::ZERO,
-                is_static: false,
-                target_address: token,
-                bytecode_address: token,
-            },
+            caller,
+            &calldata,
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+            token,
+            token,
         )?;
 
         assert!(result.is_revert());
@@ -608,8 +462,34 @@ mod tests {
     }
 
     #[test]
-    fn bridge_auth_rejects_crossed_system_calls_and_keeps_allowed_paths() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn malformed_calldata_uses_upstream_dispatch() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+
+        let balance_of = harness.call(
+            harness.alice,
+            Bytes::from(ITIP20::balanceOfCall::SELECTOR.to_vec()),
+            100_000,
+            true,
+        )?;
+        assert!(balance_of.is_revert());
+        assert_eq!(balance_of.bytes, Bytes::new());
+
+        let transfer = harness.call(
+            harness.alice,
+            Bytes::from(ITIP20::transferCall::SELECTOR.to_vec()),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(transfer.is_revert());
+        assert_eq!(transfer.bytes, Bytes::new());
+        assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
+
+        Ok(())
+    }
+
+    #[test]
+    fn bridge_auth_rejects_crossed_system_calls_and_keeps_allowed_paths() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
 
         let inbox_mint = harness.call(
             ZONE_INBOX_ADDRESS,
@@ -671,37 +551,12 @@ mod tests {
             Bytes::from(RolesAuthError::unauthorized().selector().to_vec())
         );
 
-        let issuer_mint = harness.call(
-            harness.issuer,
-            ITIP20::mintCall {
-                to: harness.issuer,
-                amount: U256::from(25_000u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(issuer_mint.is_success());
-
-        let issuer_burn = harness.call(
-            harness.issuer,
-            ITIP20::burnCall {
-                amount: U256::from(5_000u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(issuer_burn.is_success());
-
         Ok(())
     }
 
     #[test]
-    fn fixed_gas_selectors_charge_exactly_one_hundred_thousand_gas() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn fixed_gas_selectors_charge_exactly_one_hundred_thousand_gas() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
 
         let approve = harness.call(
             harness.alice,
@@ -711,10 +566,10 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(approve.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(approve.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(approve.state_gas_used, 0);
 
         let approve_update = harness.call(
@@ -725,10 +580,10 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(approve_update.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(approve_update.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(approve_update.state_gas_used, 0);
 
         let transfer_new = harness.call(
@@ -739,10 +594,10 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(transfer_new.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(transfer_new.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(transfer_new.state_gas_used, 0);
 
         let transfer_existing = harness.call(
@@ -753,10 +608,10 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(transfer_existing.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(transfer_existing.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(transfer_existing.state_gas_used, 0);
 
         let transfer_with_memo = harness.call(
@@ -768,10 +623,10 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(transfer_with_memo.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(transfer_with_memo.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(transfer_with_memo.state_gas_used, 0);
 
         let transfer_from = harness.call(
@@ -783,10 +638,10 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(transfer_from.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(transfer_from.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(transfer_from.state_gas_used, 0);
 
         let transfer_from_with_memo = harness.call(
@@ -799,18 +654,18 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert_eq!(transfer_from_with_memo.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(transfer_from_with_memo.gas_used, TIP20_FIXED_TRANSFER_GAS);
         assert_eq!(transfer_from_with_memo.state_gas_used, 0);
 
         Ok(())
     }
 
     #[test]
-    fn fixed_gas_selectors_fail_out_of_gas_below_threshold() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn fixed_gas_selectors_fail_out_of_gas_below_threshold() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
 
         for calldata in [
             ITIP20::transferCall {
@@ -849,7 +704,7 @@ mod tests {
             .into(),
         ] {
             let output = harness
-                .call(harness.alice, calldata, FIXED_TRANSFER_GAS - 1, false)
+                .call(harness.alice, calldata, TIP20_FIXED_TRANSFER_GAS - 1, false)
                 .expect("out of gas is returned as a halted precompile output");
             assert!(output.is_halt());
             assert_eq!(output.halt_reason(), Some(&PrecompileHalt::OutOfGas));
@@ -859,8 +714,8 @@ mod tests {
     }
 
     #[test]
-    fn fixed_gas_keeps_allowance_and_balance_state_changes_intact() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn fixed_gas_keeps_allowance_and_balance_state_changes_intact() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
 
         let approve = harness.call(
             harness.alice,
@@ -870,7 +725,7 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
         assert!(approve.is_success());
@@ -887,7 +742,7 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            FIXED_TRANSFER_GAS,
+            TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
         assert!(transfer.is_success());
@@ -897,58 +752,100 @@ mod tests {
     }
 
     #[test]
-    fn user_reward_info_enforces_account_or_sequencer_access() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
-        let calldata: Bytes = ITIP20::userRewardInfoCall {
-            account: harness.alice,
-        }
-        .abi_encode()
-        .into();
+    fn l1_blacklist_denies_transfer_sender_and_recipient() -> eyre::Result<()> {
+        let sender_l1 = MockL1Reader::with_policy_id(42);
+        let mut sender_harness = PrecompileHarness::new(sender_l1.clone())?;
+        sender_l1.seed_blacklist_policy(42, &[sender_harness.alice])?;
+        let sender_result = sender_harness.call(
+            sender_harness.alice,
+            ITIP20::transferCall {
+                to: sender_harness.bob,
+                amount: U256::from(100u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(sender_result.is_revert());
+        assert_eq!(
+            sender_result.bytes,
+            Bytes::from(TIP20Error::policy_forbids().selector().to_vec())
+        );
+        assert_eq!(sender_result.gas_used, TIP20_FIXED_TRANSFER_GAS);
 
-        // Owner can query their own reward info
-        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert!(owner.is_success());
-
-        // Sequencer can query anyone's reward info
-        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert!(sequencer.is_success());
-
-        // Outsider is rejected
-        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.is_revert());
-        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
-
-        Ok(())
-    }
-
-    #[test]
-    fn get_pending_rewards_enforces_account_or_sequencer_access() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
-        let calldata: Bytes = ITIP20::getPendingRewardsCall {
-            account: harness.alice,
-        }
-        .abi_encode()
-        .into();
-
-        // Owner can query their own pending rewards
-        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert!(owner.is_success());
-
-        // Sequencer can query anyone's pending rewards
-        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert!(sequencer.is_success());
-
-        // Outsider is rejected
-        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.is_revert());
-        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+        let recipient_l1 = MockL1Reader::with_policy_id(42);
+        let mut recipient_harness = PrecompileHarness::new(recipient_l1.clone())?;
+        recipient_l1.seed_blacklist_policy(42, &[recipient_harness.bob])?;
+        let recipient_result = recipient_harness.call(
+            recipient_harness.alice,
+            ITIP20::transferCall {
+                to: recipient_harness.bob,
+                amount: U256::from(100u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(recipient_result.is_revert());
+        assert_eq!(
+            recipient_result.bytes,
+            Bytes::from(TIP20Error::policy_forbids().selector().to_vec())
+        );
 
         Ok(())
     }
 
     #[test]
-    fn transfer_fails_closed_on_policy_resolution_error() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
+    fn l1_policy_denies_mint_recipient() -> eyre::Result<()> {
+        let l1 = MockL1Reader::with_policy_id(43);
+        let mut harness = PrecompileHarness::new(l1.clone())?;
+        l1.seed_blacklist_policy(43, &[harness.bob])?;
+
+        let result = harness.call(
+            ZONE_INBOX_ADDRESS,
+            ITIP20::mintCall {
+                to: harness.bob,
+                amount: U256::from(100u64),
+            }
+            .abi_encode()
+            .into(),
+            100_000,
+            false,
+        )?;
+        assert!(result.is_revert());
+        assert_eq!(
+            result.bytes,
+            Bytes::from(TIP20Error::policy_forbids().selector().to_vec())
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_policy_id_reflects_l1_policy_storage_not_local_default() -> eyre::Result<()> {
+        let l1_policy_id = 99;
+        let mut harness = PrecompileHarness::new(MockL1Reader::with_policy_id(l1_policy_id))?;
+
+        let result = harness.call(
+            harness.alice,
+            ITIP20::transferPolicyIdCall {}.abi_encode().into(),
+            100_000,
+            true,
+        )?;
+        assert!(result.is_success());
+        assert_eq!(
+            ITIP20::transferPolicyIdCall::abi_decode_returns(&result.bytes)?,
+            l1_policy_id
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_fails_closed_on_policy_resolution_error() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::failing())?;
 
         let calldata: Bytes = ITIP20::transferCall {
             to: harness.bob,
@@ -967,8 +864,8 @@ mod tests {
     }
 
     #[test]
-    fn mint_defers_to_l1_on_policy_resolution_error() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
+    fn mint_fails_on_l1_storage_error() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::failing())?;
 
         let calldata: Bytes = ITIP20::mintCall {
             to: harness.alice,
@@ -977,18 +874,18 @@ mod tests {
         .abi_encode()
         .into();
 
-        let result = harness.call(harness.issuer, calldata, 100_000, false);
+        let result = harness.call(ZONE_INBOX_ADDRESS, calldata, 100_000, false);
         assert!(
-            result.is_ok(),
-            "mint must proceed when policy resolution errors (L1 enforces policy at deposit time)"
+            result.is_err(),
+            "mint must fail when upstream TIP-20 cannot read L1 policy storage"
         );
 
         Ok(())
     }
 
     #[test]
-    fn has_role_enforces_account_or_sequencer_access() -> TestResult {
-        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+    fn has_role_enforces_account_or_sequencer_access() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
         let calldata: Bytes = IRolesAuth::hasRoleCall {
             account: harness.alice,
             role: *ISSUER_ROLE,

@@ -721,7 +721,6 @@ where
         let executor_builder = ZoneExecutorBuilder::new(
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
-            self.policy_cache.clone(),
         );
         let payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         Self::components_with_payload_factory(executor_builder, payload_factory)
@@ -781,20 +780,17 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
 pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: L1StateCache,
-    policy_cache: PolicyCache,
 }
 
 impl ZoneExecutorBuilder {
-    /// Create a zone executor builder with the shared L1 state/policy caches.
+    /// Create a zone executor builder with the shared L1 state cache.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: L1StateCache,
-        policy_cache: PolicyCache,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
-            policy_cache,
         }
     }
 }
@@ -814,20 +810,8 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
-
-        // Create PolicyProvider for the TIP-403 proxy precompile.
-        let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_with_config(
-                &self.l1_state_provider_config.l1_rpc_url,
-                rpc_connection_config(self.l1_state_provider_config.retry_connection_interval),
-            )
-            .await?
-            .erased();
-
-        let policy_provider = PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
-        evm_config = evm_config.with_policy_provider(policy_provider);
-        info!(target: "reth::cli", "Zone EVM initialized with TempoState + TIP-403 proxy precompiles");
+        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)
     }

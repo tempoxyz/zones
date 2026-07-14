@@ -5,9 +5,8 @@
 //! in `TempoState`. Zone admission, delegate-call, fixed-gas, and privacy rules remain outside the
 //! forwarded business logic.
 //!
-//! [`extend_zone_precompiles`] centralizes registration while the progressive policy migration is
-//! underway. The legacy zone TIP-20 and TIP-403 implementations remain active until their dedicated
-//! cutovers; `TipFeeManager` is currently the low-risk Tempo wrapper using anchored L1 execution.
+//! [`extend_zone_precompiles`] centralizes registration. TIP-20, TIP-403, and `TipFeeManager` use
+//! anchored upstream execution while the zone retains only its admission and gas rules.
 //!
 //! This crate is `no_std` compatible so these precompiles can run inside the
 //! SP1 prover guest (RISC-V) as well as in the zone node.
@@ -23,8 +22,8 @@
 //! ## Policy/token precompiles
 //!
 //! - **TIP-20 Factory** ([`tip20_factory`]) — zone-side TIP-20 token factory.
-//! - **TIP-403 Proxy** ([`tip403_proxy`]) — read-only TIP-403 registry proxy.
-//! - **Zone TIP-20** ([`ztip20`]) — policy-aware TIP-20 wrapper.
+//! - **TIP-403 Registry** ([`tip403_proxy`]) — upstream registry over finalized L1 state.
+//! - **Zone TIP-20** ([`ztip20`]) — upstream TIP-20 with zone call rules.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::too_many_arguments)]
@@ -38,7 +37,6 @@ pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
 mod execution;
-pub mod policy;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
@@ -50,8 +48,8 @@ pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use storage::L1StorageReader;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
-pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
-pub use ztip20::{SequencerExt, ZoneTip20Token};
+pub use tip403_proxy::ZONE_TIP403_PROXY_ADDRESS;
+pub use ztip20::SequencerExt;
 
 use alloc::{rc::Rc, sync::Arc};
 use core::cell::RefCell;
@@ -61,34 +59,31 @@ use revm::{context::CfgEnv, precompile::PrecompileError};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _, PrecompileEnv,
-    STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain,
-    nonce::NonceManager, storage::actions::StorageActions, storage_credits::NonCreditableSlots,
-    tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
+    STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
+    account_keychain::AccountKeychain,
+    nonce::NonceManager,
+    storage::actions::StorageActions,
+    storage_credits::NonCreditableSlots,
+    tip_fee_manager::TipFeeManager,
+    tip20::{TIP20Token, is_tip20_prefix},
+    tip403_registry::TIP403Registry,
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
-use crate::policy::PolicyCheck;
-
 /// Register zone-native and currently supported Tempo precompiles.
 ///
-/// - **Local and legacy execution:** AES-GCM, Chaum-Pedersen, `TempoState`, and the zone token
-///   factory use shared local execution; nonce and account-keychain retain Tempo's ordinary
-///   environment; and the policy-cache-backed [`ZoneTip20Token`] and
-///   [`ZoneTip403ProxyRegistry`] remain active until migrated.
-/// - **Anchored L1 execution:** `TipFeeManager` uses the exact finalized Tempo anchor through
-///   [`storage::ZonePrecompileStorageProvider`].
-pub fn extend_zone_precompiles<L1, Policy>(
+/// - **Local execution:** AES-GCM, Chaum-Pedersen, `TempoState`, and the zone token factory use
+///   shared local execution; nonce and account-keychain retain Tempo's ordinary environment.
+/// - **Anchored L1 execution:** TIP-20, TIP-403, and `TipFeeManager` use the exact finalized Tempo
+///   anchor through [`storage::ZonePrecompileStorageProvider`].
+pub fn extend_zone_precompiles<L1: L1StorageReader>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
     l1_reader: L1,
-    policy_provider: Option<Policy>,
     sequencer: Arc<dyn SequencerExt>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
-) where
-    L1: L1StorageReader,
-    Policy: PolicyCheck + Clone + Send + Sync + 'static,
-{
+) {
     let l1_env = execution::L1BackedPrecompileEnv::new(
         cfg,
         l1_reader.clone(),
@@ -110,22 +105,18 @@ pub fn extend_zone_precompiles<L1, Policy>(
         Some(ZoneTokenFactory::create(cfg))
     });
 
-    if let Some(provider) = policy_provider.clone() {
-        precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
-            Some(ZoneTip403ProxyRegistry::create(provider.clone(), cfg))
-        });
-    }
-    let registry = policy_provider.map(ZoneTip403ProxyRegistry::new);
+    let tip403_env = l1_env.clone();
+    precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, move |_| {
+        Some(create_tip403_precompile(&tip403_env))
+    });
 
-    // Static zone entries above take priority. The dynamic lookup preserves the legacy token
-    // wrapper while sharing registration for the remaining Tempo precompiles.
-    let zone_cfg = cfg.clone();
+    // Static zone entries above take priority. Dynamic TIP-20 entries use upstream execution with
+    // zone privacy, bridge-authorization, fixed-gas, and anchored policy-storage rules.
     precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
         if is_tip20_prefix(*address) {
-            Some(ZoneTip20Token::create(
+            Some(create_tip20_precompile(
                 *address,
-                &zone_cfg,
-                registry.clone(),
+                &l1_env,
                 sequencer.clone(),
             ))
         } else if *address == TIP_FEE_MANAGER_ADDRESS {
@@ -195,6 +186,32 @@ impl ZoneTokenFactory {
             |data, caller| Self::new().call(data, caller),
         )
     }
+}
+
+/// Create upstream TIP-403 execution with zone read-only rules and finalized L1 state.
+pub(crate) fn create_tip403_precompile<P: L1StorageReader>(
+    env: &execution::L1BackedPrecompileEnv<P>,
+) -> DynPrecompile {
+    execution::create_l1_backed_precompile(
+        "ZoneTip403Registry",
+        env.clone(),
+        tip403_proxy::Tip403Rules,
+        |data, caller| TIP403Registry::new().call(data, caller),
+    )
+}
+
+/// Create upstream TIP-20 execution with zone rules and finalized L1 policy reads.
+pub(crate) fn create_tip20_precompile<P: L1StorageReader>(
+    address: alloy_primitives::Address,
+    env: &execution::L1BackedPrecompileEnv<P>,
+    sequencer: Arc<dyn SequencerExt>,
+) -> DynPrecompile {
+    execution::create_l1_backed_precompile(
+        "TIP20Token",
+        env.clone(),
+        ztip20::TIP20Rules::new(sequencer),
+        move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
+    )
 }
 
 const ZONE_RPC_ERROR_PREFIX: &str = "[zone rpc]";

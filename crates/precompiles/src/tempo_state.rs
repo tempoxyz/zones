@@ -216,7 +216,6 @@ mod tests {
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
     use tempo_precompiles::storage::StorageCtx;
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     fn encode_header(header: &TempoHeader) -> Bytes {
         let mut encoded = Vec::new();
@@ -224,7 +223,7 @@ mod tests {
         encoded.into()
     }
 
-    fn initialize(ctx: &mut TestContext, header: &[u8]) -> TestResult {
+    fn initialize(ctx: &mut TestContext, header: &[u8]) -> eyre::Result<()> {
         let mut storage = test_storage_provider(ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || TempoState::new().initialize(header))?;
@@ -291,7 +290,7 @@ mod tests {
         precompile: &DynPrecompile,
         expected_hash: B256,
         expected_number: u64,
-    ) -> TestResult {
+    ) -> eyre::Result<()> {
         let block_hash = call(
             ctx,
             precompile,
@@ -319,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_sets_checkpoint() -> TestResult {
+    fn initialize_sets_checkpoint() -> eyre::Result<()> {
         let header = child_header(B256::repeat_byte(0xaa), 42);
         let header_rlp = encode_header(&header);
         let mut ctx = test_context();
@@ -332,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_updates_checkpoint() -> TestResult {
+    fn finalize_tempo_updates_checkpoint() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -358,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_for_non_inbox_caller() -> TestResult {
+    fn finalize_tempo_reverts_for_non_inbox_caller() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -382,7 +381,7 @@ mod tests {
     }
 
     #[test]
-    fn delegate_call_reverts() -> TestResult {
+    fn delegate_call_reverts() -> eyre::Result<()> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
@@ -410,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_static_call() -> TestResult {
+    fn finalize_tempo_reverts_on_static_call() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -434,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_invalid_rlp() -> TestResult {
+    fn finalize_tempo_reverts_on_invalid_rlp() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -457,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_trailing_header_bytes() -> TestResult {
+    fn finalize_tempo_reverts_on_trailing_header_bytes() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -483,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_invalid_parent_hash() -> TestResult {
+    fn finalize_tempo_reverts_on_invalid_parent_hash() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -507,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_invalid_block_number() -> TestResult {
+    fn finalize_tempo_reverts_on_invalid_block_number() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -531,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn read_tempo_storage_slot_is_system_only() -> TestResult {
+    fn read_tempo_storage_slot_is_system_only() -> eyre::Result<()> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
@@ -564,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn read_tempo_storage_slots_returns_batch() -> TestResult {
+    fn read_tempo_storage_slots_returns_batch() -> eyre::Result<()> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;

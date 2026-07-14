@@ -13439,6 +13439,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "const-hex",
+ "eyre",
  "k256",
  "paste",
  "rand 0.8.6",

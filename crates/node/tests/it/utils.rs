@@ -21,20 +21,33 @@ use std::{
     ops::Deref,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TempoChainSpec};
+use tempo_chainspec::{
+    hardfork::TempoHardfork,
+    spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
+};
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, SignatureType as KeyInfoSignatureType,
     },
 };
-use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
+use tempo_precompiles::{
+    PATH_USD_ADDRESS,
+    storage::{
+        Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
+    },
+    tip20::tip20_slots,
+    tip403_registry::{
+        ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
+        TIP403Registry, tip403_registry_slots,
+    },
+};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use zone_l1::{
@@ -193,18 +206,135 @@ fn seed_local_policy_cache(policy_cache: &zone_l1::PolicyCache) {
     );
 }
 
+// TODO(rusowsky): Remove once Tempo L1 stores transfer policy IDs in the TIP403 precompile.
+fn pack_transfer_policy_id(policy_id: u64) -> U256 {
+    U256::from(policy_id) << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8)
+}
+
+/// Seed a TIP-20 transfer policy ID in the canonical packed L1 storage slot.
+pub(crate) fn seed_raw_tip20_policy_id(
+    cache: &mut zone_l1::state::L1StateCacheInner,
+    block_number: u64,
+    token: Address,
+    policy_id: u64,
+) {
+    let packed = pack_transfer_policy_id(policy_id);
+    cache.set(
+        token,
+        B256::from(tip20_slots::TRANSFER_POLICY_ID.to_be_bytes()),
+        block_number,
+        B256::from(packed.to_be_bytes()),
+    );
+}
+
+/// A TIP-403 policy write for [`seed_raw_tip403_policy`].
+pub(crate) struct PolicySeed<'a> {
+    pub(crate) id: u64,
+    pub(crate) ty: PolicyType,
+    pub(crate) members: &'a [(Address, bool)],
+    pub(crate) compound: Option<(u64, u64, u64)>,
+}
+
+impl<'a> PolicySeed<'a> {
+    pub(crate) fn simple(id: u64, ty: PolicyType, members: &'a [(Address, bool)]) -> Self {
+        Self {
+            id,
+            ty,
+            members,
+            compound: None,
+        }
+    }
+
+    pub(crate) fn compound(id: u64, sender: u64, recipient: u64, mint_recipient: u64) -> Self {
+        Self {
+            id,
+            ty: PolicyType::COMPOUND,
+            members: &[],
+            compound: Some((sender, recipient, mint_recipient)),
+        }
+    }
+}
+
+/// Materialize one or more TIP-403 policy writes into the raw L1 cache.
+/// A batch shares a single storage snapshot, so multiple policy writes can reference each other.
+pub(crate) fn seed_raw_tip403_policy(
+    cache: &L1StateCache,
+    block_number: u64,
+    policies: &[PolicySeed<'_>],
+) -> eyre::Result<()> {
+    let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T8);
+    let registry = TIP403Registry::new();
+    let counter_slot = registry.policy_id_counter.slot();
+    let existing_next_policy_id = cache
+        .read()
+        .get(TIP403_REGISTRY_ADDRESS, counter_slot.into(), block_number)
+        .and_then(|value| U256::from_be_bytes(value.0).try_into().ok())
+        .unwrap_or(2u64);
+    let mut slots = vec![counter_slot];
+    for policy in policies {
+        slots.push(registry.policy_records[policy.id].base.base_slot());
+        if policy.compound.is_some() {
+            slots.push(registry.policy_records[policy.id].compound.base_slot());
+        }
+        slots.extend(
+            policy
+                .members
+                .iter()
+                .map(|(account, _)| registry.policy_set[policy.id][*account].slot()),
+        );
+    }
+
+    StorageCtx::enter(&mut storage, || -> tempo_precompiles::Result<()> {
+        let mut registry = TIP403Registry::new();
+        let next_policy_id = policies
+            .iter()
+            .map(|policy| policy.id + 1)
+            .max()
+            .unwrap_or(2)
+            .max(existing_next_policy_id);
+        registry.policy_id_counter.write(next_policy_id)?;
+        for policy in policies {
+            registry.policy_records[policy.id].base.write(PolicyData {
+                policy_type: policy.ty as u8,
+                admin: Address::ZERO,
+            })?;
+            if let Some((sender, recipient, mint_recipient)) = policy.compound {
+                registry.policy_records[policy.id]
+                    .compound
+                    .write(RawCompoundPolicyData {
+                        sender_policy_id: sender,
+                        recipient_policy_id: recipient,
+                        mint_recipient_policy_id: mint_recipient,
+                    })?;
+            }
+            for &(account, in_set) in policy.members {
+                registry.policy_set[policy.id][account].write(in_set)?;
+            }
+        }
+        Ok(())
+    })?;
+
+    let mut cache = cache.write();
+    for slot in slots {
+        let value = storage.sload(TIP403_REGISTRY_ADDRESS, slot)?;
+        cache.set(
+            TIP403_REGISTRY_ADDRESS,
+            slot.into(),
+            block_number,
+            value.into(),
+        );
+    }
+    Ok(())
+}
+
 /// Compute the TIP-20 token address for a given sender and salt.
 ///
 /// Mirrors `compute_tip20_address` in the factory precompile.
 pub(crate) fn compute_tip20_address(sender: Address, salt: B256) -> Address {
     let hash = keccak256((sender, salt).abi_encode());
 
-    let tip20_prefix: [u8; 12] = [
-        0x20, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-
     let mut address_bytes = [0u8; 20];
-    address_bytes[..12].copy_from_slice(&tip20_prefix);
+    address_bytes[..12].copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
     address_bytes[12..].copy_from_slice(&hash[..8]);
 
     Address::from(address_bytes)
@@ -657,6 +787,9 @@ impl ZoneTestNode {
         let policy_cache = zone_node.policy_cache();
         if is_local_dummy_l1 {
             seed_local_policy_cache(&policy_cache);
+            let mut cache = l1_state_cache.write();
+            seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
+            cache.extend_hardfork_schedule(u64::MAX, [(0, TempoHardfork::T8)]);
         }
 
         let node_handle = NodeBuilder::new(node_config)
@@ -3127,6 +3260,8 @@ pub(crate) struct L1Fixture {
     next_block_number: u64,
     next_timestamp: u64,
     last_hash: B256,
+    /// Raw L1 caches seeded by this fixture, updated with state implied by injected deposits.
+    caches: Mutex<Vec<L1StateCache>>,
 }
 
 impl L1Fixture {
@@ -3142,6 +3277,7 @@ impl L1Fixture {
             next_block_number: 1,
             next_timestamp: 1_000_000,
             last_hash: genesis_hash,
+            caches: Mutex::new(Vec::new()),
         }
     }
 
@@ -3153,12 +3289,12 @@ impl L1Fixture {
     /// for each block we plan to inject.
     pub(crate) fn seed_l1_cache(
         &self,
-        cache: &L1StateCache,
+        cache_handle: &L1StateCache,
         portal_address: Address,
         sequencer: Address,
         num_blocks: u64,
     ) {
-        let mut cache = cache.write();
+        let mut cache = cache_handle.write();
         let deposit_queue_hash_slot = B256::with_last_byte(5);
         let refunds_slot = B256::with_last_byte(10);
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
@@ -3189,10 +3325,38 @@ impl L1Fixture {
             );
         }
 
+        seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
+        cache.extend_hardfork_schedule(u64::MAX, [(0, TempoHardfork::T8)]);
         cache.update_anchor(NumHash {
             number: num_blocks,
             hash: B256::ZERO,
         });
+        drop(cache);
+        self.caches.lock().unwrap().push(cache_handle.clone());
+    }
+
+    /// Seed the absence of an address-level TIP-403 receive policy for the next fixture block.
+    pub(crate) fn seed_no_receive_policy(&self, recipient: Address) {
+        self.seed_no_receive_policy_at(self.next_block_number, recipient);
+    }
+
+    fn seed_no_receive_policy_at(&self, block_number: u64, recipient: Address) {
+        // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
+        let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
+        for cache in self.caches.lock().unwrap().iter() {
+            cache.write().set(
+                TIP403_REGISTRY_ADDRESS,
+                B256::from(receive_policy_slot.to_be_bytes()),
+                block_number,
+                B256::ZERO,
+            );
+        }
+    }
+
+    fn seed_regular_deposit_policy_state(&self, block_number: u64, deposits: &[Deposit]) {
+        for deposit in deposits {
+            self.seed_no_receive_policy_at(block_number, deposit.to);
+        }
     }
 
     /// Build a [`TempoHeader`] for the next L1 block.
@@ -3238,6 +3402,7 @@ impl L1Fixture {
         queue: &DepositQueue,
         deposits: Vec<Deposit>,
     ) {
+        self.seed_regular_deposit_policy_state(block.header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
         queue.enqueue(block.header.clone(), events, vec![]);
@@ -3302,6 +3467,7 @@ impl L1Fixture {
     /// Inject an L1 block with the given deposits into the queue.
     pub(crate) fn inject_deposits(&mut self, queue: &DepositQueue, deposits: Vec<Deposit>) {
         let header = self.next_header();
+        self.seed_regular_deposit_policy_state(header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
         queue.enqueue(header, events, vec![]);
