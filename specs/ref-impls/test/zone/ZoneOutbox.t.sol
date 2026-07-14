@@ -436,6 +436,10 @@ contract ZoneOutboxTest is Test {
         assertEq(batch.withdrawalQueueHash, expectedHash);
         assertEq(batch.withdrawalBatchIndex, 1);
         assertEq(outbox.withdrawalBatchIndex(), batch.withdrawalBatchIndex);
+
+        // The proof system reads LastBatch directly from fixed storage slots.
+        assertEq(vm.load(address(outbox), bytes32(uint256(1))), expectedHash);
+        assertEq(uint256(vm.load(address(outbox), bytes32(uint256(2)))), 1);
     }
 
     function test_finalizeWithdrawalBatch_writesLastFinalizedTimestamp() public {

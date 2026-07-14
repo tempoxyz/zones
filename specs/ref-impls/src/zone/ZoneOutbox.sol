@@ -67,12 +67,6 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
-    /// @notice Last nonce assigned to a user withdrawal fallback recipient
-    uint64 public lastFallbackNonce;
-
-    /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
-    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
-
     /// @notice Current withdrawal batch index (monotonically increasing)
     uint64 public withdrawalBatchIndex;
 
@@ -99,6 +93,12 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Timestamp of the latest withdrawal batch finalization.
     uint64 public lastFinalizedTimestamp;
+
+    /// @notice Last nonce assigned to a user withdrawal fallback recipient
+    uint64 public lastFallbackNonce;
+
+    /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
+    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
