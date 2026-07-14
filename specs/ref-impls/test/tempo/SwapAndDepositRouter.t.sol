@@ -93,6 +93,12 @@ contract MockZonePortalForRouter {
         return enabledTokens[_token];
     }
 
+    bool public revertOnDeposit;
+
+    function setRevertOnDeposit(bool _v) external {
+        revertOnDeposit = _v;
+    }
+
     function deposit(
         address _token,
         address to,
@@ -103,6 +109,7 @@ contract MockZonePortalForRouter {
         external
         returns (bytes32)
     {
+        if (revertOnDeposit) revert("MockZonePortal: deposit failed");
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastDepositRecipient = to;
         lastDepositBouncebackRecipient = bouncebackRecipient;
@@ -122,6 +129,7 @@ contract MockZonePortalForRouter {
         external
         returns (bytes32)
     {
+        if (revertOnDeposit) revert("MockZonePortal: deposit failed");
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastEncryptedAmount = amount;
         lastEncryptedKeyIndex = keyIndex;
@@ -330,6 +338,73 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         vm.prank(address(mockMessenger));
         vm.expectRevert(IStablecoinDEX.InsufficientOutput.selector);
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
+    }
+
+    // Target-portal deposit failure must revert the whole callback so the
+    // withdrawal bounces back to the source zone (plaintext path).
+    function test_plaintextDepositRevert_bounces() public {
+        mockPortal.setRevertOnDeposit(true);
+
+        bytes memory data = _buildPlaintextData(
+            address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("x"), 0
+        );
+
+        vm.prank(address(mockMessenger));
+        vm.expectRevert(bytes("MockZonePortal: deposit failed"));
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
+    }
+
+    // Same guarantee for the encrypted path.
+    function test_encryptedDepositRevert_bounces() public {
+        mockPortal.setRevertOnDeposit(true);
+
+        EncryptedDepositPayload memory payload = _defaultEncryptedPayload();
+        bytes memory data =
+            _buildEncryptedData(address(pathUSD), address(mockPortal), 0, payload, refundBurner, 0);
+
+        vm.prank(address(mockMessenger));
+        vm.expectRevert(bytes("MockZonePortal: deposit failed"));
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
+    }
+
+    // Same-token transfers perform no swap, so an impossibly high minAmountOut
+    // is ignored (documented invariant) and the full amount is deposited.
+    function test_sameToken_ignoresMinAmountOut() public {
+        bytes memory data = _buildPlaintextData(
+            address(pathUSD),
+            address(mockPortal),
+            alice,
+            refundBurner,
+            bytes32("hi"),
+            type(uint128).max
+        );
+
+        vm.prank(address(mockMessenger));
+        bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
+
+        assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
+        assertTrue(mockPortal.depositCalled());
+        assertEq(mockPortal.lastDepositAmount(), AMOUNT);
+    }
+
+    // Callback data too short to decode the leading isEncrypted bool must revert
+    // cleanly.
+    function test_malformedCallbackData_revertsCleanly() public {
+        bytes memory data = hex"00";
+
+        vm.prank(address(mockMessenger));
+        vm.expectRevert();
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
+    }
+
+    // Callback data that decodes isEncrypted=false but omits the rest of the
+    // plaintext tuple must also revert cleanly.
+    function test_truncatedCallbackData_revertsCleanly() public {
+        bytes memory data = abi.encode(false);
+
+        vm.prank(address(mockMessenger));
+        vm.expectRevert();
         router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
     }
 
