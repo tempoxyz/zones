@@ -354,6 +354,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Set the sequencer's encryption public key with proof of possession
     /// @dev Only callable by the sequencer. Appends to key history.
+    ///      No reentrancy guard is needed because this function makes no unrestricted external
+    ///      calls; its only external calls are to fixed cryptographic precompiles.
     ///      Requires a valid ECDSA signature over keccak256(abi.encode(address(this), x, yParity))
     ///      produced by the private key corresponding to (x, yParity). This prevents accidental
     ///      registration of keys the sequencer cannot decrypt with.
@@ -371,7 +373,6 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
-        nonReentrantWithdrawal
     {
         // Validate yParity
         if (!Secp256k1Lib.isCompressedYParity(yParity)) revert InvalidEphemeralPubkey();
@@ -700,6 +701,7 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
+        nonReentrantWithdrawal
     {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
