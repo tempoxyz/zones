@@ -271,13 +271,13 @@ impl PolicyCacheInner {
 
         match policy_type {
             PolicyType::WHITELIST => {
-                if !policy.policy_set.is_known(&user) {
+                if !policy.policy_set.is_known(&user, block_number) {
                     return None;
                 }
                 Some(policy.policy_set.contains(user, block_number))
             }
             PolicyType::BLACKLIST => {
-                if !policy.policy_set.is_known(&user) {
+                if !policy.policy_set.is_known(&user, block_number) {
                     return None;
                 }
                 Some(!policy.policy_set.contains(user, block_number))
@@ -323,13 +323,13 @@ impl PolicyCacheInner {
 
         match policy_type {
             PolicyType::WHITELIST => {
-                if !policy.policy_set.is_known(&user) {
+                if !policy.policy_set.is_known(&user, block_number) {
                     return None;
                 }
                 Some(policy.policy_set.contains(user, block_number))
             }
             PolicyType::BLACKLIST => {
-                if !policy.policy_set.is_known(&user) {
+                if !policy.policy_set.is_known(&user, block_number) {
                     return None;
                 }
                 Some(!policy.policy_set.contains(user, block_number))
@@ -522,7 +522,7 @@ mod tests {
 
         // Stale writes must not mark unknown users as observed either.
         set.record_status(USER_B, 15, false);
-        assert!(!set.is_known(&USER_B));
+        assert!(!set.is_known(&USER_B, 25));
 
         set.record_status(USER_A, 21, false);
         assert!(!set.contains(USER_A, 21));
@@ -533,15 +533,15 @@ mod tests {
         let mut set = PolicySet::default();
 
         set.record_status(USER_A, 0, false);
-        assert!(!set.is_known(&USER_A));
+        assert!(!set.is_known(&USER_A, 5));
         assert!(!set.contains(USER_A, 0));
 
         set.record_status(USER_B, 0, true);
-        assert!(!set.is_known(&USER_B));
+        assert!(!set.is_known(&USER_B, 5));
         assert!(!set.contains(USER_B, 0));
 
         set.record_status(USER_B, 1, true);
-        assert!(set.is_known(&USER_B));
+        assert!(set.is_known(&USER_B, 1));
         assert!(set.contains(USER_B, 1));
     }
 
@@ -1212,22 +1212,46 @@ mod tests {
         let mut set = PolicySet::default();
 
         // Fresh set: nobody known
-        assert!(!set.is_known(&USER_A));
-        assert!(!set.is_known(&USER_B));
+        assert!(!set.is_known(&USER_A, 10));
+        assert!(!set.is_known(&USER_B, 10));
 
         // Add USER_A
         set.record_status(USER_A, 10, true);
-        assert!(set.is_known(&USER_A));
-        assert!(!set.is_known(&USER_B));
+        assert!(set.is_known(&USER_A, 10));
+        assert!(!set.is_known(&USER_B, 10));
+
+        // A query before USER_A's first observed event is not authoritative.
+        assert!(!set.is_known(&USER_A, 9));
 
         // Advance past the event
         set.advance(20);
-        assert!(set.is_known(&USER_A), "observed must survive advance");
-        assert!(!set.is_known(&USER_B));
+        assert!(
+            set.is_known(&USER_A, 20),
+            "first_seen must survive advance"
+        );
+        assert!(!set.is_known(&USER_B, 20));
 
         // Clear resets everything
         set.clear();
-        assert!(!set.is_known(&USER_A));
+        assert!(!set.is_known(&USER_A, 10));
+    }
+
+    #[test]
+    fn policy_set_future_delta_does_not_authorize_earlier_query() {
+        // Regression: the subscriber runs ahead of the engine, so the set can hold a
+        // user's future delta while the engine queries an earlier block. The only event
+        // we have for USER_A is a removal at block 150; that tells us nothing about the
+        // user's membership at block 120, so an earlier query must be reported as unknown
+        // (forcing RPC fallback) rather than authoritatively "absent".
+        let mut set = PolicySet::default();
+        set.record_status(USER_A, 150, false);
+
+        assert!(
+            !set.is_known(&USER_A, 120),
+            "a future delta must not make an earlier block authoritative"
+        );
+        assert!(set.is_known(&USER_A, 150));
+        assert!(set.is_known(&USER_A, 200));
     }
 
     #[test]
