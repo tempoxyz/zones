@@ -13246,7 +13246,6 @@ dependencies = [
  "alloy-evm",
  "alloy-primitives",
  "alloy-provider",
- "alloy-sol-types",
  "eyre",
  "reth-evm",
  "reth-primitives-traits",
@@ -13259,9 +13258,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-primitives",
  "tempo-revm",
- "tempo-zone-contracts",
  "tokio",
- "tracing",
  "zone-l1",
  "zone-precompiles",
 ]

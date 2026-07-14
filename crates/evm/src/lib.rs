@@ -9,12 +9,10 @@
 
 mod executor;
 pub mod precompiles;
-mod tx_context;
 
 use crate::{
     executor::ZoneBlockExecutor,
     precompiles::{SequencerExt, extend_zone_precompiles},
-    tx_context::ZoneTxContext,
 };
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
@@ -43,7 +41,6 @@ use tempo_precompiles::{storage::actions::StorageActions, storage_credits::NonCr
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
-use tempo_zone_contracts::ZONE_TX_CONTEXT_ADDRESS;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -76,7 +73,6 @@ impl ZoneEvmFactory {
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
-        precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         evm
     }
 }

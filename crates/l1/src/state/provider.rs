@@ -342,6 +342,10 @@ impl L1StateProvider {
 }
 
 impl L1StorageReader for L1StateProvider {
+    fn portal_address(&self) -> Address {
+        self.portal_address
+    }
+
     fn read_l1_storage(
         &self,
         account: Address,

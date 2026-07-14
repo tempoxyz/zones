@@ -3,6 +3,20 @@
 pub use IZoneOutbox::{LastBatch, PendingWithdrawal, StaticCallNotAllowed};
 
 crate::sol! {
+    /// Legacy seven-argument withdrawal interface. The current overload adds `revealTo`.
+    #[derive(Debug)]
+    interface ILegacyZoneOutbox {
+        function requestWithdrawal(
+            address token,
+            address to,
+            uint128 amount,
+            bytes32 memo,
+            uint64 gasLimit,
+            address fallbackRecipient,
+            bytes calldata data
+        ) external;
+    }
+
     #[derive(Debug)]
     contract IZoneOutbox {
 

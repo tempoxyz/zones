@@ -268,6 +268,10 @@ impl MockL1Reader {
 }
 
 impl L1StorageReader for MockL1Reader {
+    fn portal_address(&self) -> Address {
+        Address::repeat_byte(0x77)
+    }
+
     fn read_l1_storage(
         &self,
         account: Address,

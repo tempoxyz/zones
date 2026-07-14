@@ -42,6 +42,7 @@ pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
 pub mod tip403_proxy;
+pub mod tx_context;
 pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
@@ -70,7 +71,8 @@ use tempo_precompiles::{
     tip20::{TIP20Token, is_tip20_prefix},
     tip403_registry::TIP403Registry,
 };
-use zone_primitives::constants::TEMPO_STATE_ADDRESS;
+use tempo_zone_contracts::ZONE_TX_CONTEXT_ADDRESS;
+use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 /// Register zone-native and currently supported Tempo precompiles.
 ///
@@ -105,6 +107,19 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
     });
     precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
         Some(ZoneTokenFactory::create(cfg))
+    });
+    let outbox_env = l1_env.clone();
+    let portal = l1_reader.portal_address();
+    precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, move |_| {
+        Some(execution::create_l1_backed_precompile(
+            "ZoneOutbox",
+            outbox_env.clone(),
+            outbox::ZoneOutboxRules::new(portal),
+            |data, caller| ZoneOutbox::new().call(data, caller),
+        ))
+    });
+    precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| {
+        Some(tx_context::create_precompile())
     });
 
     let tip403_env = l1_env.clone();

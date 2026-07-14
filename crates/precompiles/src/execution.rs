@@ -88,6 +88,8 @@ pub(crate) struct ZoneCall<'a> {
     pub(crate) caller: Address,
     /// Whether target and bytecode addresses match.
     pub(crate) is_direct: bool,
+    /// Whether the EVM call is static.
+    pub(crate) is_static: bool,
 }
 
 impl<'a> ZoneCall<'a> {
@@ -96,6 +98,7 @@ impl<'a> ZoneCall<'a> {
             data: input.data,
             caller: input.caller,
             is_direct: input.is_direct_call(),
+            is_static: input.is_static,
         }
     }
 
@@ -122,6 +125,12 @@ pub(crate) trait CallRules: 'static {
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
         None
+    }
+
+    /// Whether this selector requires the finalized-L1 overlay. Calls returning `false` execute
+    /// immediately against local state after the local admission phase.
+    fn requires_l1(&self, _selector: Option<[u8; 4]>) -> bool {
+        true
     }
 
     /// Runs checks that only depend on ordinary zone-local state. Evaluated before any L1 access.
@@ -259,6 +268,11 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
                 let result = StorageCtx::enter(&mut inner, || add_input_cost(call.data, result));
                 return apply_fixed_gas(result, fixed_gas);
             }
+        }
+
+        if !rules.requires_l1(call.selector()) {
+            let exec_result = StorageCtx::enter(&mut inner, || execute(call.data, call.caller));
+            return apply_fixed_gas(exec_result, fixed_gas);
         }
 
         let l1_block_number = match read_l1_anchor(&mut inner) {

@@ -41,6 +41,9 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 /// L1 storage access needed by zone precompile storage overlays and `TempoState` reads.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
+    /// Zone portal account whose configuration is mirrored from Tempo L1.
+    fn portal_address(&self) -> Address;
+
     /// Read `account[slot]` at `block_number` on Tempo L1.
     fn read_l1_storage(
         &self,
@@ -134,7 +137,7 @@ impl<P: L1StorageReader> PrecompileStorageProvider for ZonePrecompileStorageProv
         // Run the local SLOAD first to preserve EVM warm/cold state, gas charging, and storage-action
         // recording; mirrored L1 state overrides only the value observed by TIP-20/TIP-403 logic.
         let local = self.inner.sload(address, key)?;
-        if address == TIP403_REGISTRY_ADDRESS {
+        if address == TIP403_REGISTRY_ADDRESS || address == self.l1.portal_address() {
             return self.read_l1_slot(address, key);
         }
         if is_tip20_policy_id_slot(address, key) {
@@ -150,6 +153,7 @@ impl<P: L1StorageReader> PrecompileStorageProvider for ZonePrecompileStorageProv
 
     fn sstore(&mut self, address: Address, key: U256, value: U256) -> Result<()> {
         if address == TIP403_REGISTRY_ADDRESS
+            || address == self.l1.portal_address()
             || is_tip20_policy_id_slot(address, key)
                 && value != merge_transfer_policy_id(value, self.read_l1_slot(address, key)?)
         {
