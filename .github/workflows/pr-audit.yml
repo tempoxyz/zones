@@ -43,7 +43,7 @@ jobs:
     permissions:
       contents: read
       issues: write
-      pull-requests: read
+      pull-requests: write
     steps:
       - uses: tempoxyz/gh-actions/actions/pr-audit-comment@a3be1f9b7f217e4b7a241e124cf85e6c338f18c9
         with:
