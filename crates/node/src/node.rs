@@ -521,6 +521,7 @@ where
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
             mut stopped,
+            thread,
             commands: _commands,
             events: _events,
         } = handle.into_parts();
@@ -544,6 +545,16 @@ where
                             Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed"),
                             Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed unexpectedly"),
                         }
+                    }
+                }
+
+                match tokio::task::spawn_blocking(move || thread.join()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        tracing::error!(target: "reth::cli", "P2P runtime thread panicked")
+                    }
+                    Err(err) => {
+                        tracing::error!(target: "reth::cli", %err, "Failed joining P2P runtime thread")
                     }
                 }
             },
