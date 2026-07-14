@@ -401,7 +401,10 @@ mod tests {
         )?;
 
         assert!(output.is_revert());
-        assert_eq!(output.gas_used, 0);
+        assert_eq!(
+            output.gas_used,
+            tempo_precompiles::input_cost(calldata.len())
+        );
 
         Ok(())
     }

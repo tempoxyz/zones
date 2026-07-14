@@ -11,12 +11,12 @@
 //!
 //! # Call ordering
 //!
-//! 1. Reject disallowed delegate calls before constructing storage or reading the L1 anchor.
+//! 1. L1-backed execution rejects delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
 //! 3. Install the appropriate storage provider. L1-backed calls read their anchor once and fail
 //!    closed if the anchor, hardfork, or overlay cannot be resolved.
-//! 4. Apply [`CallRules`]. Admitted calls receive the original calldata and caller; rejected calls
-//!    are returned without invoking the supplied implementation.
+//! 4. Apply [`CallRules`], including any local direct-call rule. Admitted calls receive the original
+//!    calldata and caller; rejected calls are returned without invoking the implementation.
 //! 5. Apply the configured fixed gas charge to successful precompile results.
 //!
 //! Rule-level rejections include calldata input gas. Calls without a fixed charge retain normal
@@ -71,30 +71,55 @@ impl<P> L1BackedPrecompileEnv<P> {
     }
 }
 
-/// Selector- and caller-dependent admission rules applied inside a [`StorageCtx`].
+/// Call metadata, independent of EVM internals, for [`CallRules`] running in a [`StorageCtx`].
+/// Provider-free precompiles can inspect `PrecompileInput` directly.
 ///
-/// Returning `Some(result)` from [`Self::check_call`] rejects the call without invoking the
-/// forwarded implementation. The helper adds calldata input gas before returning that result.
-pub(crate) trait CallRules: 'static {
-    /// Whether delegate calls must be rejected before storage setup.
-    fn direct_call_only(&self) -> bool {
-        false
-    }
+/// **MOTIVATION:** Execution helpers move `PrecompileInput::internals` into the
+/// [`EvmPrecompileStorageProvider`] before calling [`CallRules::check_call`]. The full input
+/// cannot be borrowed after that partial move, so [`ZoneCall`] carries only the metadata
+/// needed by [`CallRules`].
+#[derive(Debug, Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "consumed by call rules in the stacked policy cutover"
+)]
+pub(crate) struct ZoneCall<'a> {
+    /// Input calldata.
+    pub(crate) data: &'a [u8],
+    /// Decoded 4-byte selector, when calldata is long enough.
+    pub(crate) selector: Option<[u8; 4]>,
+    /// EVM caller.
+    pub(crate) caller: Address,
+    /// Whether target and bytecode addresses match.
+    pub(crate) is_direct: bool,
+}
 
+/// Result of applying zone-specific pre-execution rules.
+pub(crate) enum CallCheck {
+    /// Allow the call and invoke the supplied precompile implementation.
+    ///
+    /// For L1-backed precompiles, this forwards to upstream Tempo with the zone's finalized L1
+    /// storage overlay active.
+    Continue,
+    /// Reject the call without invoking the supplied implementation.
+    ///
+    /// The execution helper charges calldata input gas before returning the result.
+    Return(PrecompileResult),
+}
+
+/// Selector- and caller-dependent pre-execution rules for a storage-backed precompile.
+///
+/// Checks receive [`ZoneCall`] because they run inside [`StorageCtx`], after the input's EVM
+/// internals have moved into the storage provider.
+pub(crate) trait CallRules: 'static {
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
         None
     }
 
-    /// Return a rejection result, or `None` to forward the original call.
-    fn check_call(
-        &self,
-        _data: &[u8],
-        _selector: Option<[u8; 4]>,
-        _caller: Address,
-        _is_direct: bool,
-    ) -> Option<PrecompileResult> {
-        None
+    /// Decide whether execution may proceed to the forwarded implementation.
+    fn check_call(&self, _call: ZoneCall<'_>) -> CallCheck {
+        CallCheck::Continue
     }
 }
 
@@ -105,8 +130,13 @@ impl CallRules for NoCallRules {}
 /// Rules for precompiles whose semantics require execution at their registered address.
 pub(crate) struct DirectCallOnly;
 impl CallRules for DirectCallOnly {
-    fn direct_call_only(&self) -> bool {
-        true
+    fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+        if call.is_direct {
+            CallCheck::Continue
+        } else {
+            CallCheck::Return(Ok(StorageCtx::default()
+                .revert_output(SolError::abi_encode(&DelegateCallNotAllowed {}).into())))
+        }
     }
 }
 
@@ -129,10 +159,6 @@ where
     let gas_params = cfg.gas_params.clone();
 
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
-        if rules.direct_call_only() && !input.is_direct_call() {
-            return delegate_call_not_allowed(input.reservoir);
-        }
-
         let selector = selector_from_calldata(input.data);
         let fixed_gas = rules.fixed_gas(selector);
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
@@ -154,9 +180,15 @@ where
         );
 
         StorageCtx::enter(&mut storage, || {
-            let result = match rules.check_call(input.data, selector, input.caller, is_direct) {
-                Some(result) => add_input_cost(input.data, result),
-                None => execute(input.data, input.caller),
+            let call = ZoneCall {
+                data: input.data,
+                selector,
+                caller: input.caller,
+                is_direct,
+            };
+            let result = match rules.check_call(call) {
+                CallCheck::Continue => execute(input.data, input.caller),
+                CallCheck::Return(result) => add_input_cost(input.data, result),
             };
             apply_fixed_gas(result, fixed_gas)
         })
@@ -232,9 +264,15 @@ where
             };
 
         StorageCtx::enter(&mut storage, || {
-            let result = match rules.check_call(input.data, selector, input.caller, true) {
-                Some(result) => add_input_cost(input.data, result),
-                None => execute(input.data, input.caller),
+            let call = ZoneCall {
+                data: input.data,
+                selector,
+                caller: input.caller,
+                is_direct: true,
+            };
+            let result = match rules.check_call(call) {
+                CallCheck::Continue => execute(input.data, input.caller),
+                CallCheck::Return(result) => add_input_cost(input.data, result),
             };
             apply_fixed_gas(result, fixed_gas)
         })
@@ -299,15 +337,13 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn check_call(
-            &self,
-            data: &[u8],
-            selector: Option<[u8; 4]>,
-            caller: Address,
-            _is_direct: bool,
-        ) -> Option<PrecompileResult> {
-            *self.0.borrow_mut() = Some((Bytes::copy_from_slice(data), selector, caller));
-            None
+        fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+            *self.0.borrow_mut() = Some((
+                Bytes::copy_from_slice(call.data),
+                call.selector,
+                call.caller,
+            ));
+            CallCheck::Continue
         }
     }
 
@@ -410,15 +446,9 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn check_call(
-            &self,
-            _data: &[u8],
-            _selector: Option<[u8; 4]>,
-            _caller: Address,
-            _is_direct: bool,
-        ) -> Option<PrecompileResult> {
+        fn check_call(&self, _call: ZoneCall<'_>) -> CallCheck {
             self.0.set(true);
-            Some(Ok(
+            CallCheck::Return(Ok(
                 StorageCtx::default().revert_output(Bytes::from_static(b"denied"))
             ))
         }
