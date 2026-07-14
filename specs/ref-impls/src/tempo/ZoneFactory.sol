@@ -74,7 +74,7 @@ contract ZoneFactory is IZoneFactory {
 
         // Deploy and atomically initialize the portal. The portal binds this factory as its only
         // initializer authority when it is created.
-        ZonePortal portalContract = new ZonePortal();
+        ZonePortal portalContract = new ZonePortal(address(this));
         portalContract.initialize(
             zoneId,
             params.initialToken,

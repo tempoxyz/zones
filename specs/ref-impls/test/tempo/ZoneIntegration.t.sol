@@ -115,7 +115,7 @@ contract ZoneIntegrationTest is BaseTest {
         MockZoneFactoryForIntegrationMessenger messengerFactory =
             new MockZoneFactoryForIntegrationMessenger();
         ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
-        l1Portal = new ZonePortal();
+        l1Portal = new ZonePortal(address(this));
         l1Portal.initialize(
             1,
             address(l2ZoneToken),

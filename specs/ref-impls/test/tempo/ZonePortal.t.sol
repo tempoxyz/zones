@@ -184,6 +184,7 @@ contract ReentrantWithdrawalReceiver is IWithdrawalReceiver {
 }
 
 contract ZonePortalProxyStorageTest is Test {
+
     function test_proxyMetadataIsReadFromPortalStorage() public {
         address initialToken = makeAddr("initial token");
         vm.mockCall(
@@ -196,14 +197,14 @@ contract ZonePortalProxyStorageTest is Test {
             initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
         );
 
-        ZonePortal implementation = new ZonePortal();
+        address authorizedFactory = makeAddr("authorized factory");
+        ZonePortal implementation = new ZonePortal(authorizedFactory);
+        assertNotEq(address(this), authorizedFactory, "logic deployer must differ from factory");
 
         address proxyA = makeAddr("portal proxy A");
         address proxyB = makeAddr("portal proxy B");
         bytes memory runtime = abi.encodePacked(
-            hex"363d3d373d3d3d363d73",
-            address(implementation),
-            hex"5af43d82803e903d91602b57fd5bf3"
+            hex"363d3d373d3d3d363d73", address(implementation), hex"5af43d82803e903d91602b57fd5bf3"
         );
         vm.etch(proxyA, runtime);
         vm.etch(proxyB, runtime);
@@ -214,23 +215,26 @@ contract ZonePortalProxyStorageTest is Test {
         address verifierB = makeAddr("verifier B");
         vm.prank(makeAddr("not factory"));
         vm.expectRevert(IZonePortal.NotFactory.selector);
-        ZonePortal(proxyA).initialize(
-            1,
-            initialToken,
-            messengerA,
-            makeAddr("admin A"),
-            makeAddr("sequencer A"),
-            verifierA,
-            keccak256("genesis A"),
-            100,
-            ""
-        );
+        ZonePortal(proxyA)
+            .initialize(
+                1,
+                initialToken,
+                messengerA,
+                makeAddr("admin A"),
+                makeAddr("sequencer A"),
+                verifierA,
+                keccak256("genesis A"),
+                100,
+                ""
+            );
 
+        vm.startPrank(authorizedFactory);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
         _initializePortal(proxyB, initialToken, 2, messengerB, verifierB, 200);
 
         vm.expectRevert(IZonePortal.AlreadyInitialized.selector);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
+        vm.stopPrank();
 
         assertEq(ZonePortal(proxyA).zoneId(), 1);
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
@@ -250,19 +254,23 @@ contract ZonePortalProxyStorageTest is Test {
         address portalMessenger,
         address portalVerifier,
         uint64 genesisBlockNumber
-    ) internal {
-        ZonePortal(target).initialize(
-            id,
-            initialToken,
-            portalMessenger,
-            makeAddr(string.concat("admin ", vm.toString(id))),
-            makeAddr(string.concat("sequencer ", vm.toString(id))),
-            portalVerifier,
-            keccak256(abi.encode("genesis", id)),
-            genesisBlockNumber,
-            ""
-        );
+    )
+        internal
+    {
+        ZonePortal(target)
+            .initialize(
+                id,
+                initialToken,
+                portalMessenger,
+                makeAddr(string.concat("admin ", vm.toString(id))),
+                makeAddr(string.concat("sequencer ", vm.toString(id))),
+                portalVerifier,
+                keccak256(abi.encode("genesis", id)),
+                genesisBlockNumber,
+                ""
+            );
     }
+
 }
 
 /// @notice Tests for ZonePortal - simulating L1/zone interface
@@ -3096,9 +3104,7 @@ contract ZonePortalTest is BaseTest {
 
         // --- Slot 18: verifier (address) + genesisTempoBlockNumber (uint64) packed ---
         bytes32 slot18 = vm.load(address(portal), bytes32(uint256(18)));
-        assertEq(
-            address(uint160(uint256(slot18))), portal.verifier(), "slot 18: verifier mismatch"
-        );
+        assertEq(address(uint160(uint256(slot18))), portal.verifier(), "slot 18: verifier mismatch");
         assertEq(
             uint64(uint256(slot18) >> 160),
             portal.genesisTempoBlockNumber(),
