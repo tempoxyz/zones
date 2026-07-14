@@ -73,7 +73,7 @@ impl<P> L1BackedPrecompileEnv<P> {
 /// Provider-free precompiles can inspect `PrecompileInput` directly.
 ///
 /// **MOTIVATION:** Execution helpers move `PrecompileInput::internals` into the
-/// [`EvmPrecompileStorageProvider`] before calling [`CallRules::check_call`]. The full input
+/// [`EvmPrecompileStorageProvider`] before calling [`CallRules`]'s checks. The full input
 /// cannot be borrowed after that partial move, so [`ZoneCall`] carries only the metadata
 /// needed by [`CallRules`].
 #[derive(Debug, Clone, Copy)]
@@ -118,18 +118,19 @@ pub(crate) enum CallCheck {
 }
 
 /// Selector- and caller-dependent pre-execution rules for a storage-backed precompile.
-///
-/// Checks receive [`ZoneCall`] because they run inside a local [`StorageCtx`], after the input's EVM
-/// internals have moved into the storage provider. They run before any anchored L1 provider is
-/// constructed and therefore must not depend on the L1 storage overlay.
 pub(crate) trait CallRules: 'static {
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
         None
     }
 
-    /// Decide whether execution may proceed to the forwarded implementation.
-    fn check_call(&self, _call: ZoneCall<'_>) -> CallCheck {
+    /// Runs checks that only depend on ordinary zone-local state. Evaluated before any L1 access.
+    fn check_with_local_state(&self, _call: ZoneCall<'_>) -> CallCheck {
+        CallCheck::Continue
+    }
+
+    /// Runs checks that depend on the finalized Tempo L1-backed state overlay.
+    fn check_with_l1_backed_state(&self, _call: ZoneCall<'_>) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -141,7 +142,7 @@ impl CallRules for NoCallRules {}
 /// Rules for precompiles whose semantics require execution at their registered address.
 pub(crate) struct DirectCallOnly;
 impl CallRules for DirectCallOnly {
-    fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+    fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
         if call.is_direct {
             CallCheck::Continue
         } else {
@@ -186,7 +187,7 @@ pub(crate) fn create_local_precompile(
         );
 
         if let Some(check_result) =
-            StorageCtx::enter(&mut storage, || match rules.check_call(call) {
+            StorageCtx::enter(&mut storage, || match rules.check_with_local_state(call) {
                 CallCheck::Continue => None,
                 CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
             })
@@ -252,11 +253,12 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
         .with_actions(actions.clone())
         .with_non_creditable_slots(non_creditable_slots.clone());
 
-        if let Some(check_result) = StorageCtx::enter(&mut inner, || match rules.check_call(call) {
-            CallCheck::Continue => None,
-            CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
-        }) {
-            return apply_fixed_gas(check_result, fixed_gas);
+        match StorageCtx::enter(&mut inner, || rules.check_with_local_state(call)) {
+            CallCheck::Continue => {}
+            CallCheck::Return(result) => {
+                let result = StorageCtx::enter(&mut inner, || add_input_cost(call.data, result));
+                return apply_fixed_gas(result, fixed_gas);
+            }
         }
 
         let l1_block_number = match read_l1_anchor(&mut inner) {
@@ -271,6 +273,15 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
                 Ok(storage) => storage,
                 Err(err) => return err.into_precompile_result(gas_used, reservoir),
             };
+
+        if let Some(check_result) = StorageCtx::enter(&mut storage, || {
+            match rules.check_with_l1_backed_state(call) {
+                CallCheck::Continue => None,
+                CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
+            }
+        }) {
+            return apply_fixed_gas(check_result, fixed_gas);
+        }
 
         let exec_result = StorageCtx::enter(&mut storage, || execute(call.data, call.caller));
         apply_fixed_gas(exec_result, fixed_gas)
@@ -324,7 +335,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+        fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(call.data),
                 call.selector(),
@@ -449,7 +460,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn check_call(&self, _call: ZoneCall<'_>) -> CallCheck {
+        fn check_with_local_state(&self, _call: ZoneCall<'_>) -> CallCheck {
             self.0.set(true);
             CallCheck::Return(Ok(
                 StorageCtx::default().revert_output(Bytes::from_static(b"denied"))

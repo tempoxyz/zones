@@ -34,7 +34,7 @@ alloy_sol_types::sol! {
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+    fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
         if call
             .selector()
             .is_some_and(|selector| TIP403_MUTATING_SELECTORS.contains(&selector))

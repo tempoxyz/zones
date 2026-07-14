@@ -75,7 +75,7 @@ impl CallRules for TIP20Rules {
     }
 
     /// Apply zone privacy and bridge-path checks before upstream execution.
-    fn check_call(&self, call: ZoneCall<'_>) -> CallCheck {
+    fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
         let Some(selector) = call.selector() else {
             return CallCheck::Continue;
         };
