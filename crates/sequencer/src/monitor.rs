@@ -205,7 +205,9 @@ impl ZoneMonitor {
             .wrap_err("failed to read portal block hash during zone monitor startup")?;
 
         let last_submitted_zone_block =
-            Self::resolve_zone_block_number(&provider, prev_zone_block_hash).await;
+            Self::resolve_zone_block_number(&provider, prev_zone_block_hash)
+                .await
+                .wrap_err("failed to resolve zone block number during zone monitor startup")?;
         let prev_processed_deposit_hash = Self::read_processed_deposit_hash_at_block(
             &inbox,
             last_submitted_zone_block,
@@ -720,7 +722,17 @@ impl ZoneMonitor {
         match self.batch_submitter.read_portal_block_hash().await {
             Ok(portal_hash) => {
                 let last_submitted_zone_block =
-                    Self::resolve_zone_block_number(&self.provider, portal_hash).await;
+                    match Self::resolve_zone_block_number(&self.provider, portal_hash).await {
+                        Ok(number) => number,
+                        Err(e) => {
+                            error!(
+                                error = %e,
+                                "Failed to resolve zone block number during resync; \
+                                 keeping prior submission anchor"
+                            );
+                            return;
+                        }
+                    };
                 let deposit_hash = Self::read_processed_deposit_hash_at_block(
                     &self.inbox,
                     last_submitted_zone_block,
@@ -778,32 +790,34 @@ impl ZoneMonitor {
         }
     }
 
+    /// Resolve the zone L2 block number for a portal `blockHash`.
+    ///
+    /// Returns `Ok(0)` only for a genuine reset — a zero hash, or a hash the zone
+    /// node does not have (`Ok(None)`), which means the zone was reset to genesis. A
+    /// transient RPC failure (`Err`) is propagated rather than collapsed into `0`:
+    /// resetting the submission anchor to genesis on a one-off RPC hiccup would make
+    /// the next batch mismatch the portal's batch index and wedge settlement.
     async fn resolve_zone_block_number(
         provider: &DynProvider<TempoNetwork>,
         zone_block_hash: B256,
-    ) -> u64 {
+    ) -> eyre::Result<u64> {
         if zone_block_hash.is_zero() {
-            return 0;
+            return Ok(0);
         }
 
         match provider.get_block_by_hash(zone_block_hash).await {
-            Ok(Some(block)) => block.number(),
+            Ok(Some(block)) => Ok(block.number()),
             Ok(None) => {
                 warn!(
                     %zone_block_hash,
                     "Portal blockHash not found on zone L2 — zone may have been reset. \
                      Starting from genesis."
                 );
-                0
+                Ok(0)
             }
-            Err(e) => {
-                warn!(
-                    %zone_block_hash,
-                    error = %e,
-                    "Failed to look up zone block by hash, starting from genesis"
-                );
-                0
-            }
+            Err(e) => Err(eyre::eyre!(
+                "failed to look up zone block {zone_block_hash} by hash: {e}"
+            )),
         }
     }
 
