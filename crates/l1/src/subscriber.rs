@@ -489,19 +489,29 @@ impl L1Subscriber {
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — update the L1 state anchor, apply events, and
-                    // flush to the queue.
+                    // Confirmed. Apply the tip's L1-state anchor and cache updates
+                    // only when the queue accepts it as contiguous. If a gap exists,
+                    // applying the tip first would jump the anchor past the gap, and
+                    // the subsequent gap backfill would then look like a reorg and
+                    // wipe the policy and L1-state caches (which happens on nearly
+                    // every startup, since L1 advances by ≥2 blocks during the
+                    // initial backfill). In the gap case, `backfill` applies the
+                    // whole range — anchor, events, and enqueue — in order.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
-                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
-                    self.apply_policy_events(tip_number, &tip_policy_events);
-                    self.apply_portal_state_events(tip_number, &tip_events);
+                    // `try_enqueue` consumes the events; keep copies for the
+                    // contiguous-path cache updates.
+                    let tip_policy_events_for_cache = tip_policy_events.clone();
+                    let tip_events_for_cache = tip_events.clone();
                     match self
                         .deposit_queue
                         .try_enqueue(tip_header, tip_events, tip_policy_events)
                     {
                         EnqueueOutcome::Accepted => {
+                            self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
+                            self.apply_policy_events(tip_number, &tip_policy_events_for_cache);
+                            self.apply_portal_state_events(tip_number, &tip_events_for_cache);
                             self.subscriber_metrics.blocks_enqueued.increment(1);
                         }
                         EnqueueOutcome::Duplicate => {}
