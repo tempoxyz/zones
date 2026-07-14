@@ -10,6 +10,7 @@ use alloy_network::TransactionBuilder;
 use alloy_primitives::{Address, Bytes, TxKind};
 use alloy_sol_types::SolCall;
 use tempo_alloy::rpc::TempoTransactionRequest;
+use tempo_contracts::precompiles::{ACCOUNT_KEYCHAIN_ADDRESS, account_keychain::IAccountKeychain};
 use tempo_primitives::TempoTxEnvelope;
 use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
@@ -19,7 +20,8 @@ use crate::{auth::AuthContext, types::JsonRpcError};
 /// Enforce all private RPC authorization rules for simulation-style requests.
 ///
 /// The sequencer check is lazy: it is awaited only for calls that try to read
-/// another account's `ZoneInbox.refunds(token, owner)` entry.
+/// another account's private state through a non-caller-scoped getter (currently
+/// `ZoneInbox.refunds(token, owner)` and the `AccountKeychain` view getters).
 pub async fn enforce_authorized<F>(
     request: &mut TempoTransactionRequest,
     auth: &AuthContext,
@@ -30,7 +32,7 @@ where
 {
     enforce_from(request, auth)?;
     enforce_contract_creation(request, auth.caller)?;
-    enforce_zone_inbox_refund_call_privacy(request, auth, is_sequencer).await
+    enforce_private_read_scoping(request, auth, is_sequencer).await
 }
 
 /// Enforce that `from` matches the authenticated caller.
@@ -83,7 +85,14 @@ fn enforce_contract_creation_with_allowlist(
     Ok(())
 }
 
-async fn enforce_zone_inbox_refund_call_privacy<F>(
+/// Reject `eth_call`/`eth_estimateGas` requests that read another account's private
+/// state through a getter that is not scoped by `msg.sender` on-chain, unless the
+/// authenticated caller is the sequencer (which is allowed full visibility).
+///
+/// Covers `ZoneInbox.refunds(token, owner)` and the `AccountKeychain` view getters.
+/// The sequencer future is awaited at most once, only when a cross-account read is
+/// actually detected.
+async fn enforce_private_read_scoping<F>(
     request: &TempoTransactionRequest,
     auth: &AuthContext,
     is_sequencer: F,
@@ -91,7 +100,10 @@ async fn enforce_zone_inbox_refund_call_privacy<F>(
 where
     F: Future<Output = Result<bool, JsonRpcError>>,
 {
-    if zone_inbox_refunds_mismatched_owner(request, auth.caller).is_none() {
+    let reads_other_account = zone_inbox_refunds_mismatched_owner(request, auth.caller).is_some()
+        || account_keychain_mismatched_account(request, auth.caller).is_some();
+
+    if !reads_other_account {
         return Ok(());
     }
 
@@ -100,6 +112,64 @@ where
     }
 
     Err(JsonRpcError::account_mismatch())
+}
+
+/// `AccountKeychain` view getters that take a queried `account` as their first
+/// argument and are **not** scoped by `msg.sender` on-chain. Reading any of these
+/// for an account other than the caller would expose that account's keys, spending
+/// limits, and allowed-call lists.
+const KEYCHAIN_ACCOUNT_SCOPED_SELECTORS: [[u8; 4]; 6] = [
+    IAccountKeychain::getKeyCall::SELECTOR,
+    IAccountKeychain::getRemainingLimitCall::SELECTOR,
+    IAccountKeychain::getRemainingLimitWithPeriodCall::SELECTOR,
+    IAccountKeychain::getAllowedCallsCall::SELECTOR,
+    IAccountKeychain::isKeyAuthorizationWitnessBurnedCall::SELECTOR,
+    IAccountKeychain::isAdminKeyCall::SELECTOR,
+];
+
+/// Finds a direct or nested `AccountKeychain` view read whose queried `account` is
+/// not the authenticated caller.
+///
+/// Every selector in [`KEYCHAIN_ACCOUNT_SCOPED_SELECTORS`] takes `address account`
+/// as its first ABI word, so the account is decoded from the low 20 bytes of that
+/// word. Other calls, contract creations, and malformed calldata are ignored here.
+fn account_keychain_mismatched_account(
+    request: &TempoTransactionRequest,
+    caller: Address,
+) -> Option<Address> {
+    let keychain_account_mismatch = |to: Option<Address>, input: Option<&Bytes>| {
+        if to != Some(ACCOUNT_KEYCHAIN_ADDRESS) {
+            return None;
+        }
+
+        let input = input?;
+        // selector (4 bytes) + one 32-byte ABI word for `account`.
+        if input.len() < 36 {
+            return None;
+        }
+        let selector: [u8; 4] = input[..4].try_into().ok()?;
+        if !KEYCHAIN_ACCOUNT_SCOPED_SELECTORS.contains(&selector) {
+            return None;
+        }
+
+        let account = Address::from_slice(&input[16..36]);
+        (account != caller).then_some(account)
+    };
+
+    if let Some(account) = keychain_account_mismatch(
+        TransactionBuilder::to(request),
+        TransactionBuilder::input(request),
+    ) {
+        return Some(account);
+    }
+
+    request.calls.iter().find_map(|call| {
+        let to = match call.to {
+            TxKind::Call(to) => Some(to),
+            TxKind::Create => None,
+        };
+        keychain_account_mismatch(to, Some(&call.input))
+    })
 }
 
 /// Finds a direct or nested `ZoneInbox.refunds(token, owner)` read where
@@ -163,12 +233,13 @@ mod tests {
     use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
     use alloy_sol_types::SolCall;
     use tempo_alloy::rpc::TempoTransactionRequest;
+    use tempo_contracts::precompiles::{ACCOUNT_KEYCHAIN_ADDRESS, account_keychain::IAccountKeychain};
     use tempo_primitives::transaction::Call;
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox};
 
     use super::{
-        enforce_contract_creation, enforce_contract_creation_with_allowlist,
-        zone_inbox_refunds_mismatched_owner,
+        account_keychain_mismatched_account, enforce_contract_creation,
+        enforce_contract_creation_with_allowlist, zone_inbox_refunds_mismatched_owner,
     };
 
     fn call_target(byte: u8) -> TxKind {
@@ -316,5 +387,74 @@ mod tests {
         request.inner.to = Some(TxKind::Call(Address::repeat_byte(0x33)));
 
         assert_eq!(zone_inbox_refunds_mismatched_owner(&request, caller), None);
+    }
+
+    fn account_keychain_get_key_request(account: Address) -> TempoTransactionRequest {
+        TempoTransactionRequest {
+            inner: TransactionRequest {
+                to: Some(TxKind::Call(ACCOUNT_KEYCHAIN_ADDRESS)),
+                input: TransactionInput::new(
+                    IAccountKeychain::getKeyCall {
+                        account,
+                        keyId: Address::repeat_byte(0x09),
+                    }
+                    .abi_encode()
+                    .into(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn account_keychain_detects_other_account_read() {
+        let caller = Address::repeat_byte(0x11);
+        let victim = Address::repeat_byte(0x22);
+        let request = account_keychain_get_key_request(victim);
+
+        assert_eq!(
+            account_keychain_mismatched_account(&request, caller),
+            Some(victim)
+        );
+    }
+
+    #[test]
+    fn account_keychain_allows_own_read() {
+        let caller = Address::repeat_byte(0x11);
+        let request = account_keychain_get_key_request(caller);
+
+        assert_eq!(account_keychain_mismatched_account(&request, caller), None);
+    }
+
+    #[test]
+    fn account_keychain_detects_nested_other_account_read() {
+        let caller = Address::repeat_byte(0x11);
+        let victim = Address::repeat_byte(0x22);
+        let mut request = call_request(Some(TxKind::Call(Address::repeat_byte(0x33))));
+        request.calls.push(Call {
+            to: TxKind::Call(ACCOUNT_KEYCHAIN_ADDRESS),
+            value: U256::ZERO,
+            input: IAccountKeychain::getKeyCall {
+                account: victim,
+                keyId: Address::repeat_byte(0x09),
+            }
+            .abi_encode()
+            .into(),
+        });
+
+        assert_eq!(
+            account_keychain_mismatched_account(&request, caller),
+            Some(victim)
+        );
+    }
+
+    #[test]
+    fn account_keychain_ignores_non_keychain_target() {
+        let caller = Address::repeat_byte(0x11);
+        let mut request = account_keychain_get_key_request(Address::repeat_byte(0x22));
+        request.inner.to = Some(TxKind::Call(Address::repeat_byte(0x33)));
+
+        assert_eq!(account_keychain_mismatched_account(&request, caller), None);
     }
 }
