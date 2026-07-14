@@ -12,6 +12,7 @@ members = [
   "crates/evm",
   "crates/l1",
   "crates/node",
+  "crates/p2p",
   "crates/payload",
   "crates/precompiles",
   "crates/primitives",
@@ -117,6 +118,7 @@ tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-evm = { path = "crates/evm" }
 zone-l1 = { path = "crates/l1" }
 zone-node = { path = "crates/node" }
+zone-p2p = { path = "crates/p2p" }
 zone-payload = { path = "crates/payload" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
@@ -182,6 +184,8 @@ commonware-codec = "=2026.4.0"
 commonware-consensus = "=2026.4.0"
 commonware-cryptography = "=2026.4.0"
 commonware-math = "=2026.4.0"
+commonware-p2p = "=2026.4.0"
+commonware-runtime = "=2026.4.0"
 commonware-utils = "=2026.4.0"
 
 # misc
@@ -210,6 +214,8 @@ serde = { version = "1.0.219", default-features = false, features = [
 serde_json = "1.0.142"
 thiserror = "2"
 tokio = { version = "1.45.1", features = ["full"] }
+tokio-util = "0.7.18"
+toml = "0.9.12"
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = [
   "json",
@@ -217,3 +223,19 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 tokio-tungstenite = "0.28"
 tracing = "0.1.41"
+
+[patch.crates-io]
+
+# Keep the Commonware stack aligned with Tempo's consensus implementation.
+commonware-broadcast = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-macros = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-parallel = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
+commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "2a7dd423f0a241276a5a38db8cc3d05f11de0c03" }
