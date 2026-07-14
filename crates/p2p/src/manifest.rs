@@ -1,0 +1,472 @@
+use std::{
+    collections::BTreeSet,
+    fmt,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::Path,
+};
+
+use commonware_codec::DecodeExt as _;
+use commonware_cryptography::ed25519::PublicKey;
+use commonware_p2p::{Address, Ingress};
+use commonware_utils::Hostname;
+use serde::Deserialize;
+
+/// The role assigned to a node by the manifest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Builds blocks and runs the existing sequencer settlement tasks.
+    Leader,
+    /// Runs without block production, follows `Leader`s blocks
+    Follower,
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Leader => f.write_str("leader"),
+            Self::Follower => f.write_str("follower"),
+        }
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "leader" => Ok(Self::Leader),
+            "follower" => Ok(Self::Follower),
+            _ => Err(format!("expected `leader` or `follower`, got `{value}`")),
+        }
+    }
+}
+
+/// A validated P2P address from the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ManifestAddress {
+    /// A literal IP address and port.
+    Socket(SocketAddr),
+    /// A DNS hostname and port.
+    Dns { host: Hostname, port: u16 },
+}
+
+impl ManifestAddress {
+    pub(crate) fn to_commonware(&self) -> Address {
+        match self {
+            Self::Socket(address) => Address::Symmetric(*address),
+            Self::Dns { host, port } => Address::Asymmetric {
+                ingress: Ingress::Dns {
+                    host: host.clone(),
+                    port: *port,
+                },
+                // DNS-only manifests cannot know a pod's egress IP ahead of time.
+                // The network enables authenticated-key-only ingress filtering when
+                // DNS addresses are present, so this placeholder is never consulted.
+                egress: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0),
+            },
+        }
+    }
+
+    pub(crate) const fn is_dns(&self) -> bool {
+        matches!(self, Self::Dns { .. })
+    }
+}
+
+impl fmt::Display for ManifestAddress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Socket(address) => address.fmt(f),
+            Self::Dns { host, port } => write!(f, "{host}:{port}"),
+        }
+    }
+}
+
+impl std::str::FromStr for ManifestAddress {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if let Ok(address) = value.parse::<SocketAddr>() {
+            if address.port() == 0 {
+                return Err("port must be non-zero".to_owned());
+            }
+            return Ok(Self::Socket(address));
+        }
+
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| "expected `host:port`".to_owned())?;
+        if host.is_empty() || host.contains(':') {
+            return Err("expected a DNS hostname or bracketed IP followed by a port".to_owned());
+        }
+        let host = Hostname::new(host).map_err(|err| format!("invalid DNS hostname: {err}"))?;
+        let port = port
+            .parse::<u16>()
+            .map_err(|err| format!("invalid port: {err}"))?;
+        if port == 0 {
+            return Err("port must be non-zero".to_owned());
+        }
+        Ok(Self::Dns { host, port })
+    }
+}
+
+/// One node in a zone's static multi-sequencer topology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestNode {
+    name: String,
+    ed25519_public_key: PublicKey,
+    // TODO: Add `secp256k1_address`, from this
+    // node's individual L1/attestation key. It is distinct from the Commonware
+    // Ed25519 identity above and will be used for the on-chain quorum.
+    address: ManifestAddress,
+}
+
+impl ManifestNode {
+    /// Human-readable node name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Node's Ed25519 public key used to authenticate Commonware traffic.
+    pub const fn ed25519_public_key(&self) -> &PublicKey {
+        &self.ed25519_public_key
+    }
+
+    /// Node's advertised P2P address.
+    pub const fn address(&self) -> &ManifestAddress {
+        &self.address
+    }
+}
+
+/// A parsed and intrinsically validated zone manifest.
+#[derive(Debug, Clone)]
+pub struct ZoneManifest {
+    zone_id: u32,
+    leader_ed25519_public_key: PublicKey,
+    nodes: Vec<ManifestNode>,
+}
+
+impl ZoneManifest {
+    /// Parses and validates a TOML manifest.
+    pub fn parse(input: &str) -> Result<Self, ManifestError> {
+        let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Toml)?;
+        if raw.nodes.len() < 3 {
+            return Err(ManifestError::TooFewNodes(raw.nodes.len()));
+        }
+
+        let leader_ed25519_public_key =
+            parse_ed25519_public_key("leader_ed25519_public_key", &raw.leader_ed25519_public_key)?;
+        let mut names = BTreeSet::new();
+        let mut ed25519_public_keys = BTreeSet::new();
+        let mut nodes = Vec::with_capacity(raw.nodes.len());
+
+        for raw_node in raw.nodes {
+            if raw_node.name.trim().is_empty() {
+                return Err(ManifestError::EmptyNodeName);
+            }
+            if !names.insert(raw_node.name.clone()) {
+                return Err(ManifestError::DuplicateNodeName(raw_node.name));
+            }
+
+            let ed25519_public_key = parse_ed25519_public_key(
+                &format!("nodes.{}.ed25519_public_key", raw_node.name),
+                &raw_node.ed25519_public_key,
+            )?;
+            if !ed25519_public_keys.insert(ed25519_public_key.clone()) {
+                return Err(ManifestError::DuplicateEd25519PublicKey(
+                    ed25519_public_key.to_string(),
+                ));
+            }
+
+            let address =
+                raw_node
+                    .address
+                    .parse()
+                    .map_err(|reason| ManifestError::InvalidAddress {
+                        node: raw_node.name.clone(),
+                        address: raw_node.address.clone(),
+                        reason,
+                    })?;
+            nodes.push(ManifestNode {
+                name: raw_node.name,
+                ed25519_public_key,
+                address,
+            });
+        }
+
+        if !ed25519_public_keys.contains(&leader_ed25519_public_key) {
+            return Err(ManifestError::LeaderEd25519PublicKeyNotFound(
+                leader_ed25519_public_key.to_string(),
+            ));
+        }
+
+        Ok(Self {
+            zone_id: raw.zone_id,
+            leader_ed25519_public_key,
+            nodes,
+        })
+    }
+
+    /// Reads, parses, and validates a TOML manifest from disk.
+    pub fn read_from_file(path: impl AsRef<Path>) -> Result<Self, ManifestError> {
+        let path = path.as_ref();
+        let input = std::fs::read_to_string(path).map_err(|source| ManifestError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        Self::parse(&input)
+    }
+
+    /// Validates node-specific invariants and returns the manifest-derived role.
+    pub fn validate_node(
+        &self,
+        expected_zone_id: u32,
+        local_ed25519_public_key: &PublicKey,
+        asserted_role: Option<Role>,
+    ) -> Result<Role, ManifestError> {
+        if self.zone_id != expected_zone_id {
+            return Err(ManifestError::ZoneIdMismatch {
+                manifest: self.zone_id,
+                cli: expected_zone_id,
+            });
+        }
+
+        let role = self.role_of(local_ed25519_public_key).ok_or_else(|| {
+            ManifestError::LocalNodeNotFound(local_ed25519_public_key.to_string())
+        })?;
+        if let Some(asserted) = asserted_role
+            && asserted != role
+        {
+            return Err(ManifestError::RoleMismatch {
+                asserted,
+                manifest: role,
+            });
+        }
+        Ok(role)
+    }
+
+    /// Zone identifier used to domain-separate the P2P network.
+    pub const fn zone_id(&self) -> u32 {
+        self.zone_id
+    }
+
+    /// Ed25519 Commonware public key of the statically assigned leader.
+    pub const fn leader_ed25519_public_key(&self) -> &PublicKey {
+        &self.leader_ed25519_public_key
+    }
+
+    /// All nodes in the static peer set.
+    pub fn nodes(&self) -> &[ManifestNode] {
+        &self.nodes
+    }
+
+    /// Returns the role of a manifest member, or `None` for an unknown Ed25519 key.
+    pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Option<Role> {
+        self.nodes
+            .iter()
+            .any(|node| node.ed25519_public_key() == ed25519_public_key)
+            .then_some(if ed25519_public_key == &self.leader_ed25519_public_key {
+                Role::Leader
+            } else {
+                Role::Follower
+            })
+    }
+
+    pub(crate) fn has_dns_addresses(&self) -> bool {
+        self.nodes.iter().any(|node| node.address.is_dns())
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawManifest {
+    zone_id: u32,
+    leader_ed25519_public_key: String,
+    nodes: Vec<RawManifestNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawManifestNode {
+    name: String,
+    ed25519_public_key: String,
+    address: String,
+}
+
+fn parse_ed25519_public_key(field: &str, encoded: &str) -> Result<PublicKey, ManifestError> {
+    let bytes =
+        const_hex::decode(encoded).map_err(|source| ManifestError::InvalidEd25519PublicKey {
+            field: field.to_owned(),
+            reason: source.to_string(),
+        })?;
+    PublicKey::decode(&bytes[..]).map_err(|source| ManifestError::InvalidEd25519PublicKey {
+        field: field.to_owned(),
+        reason: source.to_string(),
+    })
+}
+
+/// Manifest parsing and validation errors.
+#[derive(Debug, thiserror::Error)]
+pub enum ManifestError {
+    #[error("failed reading sequencer manifest `{path}`")]
+    Read {
+        path: std::path::PathBuf,
+
+        #[source]
+        source: std::io::Error,
+    },
+
+    #[error("invalid sequencer manifest TOML")]
+    Toml(#[source] toml::de::Error),
+
+    #[error("sequencer manifest must contain at least 3 nodes, found {0}")]
+    TooFewNodes(usize),
+
+    #[error("sequencer manifest node names must not be empty")]
+    EmptyNodeName,
+
+    #[error("duplicate sequencer manifest node name `{0}`")]
+    DuplicateNodeName(String),
+
+    #[error("duplicate sequencer manifest Ed25519 public key `{0}`")]
+    DuplicateEd25519PublicKey(String),
+
+    #[error("invalid Ed25519 public key in `{field}`: {reason}")]
+    InvalidEd25519PublicKey { field: String, reason: String },
+
+    #[error("invalid address `{address}` for node `{node}`: {reason}")]
+    InvalidAddress {
+        node: String,
+        address: String,
+        reason: String,
+    },
+
+    #[error("manifest leader Ed25519 public key `{0}` does not match any node")]
+    LeaderEd25519PublicKeyNotFound(String),
+
+    #[error("zone ID mismatch: manifest has {manifest}, but --zone.id is {cli}")]
+    ZoneIdMismatch { manifest: u32, cli: u32 },
+
+    #[error("this node's Ed25519 public key `{0}` is not present in the sequencer manifest")]
+    LocalNodeNotFound(String),
+
+    #[error("--sequencer.role asserts `{asserted}`, but the manifest assigns `{manifest}`")]
+    RoleMismatch { asserted: Role, manifest: Role },
+}
+
+#[cfg(test)]
+mod tests {
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+    use super::{ManifestError, Role, ZoneManifest};
+
+    fn ed25519_public_key(seed: u64) -> String {
+        let key = PrivateKey::from_seed(seed).public_key();
+        const_hex::encode_prefixed(key.as_ref())
+    }
+
+    fn manifest(leader: u64, nodes: &[(u64, &str, &str)]) -> String {
+        let mut value = format!(
+            "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
+            ed25519_public_key(leader)
+        );
+        for (key, name, address) in nodes {
+            value.push_str(&format!(
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
+                ed25519_public_key(*key)
+            ));
+        }
+        value
+    }
+
+    #[test]
+    fn parses_and_derives_roles() {
+        let input = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "follower-a.zone.local:9200"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        );
+        let manifest = ZoneManifest::parse(&input).unwrap();
+        let leader = PrivateKey::from_seed(1).public_key();
+        let follower = PrivateKey::from_seed(2).public_key();
+
+        assert_eq!(
+            manifest.validate_node(7, &leader, None).unwrap(),
+            Role::Leader
+        );
+        assert_eq!(
+            manifest
+                .validate_node(7, &follower, Some(Role::Follower))
+                .unwrap(),
+            Role::Follower
+        );
+    }
+
+    #[test]
+    fn readme_manifest_example_has_expected_shape() {
+        let (_, after_fence) = include_str!("../README.md")
+            .split_once("```toml\n")
+            .expect("README contains a TOML manifest example");
+        let (example, _) = after_fence
+            .split_once("\n```")
+            .expect("README closes the TOML manifest example");
+
+        let manifest: super::RawManifest = toml::from_str(example).unwrap();
+        assert_eq!(manifest.zone_id, 7);
+        assert_eq!(manifest.nodes.len(), 3);
+    }
+
+    #[test]
+    fn rejects_invalid_topologies_and_node_assertions() {
+        let too_small = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower", "127.0.0.1:9201"),
+            ],
+        );
+        assert!(matches!(
+            ZoneManifest::parse(&too_small),
+            Err(ManifestError::TooFewNodes(2))
+        ));
+
+        let duplicate = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower", "127.0.0.1:9201"),
+                (2, "follower-2", "127.0.0.1:9202"),
+            ],
+        );
+        assert!(matches!(
+            ZoneManifest::parse(&duplicate),
+            Err(ManifestError::DuplicateEd25519PublicKey(_))
+        ));
+
+        let valid = ZoneManifest::parse(&manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower-a", "127.0.0.1:9201"),
+                (3, "follower-b", "127.0.0.1:9202"),
+            ],
+        ))
+        .unwrap();
+        let follower = PrivateKey::from_seed(2).public_key();
+        assert!(matches!(
+            valid.validate_node(7, &follower, Some(Role::Leader)),
+            Err(ManifestError::RoleMismatch { .. })
+        ));
+        assert!(matches!(
+            valid.validate_node(8, &follower, None),
+            Err(ManifestError::ZoneIdMismatch { .. })
+        ));
+        let unknown = PrivateKey::from_seed(99).public_key();
+        assert!(matches!(
+            valid.validate_node(7, &unknown, None),
+            Err(ManifestError::LocalNodeNotFound(_))
+        ));
+    }
+}
