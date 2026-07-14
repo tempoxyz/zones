@@ -62,9 +62,9 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
-    /// @dev The contract that deployed this implementation is the only initializer authority.
+    /// @dev The explicitly configured factory is the only initializer authority.
     ///      This is protocol-wide code configuration and does not consume proxy storage.
-    address internal immutable _factory = msg.sender;
+    address internal immutable _factory;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -143,6 +143,10 @@ contract ZonePortal is IZonePortal {
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
+    constructor(address factory) {
+        _factory = factory;
+    }
+
     function initialize(
         uint32 _zoneId,
         address _initialToken,
@@ -153,7 +157,9 @@ contract ZonePortal is IZonePortal {
         bytes32 _genesisBlockHash,
         uint64 _genesisTempoBlockNumber,
         string calldata _rpcUrl
-    ) external {
+    )
+        external
+    {
         if (msg.sender != _factory) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
 
