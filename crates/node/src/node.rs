@@ -268,6 +268,12 @@ impl ZoneNode {
         self
     }
 
+    /// Set the parent L1 chain ID, avoiding a startup RPC lookup.
+    pub fn with_l1_chain_id(mut self, chain_id: u64) -> Self {
+        self.l1_state_provider_config.chain_id = Some(chain_id);
+        self
+    }
+
     /// Set the number of zone blocks between empty withdrawal batch
     /// finalization.
     pub fn with_withdrawal_batch_interval_blocks(mut self, interval_blocks: u64) -> Self {

@@ -631,6 +631,9 @@ impl ZoneTestNode {
             std::time::Duration::from_millis(100),
         )
         .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks);
+        if is_local_dummy_l1 {
+            zone_node = zone_node.with_l1_chain_id(1337);
+        }
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
         }
