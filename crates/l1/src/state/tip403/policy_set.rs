@@ -1,7 +1,7 @@
 //! Block-versioned policy sets for TIP-403 policy tracking.
 
 use alloy_primitives::Address;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Block-versioned policy set for TIP-403 policy tracking.
 ///
@@ -19,9 +19,11 @@ pub struct PolicySet {
     baseline_height: u64,
     /// Per-block set updates above `baseline_height`.
     pending: BTreeMap<u64, Vec<PolicySetUpdate>>,
-    /// All addresses for which we've ever recorded a set event. Survives `advance()` so
-    /// we can distinguish "explicitly absent from the set" from "never observed by the subscriber".
-    observed: HashSet<Address>,
+    /// Earliest block at which we recorded a set event for each address. Survives `advance()`
+    /// so we can distinguish "explicitly absent from the set" from "never observed by the
+    /// subscriber", *and* so that known-ness is scoped to the queried block: an event only
+    /// tells us the membership at and after the block it was observed on.
+    first_seen: HashMap<Address, u64>,
 }
 
 impl PolicySet {
@@ -45,12 +47,23 @@ impl PolicySet {
         self.baseline.contains(&user)
     }
 
-    /// Returns `true` if we've ever recorded a set event for `user` (added or removed).
+    /// Returns `true` if [`contains`](Self::contains) can be trusted for `user` at
+    /// `block_number`.
     ///
-    /// When `false`, the caller should not trust [`contains`](Self::contains) returning `false`
-    /// because the user may have been added before the subscriber started.
-    pub fn is_known(&self, user: &Address) -> bool {
-        self.observed.contains(user) || self.baseline.contains(user)
+    /// A set event only reveals membership at and after the block it was observed on. We can
+    /// therefore only answer authoritatively for a query block that is at or after the earliest
+    /// event we recorded for the user; below that block (or with no event at all) the user may
+    /// have been added before we started observing, so the caller must fall back to RPC.
+    ///
+    /// This scoping matters because the subscriber runs ahead of the engine: the set can hold a
+    /// user's *future* delta (e.g. a block-150 removal) while the engine queries an earlier block
+    /// (e.g. block 120). Without the block bound, that future delta would mark the user "known"
+    /// and suppress the RPC fallback, so a blacklist membership that only exists before the delta
+    /// would be silently treated as absent.
+    pub fn is_known(&self, user: &Address, block_number: u64) -> bool {
+        self.first_seen
+            .get(user)
+            .is_some_and(|&first| first <= block_number)
     }
 
     /// Record a set update at the given block height.
@@ -63,7 +76,10 @@ impl PolicySet {
             return;
         }
 
-        self.observed.insert(user);
+        self.first_seen
+            .entry(user)
+            .and_modify(|first| *first = (*first).min(block_number))
+            .or_insert(block_number);
         self.pending
             .entry(block_number)
             .or_default()
@@ -110,7 +126,7 @@ impl PolicySet {
         self.baseline.clear();
         self.baseline_height = 0;
         self.pending.clear();
-        self.observed.clear();
+        self.first_seen.clear();
     }
 }
 
