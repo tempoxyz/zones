@@ -362,12 +362,19 @@ impl WithdrawalProcessor {
             } = self.capture_store_snapshot(head_val);
             self.record_queue_metrics(head_val, tail_val, store_batch_count);
 
-            if head_val == tail_val {
+            // `head` and `tail` are read as two separate `eth_call`s against "latest",
+            // so they are not guaranteed to observe the same block. During active
+            // draining a split read can return `head > tail`; treat `head >= tail` as
+            // "nothing to do this cycle" (the queue is empty or the reads raced) and
+            // compute the slot count with a saturating subtraction so a raced read can
+            // never underflow (which panics under debug/overflow-checks and wraps to a
+            // garbage count in release).
+            if head_val >= tail_val {
                 debug!("Withdrawal queue empty, nothing to process");
                 return Ok(());
             }
 
-            let pending_slots = tail_val - head_val;
+            let pending_slots = tail_val.saturating_sub(head_val);
             info!(
                 head = head_val,
                 tail = tail_val,
