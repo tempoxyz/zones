@@ -63,6 +63,9 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @dev The fixed account holding the shared portal logic contract runtime.
+    address internal constant ZONE_PORTAL_LOGIC_ADDRESS =
+        0x5AD1000000000000000000000000000000000000;
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -152,6 +155,7 @@ contract ZonePortal is IZonePortal {
         string calldata _rpcUrl
     )
         external
+        onlyDelegateCall
     {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
@@ -173,6 +177,12 @@ contract ZonePortal is IZonePortal {
     /*//////////////////////////////////////////////////////////////
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev Initialization is valid only in a portal proxy's storage context.
+    modifier onlyDelegateCall() {
+        if (address(this) == ZONE_PORTAL_LOGIC_ADDRESS) revert MustDelegateCall();
+        _;
+    }
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
