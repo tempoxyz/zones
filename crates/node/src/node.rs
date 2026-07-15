@@ -167,7 +167,7 @@ where
         + Sync
         + 'static,
 {
-    // Check the recieved block
+    // Check the received block
     let mut input = encoded;
     let block = Block::decode(&mut input)
         .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
