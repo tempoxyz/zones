@@ -276,6 +276,17 @@ contract ZonePortalProxyStorageTest is Test {
 /// @notice Tests for ZonePortal - simulating L1/zone interface
 contract ZonePortalTest is BaseTest {
 
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant ZONE_BLOCK_ATTESTATION_TYPEHASH = keccak256(
+        "ZoneBlockAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,bytes32 parentBlockHash,bytes32 zoneBlockHash)"
+    );
+
+    uint256 internal constant SIGNER_A_KEY = 2;
+    uint256 internal constant SIGNER_B_KEY = 3;
+    uint256 internal constant SIGNER_C_KEY = 1;
+
     ZoneFactory public zoneFactory;
     ZonePortal public portal;
     ZoneMessenger public messenger;
@@ -337,6 +348,61 @@ contract ZonePortalTest is BaseTest {
         return keccak256(abi.encodePacked(sender));
     }
 
+    function _sequencerSet() internal returns (address[] memory signers) {
+        // vm.addr(2) < vm.addr(3) < vm.addr(1); the portal requires canonical address ordering.
+        signers = new address[](3);
+        signers[0] = vm.addr(SIGNER_A_KEY);
+        signers[1] = vm.addr(SIGNER_B_KEY);
+        signers[2] = vm.addr(SIGNER_C_KEY);
+    }
+
+    function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
+        signers = _sequencerSet();
+        vm.prank(admin);
+        portal.setSequencerSet(signers, quorum);
+    }
+
+    function _attestationDigest(
+        uint256 height,
+        bytes32 nextBlockHash
+    )
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256("ZonePortal"),
+                keccak256("1"),
+                block.chainid,
+                address(portal)
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ZONE_BLOCK_ATTESTATION_TYPEHASH,
+                portal.zoneId(),
+                portal.sequencerSetVersion(),
+                height,
+                portal.blockHash(),
+                nextBlockHash
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    function _sign(uint256 privateKey, bytes32 digest) internal returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _quorumSignatures(bytes32 digest) internal returns (bytes[] memory signatures) {
+        signatures = new bytes[](2);
+        signatures[0] = _sign(SIGNER_A_KEY, digest);
+        signatures[1] = _sign(SIGNER_B_KEY, digest);
+    }
+
     function _withdrawal(
         address token,
         address sender,
@@ -390,6 +456,171 @@ contract ZonePortalTest is BaseTest {
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
         assertEq(info.sequencer, sequencer);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         SEQUENCER QUORUM TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_setSequencerSet_configuresVersionedQuorum() public {
+        address[] memory signers = _sequencerSet();
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.SequencerSetUpdated(1, 2, signers);
+        vm.prank(admin);
+        portal.setSequencerSet(signers, 2);
+
+        assertEq(portal.sequencerSetVersion(), 1);
+        assertEq(portal.sequencerQuorum(), 2);
+        assertEq(portal.sequencerCount(), 3);
+        for (uint256 i; i < signers.length; ++i) {
+            assertEq(portal.sequencerAt(i), signers[i]);
+            assertTrue(portal.isSequencer(signers[i]));
+        }
+    }
+
+    function test_setSequencerSet_revertsForNonAdminAndInvalidSets() public {
+        address[] memory signers = _sequencerSet();
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setSequencerSet(signers, 2);
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidSequencerSet.selector);
+        portal.setSequencerSet(signers, 4);
+
+        (signers[0], signers[1]) = (signers[1], signers[0]);
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidSequencerSet.selector);
+        portal.setSequencerSet(signers, 2);
+    }
+
+    function test_setSequencerSet_revertsIfUnchangedAndRotatesMembership() public {
+        address[] memory signers = _activateSequencerSet(2);
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.SequencerSetUnchanged.selector);
+        portal.setSequencerSet(signers, 2);
+
+        address removed = signers[2];
+        address[] memory replacement = new address[](2);
+        replacement[0] = signers[0];
+        replacement[1] = signers[1];
+        vm.prank(admin);
+        portal.setSequencerSet(replacement, 2);
+
+        assertEq(portal.sequencerSetVersion(), 2);
+        assertFalse(portal.isSequencer(removed));
+    }
+
+    function test_verifyBlock_acceptsDistinctCurrentSetQuorum() public {
+        _activateSequencerSet(2);
+        bytes32 nextBlockHash = keccak256("quorum-tip");
+        bytes[] memory signatures = _quorumSignatures(_attestationDigest(10, nextBlockHash));
+
+        assertTrue(portal.verifyBlock(10, nextBlockHash, signatures));
+        assertFalse(portal.verifyBlock(10, keccak256("other-tip"), signatures));
+    }
+
+    function test_verifyBlock_rejectsDuplicatesMalformedAndInsufficientQuorum() public {
+        _activateSequencerSet(2);
+        bytes32 nextBlockHash = keccak256("quorum-tip");
+        bytes32 digest = _attestationDigest(10, nextBlockHash);
+
+        bytes[] memory signatures = new bytes[](2);
+        signatures[0] = _sign(SIGNER_A_KEY, digest);
+        signatures[1] = signatures[0];
+        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
+
+        signatures[1] = hex"1234";
+        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
+
+        bytes[] memory oneSignature = new bytes[](1);
+        oneSignature[0] = signatures[0];
+        assertFalse(portal.verifyBlock(10, nextBlockHash, oneSignature));
+
+        signatures[1] = _sign(99, digest);
+        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
+    }
+
+    function test_verifyBlock_rejectsOldCertificateAfterRotation() public {
+        address[] memory signers = _activateSequencerSet(2);
+        bytes32 nextBlockHash = keccak256("quorum-tip");
+        bytes[] memory signatures = _quorumSignatures(_attestationDigest(10, nextBlockHash));
+
+        vm.prank(admin);
+        portal.setSequencerSet(signers, 3);
+
+        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
+    }
+
+    function test_quorumSequencerCannotCallConfigurationMethods() public {
+        address[] memory signers = _activateSequencerSet(2);
+
+        vm.startPrank(signers[0]);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setZoneGasRate(1);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setRpcUrl("https://follower.invalid");
+        vm.stopPrank();
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, 1, bytes32(0), 0, alice, "");
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.processWithdrawal(withdrawal, bytes32(0));
+    }
+
+    function test_submitBatch_requiresQuorumAfterActivation() public {
+        address[] memory signers = _activateSequencerSet(2);
+
+        vm.prank(signers[0]);
+        vm.expectRevert(IZonePortal.LegacyBatchSubmissionDisabled.selector);
+        portal.submitBatch(
+            uint64(block.number),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("tip") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+    }
+
+    function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
+        address[] memory signers = _activateSequencerSet(2);
+        bytes32 nextBlockHash = keccak256("certified-tip");
+        uint256 nextZoneHeight = 10;
+        bytes[] memory signatures =
+            _quorumSignatures(_attestationDigest(nextZoneHeight, nextBlockHash));
+
+        vm.roll(block.number + 1);
+        vm.prank(signers[0]);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: nextBlockHash }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            "",
+            nextZoneHeight,
+            signatures
+        );
+
+        assertEq(portal.blockHash(), nextBlockHash);
+        assertEq(portal.zoneHeight(), nextZoneHeight);
     }
 
     function test_adminCanPauseAndResumeDeposits() public {

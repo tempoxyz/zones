@@ -352,6 +352,10 @@ interface IZoneTxContext {
 //   slot 16: _withdrawalReentrancyStatus (uint256)
 //   slot 17: zoneId (uint32) + messenger (address) [packed]
 //   slot 18: verifier (address) + genesisTempoBlockNumber (uint64) + _initialized (bool) [packed]
+//   slot 19: sequencerSetVersion (uint64) + sequencerQuorum (uint8) [packed]
+//   slot 20: zoneHeight (uint256)
+//   slot 21: _sequencers (address[])
+//   slot 22: isSequencer (mapping(address => bool))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -607,6 +611,9 @@ interface IZonePortal {
     /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
+    /// @notice Emitted when the admin replaces the batch-attestation signer set.
+    event SequencerSetUpdated(uint64 indexed version, uint8 quorum, address[] sequencers);
+
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
@@ -633,6 +640,10 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
+    error InvalidSequencerSet();
+    error SequencerSetUnchanged();
+    error InvalidQuorumCertificate();
+    error LegacyBatchSubmissionDisabled();
 
     function initialize(
         uint32 zoneId,
@@ -691,6 +702,24 @@ interface IZonePortal {
 
     function genesisTempoBlockNumber() external view returns (uint64);
 
+    /// @notice Version of the active batch-attestation signer set (zero means legacy mode).
+    function sequencerSetVersion() external view returns (uint64);
+
+    /// @notice Number of distinct registered signatures required for batch settlement.
+    function sequencerQuorum() external view returns (uint8);
+
+    /// @notice Highest zone block height accepted with a quorum certificate.
+    function zoneHeight() external view returns (uint256);
+
+    /// @notice Whether an account belongs to the active settlement signer set.
+    function isSequencer(address account) external view returns (bool);
+
+    /// @notice Number of accounts in the active settlement signer set.
+    function sequencerCount() external view returns (uint256);
+
+    /// @notice Return a signer-set member by index.
+    function sequencerAt(uint256 index) external view returns (address);
+
     /*//////////////////////////////////////////////////////////////
                           TOKEN REGISTRY
     //////////////////////////////////////////////////////////////*/
@@ -736,6 +765,10 @@ interface IZonePortal {
 
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
+
+    /// @notice Atomically replace the settlement signer set and quorum. Only callable by admin.
+    /// @dev Signers must be nonzero, unique, and sorted in strictly ascending address order.
+    function setSequencerSet(address[] calldata sequencers, uint8 quorum) external;
 
     /// @notice Start an admin transfer. Only callable by the current admin.
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
@@ -862,6 +895,30 @@ interface IZonePortal {
         bytes calldata proof
     )
         external;
+
+    /// @notice Submit a batch with an n-of-m certificate for its zone tip.
+    function submitBatch(
+        uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes calldata verifierConfig,
+        bytes calldata proof,
+        uint256 zoneHeight,
+        bytes[] calldata signatures
+    )
+        external;
+
+    /// @notice Verify a certificate for a proposed successor of the current portal head.
+    function verifyBlock(
+        uint256 zoneHeight,
+        bytes32 zoneBlockHash,
+        bytes[] calldata signatures
+    )
+        external
+        view
+        returns (bool);
 
 }
 

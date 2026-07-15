@@ -63,6 +63,20 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @notice Maximum number of independently countable settlement signers.
+    uint256 public constant MAX_SEQUENCERS = 32;
+
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
+    bytes32 internal constant VERSION_HASH = keccak256("1");
+    bytes32 internal constant ZONE_BLOCK_ATTESTATION_TYPEHASH = keccak256(
+        "ZoneBlockAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,bytes32 parentBlockHash,bytes32 zoneBlockHash)"
+    );
+    uint256 internal constant SECP256K1N_DIV_2 =
+        0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -136,6 +150,15 @@ contract ZonePortal is IZonePortal {
     uint64 public genesisTempoBlockNumber;
     bool internal _initialized;
 
+    /// @notice Versioned signer set used to authorize and attest batch settlement.
+    /// @dev Appended after the cross-domain storage layout. Version zero preserves legacy zones
+    ///      until their admin explicitly activates quorum settlement.
+    uint64 public sequencerSetVersion;
+    uint8 public sequencerQuorum;
+    uint256 public zoneHeight;
+    address[] internal _sequencers;
+    mapping(address => bool) public isSequencer;
+
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
@@ -179,6 +202,13 @@ contract ZonePortal is IZonePortal {
         _;
     }
 
+    modifier onlySettlementSequencer() {
+        if (sequencerSetVersion == 0 ? msg.sender != sequencer : !isSequencer[msg.sender]) {
+            revert NotSequencer();
+        }
+        _;
+    }
+
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
         _;
@@ -219,6 +249,56 @@ contract ZonePortal is IZonePortal {
         sequencer = pendingSequencer;
         pendingSequencer = address(0);
         emit SequencerTransferred(previousSequencer, sequencer);
+    }
+
+    /// @inheritdoc IZonePortal
+    function setSequencerSet(address[] calldata newSequencers, uint8 newQuorum) external onlyAdmin {
+        uint256 length = newSequencers.length;
+        if (length == 0 || length > MAX_SEQUENCERS || newQuorum == 0 || newQuorum > length) {
+            revert InvalidSequencerSet();
+        }
+
+        address previous = address(0);
+        for (uint256 i = 0; i < length; ++i) {
+            address signer = newSequencers[i];
+            if (signer == address(0) || signer <= previous) revert InvalidSequencerSet();
+            previous = signer;
+        }
+
+        if (newQuorum == sequencerQuorum && length == _sequencers.length) {
+            bool unchanged = true;
+            for (uint256 i = 0; i < length; ++i) {
+                if (newSequencers[i] != _sequencers[i]) {
+                    unchanged = false;
+                    break;
+                }
+            }
+            if (unchanged) revert SequencerSetUnchanged();
+        }
+
+        for (uint256 i = 0; i < _sequencers.length; ++i) {
+            isSequencer[_sequencers[i]] = false;
+        }
+        delete _sequencers;
+        for (uint256 i = 0; i < length; ++i) {
+            address signer = newSequencers[i];
+            _sequencers.push(signer);
+            isSequencer[signer] = true;
+        }
+
+        sequencerQuorum = newQuorum;
+        uint64 newVersion = ++sequencerSetVersion;
+        emit SequencerSetUpdated(newVersion, newQuorum, newSequencers);
+    }
+
+    /// @inheritdoc IZonePortal
+    function sequencerCount() external view returns (uint256) {
+        return _sequencers.length;
+    }
+
+    /// @inheritdoc IZonePortal
+    function sequencerAt(uint256 index) external view returns (address) {
+        return _sequencers[index];
     }
 
     /// @notice Set zone gas rate. Only callable by sequencer.
@@ -711,7 +791,7 @@ contract ZonePortal is IZonePortal {
         bytes32 remainingQueue
     )
         external
-        onlySequencer
+        onlySettlementSequencer
         nonReentrantWithdrawal
     {
         // Pop from withdrawal queue (library handles swap and hash verification)
@@ -873,7 +953,7 @@ contract ZonePortal is IZonePortal {
                            BATCH SUBMISSION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
+    /// @notice Submit a legacy batch before a signer set has been activated.
     /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
     /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
     function submitBatch(
@@ -886,11 +966,73 @@ contract ZonePortal is IZonePortal {
         bytes calldata proof
     )
         external
-        onlySequencer
+        onlySettlementSequencer
+    {
+        if (sequencerSetVersion != 0) revert LegacyBatchSubmissionDisabled();
+        bytes[] memory signatures = new bytes[](0);
+        _submitBatch(
+            tempoBlockNumber,
+            recentTempoBlockNumber,
+            blockTransition,
+            depositQueueTransition,
+            withdrawalQueueHash,
+            verifierConfig,
+            proof,
+            0,
+            signatures
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function submitBatch(
+        uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes calldata verifierConfig,
+        bytes calldata proof,
+        uint256 nextZoneHeight,
+        bytes[] calldata signatures
+    )
+        external
+        onlySettlementSequencer
+    {
+        if (sequencerSetVersion == 0) revert InvalidQuorumCertificate();
+        _submitBatch(
+            tempoBlockNumber,
+            recentTempoBlockNumber,
+            blockTransition,
+            depositQueueTransition,
+            withdrawalQueueHash,
+            verifierConfig,
+            proof,
+            nextZoneHeight,
+            signatures
+        );
+    }
+
+    function _submitBatch(
+        uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes calldata verifierConfig,
+        bytes calldata proof,
+        uint256 nextZoneHeight,
+        bytes[] memory signatures
+    )
+        internal
     {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
         }
+
+        if (
+            sequencerSetVersion != 0
+                && !_verifyBlock(nextZoneHeight, blockTransition.nextBlockHash, signatures)
+        ) revert InvalidQuorumCertificate();
 
         // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
         if (tempoBlockNumber < genesisTempoBlockNumber) {
@@ -960,6 +1102,7 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
+        if (sequencerSetVersion != 0) zoneHeight = nextZoneHeight;
 
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
@@ -971,6 +1114,82 @@ contract ZonePortal is IZonePortal {
             blockHash,
             withdrawalQueueHash,
             lastProcessedDepositNumber
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function verifyBlock(
+        uint256 nextZoneHeight,
+        bytes32 zoneBlockHash,
+        bytes[] calldata signatures
+    )
+        external
+        view
+        returns (bool)
+    {
+        return _verifyBlock(nextZoneHeight, zoneBlockHash, signatures);
+    }
+
+    function _verifyBlock(
+        uint256 nextZoneHeight,
+        bytes32 zoneBlockHash,
+        bytes[] memory signatures
+    )
+        internal
+        view
+        returns (bool)
+    {
+        uint256 quorum = sequencerQuorum;
+        if (
+            sequencerSetVersion == 0 || nextZoneHeight <= zoneHeight || signatures.length < quorum
+                || signatures.length > _sequencers.length
+        ) return false;
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                ZONE_BLOCK_ATTESTATION_TYPEHASH,
+                zoneId,
+                sequencerSetVersion,
+                nextZoneHeight,
+                blockHash,
+                zoneBlockHash
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        address[] memory recovered = new address[](signatures.length);
+
+        for (uint256 i = 0; i < signatures.length; ++i) {
+            bytes memory signature = signatures[i];
+            if (signature.length != 65) return false;
+
+            bytes32 r = bytes32(0);
+            bytes32 s = bytes32(0);
+            uint8 v = 0;
+            assembly ("memory-safe") {
+                r := mload(add(signature, 0x20))
+                s := mload(add(signature, 0x40))
+                v := byte(0, mload(add(signature, 0x60)))
+            }
+            if (v < 27) v += 27;
+            if (v != 27 && v != 28) return false;
+            if (uint256(s) == 0 || uint256(s) > SECP256K1N_DIV_2) return false;
+
+            address signer = ecrecover(digest, v, r, s);
+            if (signer == address(0) || !isSequencer[signer]) return false;
+            for (uint256 j = 0; j < i; ++j) {
+                if (recovered[j] == signer) return false;
+            }
+            recovered[i] = signer;
+        }
+
+        return signatures.length >= quorum;
+    }
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)
+            )
         );
     }
 
