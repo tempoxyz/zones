@@ -29,6 +29,8 @@ contract ZoneFactory is IZoneFactory {
     mapping(address => bool) internal _validVerifiers;
     address internal _verifier;
     address internal _messenger;
+    address internal _owner;
+    address internal _pendingOwner;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment,
@@ -40,6 +42,9 @@ contract ZoneFactory is IZoneFactory {
     //////////////////////////////////////////////////////////////*/
 
     constructor() {
+        _owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+
         address v = address(new Verifier());
         _validVerifiers[v] = true;
         _verifier = v;
@@ -54,6 +59,8 @@ contract ZoneFactory is IZoneFactory {
         external
         returns (uint32 zoneId, address portal)
     {
+        if (msg.sender != _owner) revert NotOwner();
+
         // Validate initial token is a TIP-20
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(params.initialToken)) {
             revert InvalidToken();
@@ -120,6 +127,25 @@ contract ZoneFactory is IZoneFactory {
         );
     }
 
+    /// @inheritdoc IZoneFactory
+    function transferOwnership(address newOwner) external {
+        if (msg.sender != _owner) revert NotOwner();
+        if (newOwner == address(0)) revert InvalidOwner();
+
+        _pendingOwner = newOwner;
+        emit OwnershipTransferStarted(_owner, newOwner);
+    }
+
+    /// @inheritdoc IZoneFactory
+    function acceptOwnership() external {
+        if (msg.sender != _pendingOwner) revert NotPendingOwner();
+
+        address previousOwner = _owner;
+        _owner = msg.sender;
+        _pendingOwner = address(0);
+        emit OwnershipTransferred(previousOwner, msg.sender);
+    }
+
     /// @notice Compute the address of a contract deployed with CREATE
     /// @dev address = keccak256(rlp([sender, nonce]))[12:]
     function _computeCreateAddress(address deployer, uint256 nonce)
@@ -155,6 +181,14 @@ contract ZoneFactory is IZoneFactory {
     /// @notice Returns the number of zones created (not including reserved zone 0)
     function zoneCount() external view returns (uint32) {
         return _nextZoneId - 1;
+    }
+
+    function owner() external view returns (address) {
+        return _owner;
+    }
+
+    function pendingOwner() external view returns (address) {
+        return _pendingOwner;
     }
 
     function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
