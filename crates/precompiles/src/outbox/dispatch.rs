@@ -8,13 +8,11 @@ use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
 
 use crate::{
     dispatch::{metadata, mutate, mutate_void, view},
-    ecies::AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE,
+    ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, COMPRESSED_PUBLIC_KEY_SIZE},
     tx_context,
 };
 
-use super::{
-    MAX_CALLBACK_DATA_SIZE, MAX_GAS_FEE_RATE, REVEAL_TO_KEY_LENGTH, WITHDRAWAL_BASE_GAS, ZoneOutbox,
-};
+use super::{MAX_CALLBACK_DATA_SIZE, MAX_GAS_FEE_RATE, WITHDRAWAL_BASE_GAS, ZoneOutbox};
 
 impl Precompile for ZoneOutbox {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -38,7 +36,7 @@ impl Precompile for ZoneOutbox {
                 MAX_WITHDRAWAL_GAS_LIMIT(_) => metadata::<IZoneOutbox::MAX_WITHDRAWAL_GAS_LIMITCall>(|| Ok(MAX_WITHDRAWAL_GAS_LIMIT)),
                 MAX_GAS_FEE_RATE(_) => metadata::<IZoneOutbox::MAX_GAS_FEE_RATECall>(|| Ok(MAX_GAS_FEE_RATE)),
                 WITHDRAWAL_BASE_GAS(_) => metadata::<IZoneOutbox::WITHDRAWAL_BASE_GASCall>(|| Ok(WITHDRAWAL_BASE_GAS)),
-                REVEAL_TO_KEY_LENGTH(_) => metadata::<IZoneOutbox::REVEAL_TO_KEY_LENGTHCall>(|| Ok(U256::from(REVEAL_TO_KEY_LENGTH))),
+                REVEAL_TO_KEY_LENGTH(_) => metadata::<IZoneOutbox::REVEAL_TO_KEY_LENGTHCall>(|| Ok(U256::from(COMPRESSED_PUBLIC_KEY_SIZE))),
                 AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH(_) => metadata::<IZoneOutbox::AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTHCall>(|| Ok(U256::from(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE))),
                 setTempoGasRate(call) => mutate_void(call, msg_sender, |_, call| self.set_tempo_gas_rate(call)),
                 setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |_, call| self.set_max_withdrawals_per_block(call)),

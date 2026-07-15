@@ -1,39 +1,9 @@
 //! `ZoneOutbox` — deployed on the Zone L2.
 
 pub use IZoneOutbox::{
-    IZoneOutboxErrors as ZoneOutboxError, LastBatch, PendingWithdrawal, StaticCallNotAllowed,
+    IZoneOutboxErrors as ZoneOutboxError, IZoneOutboxEvents as ZoneOutboxEvent, LastBatch,
+    PendingWithdrawal, StaticCallNotAllowed,
 };
-
-crate::sol! {
-    /// Legacy seven-argument withdrawal interface. The current overload adds `revealTo`.
-    #[derive(Debug)]
-    interface ILegacyZoneOutbox {
-        function requestWithdrawal(
-            address token,
-            address to,
-            uint128 amount,
-            bytes32 memo,
-            uint64 gasLimit,
-            address fallbackRecipient,
-            bytes calldata data
-        ) external;
-    }
-}
-
-impl From<ILegacyZoneOutbox::requestWithdrawalCall> for IZoneOutbox::requestWithdrawalCall {
-    fn from(call: ILegacyZoneOutbox::requestWithdrawalCall) -> Self {
-        Self {
-            token: call.token,
-            to: call.to,
-            amount: call.amount,
-            memo: call.memo,
-            gasLimit: call.gasLimit,
-            fallbackRecipient: call.fallbackRecipient,
-            data: call.data,
-            revealTo: Default::default(),
-        }
-    }
-}
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -58,19 +28,6 @@ crate::sol! {
             bytes revealTo;
         }
 
-        struct Withdrawal {
-            address token;
-            bytes32 senderTag;
-            address to;
-            uint128 amount;
-            uint128 fee;
-            bytes32 memo;
-            uint64 gasLimit;
-            address fallbackRecipient;
-            bytes callbackData;
-            bytes encryptedSender;
-        }
-
         // -- Events --
 
         event WithdrawalRequested(
@@ -88,9 +45,7 @@ crate::sol! {
         );
 
         event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
-
         event TempoGasRateUpdated(uint128 tempoGasRate);
-
         event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
 
         // -- Errors --
@@ -151,5 +106,36 @@ crate::sol! {
             address bouncebackRecipient
         ) external;
         function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders) external returns (bytes32 withdrawalQueueHash);
+    }
+}
+
+crate::sol! {
+    /// Legacy seven-argument withdrawal interface. The current overload adds `revealTo`.
+    #[derive(Debug)]
+    interface ILegacyZoneOutbox {
+        function requestWithdrawal(
+            address token,
+            address to,
+            uint128 amount,
+            bytes32 memo,
+            uint64 gasLimit,
+            address fallbackRecipient,
+            bytes calldata data
+        ) external;
+    }
+}
+
+impl From<ILegacyZoneOutbox::requestWithdrawalCall> for IZoneOutbox::requestWithdrawalCall {
+    fn from(call: ILegacyZoneOutbox::requestWithdrawalCall) -> Self {
+        Self {
+            token: call.token,
+            to: call.to,
+            amount: call.amount,
+            memo: call.memo,
+            gasLimit: call.gasLimit,
+            fallbackRecipient: call.fallbackRecipient,
+            data: call.data,
+            revealTo: Default::default(),
+        }
     }
 }

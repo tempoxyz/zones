@@ -24,8 +24,23 @@ pub const ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE: usize = 64;
 /// Plaintext size for authenticated-withdrawal sender reveals: 20 bytes (sender) + 32 bytes (tx hash).
 pub const AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE: usize = 52;
 
+/// Encoded size of a compressed secp256k1 public key.
+pub const COMPRESSED_PUBLIC_KEY_SIZE: usize = 33;
+
 /// Total encoded size of `encryptedSender`.
-pub const AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE: usize = 33 + 12 + 52 + 16;
+pub const AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE: usize =
+    COMPRESSED_PUBLIC_KEY_SIZE + 12 + AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE + 16;
+
+/// Decode a SEC1-compressed secp256k1 public key.
+pub(crate) fn decode_compressed_public_key(encoded: &[u8]) -> Option<AffinePoint> {
+    let encoded: &[u8; COMPRESSED_PUBLIC_KEY_SIZE] = encoded.try_into().ok()?;
+    let parity = encoded[0];
+    if !matches!(parity, 0x02 | 0x03) {
+        return None;
+    }
+    let x: &[u8; 32] = encoded[1..].try_into().ok()?;
+    recover_point(x, parity)
+}
 
 /// Result of sequencer-side ECDH + Chaum-Pedersen proof derivation.
 ///
@@ -162,16 +177,7 @@ pub fn encrypt_authenticated_withdrawal(
     sender: Address,
     tx_hash: B256,
 ) -> Option<Vec<u8>> {
-    if reveal_to.len() != 33 {
-        return None;
-    }
-    let parity = reveal_to[0];
-    if parity != 0x02 && parity != 0x03 {
-        return None;
-    }
-
-    let reveal_to_x = B256::from_slice(&reveal_to[1..]);
-    let reveal_pub = recover_point(&reveal_to_x.0, parity)?;
+    let reveal_pub = decode_compressed_public_key(reveal_to)?;
 
     let eph_key = k256::SecretKey::random(&mut rand::thread_rng());
     let eph_scalar: Scalar = *eph_key.to_nonzero_scalar();

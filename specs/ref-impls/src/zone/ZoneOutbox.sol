@@ -77,7 +77,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Pending withdrawals waiting to be batched
     PendingWithdrawal[] internal _pendingWithdrawals;
-    uint256 internal _pendingWithdrawalsHead;
+    uint32 internal _pendingWithdrawalsHead;
 
     /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
     /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
@@ -445,7 +445,7 @@ contract ZoneOutbox is IZoneOutbox {
                 }
             }
 
-            _pendingWithdrawalsHead = end;
+            _pendingWithdrawalsHead = uint32(end);
 
             if (_pendingWithdrawalsHead == _pendingWithdrawals.length) {
                 delete _pendingWithdrawals;
