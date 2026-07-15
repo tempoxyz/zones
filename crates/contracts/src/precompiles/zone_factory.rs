@@ -1,6 +1,11 @@
 //! `ZoneFactory` — deployed on Tempo L1.
 
+use alloy_primitives::{Address, address};
+
 pub use ZoneFactory::ZoneInfo;
+
+/// Protocol-managed ZoneFactory address defined by TIP-1091.
+pub const ZONE_FACTORY_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000000");
 
 crate::sol! {
     #[derive(Debug)]

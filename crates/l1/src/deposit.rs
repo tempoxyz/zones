@@ -35,10 +35,12 @@ impl Deposit {
 
     /// Create a bounce-back deposit from an event.
     pub fn from_bounce_back(event: WithdrawalBounceBack, portal_address: Address) -> Self {
+        let mut encoded_nonce = [0u8; 20];
+        encoded_nonce[12..].copy_from_slice(&event.fallbackNonce.to_be_bytes());
         Self {
             token: event.token,
             sender: portal_address,
-            to: event.fallbackRecipient,
+            to: Address::from(encoded_nonce),
             amount: event.amount,
             fee: 0,
             bounceback_recipient: Address::ZERO,

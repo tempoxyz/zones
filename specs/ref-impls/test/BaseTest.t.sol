@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
+import { ZONE_FACTORY_ADDRESS, ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
 import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
+import { Verifier } from "../src/tempo/Verifier.sol";
+import { ZoneFactory } from "../src/tempo/ZoneFactory.sol";
+import { ZoneMessenger } from "../src/tempo/ZoneMessenger.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -31,6 +34,7 @@ contract BaseTest is Test {
     address internal constant _VALIDATOR_CONFIG = StdPrecompiles.VALIDATOR_CONFIG_ADDRESS;
     address internal constant _BLOCKHASH_HISTORY = EIP2935;
     address internal constant _ZONE_TX_CONTEXT = ZONE_TX_CONTEXT;
+    address internal constant _ZONE_FACTORY = ZONE_FACTORY_ADDRESS;
 
     // EIP-2935 serve window: hashes for the most recent 8191 blocks are available
     // (block.number - 8191 ..= block.number - 1); reads outside that range return zero.
@@ -128,6 +132,33 @@ contract BaseTest is Test {
                 "TOKEN2", "T2", "USD", ITIP20(_PATH_USD), sequencer, bytes32("token2")
             )
         );
+    }
+
+    /// @notice Installs the deployable reference factory at TIP-1091's fixed precompile address.
+    function _deployZoneFactory() internal returns (ZoneFactory zoneFactory) {
+        Verifier verifier = new Verifier();
+        ZoneMessenger messenger = new ZoneMessenger(ZONE_FACTORY_ADDRESS);
+
+        vm.etch(ZONE_FACTORY_ADDRESS, type(ZoneFactory).runtimeCode);
+        vm.setNonce(ZONE_FACTORY_ADDRESS, 3);
+        vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(1)));
+        vm.store(
+            ZONE_FACTORY_ADDRESS,
+            keccak256(abi.encode(address(verifier), uint256(3))),
+            bytes32(uint256(1))
+        );
+        vm.store(
+            ZONE_FACTORY_ADDRESS, bytes32(uint256(4)), bytes32(uint256(uint160(address(verifier))))
+        );
+        vm.store(
+            ZONE_FACTORY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(uint160(address(messenger))))
+        );
+        vm.store(
+            ZONE_FACTORY_ADDRESS, bytes32(uint256(6)), bytes32(uint256(uint160(address(this))))
+        );
+        vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(7)), bytes32(uint256(3)));
+
+        zoneFactory = ZoneFactory(ZONE_FACTORY_ADDRESS);
     }
 
 }

@@ -469,7 +469,7 @@ contract WithdrawalQueueLibTest is Test {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: sender,
+            fallbackNonce: uint64(uint160(sender)),
             callbackData: "",
             encryptedSender: ""
         });
