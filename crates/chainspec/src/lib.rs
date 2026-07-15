@@ -25,14 +25,11 @@ pub struct ZoneChainSpec {
 }
 
 impl ZoneChainSpec {
-    /// Creates a Zone chain specification from a Tempo chain specification.
-    pub const fn new(inner: TempoChainSpec) -> Self {
-        Self { inner }
-    }
-
     /// Converts a genesis configuration into a Zone chain specification.
     pub fn from_genesis(genesis: Genesis) -> Self {
-        Self::new(TempoChainSpec::from_genesis(genesis))
+        Self {
+            inner: TempoChainSpec::from_genesis(genesis),
+        }
     }
 
     /// Applies Tempo hardfork activations from the parent chain.
@@ -48,14 +45,14 @@ impl ZoneChainSpec {
 }
 
 impl From<TempoChainSpec> for ZoneChainSpec {
-    fn from(value: TempoChainSpec) -> Self {
-        Self::new(value)
+    fn from(inner: TempoChainSpec) -> Self {
+        Self { inner }
     }
 }
 
 impl From<ChainSpec> for ZoneChainSpec {
     fn from(value: ChainSpec) -> Self {
-        Self::new(value.into())
+        TempoChainSpec::from(value).into()
     }
 }
 
@@ -177,7 +174,7 @@ mod tests {
 
     #[test]
     fn delegates_tempo_chain_behavior() {
-        let zone = ZoneChainSpec::new(DEV.as_ref().clone());
+        let zone = ZoneChainSpec::from(DEV.as_ref().clone());
         let parent = zone.genesis_header();
         let timestamp = parent.inner.timestamp;
 

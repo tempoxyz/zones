@@ -446,7 +446,7 @@ mod tests {
 
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
-        let zone = ZoneChainSpec::new(DEV.as_ref().clone());
+        let zone = ZoneChainSpec::from(DEV.as_ref().clone());
         let composed = ZoneEvmConfig::compose_chain_spec(&zone, &MODERATO);
 
         assert_eq!(composed.chain().id(), DEV.chain().id());
@@ -461,7 +461,7 @@ mod tests {
 
     #[test]
     fn tempo_evm_selects_parent_fork_from_zone_block_timestamp() {
-        let zone = ZoneChainSpec::new(DEV.as_ref().clone());
+        let zone = ZoneChainSpec::from(DEV.as_ref().clone());
         let composed = ZoneEvmConfig::compose_chain_spec(&zone, &MODERATO);
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
