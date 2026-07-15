@@ -39,7 +39,6 @@ sol! {
         event ZoneCreated(
             uint32 indexed zoneId,
             address indexed portal,
-            address indexed messenger,
             address initialToken,
             address admin,
             address sequencer,
@@ -50,6 +49,7 @@ sol! {
         );
 
         function verifier() external view returns (address);
+        function messenger() external view returns (address);
         function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     }
 }
@@ -121,6 +121,8 @@ impl CreateZone {
         println!("Fetching verifier address from ZoneFactory...");
         let verifier = Address::from(factory.verifier().call().await?.0);
         println!("Verifier: {verifier}");
+        let messenger = Address::from(factory.messenger().call().await?.0);
+        println!("Messenger: {messenger}");
 
         // Anchor before createZone so the zone replays the creation block and its
         // initial TokenEnabled event during L1 backfill.
@@ -211,6 +213,7 @@ impl CreateZone {
             "zoneId": zone_id,
             "chainId": chain_id,
             "portal": format!("{portal}"),
+            "messenger": format!("{messenger}"),
             "initialToken": format!("{}", self.initial_token),
             "admin": format!("{}", self.admin),
             "sequencer": format!("{}", self.sequencer),
@@ -229,6 +232,7 @@ impl CreateZone {
         println!("  Zone ID: {zone_id}");
         println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
+        println!("  Messenger: {messenger}");
         println!("  Initial Token: {}", self.initial_token);
         println!("  Admin: {}", self.admin);
         println!("  Sequencer: {}", self.sequencer);

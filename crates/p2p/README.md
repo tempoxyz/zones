@@ -98,3 +98,10 @@ Add these arguments to the node's normal command:
 Use each node's own key file and listener address. 
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
+
+DNS peer addresses do not provide a stable egress IP for Commonware's inbound
+source-IP filter. A manifest containing any DNS peer therefore requires the
+explicit `--p2p.bypass-ip-check` flag. The flag disables source-IP filtering for
+all inbound P2P connections, not only the DNS peer. Only use it when a network-level
+policy restricts the P2P port to the configured peers; Ed25519 manifest membership
+authentication remains enforced.

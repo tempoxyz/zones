@@ -28,6 +28,7 @@ pub struct P2pConfig {
     manifest: Arc<ZoneManifest>,
     ed25519_identity: Ed25519Identity,
     listen: SocketAddr,
+    bypass_ip_check: bool,
     role: Role,
 }
 
@@ -38,11 +39,13 @@ impl P2pConfig {
         manifest_path: impl AsRef<Path>,
         ed25519_key_path: impl AsRef<Path>,
         listen: SocketAddr,
+        bypass_ip_check: bool,
         expected_zone_id: u32,
         asserted_role: Option<Role>,
     ) -> eyre::Result<Self> {
         let ed25519_identity = Ed25519Identity::read_from_file(ed25519_key_path)?;
         let manifest = ZoneManifest::read_from_file(manifest_path)?;
+        validate_ip_check_configuration(&manifest, bypass_ip_check)?;
         let role = manifest.validate_node(
             expected_zone_id,
             &ed25519_identity.ed25519_public_key(),
@@ -52,6 +55,7 @@ impl P2pConfig {
             manifest: Arc::new(manifest),
             ed25519_identity,
             listen,
+            bypass_ip_check,
             role,
         })
     }
@@ -78,9 +82,21 @@ impl std::fmt::Debug for P2pConfig {
             .field("zone_id", &self.manifest.zone_id())
             .field("ed25519_public_key", &self.ed25519_public_key())
             .field("listen", &self.listen)
+            .field("bypass_ip_check", &self.bypass_ip_check)
             .field("role", &self.role)
             .finish_non_exhaustive()
     }
+}
+
+fn validate_ip_check_configuration(
+    manifest: &ZoneManifest,
+    bypass_ip_check: bool,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        !manifest.has_dns_addresses() || bypass_ip_check,
+        "DNS peer addresses require --p2p.bypass-ip-check because their egress IPs are not known; this disables pre-authentication source-IP filtering for all inbound P2P connections"
+    );
+    Ok(())
 }
 
 /// Outbound protocol commands accepted by the dedicated P2P runtime.
@@ -267,6 +283,7 @@ fn run(
             &config.manifest,
             config.ed25519_identity.into_private_key(),
             config.listen,
+            config.bypass_ip_check,
             network_id,
         )?;
         oracle.track(0, peers).await;
@@ -277,10 +294,10 @@ fn run(
         );
         let mut network_task = commonware.start();
 
-        if config.manifest.has_dns_addresses() {
+        if config.bypass_ip_check {
             warn!(
                 target: "zone::p2p",
-                "DNS peer addresses configured; relying on manifest Ed25519 public keys instead of source-IP filtering"
+                "P2P source-IP filtering is disabled; relying on network-level access controls and manifest Ed25519 public keys"
             );
         }
         info!(
@@ -489,7 +506,7 @@ mod tests {
     use commonware_codec::Encode as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
-    use super::{P2pConfig, P2pEvent, spawn_p2p};
+    use super::{P2pConfig, P2pEvent, spawn_p2p, validate_ip_check_configuration};
     use crate::{P2pNetworkId, ZoneManifest, identity::Ed25519Identity};
 
     fn available_address() -> SocketAddr {
@@ -500,6 +517,30 @@ mod tests {
     fn ed25519_identity(seed: u64) -> Ed25519Identity {
         let key = PrivateKey::from_seed(seed);
         Ed25519Identity::from_hex(&const_hex::encode_prefixed(key.encode().as_ref())).unwrap()
+    }
+
+    #[test]
+    fn dns_manifest_requires_explicit_ip_check_bypass() {
+        let identities = [
+            ed25519_identity(1),
+            ed25519_identity(2),
+            ed25519_identity(3),
+        ];
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, identity) in identities.iter().enumerate() {
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"node-{index}.zone.local:9200\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref())
+            ));
+        }
+        let manifest = ZoneManifest::parse(&input).unwrap();
+
+        let error = validate_ip_check_configuration(&manifest, false).unwrap_err();
+        assert!(error.to_string().contains("--p2p.bypass-ip-check"));
+        validate_ip_check_configuration(&manifest, true).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -537,6 +578,7 @@ mod tests {
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
                         listen,
+                        bypass_ip_check: false,
                         role,
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),

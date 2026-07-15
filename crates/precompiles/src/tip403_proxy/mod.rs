@@ -31,6 +31,7 @@ const POLICY_DATA_GAS: u64 = 200;
 
 alloy_sol_types::sol! {
     /// Returned when a mutating call is attempted on the read-only zone registry.
+    #[derive(Debug, PartialEq, Eq)]
     error ReadOnlyRegistry();
 }
 

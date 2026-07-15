@@ -25,6 +25,7 @@ import {
     Withdrawal,
     ZONE_INBOX,
     ZONE_OUTBOX,
+    ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
@@ -45,6 +46,8 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
 
     bool public shouldAccept = true;
+    uint32 public lastZoneId;
+    address public lastSourcePortal;
     bytes32 public lastSenderTag;
     address public lastToken;
     uint128 public lastAmount;
@@ -55,6 +58,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     }
 
     function onWithdrawalReceived(
+        uint32 zoneId,
+        address sourcePortal,
         bytes32 senderTag,
         address token,
         uint128 amount,
@@ -63,11 +68,28 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
+        lastZoneId = zoneId;
+        lastSourcePortal = sourcePortal;
         lastSenderTag = senderTag;
         lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
         return shouldAccept ? IWithdrawalReceiver.onWithdrawalReceived.selector : bytes4(0);
+    }
+
+}
+
+contract MockZoneFactoryForBridgeMessenger {
+
+    mapping(uint32 => ZoneInfo) internal _zones;
+
+    function setPortal(uint32 zoneId, address portal) external {
+        _zones[zoneId].zoneId = zoneId;
+        _zones[zoneId].portal = portal;
+    }
+
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
+        return _zones[zoneId];
     }
 
 }
@@ -130,7 +152,7 @@ contract ZoneBridgeTest is BaseTest {
         super.setUp();
 
         // === Deploy L1 Contracts ===
-        l1Factory = new ZoneFactory(); // Keep factory for verifier only
+        l1Factory = _deployZoneFactory(); // Keep factory for verifier only
         withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Deploy zone token FIRST (used for both L1 escrow and zone-side operations).
@@ -147,23 +169,26 @@ contract ZoneBridgeTest is BaseTest {
         // Record genesis block number for Tempo
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Deploy messenger and portal directly (bypass factory to avoid TIP20 prefix check).
-        // Predict portal address so messenger can reference it in its constructor.
-        uint256 currentNonce = vm.getNonce(address(this));
-        address predictedPortal = vm.computeCreateAddress(address(this), currentNonce + 1);
-        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal);
-        l1Portal = new ZonePortal(
+        // Deploy portal directly (bypass factory to avoid TIP20 prefix check), but use a
+        // mock factory registry so the shared messenger can authenticate the source portal.
+        MockZoneFactoryForBridgeMessenger messengerFactory = new MockZoneFactoryForBridgeMessenger();
+        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
+        l1Portal = new ZonePortal();
+        address verifier = l1Factory.verifier();
+        vm.prank(_ZONE_FACTORY);
+        l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
             address(messengerContract),
             admin, // admin
             sequencer, // sequencer
-            l1Factory.verifier(),
+            verifier,
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
             ""
         );
         zoneId = 1;
+        messengerFactory.setPortal(zoneId, address(l1Portal));
 
         // === Deploy zone contracts ===
         // TempoState mock for testing
@@ -220,7 +245,7 @@ contract ZoneBridgeTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -1139,7 +1164,7 @@ contract ZoneBridgeTest is BaseTest {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });

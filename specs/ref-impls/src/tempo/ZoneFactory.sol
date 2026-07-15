@@ -26,14 +26,14 @@ contract ZoneFactory is IZoneFactory {
 
     mapping(uint32 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
-    mapping(address => bool) internal _isZoneMessenger;
     mapping(address => bool) internal _validVerifiers;
     address internal _verifier;
+    address internal _messenger;
 
     /// @notice Tracks deployment count for CREATE address prediction
-    /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment
-    ///      in the constructor, so zone deployments start at nonce 2.
-    uint256 internal _deploymentNonce = 2;
+    /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment,
+    ///      nonce 2 by the shared ZoneMessenger, so zone deployments start at nonce 3.
+    uint256 internal _deploymentNonce = 3;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -43,6 +43,7 @@ contract ZoneFactory is IZoneFactory {
         address v = address(new Verifier());
         _validVerifiers[v] = true;
         _verifier = v;
+        _messenger = address(new ZoneMessenger(address(this)));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -66,32 +67,18 @@ contract ZoneFactory is IZoneFactory {
         if (zoneId == type(uint32).max) revert ZoneIdOverflow();
         _nextZoneId = zoneId + 1;
 
-        // We deploy messenger first, then portal.
-        // Messenger needs portal's address at construction (immutable).
-        // Solution: predict portal's address based on CREATE address formula.
-        //
-        // CREATE addresses: address = keccak256(rlp([sender, nonce]))[12:]
-        // - messenger will be at nonce N
-        // - portal will be at nonce N+1
-        //
-        // We track our own nonce since contract nonce isn't accessible.
-
         uint256 currentNonce = _deploymentNonce;
-        _deploymentNonce += 2; // We'll deploy 2 contracts
+        _deploymentNonce += 1; // We'll deploy 1 contract
 
-        // Compute portal's address (will be deployed at nonce+1)
-        address predictedPortal = _computeCreateAddress(address(this), currentNonce + 1);
+        address predictedPortal = _computeCreateAddress(address(this), currentNonce);
 
-        // Deploy messenger with predicted portal address (no token needed -- portal grants approval per-token)
-        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal);
-        address messengerAddress = address(messengerContract);
-
-        // Deploy portal with messenger address and initial token
-        // The portal constructor enables the initial token automatically
-        ZonePortal portalContract = new ZonePortal(
+        // Deploy and atomically initialize the portal. TIP-1091 fixes this factory's address as
+        // the portal's only initializer authority.
+        ZonePortal portalContract = new ZonePortal();
+        portalContract.initialize(
             zoneId,
             params.initialToken,
-            messengerAddress,
+            _messenger,
             params.admin,
             params.sequencer,
             params.verifier,
@@ -108,7 +95,6 @@ contract ZoneFactory is IZoneFactory {
         _zones[zoneId] = ZoneInfo({
             zoneId: zoneId,
             portal: portal,
-            messenger: messengerAddress,
             initialToken: params.initialToken,
             admin: params.admin,
             sequencer: params.sequencer,
@@ -120,12 +106,10 @@ contract ZoneFactory is IZoneFactory {
         });
 
         _isZonePortal[portal] = true;
-        _isZoneMessenger[messengerAddress] = true;
 
         emit ZoneCreated(
             zoneId,
             portal,
-            messengerAddress,
             params.initialToken,
             params.admin,
             params.sequencer,
@@ -181,16 +165,16 @@ contract ZoneFactory is IZoneFactory {
         return _isZonePortal[portal];
     }
 
-    function isZoneMessenger(address messenger) external view returns (bool) {
-        return _isZoneMessenger[messenger];
-    }
-
     function isValidVerifier(address v) external view returns (bool) {
         return _validVerifiers[v];
     }
 
     function verifier() external view returns (address) {
         return _verifier;
+    }
+
+    function messenger() external view returns (address) {
+        return _messenger;
     }
 
 }

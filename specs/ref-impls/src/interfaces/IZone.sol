@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+// Protocol-managed ZoneFactory precompile defined by TIP-1091.
+address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
+
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
@@ -21,7 +24,6 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address messenger;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address admin;
     address sequencer;
@@ -279,7 +281,7 @@ struct Withdrawal {
     uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
-    address fallbackRecipient; // zone address for bounce-back if call fails
+    uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
     bytes encryptedSender; // optional encrypted (sender, txHash) reveal payload
 }
@@ -293,7 +295,7 @@ struct PendingWithdrawal {
     uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
-    address fallbackRecipient; // zone address for bounce-back if call fails
+    uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
     bytes revealTo; // optional compressed secp256k1 pubkey for sender reveal encryption
 }
@@ -330,7 +332,7 @@ interface IZoneTxContext {
                 ZONE PORTAL STORAGE SLOT CONSTANTS
 //////////////////////////////////////////////////////////////*/
 
-// ZonePortal storage layout (non-immutable variables only):
+// ZonePortal storage layout:
 //   slot 0: sequencer (address)
 //   slot 1: admin (address)
 //   slot 2: pendingSequencer (address)
@@ -347,6 +349,9 @@ interface IZoneTxContext {
 //   slot 13: _withdrawalQueue.slots (mapping(uint256 => bytes32))
 //   slot 14: rpcUrl (string)
 //   slot 15: pendingAdmin (address)
+//   slot 16: _withdrawalReentrancyStatus (uint256)
+//   slot 17: zoneId (uint32) + messenger (address) [packed]
+//   slot 18: verifier (address) + genesisTempoBlockNumber (uint64) + _initialized (bool) [packed]
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -421,7 +426,6 @@ interface IZoneFactory {
     event ZoneCreated(
         uint32 indexed zoneId,
         address indexed portal,
-        address indexed messenger,
         address initialToken,
         address admin,
         address sequencer,
@@ -443,7 +447,11 @@ interface IZoneFactory {
     /// @return valid True if `verifier` can be passed to `createZone`.
     function isValidVerifier(address verifier) external view returns (bool);
 
-    /// @notice Creates a new zone and deploys its portal and messenger contracts.
+    /// @notice Returns the default verifier deployed by the factory.
+    /// @return verifier The default verifier contract address.
+    function verifier() external view returns (address);
+
+    /// @notice Creates a new zone and deploys its portal contract.
     /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
@@ -465,10 +473,9 @@ interface IZoneFactory {
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
 
-    /// @notice Returns whether an address is a messenger deployed by this factory.
-    /// @param messenger The messenger address to check.
-    /// @return isMessenger True if `messenger` was created by this factory.
-    function isZoneMessenger(address messenger) external view returns (bool);
+    /// @notice Returns the shared messenger used for withdrawal callbacks.
+    /// @return messenger The shared messenger contract address.
+    function messenger() external view returns (address);
 
 }
 
@@ -520,7 +527,7 @@ interface IZonePortal {
 
     event WithdrawalBounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
-        address indexed fallbackRecipient,
+        uint64 indexed fallbackNonce,
         address token,
         uint128 amount,
         uint64 depositNumber
@@ -592,11 +599,16 @@ interface IZonePortal {
 
     error NotSequencer();
     error NotAdmin();
+    error NotFactory();
+    error AlreadyInitialized();
     error NotPendingSequencer();
     error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
+    error TransferFailed();
+    error NotSelf();
+    error ReentrantWithdrawal();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
     error NoEncryptionKeySet();
@@ -611,6 +623,19 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
+
+    function initialize(
+        uint32 zoneId,
+        address initialToken,
+        address messenger,
+        address admin,
+        address sequencer,
+        address verifier,
+        bytes32 genesisBlockHash,
+        uint64 genesisTempoBlockNumber,
+        string calldata rpcUrl
+    )
+        external;
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
@@ -677,7 +702,7 @@ interface IZonePortal {
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
-    ///      Validates the token is a TIP-20 and grants messenger max approval.
+    ///      Validates the token is a TIP-20.
     function enableToken(address token) external;
 
     /// @notice Pause deposits for a token. Only callable by admin.
@@ -803,6 +828,16 @@ interface IZonePortal {
 
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
+    function deliverWithdrawal(
+        address token,
+        address target,
+        uint128 amount,
+        bytes32 senderTag,
+        uint64 gasLimit,
+        bytes calldata data
+    )
+        external;
+
     function refunds(address token, address owner) external view returns (uint128);
 
     function claimRefund(address token) external returns (uint128 amount);
@@ -821,15 +856,13 @@ interface IZonePortal {
 }
 
 /// @title IZoneMessenger
-/// @notice Interface for zone messenger on Tempo (handles withdrawal callbacks)
+/// @notice Interface for the shared zone messenger on Tempo (handles withdrawal callbacks)
 interface IZoneMessenger {
 
-    /// @notice Returns the zone's portal address
-    function portal() external view returns (address);
-
-    /// @notice Relay a withdrawal message. Only callable by the portal.
-    /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
+    /// @notice Relay a withdrawal message. Only callable by the registered portal for `zoneId`.
+    /// @dev Transfers tokens it received from the portal to target, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
+    /// @param zoneId The source zone ID.
     /// @param token The TIP-20 token to transfer
     /// @param senderTag The authenticated sender commitment from the zone
     /// @param target The Tempo recipient
@@ -837,6 +870,7 @@ interface IZoneMessenger {
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
     function relayMessage(
+        uint32 zoneId,
         address token,
         bytes32 senderTag,
         address target,
@@ -853,6 +887,8 @@ interface IZoneMessenger {
 interface IWithdrawalReceiver {
 
     function onWithdrawalReceived(
+        uint32 zoneId,
+        address sourcePortal,
         bytes32 senderTag,
         address token,
         uint128 amount,
@@ -1054,14 +1090,14 @@ interface IZoneOutbox {
         uint128 fee,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        uint64 fallbackNonce,
         bytes data,
         bytes revealTo
     );
 
     event TempoGasRateUpdated(uint128 tempoGasRate);
 
-    event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
+    event MaxWithdrawalsPerBlockUpdated(uint32 maxWithdrawalsPerBlock);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
@@ -1076,6 +1112,12 @@ interface IZoneOutbox {
 
     /// @notice Next withdrawal index (monotonically increasing)
     function nextWithdrawalIndex() external view returns (uint64);
+
+    /// @notice Last nonce assigned to a user withdrawal fallback recipient
+    function lastFallbackNonce() external view returns (uint64);
+
+    /// @notice Resolve and delete a fallback recipient. Only callable by ZoneInbox.
+    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
 
     /// @notice Current withdrawal batch index (monotonically increasing)
     function withdrawalBatchIndex() external view returns (uint64);
@@ -1093,7 +1135,7 @@ interface IZoneOutbox {
     function lastFinalizedTimestamp() external view returns (uint64);
 
     /// @notice Maximum number of withdrawal requests per zone block (0 = unlimited)
-    function maxWithdrawalsPerBlock() external view returns (uint256);
+    function maxWithdrawalsPerBlock() external view returns (uint32);
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
@@ -1102,7 +1144,7 @@ interface IZoneOutbox {
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
-    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
+    function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate

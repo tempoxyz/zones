@@ -16,6 +16,7 @@ import {
     ITIP20ZoneFactory,
     IZoneConfig,
     IZoneInbox,
+    IZoneOutbox,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
@@ -1147,14 +1148,21 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(alice), 0);
     }
 
-    /// @notice Claiming pays a parked mint refund and clears it.
+    /// @notice Claiming pays a parked withdrawal bounce-back refund and clears it.
     function test_claimRefund_success() public {
+        uint64 fallbackNonce = 1;
+        vm.mockCall(
+            ZONE_OUTBOX,
+            abi.encodeWithSelector(IZoneOutbox.consumeFallbackRecipient.selector, fallbackNonce),
+            abi.encode(bob)
+        );
+
         zoneToken.setMinter(address(inbox), false);
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({
             token: address(zoneToken),
             sender: alice,
-            to: bob,
+            to: address(uint160(fallbackNonce)),
             amount: 100e6,
             bouncebackRecipient: address(0),
             memo: bytes32(0)

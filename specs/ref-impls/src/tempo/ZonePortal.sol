@@ -16,7 +16,8 @@ import {
     MAX_WITHDRAWAL_CALLBACK_GAS,
     QueuedDeposit,
     TokenConfig,
-    Withdrawal
+    Withdrawal,
+    ZONE_FACTORY_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
@@ -65,11 +66,6 @@ contract ZonePortal is IZonePortal {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
-
-    uint32 public immutable zoneId;
-    address public immutable messenger;
-    address public immutable verifier;
-    uint64 public immutable genesisTempoBlockNumber;
 
     /// @notice Current sequencer address
     address public sequencer;
@@ -128,11 +124,23 @@ contract ZonePortal is IZonePortal {
     /// @notice Pending admin for two-step admin transfer
     address public pendingAdmin;
 
+    /// @notice Reentrancy guard for withdrawal delivery.
+    uint256 internal _withdrawalReentrancyStatus;
+
+    /// @notice Zone metadata stored after the cross-domain layout.
+    /// @dev These values must remain in account storage so each delegatecall proxy observes its
+    ///      own metadata. Keep them after the established slots read directly by zone contracts.
+    uint32 public zoneId;
+    address public messenger;
+    address public verifier;
+    uint64 public genesisTempoBlockNumber;
+    bool internal _initialized;
+
     /*//////////////////////////////////////////////////////////////
-                              CONSTRUCTOR
+                             INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
+    function initialize(
         uint32 _zoneId,
         address _initialToken,
         address _messenger,
@@ -141,8 +149,14 @@ contract ZonePortal is IZonePortal {
         address _verifier,
         bytes32 _genesisBlockHash,
         uint64 _genesisTempoBlockNumber,
-        string memory _rpcUrl
-    ) {
+        string calldata _rpcUrl
+    )
+        external
+    {
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
+        if (_initialized) revert AlreadyInitialized();
+
+        _initialized = true;
         zoneId = _zoneId;
         messenger = _messenger;
         admin = _admin;
@@ -168,6 +182,18 @@ contract ZonePortal is IZonePortal {
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
         _;
+    }
+
+    modifier onlySelf() {
+        if (msg.sender != address(this)) revert NotSelf();
+        _;
+    }
+
+    modifier nonReentrantWithdrawal() {
+        if (_withdrawalReentrancyStatus != 0) revert ReentrantWithdrawal();
+        _withdrawalReentrancyStatus = 1;
+        _;
+        _withdrawalReentrancyStatus = 0;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -280,7 +306,7 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled (non-custodial guarantee).
-    ///      Validates the token is a TIP-20 and grants messenger max approval.
+    ///      Validates the token is a TIP-20.
     function enableToken(address _token) external onlyAdmin {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
@@ -304,13 +330,10 @@ contract ZonePortal is IZonePortal {
         emit DepositsResumed(_token);
     }
 
-    /// @notice Internal function to enable a token (used by constructor and enableToken)
+    /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
         _enabledTokens.push(_token);
-
-        // Give messenger max approval for this token
-        ITIP20(_token).approve(messenger, type(uint256).max);
 
         // Read token metadata for the event so zone-side can create matching TIP-20
         string memory name = ITIP20(_token).name();
@@ -342,6 +365,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Set the sequencer's encryption public key with proof of possession
     /// @dev Only callable by the sequencer. Appends to key history.
+    ///      No reentrancy guard is needed because this function makes no unrestricted external
+    ///      calls; its only external calls are to fixed cryptographic precompiles.
     ///      Requires a valid ECDSA signature over keccak256(abi.encode(address(this), x, yParity))
     ///      produced by the private key corresponding to (x, yParity). This prevents accidental
     ///      registration of keys the sequencer cannot decrypt with.
@@ -687,13 +712,14 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
+        nonReentrantWithdrawal
     {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
         address _token = withdrawal.token;
 
-        if (withdrawal.fallbackRecipient == address(0)) {
+        if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
         }
@@ -706,7 +732,7 @@ contract ZonePortal is IZonePortal {
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
-            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
             emit WithdrawalProcessed(
                 withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
             );
@@ -717,15 +743,14 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.gasLimit == 0) {
             success = _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
-            try IZoneMessenger(messenger)
-                .relayMessage(
-                    _token,
-                    withdrawal.senderTag,
-                    withdrawal.to,
-                    withdrawal.amount,
-                    withdrawal.gasLimit,
-                    withdrawal.callbackData
-                ) {
+            try this.deliverWithdrawal(
+                _token,
+                withdrawal.to,
+                withdrawal.amount,
+                withdrawal.senderTag,
+                withdrawal.gasLimit,
+                withdrawal.callbackData
+            ) {
                 success = true;
             } catch {
                 success = false;
@@ -734,11 +759,35 @@ contract ZonePortal is IZonePortal {
 
         if (!success) {
             // Callback failed: bounce back to zone (only amount, not fee)
-            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
         }
         emit WithdrawalProcessed(
             withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success
         );
+    }
+
+    /// @notice Deliver a callback withdrawal in a revertable self-call frame.
+    /// @dev Only callable by this portal. It transfers only the current withdrawal amount to
+    ///      the shared messenger, then asks the messenger to call the target. If delivery
+    ///      fails, this call reverts and rolls back the transfer to the messenger. The outer
+    ///      processWithdrawal catches the revert and records a bounce-back.
+    function deliverWithdrawal(
+        address token,
+        address target,
+        uint128 amount,
+        bytes32 senderTag,
+        uint64 gasLimit,
+        bytes calldata data
+    )
+        external
+        onlySelf
+    {
+        if (!ITIP20(token).transfer(messenger, amount)) {
+            revert TransferFailed();
+        }
+
+        IZoneMessenger(messenger)
+            .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
@@ -799,18 +848,12 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     /// @param _token The token from the failed withdrawal
     /// @param amount The amount to bounce back
-    /// @param fallbackRecipient The zone address to receive the bounce-back
-    function _enqueueBounceBack(
-        address _token,
-        uint128 amount,
-        address fallbackRecipient
-    )
-        internal
-    {
+    /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
+    function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
         Deposit memory depositData = Deposit({
             token: _token,
             sender: address(this),
-            to: fallbackRecipient,
+            to: address(uint160(fallbackNonce)),
             amount: amount,
             bouncebackRecipient: address(0),
             memo: bytes32(0)
@@ -822,7 +865,7 @@ contract ZonePortal is IZonePortal {
         uint64 thisDeposit = ++depositCount;
 
         emit WithdrawalBounceBack(
-            newCurrentDepositQueueHash, fallbackRecipient, _token, amount, thisDeposit
+            newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
         );
     }
 

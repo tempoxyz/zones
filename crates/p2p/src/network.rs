@@ -43,6 +43,7 @@ pub(crate) fn instantiate(
     manifest: &ZoneManifest,
     ed25519_private_key: PrivateKey,
     listen: SocketAddr,
+    bypass_ip_check: bool,
     network_id: P2pNetworkId,
 ) -> eyre::Result<(Network, Oracle, Map<PublicKey, Address>)> {
     let namespace = namespace(manifest.zone_id(), network_id);
@@ -55,10 +56,9 @@ pub(crate) fn instantiate(
     // Zone P2P peers commonly use pod/private addresses. Membership remains
     // authenticated by the Ed25519 identities in the manifest.
     config.allow_private_ips = true;
-    // A DNS-only manifest has no stable egress IP to compare against. In that
-    // topology, accept inbound attempts from any IP and rely on the authenticated
-    // manifest identity. This does not admit keys absent from the peer set.
-    config.bypass_ip_check = manifest.has_dns_addresses();
+    // This is a network-wide Commonware setting, so it must be an explicit
+    // operator choice.
+    config.bypass_ip_check = bypass_ip_check;
 
     let peers = manifest
         .nodes()

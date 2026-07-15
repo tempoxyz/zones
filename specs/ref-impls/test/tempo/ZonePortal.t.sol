@@ -25,6 +25,7 @@ import {
     PORTAL_PENDING_SEQUENCER_SLOT,
     PORTAL_SEQUENCER_SLOT,
     Withdrawal,
+    ZONE_FACTORY_ADDRESS,
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
@@ -39,6 +40,7 @@ import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
 /// @notice Mock withdrawal receiver that accepts funds
@@ -48,6 +50,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     bool public shouldRevert = false;
 
     bytes32 public lastSenderTag;
+    uint32 public lastZoneId;
+    address public lastSourcePortal;
     address public lastToken;
     uint128 public lastAmount;
     bytes public lastCallbackData;
@@ -66,6 +70,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     }
 
     function onWithdrawalReceived(
+        uint32 zoneId,
+        address sourcePortal,
         bytes32 senderTag,
         address token,
         uint128 amount,
@@ -74,10 +80,16 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
+        lastZoneId = zoneId;
+        lastSourcePortal = sourcePortal;
         lastSenderTag = senderTag;
         lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
+
+        if (expectedMessenger != address(0) && msg.sender != expectedMessenger) {
+            revert("MockWithdrawalReceiver: unexpected messenger");
+        }
 
         if (shouldRevert) {
             revert("MockWithdrawalReceiver: intentional revert");
@@ -96,6 +108,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
 contract GasConsumingReceiver is IWithdrawalReceiver {
 
     function onWithdrawalReceived(
+        uint32,
+        address,
         bytes32,
         address,
         uint128,
@@ -117,6 +131,8 @@ contract SuccessfulReceiver is IWithdrawalReceiver {
     uint256 public callCount;
 
     function onWithdrawalReceived(
+        uint32,
+        address,
         bytes32,
         address,
         uint128,
@@ -127,6 +143,132 @@ contract SuccessfulReceiver is IWithdrawalReceiver {
     {
         callCount++;
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
+    }
+
+}
+
+/// @notice Sequencer-controlled receiver that attempts to process another withdrawal in callback.
+contract ReentrantWithdrawalReceiver is IWithdrawalReceiver {
+
+    bytes4 public nestedRevertSelector;
+    bool public nestedCallSucceeded;
+
+    function onWithdrawalReceived(
+        uint32,
+        address sourcePortal,
+        bytes32,
+        address,
+        uint128,
+        bytes calldata callbackData
+    )
+        external
+        returns (bytes4)
+    {
+        (Withdrawal memory withdrawal, bytes32 remainingQueue) =
+            abi.decode(callbackData, (Withdrawal, bytes32));
+
+        try IZonePortal(sourcePortal).processWithdrawal(withdrawal, remainingQueue) {
+            nestedCallSucceeded = true;
+        } catch (bytes memory reason) {
+            if (reason.length >= 4) {
+                bytes4 selector;
+                assembly ("memory-safe") {
+                    selector := mload(add(reason, 0x20))
+                }
+                nestedRevertSelector = selector;
+            }
+        }
+
+        return IWithdrawalReceiver.onWithdrawalReceived.selector;
+    }
+
+}
+
+contract ZonePortalProxyStorageTest is Test {
+
+    function test_proxyMetadataIsReadFromPortalStorage() public {
+        address initialToken = makeAddr("initial token");
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.symbol.selector), abi.encode("INITIAL")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
+        );
+
+        ZonePortal implementation = new ZonePortal();
+        assertNotEq(address(this), ZONE_FACTORY_ADDRESS, "logic deployer must differ from factory");
+
+        address proxyA = makeAddr("portal proxy A");
+        address proxyB = makeAddr("portal proxy B");
+        bytes memory runtime = abi.encodePacked(
+            hex"363d3d373d3d3d363d73", address(implementation), hex"5af43d82803e903d91602b57fd5bf3"
+        );
+        vm.etch(proxyA, runtime);
+        vm.etch(proxyB, runtime);
+
+        address messengerA = makeAddr("messenger A");
+        address messengerB = makeAddr("messenger B");
+        address verifierA = makeAddr("verifier A");
+        address verifierB = makeAddr("verifier B");
+        vm.prank(makeAddr("not factory"));
+        vm.expectRevert(IZonePortal.NotFactory.selector);
+        ZonePortal(proxyA)
+            .initialize(
+                1,
+                initialToken,
+                messengerA,
+                makeAddr("admin A"),
+                makeAddr("sequencer A"),
+                verifierA,
+                keccak256("genesis A"),
+                100,
+                ""
+            );
+
+        vm.startPrank(ZONE_FACTORY_ADDRESS);
+        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
+        _initializePortal(proxyB, initialToken, 2, messengerB, verifierB, 200);
+
+        vm.expectRevert(IZonePortal.AlreadyInitialized.selector);
+        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
+        vm.stopPrank();
+
+        assertEq(ZonePortal(proxyA).zoneId(), 1);
+        assertEq(ZonePortal(proxyA).messenger(), messengerA);
+        assertEq(ZonePortal(proxyA).verifier(), verifierA);
+        assertEq(ZonePortal(proxyA).genesisTempoBlockNumber(), 100);
+
+        assertEq(ZonePortal(proxyB).zoneId(), 2);
+        assertEq(ZonePortal(proxyB).messenger(), messengerB);
+        assertEq(ZonePortal(proxyB).verifier(), verifierB);
+        assertEq(ZonePortal(proxyB).genesisTempoBlockNumber(), 200);
+    }
+
+    function _initializePortal(
+        address target,
+        address initialToken,
+        uint32 id,
+        address portalMessenger,
+        address portalVerifier,
+        uint64 genesisBlockNumber
+    )
+        internal
+    {
+        ZonePortal(target)
+            .initialize(
+                id,
+                initialToken,
+                portalMessenger,
+                makeAddr(string.concat("admin ", vm.toString(id))),
+                makeAddr(string.concat("sequencer ", vm.toString(id))),
+                portalVerifier,
+                keccak256(abi.encode("genesis", id)),
+                genesisBlockNumber,
+                ""
+            );
     }
 
 }
@@ -150,7 +292,7 @@ contract ZonePortalTest is BaseTest {
         super.setUp();
 
         // Deploy zone infrastructure
-        zoneFactory = new ZoneFactory();
+        zoneFactory = _deployZoneFactory();
         withdrawalReceiver = new MockWithdrawalReceiver();
         gasConsumingReceiver = new GasConsumingReceiver();
         successfulReceiver = new SuccessfulReceiver();
@@ -184,9 +326,8 @@ contract ZonePortalTest is BaseTest {
         (testZoneId, portalAddr) = zoneFactory.createZone(params);
         portal = ZonePortal(portalAddr);
 
-        // Get the messenger
-        ZoneInfo memory info = zoneFactory.zones(testZoneId);
-        messenger = ZoneMessenger(info.messenger);
+        // Get the shared messenger
+        messenger = ZoneMessenger(zoneFactory.messenger());
 
         // Set expected messenger for withdrawal receiver
         withdrawalReceiver.setExpectedMessenger(address(messenger));
@@ -218,7 +359,7 @@ contract ZonePortalTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(uint160(fallbackRecipient)),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -246,7 +387,6 @@ contract ZonePortalTest is BaseTest {
         ZoneInfo memory info = zoneFactory.zones(testZoneId);
         assertEq(info.zoneId, testZoneId);
         assertEq(info.portal, address(portal));
-        assertEq(info.messenger, address(messenger));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
         assertEq(info.sequencer, sequencer);
@@ -1450,6 +1590,67 @@ contract ZonePortalTest is BaseTest {
         portal.processWithdrawal(w, bytes32(0));
     }
 
+    function test_processWithdrawal_revertsOnSequencerCallbackReentrancy() public {
+        ReentrantWithdrawalReceiver receiver = new ReentrantWithdrawalReceiver();
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        Withdrawal memory nested =
+            _withdrawal(address(pathUSD), alice, bob, 200e6, bytes32(0), 0, alice, "");
+        Withdrawal memory outer = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(receiver),
+            300e6,
+            bytes32(0),
+            500_000,
+            alice,
+            abi.encode(nested, bytes32(0))
+        );
+
+        bytes32 remainingQueue = keccak256(abi.encode(nested, EMPTY_SENTINEL));
+        bytes32 withdrawalQueue = keccak256(abi.encode(outer, remainingQueue));
+
+        vm.roll(block.number + 1);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("reentrancy")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: portal.currentDepositQueueHash(),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalQueue,
+            "",
+            ""
+        );
+
+        portal.transferSequencer(address(receiver));
+        vm.prank(address(receiver));
+        portal.acceptSequencer();
+
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        vm.prank(address(receiver));
+        portal.processWithdrawal(outer, remainingQueue);
+
+        assertFalse(receiver.nestedCallSucceeded());
+        assertEq(receiver.nestedRevertSelector(), IZonePortal.ReentrantWithdrawal.selector);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(portal.withdrawalQueueSlot(0), remainingQueue);
+
+        vm.prank(address(receiver));
+        portal.processWithdrawal(nested, bytes32(0));
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + nested.amount);
+    }
+
     /*//////////////////////////////////////////////////////////////
                          DEPOSIT CHAIN TESTS
     //////////////////////////////////////////////////////////////*/
@@ -2243,10 +2444,10 @@ contract ZonePortalTest is BaseTest {
     }
 
     /*//////////////////////////////////////////////////////////////
-                         IMMUTABLE GETTERS TESTS
+                          METADATA GETTER TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_immutableGetters() public view {
+    function test_metadataGetters() public view {
         assertEq(portal.zoneId(), testZoneId);
         assertEq(portal.sequencer(), sequencer);
         assertEq(portal.verifier(), zoneFactory.verifier());
@@ -2819,7 +3020,7 @@ contract ZonePortalTest is BaseTest {
     ///      TempoState.readTempoStorageSlot() using hardcoded slot numbers. If those slot
     ///      numbers drift from the actual layout, the zone reads garbage data.
     ///
-    ///      Slot layout (non-immutable variables only):
+    ///      Slot layout:
     ///        slot 0: sequencer (address)
     ///        slot 1: admin (address)
     ///        slot 2: pendingSequencer (address)
@@ -2828,6 +3029,8 @@ contract ZonePortalTest is BaseTest {
     ///        slot 5: currentDepositQueueHash (bytes32)
     ///        slot 6: deposit counters
     ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
+    ///        slot 17: zoneId (uint32) + messenger (address) [packed]
+    ///        slot 18: verifier + genesisTempoBlockNumber + _initialized [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: sequencer ---
         bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
@@ -2889,6 +3092,25 @@ contract ZonePortalTest is BaseTest {
             portal.pendingAdmin(),
             "slot 15: pendingAdmin mismatch"
         );
+
+        // --- Slot 17: zoneId (uint32) + messenger (address) packed ---
+        bytes32 slot17 = vm.load(address(portal), bytes32(uint256(17)));
+        assertEq(uint32(uint256(slot17)), portal.zoneId(), "slot 17: zoneId mismatch");
+        assertEq(
+            address(uint160(uint256(slot17) >> 32)),
+            portal.messenger(),
+            "slot 17: messenger mismatch"
+        );
+
+        // --- Slot 18: verifier (address) + genesisTempoBlockNumber (uint64) packed ---
+        bytes32 slot18 = vm.load(address(portal), bytes32(uint256(18)));
+        assertEq(address(uint160(uint256(slot18))), portal.verifier(), "slot 18: verifier mismatch");
+        assertEq(
+            uint64(uint256(slot18) >> 160),
+            portal.genesisTempoBlockNumber(),
+            "slot 18: genesisTempoBlockNumber mismatch"
+        );
+        assertEq(uint8(uint256(slot18) >> 224), 1, "slot 18: initialized mismatch");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

@@ -19,8 +19,8 @@ use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, WITHDRAWAL_TX_GAS, approve_outbox, local_dev_zone_account,
-    start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
+    local_dev_zone_account, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to the dev account, then transfer a portion to Bob.
@@ -123,9 +123,12 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let withdrawal_fee = outbox.calculateWithdrawalFee(0).call().await?;
+    let gas_buffer = u128::from(TIP20_TX_GAS)
+        .checked_add(u128::from(WITHDRAWAL_TX_GAS))
+        .expect("test gas buffer should not overflow");
     let deposit_amount = withdrawal_amount
         .checked_add(withdrawal_fee)
-        .and_then(|value| value.checked_add(100_000))
+        .and_then(|value| value.checked_add(gas_buffer))
         .expect("test deposit amount should not overflow");
 
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
@@ -239,7 +242,7 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let pending = tip20_alice
         .transfer(bob, U256::from(alice_to_bob))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
 
@@ -267,7 +270,7 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let pending = tip20_bob
         .transfer(charlie, U256::from(bob_to_charlie))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
 
@@ -350,7 +353,7 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
 
@@ -416,7 +419,7 @@ async fn test_transfer_with_memo() -> eyre::Result<()> {
     let pending = tip20
         .transferWithMemo(bob, U256::from(transfer_amount), memo)
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
 

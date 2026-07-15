@@ -38,7 +38,7 @@ use reth_transaction_pool::{
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TempoChainSpec;
+use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
 use tempo_evm::TempoEvmConfig;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
@@ -71,6 +71,16 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
+
+/// Returns a known Tempo chain spec for an L1 chain ID.
+///
+/// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
+fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
+    chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
+        1337 | 31337 => Some(DEV.clone()),
+        _ => None,
+    })
+}
 
 /// Network primitives for Zone Nodes
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
@@ -265,6 +275,12 @@ impl ZoneNode {
     /// When set, the startup L1 RPC query for enabled tokens is skipped.
     pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
         self.initial_tokens = Some(tokens);
+        self
+    }
+
+    /// Set the parent L1 chain ID, avoiding a startup RPC lookup.
+    pub fn with_l1_chain_id(mut self, chain_id: u64) -> Self {
+        self.l1_state_provider_config.chain_id = Some(chain_id);
         self
     }
 
@@ -951,7 +967,11 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        let l1_chain_id = l1_provider.chain_id().await?;
+        let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
+            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
+        // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
+        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -1000,14 +1020,14 @@ where
     async fn build_pool(
         self,
         ctx: &BuilderContext<Node>,
-        _evm_config: ZoneEvmConfig,
+        evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
-        let tempo_evm_config = TempoEvmConfig::new(ctx.chain_spec());
+        let tempo_evm_config = TempoEvmConfig::new(evm_config.chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
         let mut validator = TransactionValidationTaskExecutor::eth_builder(
@@ -1083,6 +1103,7 @@ mod tests {
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
     use alloy_primitives::{Bytes, Signature, TxKind, U256};
+    use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
     use tempo_primitives::transaction::{
         AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
@@ -1103,6 +1124,15 @@ mod tests {
             AASigned::new_unhashed(transaction, signature).into(),
             sender,
         )
+    }
+
+    #[test]
+    fn resolves_public_and_local_tempo_l1_specs() {
+        assert_eq!(tempo_chain_spec_for_l1(4217).unwrap().chain().id(), 4217);
+        assert_eq!(tempo_chain_spec_for_l1(42431).unwrap().chain().id(), 42431);
+        assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
+        assert!(tempo_chain_spec_for_l1(999_999).is_none());
     }
 
     #[test]

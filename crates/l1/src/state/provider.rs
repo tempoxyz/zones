@@ -26,6 +26,8 @@ use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
 pub struct L1StateProviderConfig {
+    /// Optional known L1 chain ID, avoiding an RPC lookup when configured.
+    pub chain_id: Option<u64>,
     /// HTTP RPC endpoint for Tempo L1.
     pub l1_rpc_url: String,
     /// Zone portal address on Tempo L1, used for sequencer lookups.
@@ -44,6 +46,7 @@ pub struct L1StateProviderConfig {
 impl Default for L1StateProviderConfig {
     fn default() -> Self {
         Self {
+            chain_id: None,
             l1_rpc_url: String::new(),
             portal_address: Address::ZERO,
             max_retries: 10,
@@ -71,6 +74,8 @@ impl Default for L1StateProviderConfig {
 /// `spawn_blocking`). Calling it from within an async task on the same runtime will panic.
 #[derive(Debug, Clone)]
 pub struct L1StateProvider {
+    /// Known L1 chain ID, if configured.
+    chain_id: Option<u64>,
     /// In-memory cache of L1 contract storage slots, checked before any RPC call.
     cache: L1StateCache,
     /// Zone portal address on Tempo L1 used for sequencer lookups.
@@ -84,6 +89,14 @@ pub struct L1StateProvider {
 }
 
 impl L1StateProvider {
+    /// Returns the chain ID reported by the configured L1 provider.
+    pub async fn chain_id(&self) -> Result<u64> {
+        match self.chain_id {
+            Some(chain_id) => Ok(chain_id),
+            None => Ok(self.provider.get_chain_id().await?),
+        }
+    }
+
     /// Create a new provider.
     ///
     /// The provider is created eagerly from [`L1StateProviderConfig::l1_rpc_url`] and reused
@@ -116,6 +129,7 @@ impl L1StateProvider {
             .erased();
 
         Ok(Self {
+            chain_id: config.chain_id,
             cache,
             portal_address: config.portal_address,
             provider,
@@ -134,6 +148,7 @@ impl L1StateProvider {
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
+            chain_id: config.chain_id,
             cache,
             portal_address: config.portal_address,
             provider,

@@ -8,8 +8,9 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, ZoneAccount, now_secs, start_zone_with_private_rpc,
-    start_zone_with_private_rpc_l1, start_zone_with_private_rpc_l1_with_encryption,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, ZoneAccount, now_secs,
+    start_zone_with_private_rpc, start_zone_with_private_rpc_l1,
+    start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
     primitives::{Address, B256, U256, address, hex},
@@ -558,7 +559,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     let approve_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
         .approve(spender, U256::from(allowance_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
     ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
@@ -1016,13 +1017,13 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
     let owner_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
         .approve(spender, U256::from(111u64))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
     let outsider_pending = ContractTip20::new(PATH_USD_ADDRESS, &outsider_provider)
         .approve(spender, U256::from(222u64))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
+        .gas(TIP20_TX_GAS)
         .send()
         .await?;
 
