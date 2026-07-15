@@ -30,7 +30,6 @@ contract ZoneFactory is IZoneFactory {
     address internal _verifier;
     address internal _messenger;
     address internal _owner;
-    address internal _pendingOwner;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment,
@@ -132,18 +131,9 @@ contract ZoneFactory is IZoneFactory {
         if (msg.sender != _owner) revert NotOwner();
         if (newOwner == address(0)) revert InvalidOwner();
 
-        _pendingOwner = newOwner;
-        emit OwnershipTransferStarted(_owner, newOwner);
-    }
-
-    /// @inheritdoc IZoneFactory
-    function acceptOwnership() external {
-        if (msg.sender != _pendingOwner) revert NotPendingOwner();
-
         address previousOwner = _owner;
-        _owner = msg.sender;
-        _pendingOwner = address(0);
-        emit OwnershipTransferred(previousOwner, msg.sender);
+        _owner = newOwner;
+        emit OwnershipTransferred(previousOwner, newOwner);
     }
 
     /// @notice Compute the address of a contract deployed with CREATE
@@ -185,10 +175,6 @@ contract ZoneFactory is IZoneFactory {
 
     function owner() external view returns (address) {
         return _owner;
-    }
-
-    function pendingOwner() external view returns (address) {
-        return _pendingOwner;
     }
 
     function zones(uint32 zoneId) external view returns (ZoneInfo memory) {

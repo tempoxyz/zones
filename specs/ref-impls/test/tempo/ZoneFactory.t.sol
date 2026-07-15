@@ -78,31 +78,17 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_transferOwnership_updatesZoneCreator() public {
         vm.expectEmit(true, true, false, false);
-        emit IZoneFactory.OwnershipTransferStarted(address(this), alice);
+        emit IZoneFactory.OwnershipTransferred(address(this), alice);
         zoneFactory.transferOwnership(alice);
 
-        assertEq(zoneFactory.owner(), address(this));
-        assertEq(zoneFactory.pendingOwner(), alice);
-
-        vm.prank(alice);
-        vm.expectEmit(true, true, false, false);
-        emit IZoneFactory.OwnershipTransferred(address(this), alice);
-        zoneFactory.acceptOwnership();
-
         assertEq(zoneFactory.owner(), alice);
-        assertEq(zoneFactory.pendingOwner(), address(0));
 
         vm.expectRevert(IZoneFactory.NotOwner.selector);
         zoneFactory.transferOwnership(admin);
 
         vm.prank(alice);
         zoneFactory.transferOwnership(admin);
-        assertEq(zoneFactory.pendingOwner(), admin);
-    }
-
-    function test_acceptOwnership_revertsForNonPendingOwner() public {
-        vm.expectRevert(IZoneFactory.NotPendingOwner.selector);
-        zoneFactory.acceptOwnership();
+        assertEq(zoneFactory.owner(), admin);
     }
 
     function test_transferOwnership_revertsForZeroAddress() public {
