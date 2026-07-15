@@ -114,10 +114,9 @@ pub struct ZoneOutbox {
     withdrawal_batch_index: u64,
     last_batch: LastBatch,
     pending_withdrawals: Vec<PendingWithdrawal>,
-    pending_withdrawals_head: u32,
-    max_withdrawals_per_block: U256,
-    withdrawals_this_block: U256,
-    current_block_number: U256,
+    max_withdrawals_per_block: u32,
+    withdrawals_this_block: u32,
+    current_block_number: u64,
     last_finalized_timestamp: u64,
 }
 
@@ -148,14 +147,14 @@ impl ZoneOutbox {
 
     fn enforce_withdrawal_block_cap(&mut self) -> ZoneResult<()> {
         let max = self.max_withdrawals_per_block.read()?;
-        if max.is_zero() {
+        if max == 0 {
             return Ok(());
         }
 
-        let block_number = U256::from(self.storage.block_number());
+        let block_number = self.storage.block_number();
         if block_number != self.current_block_number.read()? {
             self.current_block_number.write(block_number)?;
-            self.withdrawals_this_block.write(U256::ZERO)?;
+            self.withdrawals_this_block.write(0)?;
         }
 
         let withdrawals = self.withdrawals_this_block.read()?;
@@ -164,7 +163,7 @@ impl ZoneOutbox {
         }
         self.withdrawals_this_block.write(
             withdrawals
-                .checked_add(U256::ONE)
+                .checked_add(1)
                 .ok_or_else(TempoPrecompileError::under_overflow)?,
         )?;
         Ok(())
@@ -244,9 +243,7 @@ impl ZoneOutbox {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }
 
-        let len = self.pending_withdrawals.len()?;
-        let head = self.pending_withdrawals_head.read()? as usize;
-        let count = len.saturating_sub(head);
+        let count = self.pending_withdrawals.len()?;
         if call.count != U256::from(count) {
             return Err(
                 ZoneOutboxError::invalid_withdrawal_count(call.count, U256::from(count)).into(),
@@ -263,22 +260,13 @@ impl ZoneOutbox {
         let mut withdrawal_queue_hash = B256::ZERO;
         if count > 0 {
             withdrawal_queue_hash = EMPTY_SENTINEL;
-            let end = head + count;
-            for i in (head..end).rev() {
+            for i in (0..count).rev() {
                 let pending_withdrawal = self.pending_withdrawals[i].read()?;
-                let encrypted_sender = call.encryptedSenders[i - head].clone();
+                let encrypted_sender = &call.encryptedSenders[i];
                 let withdrawal = pending_withdrawal.into_withdrawal(encrypted_sender)?;
                 withdrawal_queue_hash = keccak256((withdrawal, withdrawal_queue_hash).abi_encode());
-                self.pending_withdrawals[i].delete()?;
             }
-            self.pending_withdrawals_head.write(
-                end.try_into()
-                    .map_err(|_| TempoPrecompileError::under_overflow())?,
-            )?;
-            if end == len {
-                self.pending_withdrawals.delete()?;
-                self.pending_withdrawals_head.write(0)?;
-            }
+            self.pending_withdrawals.delete()?;
         }
 
         let next_batch_index = self
@@ -322,19 +310,13 @@ impl ZoneOutbox {
     }
 
     fn pending_withdrawals_count(&self) -> TempoResult<U256> {
-        let len = self.pending_withdrawals.len()?;
-        let head = self.pending_withdrawals_head.read()? as usize;
-        Ok(U256::from(len.saturating_sub(head)))
+        Ok(U256::from(self.pending_withdrawals.len()?))
     }
 
     fn get_pending_withdrawals(&self) -> TempoResult<Vec<ZoneOutboxAbi::PendingWithdrawal>> {
         let len = self.pending_withdrawals.len()?;
-        let head = self.pending_withdrawals_head.read()? as usize;
-        if head >= len {
-            return Ok(Vec::new());
-        }
-        let mut pending = Vec::with_capacity(len - head);
-        for index in head..len {
+        let mut pending = Vec::with_capacity(len);
+        for index in 0..len {
             pending.push(self.pending_withdrawals[index].read()?.into());
         }
         Ok(pending)
@@ -422,7 +404,7 @@ impl PendingWithdrawal {
         )
     }
 
-    fn into_withdrawal(self, encrypted_sender: Bytes) -> ZoneResult<Withdrawal> {
+    fn into_withdrawal(self, encrypted_sender: &Bytes) -> ZoneResult<Withdrawal> {
         let expected = if self.reveal_to.is_empty() {
             0
         } else {
@@ -447,7 +429,7 @@ impl PendingWithdrawal {
             gasLimit: self.gas_limit,
             fallbackRecipient: self.fallback_recipient,
             callbackData: self.callback_data,
-            encryptedSender: encrypted_sender,
+            encryptedSender: encrypted_sender.to_owned(),
         })
     }
 }

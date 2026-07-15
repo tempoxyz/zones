@@ -46,7 +46,7 @@ crate::sol! {
 
         event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
         event TempoGasRateUpdated(uint128 tempoGasRate);
-        event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
+        event MaxWithdrawalsPerBlockUpdated(uint32 maxWithdrawalsPerBlock);
 
         // -- Errors --
 
@@ -71,7 +71,7 @@ crate::sol! {
 
         function config() external view returns (address);
         function tempoGasRate() external view returns (uint128);
-        function maxWithdrawalsPerBlock() external view returns (uint256);
+        function maxWithdrawalsPerBlock() external view returns (uint32);
         function lastBatch() external view returns (LastBatch memory);
         function withdrawalBatchIndex() external view returns (uint64);
         function lastFinalizedTimestamp() external view returns (uint64);
@@ -89,7 +89,7 @@ crate::sol! {
         // -- State-changing functions --
 
         function setTempoGasRate(uint128 _tempoGasRate) external;
-        function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
+        function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
         function requestWithdrawal(
             address token,
             address to,

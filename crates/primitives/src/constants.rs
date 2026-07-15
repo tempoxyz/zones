@@ -48,13 +48,13 @@ pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000
 pub const PORTAL_SEQUENCER_SLOT: B256 = B256::ZERO;
 
 /// ZonePortal storage slot 1: `admin` (address).
-pub const PORTAL_ADMIN_SLOT: B256 = { B256::with_last_byte(1) };
+pub const PORTAL_ADMIN_SLOT: B256 = B256::with_last_byte(1);
 
 /// ZonePortal storage slot 2: `pendingSequencer` (address).
-pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = { B256::with_last_byte(2) };
+pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = B256::with_last_byte(2);
 
 /// ZonePortal storage slot 8: `tokenConfigs` mapping.
-pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = { B256::with_last_byte(8) };
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(8);
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
