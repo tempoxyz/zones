@@ -916,7 +916,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 
     // --- Step 6: Deposit both tokens (user account) ---
     let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
-    let pathusd_amount: u128 = 1_000_000; // 1 pathUSD
+    let pathusd_amount: u128 = 25_000_000; // pathUSD for withdrawals and L2 gas
     let zoneusd_amount: u128 = 2_000_000; // 2 ZoneUSD
 
     // Fund user with both tokens on L1

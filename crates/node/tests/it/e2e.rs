@@ -575,7 +575,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
-    let deposit_amount: u128 = 2_000_000;
+    let deposit_amount: u128 = 25_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
     zone.wait_for_balance(
@@ -710,12 +710,12 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
-    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 2_000_000);
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 25_000_000);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
     zone.wait_for_balance(
         PATH_USD_ADDRESS,
         dev_address,
-        U256::from(2_000_000u128),
+        U256::from(25_000_000u128),
         DEFAULT_TIMEOUT,
     )
     .await?;
