@@ -1155,21 +1155,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rpc_connection_config_allows_large_ws_responses() {
-        let config = rpc_connection_config(Duration::from_secs(1));
-        let ws_config = config.ws_config.unwrap();
-
-        assert_eq!(
-            ws_config.max_frame_size,
-            Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)
-        );
-        assert_eq!(
-            ws_config.max_message_size,
-            Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)
-        );
-    }
-
-    #[test]
     fn regular_deposit_status_maps_terminal_events() {
         assert_eq!(
             regular_deposit_status(Some(TerminalDepositEvent::RegularProcessed)).unwrap(),

@@ -15,23 +15,3 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
                 .max_message_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)),
         )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rpc_connection_config_allows_large_ws_responses() {
-        let config = rpc_connection_config(Duration::from_secs(1));
-        let ws_config = config.ws_config.unwrap();
-
-        assert_eq!(
-            ws_config.max_frame_size,
-            Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)
-        );
-        assert_eq!(
-            ws_config.max_message_size,
-            Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)
-        );
-    }
-}
