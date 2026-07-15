@@ -1,4 +1,4 @@
-use alloy::genesis::Genesis;
+use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
@@ -17,6 +17,7 @@ use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
+    collections::BTreeMap,
     future::Future,
     ops::Deref,
     pin::Pin,
@@ -36,7 +37,7 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
@@ -169,6 +170,114 @@ fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     Ok(alloy_primitives::Bytes::from(
         alloy_primitives::hex::decode(hex_str)?,
     ))
+}
+
+fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    let specs_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
+    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
+    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
+        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
+    })?;
+    let artifact: serde_json::Value = serde_json::from_str(&json)?;
+    let hex_str = artifact["deployedBytecode"]["object"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?;
+    Ok(alloy_primitives::Bytes::from(
+        alloy_primitives::hex::decode(hex_str)?,
+    ))
+}
+
+fn forge_deployed_bytecode_with_address_immutable(
+    contract: &str,
+    address: Address,
+) -> eyre::Result<alloy_primitives::Bytes> {
+    let specs_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
+    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
+    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
+        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
+    })?;
+    let artifact: serde_json::Value = serde_json::from_str(&json)?;
+    let mut bytecode = alloy_primitives::hex::decode(
+        artifact["deployedBytecode"]["object"]
+            .as_str()
+            .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?,
+    )?;
+    let references = artifact["deployedBytecode"]["immutableReferences"]
+        .as_object()
+        .ok_or_else(|| eyre::eyre!("missing immutable references in {contract} artifact"))?;
+    let mut patched = 0;
+    for reference in references.values().flat_map(|value| {
+        value
+            .as_array()
+            .into_iter()
+            .flat_map(|references| references.iter())
+    }) {
+        let start = reference["start"]
+            .as_u64()
+            .ok_or_else(|| eyre::eyre!("invalid immutable start in {contract} artifact"))?
+            as usize;
+        let length = reference["length"]
+            .as_u64()
+            .ok_or_else(|| eyre::eyre!("invalid immutable length in {contract} artifact"))?
+            as usize;
+        eyre::ensure!(length == 32, "unexpected immutable size in {contract}");
+        bytecode[start + 12..start + length].copy_from_slice(address.as_slice());
+        patched += 1;
+    }
+    eyre::ensure!(patched > 0, "no immutable references found in {contract}");
+    Ok(bytecode.into())
+}
+
+fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
+    const VERIFIER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000001");
+    const MESSENGER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000002");
+
+    let one = B256::with_last_byte(1);
+    let mut factory_storage = BTreeMap::new();
+    factory_storage.insert(B256::ZERO, one);
+    factory_storage.insert(
+        keccak256((VERIFIER_ADDRESS, U256::from(3)).abi_encode()),
+        one,
+    );
+    factory_storage.insert(
+        B256::with_last_byte(4),
+        B256::left_padding_from(VERIFIER_ADDRESS.as_slice()),
+    );
+    factory_storage.insert(
+        B256::with_last_byte(5),
+        B256::left_padding_from(MESSENGER_ADDRESS.as_slice()),
+    );
+    factory_storage.insert(
+        B256::with_last_byte(6),
+        B256::left_padding_from(owner.as_slice()),
+    );
+    factory_storage.insert(B256::with_last_byte(7), B256::with_last_byte(3));
+
+    genesis.alloc.insert(
+        ZONE_FACTORY_ADDRESS,
+        GenesisAccount::default()
+            .with_nonce(Some(3))
+            .with_code(Some(forge_deployed_bytecode("ZoneFactory")?))
+            .with_storage(Some(factory_storage)),
+    );
+    genesis.alloc.insert(
+        VERIFIER_ADDRESS,
+        GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(forge_deployed_bytecode("Verifier")?)),
+    );
+    genesis.alloc.insert(
+        MESSENGER_ADDRESS,
+        GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(forge_deployed_bytecode_with_address_immutable(
+                "ZoneMessenger",
+                ZONE_FACTORY_ADDRESS,
+            )?)),
+    );
+    Ok(())
 }
 
 /// Dummy L1 URL used when no real L1 is needed.
@@ -1103,30 +1212,13 @@ impl L1TestNode {
             .await?)
     }
 
-    /// Deploy the ZoneFactory contract on L1 from the Foundry artifact.
-    ///
-    /// The factory constructor also deploys a Verifier internally.
-    /// Returns the factory address for use with [`create_zone`](Self::create_zone).
+    /// Install the ZoneFactory at TIP-1091's fixed address.
     pub(crate) async fn deploy_zone_factory(&self) -> eyre::Result<Address> {
-        use alloy_primitives::TxKind;
-        use alloy_rpc_types_eth::TransactionRequest;
-
-        let l1_provider = self.dev_provider();
-
-        let bytecode = forge_bytecode("ZoneFactory")?;
-
-        let mut deploy_tx = TransactionRequest::default().input(bytecode.into());
-        deploy_tx.to = Some(TxKind::Create);
-        let receipt = l1_provider
-            .send_transaction(deploy_tx)
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "ZoneFactory deployment failed");
-
-        receipt
-            .contract_address
-            .ok_or_else(|| eyre::eyre!("ZoneFactory deployment missing contract address"))
+        zone_node::dev::deploy_zone_factory(
+            self.http_url.as_str(),
+            alloy_network::EthereumWallet::from(self.dev_signer()),
+        )
+        .await
     }
 
     /// Create a zone on an existing ZoneFactory and return the portal address.
@@ -1697,7 +1789,9 @@ impl L1TestNode {
 
         let genesis: serde_json::Value =
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
-        let chain_spec = TempoChainSpec::from_genesis(serde_json::from_value(genesis)?);
+        let mut genesis = serde_json::from_value(genesis)?;
+        install_reference_zone_factory(&mut genesis, l1_dev_signer().address())?;
+        let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
             .with_unused_ports()

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZonePortal, Withdrawal } from "../../src/interfaces/IZone.sol";
+import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
@@ -51,7 +51,9 @@ contract ZonePortalGasLimitTest is Test {
 
     function setUp() public {
         token = new MockPortalToken();
-        portal = new ZonePortal(
+        portal = new ZonePortal();
+        vm.prank(ZONE_FACTORY_ADDRESS);
+        portal.initialize(
             1,
             address(token),
             address(0x400),
@@ -73,7 +75,7 @@ contract ZonePortalGasLimitTest is Test {
             fee: 0,
             memo: bytes32(0),
             gasLimit: portal.MAX_WITHDRAWAL_GAS_LIMIT() + 1,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: 1,
             callbackData: "test",
             encryptedSender: ""
         });
@@ -83,9 +85,7 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), _withdrawalQueueSlot(0), wHash);
 
         vm.expectEmit(false, true, false, true, address(portal));
-        emit IZonePortal.WithdrawalBounceBack(
-            bytes32(0), fallbackRecipient, address(token), 500e6, 1
-        );
+        emit IZonePortal.WithdrawalBounceBack(bytes32(0), 1, address(token), 500e6, 1);
         vm.expectEmit(true, true, false, true, address(portal));
         emit IZonePortal.WithdrawalProcessed(recipient, w.senderTag, address(token), 500e6, false);
         portal.processWithdrawal(w, bytes32(0));
@@ -180,7 +180,7 @@ contract ZonePortalGasLimitTest is Test {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });

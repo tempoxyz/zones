@@ -29,6 +29,7 @@ contract ZoneFactory is IZoneFactory {
     mapping(address => bool) internal _validVerifiers;
     address internal _verifier;
     address internal _messenger;
+    address public owner;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment,
@@ -40,6 +41,9 @@ contract ZoneFactory is IZoneFactory {
     //////////////////////////////////////////////////////////////*/
 
     constructor() {
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+
         address v = address(new Verifier());
         _validVerifiers[v] = true;
         _verifier = v;
@@ -54,6 +58,8 @@ contract ZoneFactory is IZoneFactory {
         external
         returns (uint32 zoneId, address portal)
     {
+        if (msg.sender != owner) revert NotOwner();
+
         // Validate initial token is a TIP-20
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(params.initialToken)) {
             revert InvalidToken();
@@ -72,9 +78,10 @@ contract ZoneFactory is IZoneFactory {
 
         address predictedPortal = _computeCreateAddress(address(this), currentNonce);
 
-        // Deploy portal with the shared messenger address and initial token
-        // The portal constructor enables the initial token automatically
-        ZonePortal portalContract = new ZonePortal(
+        // Deploy and atomically initialize the portal. TIP-1091 fixes this factory's address as
+        // the portal's only initializer authority.
+        ZonePortal portalContract = new ZonePortal();
+        portalContract.initialize(
             zoneId,
             params.initialToken,
             _messenger,
@@ -117,6 +124,16 @@ contract ZoneFactory is IZoneFactory {
             params.zoneParams.genesisTempoBlockHash,
             params.zoneParams.genesisTempoBlockNumber
         );
+    }
+
+    /// @inheritdoc IZoneFactory
+    function transferOwnership(address newOwner) external {
+        if (msg.sender != owner) revert NotOwner();
+        if (newOwner == address(0)) revert InvalidOwner();
+
+        address previousOwner = owner;
+        owner = newOwner;
+        emit OwnershipTransferred(previousOwner, newOwner);
     }
 
     /// @notice Compute the address of a contract deployed with CREATE
