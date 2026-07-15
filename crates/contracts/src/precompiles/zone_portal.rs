@@ -7,7 +7,7 @@ pub use ZonePortal::{
 use crate::IZoneOutbox;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
-use zone_primitives::constants::EMPTY_SENTINEL;
+use zone_primitives::constants::{EMPTY_SENTINEL, PORTAL_TOKEN_CONFIGS_SLOT};
 
 crate::sol! {
     #[derive(Debug)]
@@ -384,6 +384,11 @@ impl Withdrawal {
         }
     }
 
+    /// Hash this withdrawal as one link in a withdrawal queue.
+    pub fn hash_with_tail(&self, tail: B256) -> B256 {
+        keccak256((self.clone(), tail).abi_encode_params())
+    }
+
     /// Compute the withdrawal queue hash for a slice of withdrawals.
     ///
     /// The hash chain has the oldest withdrawal at the outermost layer for efficient FIFO removal:
@@ -400,9 +405,14 @@ impl Withdrawal {
         }
 
         let mut hash = EMPTY_SENTINEL;
-        for w in withdrawals.iter().rev() {
-            hash = keccak256((w.clone(), hash).abi_encode_params());
+        for withdrawal in withdrawals.iter().rev() {
+            hash = withdrawal.hash_with_tail(hash);
         }
         hash
     }
+}
+
+/// Return the storage slot for `token` in the portal token-config mapping.
+pub fn portal_token_config_slot(token: Address) -> B256 {
+    keccak256((token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode())
 }

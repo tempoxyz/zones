@@ -12,6 +12,7 @@ use k256::{
     AffinePoint, ProjectivePoint, Scalar,
     elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
 };
+use tempo_zone_contracts::Withdrawal;
 
 use crate::{
     aes_gcm::decrypt_aes_gcm,
@@ -401,10 +402,7 @@ pub fn build_authenticated_withdrawal_plaintext(
     sender: &Address,
     tx_hash: &B256,
 ) -> [u8; AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE] {
-    let mut buf = [0u8; AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE];
-    buf[..20].copy_from_slice(sender.as_slice());
-    buf[20..].copy_from_slice(tx_hash.as_slice());
-    buf
+    Withdrawal::authenticated_sender_plaintext(*sender, *tx_hash)
 }
 
 /// Build the 84-byte HKDF info parameter: `[portal(20) | key_index(32) | eph_pub_x(32)]`.

@@ -4,8 +4,8 @@ mod dispatch;
 
 use alloc::vec::Vec;
 
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-use alloy_sol_types::{SolCall, SolValue};
+use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_sol_types::SolCall;
 use revm::interpreter::instructions::utility::IntoAddress;
 use tempo_precompiles::{
     Result as TempoResult,
@@ -16,10 +16,10 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
     ILegacyZoneOutbox, IZoneOutbox as ZoneOutboxAbi, Withdrawal, ZoneOutboxError, ZoneOutboxEvent,
+    portal_token_config_slot,
 };
 use zone_primitives::constants::{
-    EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_SEQUENCER_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
-    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_SEQUENCER_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -73,7 +73,7 @@ impl CallRules for ZoneOutboxRules {
         let Some(withdrawal) = decode_withdrawal(call) else {
             return CallCheck::Continue;
         };
-        match validate_withdrawal_request(&withdrawal) {
+        match check_withdrawal_request(&withdrawal) {
             Ok(()) => CallCheck::Continue,
             Err(err) => CallCheck::from_error(err),
         }
@@ -96,7 +96,7 @@ impl CallRules for ZoneOutboxRules {
         }
 
         if let Some(withdrawal) = decode_withdrawal(call) {
-            let slot = keccak256((withdrawal.token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode()).into();
+            let slot = portal_token_config_slot(withdrawal.token).into();
             match StorageCtx::default().sload(self.portal, slot) {
                 Ok(value) if value.byte(0) != 0 => {}
                 Ok(_) => return CallCheck::from_error(ZoneOutboxError::token_not_enabled()),
@@ -134,15 +134,7 @@ impl ZoneOutbox {
 
     fn calculate_withdrawal_fee(&self, gas_limit: u64) -> ZoneResult<u128> {
         validate_gas_limit(gas_limit)?;
-        Ok(self.calculate_fee_unchecked(gas_limit)?)
-    }
-
-    fn validate_reveal_to(&self, reveal_to: &[u8]) -> ZoneResult<()> {
-        if reveal_to.is_empty() || decode_compressed_public_key(reveal_to).is_some() {
-            Ok(())
-        } else {
-            Err(ZoneOutboxError::invalid_reveal_to().into())
-        }
+        self.calculate_fee_unchecked(gas_limit).map_err(Into::into)
     }
 
     fn enforce_withdrawal_block_cap(&mut self) -> ZoneResult<()> {
@@ -171,14 +163,14 @@ impl ZoneOutbox {
 
     fn enqueue(&mut self, pending: PendingWithdrawal) -> ZoneResult<()> {
         let index = self.next_withdrawal_index.read()?;
-        let event = pending.requested_event(index);
+        self.emit_event(pending.requested_event(index))?;
+
         self.pending_withdrawals.push(pending)?;
         self.next_withdrawal_index.write(
             index
                 .checked_add(1)
                 .ok_or_else(TempoPrecompileError::under_overflow)?,
         )?;
-        self.emit_event(event)?;
         Ok(())
     }
 
@@ -188,32 +180,35 @@ impl ZoneOutbox {
         current_tx_hash: B256,
         call: ZoneOutboxAbi::requestWithdrawalCall,
     ) -> ZoneResult<()> {
-        validate_withdrawal_request(&call)?;
+        if current_tx_hash.is_zero() {
+            return Err(ZoneOutboxError::invalid_current_tx_hash().into());
+        }
+        check_withdrawal_request(&call)?;
         self.enforce_withdrawal_block_cap()?;
-        self.validate_reveal_to(&call.revealTo)?;
+
+        // If necessary, validate reveal
+        if !call.revealTo.is_empty() && decode_compressed_public_key(&call.revealTo).is_none() {
+            return Err(ZoneOutboxError::invalid_reveal_to().into());
+        }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
         let total_burn = call
             .amount
             .checked_add(fee)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
-        if current_tx_hash.is_zero() {
-            return Err(ZoneOutboxError::invalid_current_tx_hash().into());
-        }
-
         let mut zone_token = TIP20Token::from_address(call.token)?;
         let amount = U256::from(total_burn);
         if !zone_token.transfer_from(
-            ZONE_OUTBOX_ADDRESS,
+            self.address,
             ITIP20::transferFromCall {
                 from: caller,
-                to: ZONE_OUTBOX_ADDRESS,
+                to: self.address,
                 amount,
             },
         )? {
             return Err(ZoneOutboxError::transfer_failed().into());
         }
-        zone_token.burn(ZONE_OUTBOX_ADDRESS, ITIP20::burnCall { amount })?;
+        zone_token.burn(self.address, ITIP20::burnCall { amount })?;
 
         self.enqueue(PendingWithdrawal::from_request(
             caller,
@@ -259,12 +254,11 @@ impl ZoneOutbox {
 
         let mut withdrawal_queue_hash = B256::ZERO;
         if count > 0 {
-            withdrawal_queue_hash = EMPTY_SENTINEL;
-            for i in (0..count).rev() {
-                let pending_withdrawal = self.pending_withdrawals[i].read()?;
-                let encrypted_sender = &call.encryptedSenders[i];
-                let withdrawal = pending_withdrawal.into_withdrawal(encrypted_sender)?;
-                withdrawal_queue_hash = keccak256((withdrawal, withdrawal_queue_hash).abi_encode());
+            withdrawal_queue_hash = zone_primitives::constants::EMPTY_SENTINEL;
+            for (index, encrypted_sender) in call.encryptedSenders.into_iter().enumerate().rev() {
+                let pending = self.pending_withdrawals[index].read()?;
+                let withdrawal = pending.into_withdrawal(encrypted_sender)?;
+                withdrawal_queue_hash = withdrawal.hash_with_tail(withdrawal_queue_hash);
             }
             self.pending_withdrawals.delete()?;
         }
@@ -310,7 +304,7 @@ impl ZoneOutbox {
     }
 
     fn pending_withdrawals_count(&self) -> TempoResult<U256> {
-        Ok(U256::from(self.pending_withdrawals.len()?))
+        self.pending_withdrawals.len().map(|val| U256::from(val))
     }
 
     fn get_pending_withdrawals(&self) -> TempoResult<Vec<ZoneOutboxAbi::PendingWithdrawal>> {
@@ -323,7 +317,7 @@ impl ZoneOutbox {
     }
 
     fn last_batch(&self) -> TempoResult<ZoneOutboxAbi::LastBatch> {
-        Ok(self.last_batch.read()?.into())
+        self.last_batch.read().map(Into::into)
     }
 }
 
@@ -404,7 +398,7 @@ impl PendingWithdrawal {
         )
     }
 
-    fn into_withdrawal(self, encrypted_sender: &Bytes) -> ZoneResult<Withdrawal> {
+    fn into_withdrawal(self, encrypted_sender: Bytes) -> ZoneResult<Withdrawal> {
         let expected = if self.reveal_to.is_empty() {
             0
         } else {
@@ -429,7 +423,7 @@ impl PendingWithdrawal {
             gasLimit: self.gas_limit,
             fallbackRecipient: self.fallback_recipient,
             callbackData: self.callback_data,
-            encryptedSender: encrypted_sender.to_owned(),
+            encryptedSender: encrypted_sender,
         })
     }
 }
@@ -473,7 +467,7 @@ fn validate_gas_limit(gas_limit: u64) -> ZoneResult<()> {
     Ok(())
 }
 
-fn validate_withdrawal_request(call: &ZoneOutboxAbi::requestWithdrawalCall) -> ZoneResult<()> {
+fn check_withdrawal_request(call: &ZoneOutboxAbi::requestWithdrawalCall) -> ZoneResult<()> {
     if call.fallbackRecipient.is_zero() {
         return Err(ZoneOutboxError::invalid_fallback_recipient().into());
     }
