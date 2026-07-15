@@ -107,31 +107,30 @@ impl Harness {
         })
     }
 
-    fn call(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
-        let _guard = tx_context::set_current_tx_hash(TX_HASH);
-        call_precompile(
-            &mut self.ctx,
-            &self.precompile,
-            caller,
-            data.as_ref(),
-            GAS,
-            false,
-            ZONE_OUTBOX_ADDRESS,
-            ZONE_OUTBOX_ADDRESS,
-        )
+    #[rustfmt::skip]
+    fn call_inner(&mut self, caller: Address, data: impl AsRef<[u8]>, with_hash: bool, is_static: bool) -> PrecompileResult {
+        let mut call = || { call_precompile(
+            &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
+        )};
+
+        if with_hash {
+            let _guard = tx_context::set_current_tx_hash(TX_HASH);
+            call()
+        } else {
+            call()
+        }
     }
 
     fn call_without_hash(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
-        call_precompile(
-            &mut self.ctx,
-            &self.precompile,
-            caller,
-            data.as_ref(),
-            GAS,
-            false,
-            ZONE_OUTBOX_ADDRESS,
-            ZONE_OUTBOX_ADDRESS,
-        )
+        self.call_inner(caller, data, false, false)
+    }
+
+    fn call(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
+        self.call_inner(caller, data, true, false)
+    }
+
+    fn call_static(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
+        self.call_inner(caller, data, false, true)
     }
 
     fn pending(&mut self) -> eyre::Result<Vec<ZoneOutboxAbi::PendingWithdrawal>> {
@@ -143,21 +142,48 @@ impl Harness {
     }
 
     fn request(&mut self, amount: u128, to: Address, memo: B256) -> PrecompileResult {
-        let token = self.token;
+        self.request_custom(ZoneOutboxAbi::requestWithdrawalCall {
+            token: self.token,
+            to,
+            amount,
+            memo,
+            gasLimit: 0,
+            fallbackRecipient: ALICE,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        })
+    }
+
+    fn request_custom(&mut self, call: ZoneOutboxAbi::requestWithdrawalCall) -> PrecompileResult {
+        self.call(ALICE, call.abi_encode())
+    }
+
+    fn set_gas_rate(&mut self, rate: u128) -> PrecompileResult {
         self.call(
-            ALICE,
-            ZoneOutboxAbi::requestWithdrawalCall {
-                token,
-                to,
-                amount,
-                memo,
-                gasLimit: 0,
-                fallbackRecipient: ALICE,
-                data: Bytes::new(),
-                revealTo: Bytes::new(),
+            SEQUENCER,
+            ZoneOutboxAbi::setTempoGasRateCall {
+                _tempoGasRate: rate,
             }
             .abi_encode(),
         )
+    }
+
+    fn set_max_withdrawals(&mut self, max: u32) -> PrecompileResult {
+        self.call(
+            SEQUENCER,
+            ZoneOutboxAbi::setMaxWithdrawalsPerBlockCall {
+                _maxWithdrawalsPerBlock: max,
+            }
+            .abi_encode(),
+        )
+    }
+
+    fn balance_of(&mut self, account: Address) -> eyre::Result<U256> {
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            let token = TIP20Token::from_address(self.token).expect("initialized token");
+            Ok(token.balance_of(ITIP20::balanceOfCall { account })?)
+        })
     }
 
     fn finalize(&mut self, count: usize) -> PrecompileResult {
@@ -316,5 +342,288 @@ fn finalize_rejects_wrong_count_and_non_sequencer() -> eyre::Result<()> {
         .abi_encode(),
     );
     assert_revert(result, ZoneOutboxError::only_sequencer());
+    Ok(())
+}
+
+#[test]
+fn fee_rate_and_gas_limit_validation_match_reference() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_gas_rate(3)?;
+
+    let output = harness.call(
+        ALICE,
+        ZoneOutboxAbi::calculateWithdrawalFeeCall { gasLimit: 7 }.abi_encode(),
+    )?;
+    assert_eq!(
+        ZoneOutboxAbi::calculateWithdrawalFeeCall::abi_decode_returns(&output.bytes)?,
+        u128::from(WITHDRAWAL_BASE_GAS + 7) * 3
+    );
+
+    assert_revert(
+        harness.call(
+            ALICE,
+            ZoneOutboxAbi::calculateWithdrawalFeeCall {
+                gasLimit: MAX_WITHDRAWAL_GAS_LIMIT + 1,
+            }
+            .abi_encode(),
+        ),
+        ZoneOutboxError::gas_limit_too_high(),
+    );
+    assert_revert(
+        harness.set_gas_rate(MAX_GAS_FEE_RATE + 1),
+        ZoneOutboxError::gas_fee_rate_too_high(),
+    );
+    Ok(())
+}
+
+#[test]
+fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = harness.token;
+    let base = |data: Bytes, reveal_to: Bytes| ZoneOutboxAbi::requestWithdrawalCall {
+        token,
+        to: BOB,
+        amount: 1,
+        memo: B256::ZERO,
+        gasLimit: 0,
+        fallbackRecipient: ALICE,
+        data,
+        revealTo: reveal_to,
+    };
+
+    harness.request_custom(base(
+        Bytes::from(vec![0; MAX_CALLBACK_DATA_SIZE]),
+        Bytes::new(),
+    ))?;
+    assert_revert(
+        harness.request_custom(base(
+            Bytes::from(vec![0; MAX_CALLBACK_DATA_SIZE + 1]),
+            Bytes::new(),
+        )),
+        ZoneOutboxError::callback_data_too_large(),
+    );
+    assert_revert(
+        harness.request_custom(base(Bytes::new(), Bytes::from(vec![2; 32]))),
+        ZoneOutboxError::invalid_reveal_to(),
+    );
+    assert_revert(
+        harness.request_custom(base(Bytes::new(), Bytes::from(vec![4; 33]))),
+        ZoneOutboxError::invalid_reveal_to(),
+    );
+
+    let valid = Bytes::copy_from_slice(&alloy_primitives::hex!(
+        "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+    ));
+    harness.request_custom(base(Bytes::new(), valid))?;
+    Ok(())
+}
+
+#[test]
+fn fallback_recipient_and_zero_amount_semantics_match_reference() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = harness.token;
+    assert_revert(
+        harness.request_custom(ZoneOutboxAbi::requestWithdrawalCall {
+            token,
+            to: BOB,
+            amount: 1,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackRecipient: Address::ZERO,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        }),
+        ZoneOutboxError::invalid_fallback_recipient(),
+    );
+    harness.request(0, BOB, B256::ZERO)?;
+    assert_eq!(harness.pending()?[0].amount, 0);
+    Ok(())
+}
+
+#[test]
+fn request_burns_amount_plus_fee_and_rejects_insufficient_funds() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_gas_rate(2)?;
+    let before = harness.balance_of(ALICE)?;
+    let fee = u128::from(WITHDRAWAL_BASE_GAS) * 2;
+    harness.request(100, BOB, B256::ZERO)?;
+    assert_eq!(harness.balance_of(ALICE)?, before - U256::from(100 + fee));
+
+    let result = harness.request(u128::MAX, BOB, B256::ZERO);
+    assert!(result.expect("precompile result").is_revert());
+    Ok(())
+}
+
+#[test]
+fn encrypted_sender_count_and_length_are_validated() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.request(1, BOB, B256::ZERO)?;
+    assert_revert(
+        harness.call(
+            SEQUENCER,
+            ZoneOutboxAbi::finalizeWithdrawalBatchCall {
+                count: U256::ONE,
+                blockNumber: 0,
+                encryptedSenders: Vec::new(),
+            }
+            .abi_encode(),
+        ),
+        ZoneOutboxError::invalid_encrypted_sender_count(U256::ZERO, U256::ONE),
+    );
+    assert_revert(
+        harness.call(
+            SEQUENCER,
+            ZoneOutboxAbi::finalizeWithdrawalBatchCall {
+                count: U256::ONE,
+                blockNumber: 0,
+                encryptedSenders: vec![Bytes::from(vec![1])],
+            }
+            .abi_encode(),
+        ),
+        ZoneOutboxError::invalid_encrypted_sender_length(U256::ONE, U256::ZERO),
+    );
+    Ok(())
+}
+
+#[test]
+fn indices_last_batch_and_timestamp_advance_across_batches() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.ctx.block.timestamp = U256::from(123);
+    harness.request(1, BOB, B256::ZERO)?;
+    harness.finalize(1)?;
+    harness.request(2, BOB, B256::ZERO)?;
+    let second_hash = ZoneOutboxAbi::finalizeWithdrawalBatchCall::abi_decode_returns(
+        &harness.finalize(1)?.bytes,
+    )?;
+
+    let next = harness.call(
+        Address::ZERO,
+        ZoneOutboxAbi::nextWithdrawalIndexCall {}.abi_encode(),
+    )?;
+    assert_eq!(
+        ZoneOutboxAbi::nextWithdrawalIndexCall::abi_decode_returns(&next.bytes)?,
+        2
+    );
+    let batch = harness.call(Address::ZERO, ZoneOutboxAbi::lastBatchCall {}.abi_encode())?;
+    let batch = ZoneOutboxAbi::lastBatchCall::abi_decode_returns(&batch.bytes)?;
+    assert_eq!(batch.withdrawalBatchIndex, 2);
+    assert_eq!(batch.withdrawalQueueHash, second_hash);
+    let timestamp = harness.call(
+        Address::ZERO,
+        ZoneOutboxAbi::lastFinalizedTimestampCall {}.abi_encode(),
+    )?;
+    assert_eq!(
+        ZoneOutboxAbi::lastFinalizedTimestampCall::abi_decode_returns(&timestamp.bytes)?,
+        123
+    );
+    Ok(())
+}
+
+#[test]
+fn per_block_cap_is_unlimited_resettable_and_updateable() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_max_withdrawals(0)?;
+    for _ in 0..3 {
+        harness.request(1, BOB, B256::ZERO)?;
+    }
+
+    harness.set_max_withdrawals(1)?;
+    harness.request(1, BOB, B256::ZERO)?;
+    assert_revert(
+        harness.request(1, BOB, B256::ZERO),
+        ZoneOutboxError::too_many_withdrawals_this_block(),
+    );
+    harness.ctx.block.number = U256::ONE;
+    harness.request(1, BOB, B256::ZERO)?;
+    assert_revert(
+        harness.request(1, BOB, B256::ZERO),
+        ZoneOutboxError::too_many_withdrawals_this_block(),
+    );
+    harness.set_max_withdrawals(2)?;
+    harness.request(1, BOB, B256::ZERO)?;
+    Ok(())
+}
+
+#[test]
+fn many_withdrawals_finalize_and_clear_pending_state() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    for i in 0..20u64 {
+        harness.request(1, BOB, B256::from(U256::from(i)))?;
+    }
+    harness.finalize(20)?;
+    assert!(harness.pending()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn legacy_withdrawal_matches_current_overload_and_defaults_reveal_to() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = harness.token;
+    let memo = B256::repeat_byte(0x11);
+    let data = Bytes::from_static(b"callback");
+
+    harness.request_custom(ZoneOutboxAbi::requestWithdrawalCall {
+        token,
+        to: BOB,
+        amount: 123,
+        memo,
+        gasLimit: 7,
+        fallbackRecipient: ALICE,
+        data: data.clone(),
+        revealTo: Bytes::new(),
+    })?;
+    harness.call(
+        ALICE,
+        ILegacyZoneOutbox::requestWithdrawalCall {
+            token,
+            to: BOB,
+            amount: 123,
+            memo,
+            gasLimit: 7,
+            fallbackRecipient: ALICE,
+            data,
+        }
+        .abi_encode(),
+    )?;
+
+    let pending = harness.pending()?;
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0], pending[1]);
+    assert!(pending[1].revealTo.is_empty());
+    Ok(())
+}
+
+#[test]
+fn malformed_legacy_withdrawal_reverts_with_empty_data() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let output = harness.call(ALICE, ILegacyZoneOutbox::requestWithdrawalCall::SELECTOR)?;
+    assert!(output.is_revert());
+    assert!(output.bytes.is_empty());
+    assert!(harness.pending()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = harness.token;
+    assert_revert(
+        harness.call_static(
+            ALICE,
+            ZoneOutboxAbi::requestWithdrawalCall {
+                token,
+                to: BOB,
+                amount: 1,
+                memo: B256::ZERO,
+                gasLimit: 0,
+                fallbackRecipient: ALICE,
+                data: Bytes::new(),
+                revealTo: Bytes::new(),
+            }
+            .abi_encode(),
+        ),
+        ZoneOutboxError::static_call_not_allowed(),
+    );
+    assert!(harness.pending()?.is_empty());
     Ok(())
 }

@@ -18,7 +18,7 @@ use k256::{
 };
 use revm::{
     Context,
-    context::{BlockEnv, CfgEnv, TxEnv},
+    context::{CfgEnv, TxEnv},
     database::{CacheDB, EmptyDB},
     precompile::{PrecompileError, PrecompileResult},
 };
@@ -32,6 +32,8 @@ use tempo_precompiles::{
     tip403_registry::{CompoundPolicyData, PolicyData, TIP403Registry},
 };
 
+use tempo_primitives::TempoBlockEnv;
+
 use crate::{
     L1StorageReader,
     chaum_pedersen::{challenge_hash, recover_point},
@@ -42,7 +44,8 @@ use crate::{
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// EVM context used by precompile tests.
-pub(crate) type TestContext = Context<BlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+pub(crate) type TestContext =
+    Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 type L1Slot = (Address, B256, u64);
 type Shared<T> = Arc<Mutex<T>>;
 

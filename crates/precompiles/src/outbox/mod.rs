@@ -1,6 +1,8 @@
 //! Native `ZoneOutbox` precompile.
 //!
 mod dispatch;
+#[cfg(test)]
+mod tests;
 
 use alloc::vec::Vec;
 
@@ -111,13 +113,13 @@ impl CallRules for ZoneOutboxRules {
 pub struct ZoneOutbox {
     tempo_gas_rate: u128,
     next_withdrawal_index: u64,
+    withdrawal_queue_hash: B256,
     withdrawal_batch_index: u64,
-    last_batch: LastBatch,
-    pending_withdrawals: Vec<PendingWithdrawal>,
     max_withdrawals_per_block: u32,
     withdrawals_this_block: u32,
     current_block_number: u64,
     last_finalized_timestamp: u64,
+    pending_withdrawals: Vec<PendingWithdrawal>,
 }
 
 impl ZoneOutbox {
@@ -269,10 +271,7 @@ impl ZoneOutbox {
             .checked_add(1)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.withdrawal_batch_index.write(next_batch_index)?;
-        self.last_batch.write(LastBatch {
-            withdrawal_queue_hash,
-            withdrawal_batch_index: next_batch_index,
-        })?;
+        self.withdrawal_queue_hash.write(withdrawal_queue_hash)?;
         self.last_finalized_timestamp
             .write(self.storage.timestamp().to::<u64>())?;
         self.emit_event(ZoneOutboxEvent::batch_finalized(
@@ -317,22 +316,10 @@ impl ZoneOutbox {
     }
 
     fn last_batch(&self) -> TempoResult<ZoneOutboxAbi::LastBatch> {
-        self.last_batch.read().map(Into::into)
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Storable)]
-struct LastBatch {
-    withdrawal_queue_hash: B256,
-    withdrawal_batch_index: u64,
-}
-
-impl From<LastBatch> for ZoneOutboxAbi::LastBatch {
-    fn from(batch: LastBatch) -> Self {
-        Self {
-            withdrawalQueueHash: batch.withdrawal_queue_hash,
-            withdrawalBatchIndex: batch.withdrawal_batch_index,
-        }
+        Ok(ZoneOutboxAbi::LastBatch {
+            withdrawalQueueHash: self.withdrawal_queue_hash.read()?,
+            withdrawalBatchIndex: self.withdrawal_batch_index.read()?,
+        })
     }
 }
 
