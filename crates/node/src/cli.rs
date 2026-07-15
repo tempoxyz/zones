@@ -111,6 +111,7 @@ fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     manifest_path,
                     ed25519_key_path,
                     args.p2p_listen,
+                    args.p2p_bypass_ip_check,
                     args.zone_id,
                     args.sequencer_role,
                 )
@@ -232,6 +233,17 @@ pub struct ZoneArgs {
         default_value = "0.0.0.0:9200"
     )]
     pub p2p_listen: SocketAddr,
+
+    /// Disable Commonware's pre-authentication source-IP filter.
+    ///
+    /// Required for DNS peer addresses whose egress IPs are not known in advance.
+    /// Only enable this when network-level policy restricts access to the P2P port.
+    #[arg(
+        long = "p2p.bypass-ip-check",
+        env = "P2P_BYPASS_IP_CHECK",
+        requires = "sequencer_manifest"
+    )]
+    pub p2p_bypass_ip_check: bool,
 
     /// (Optional) Checked against the role derived from the manifest.
     #[arg(
@@ -424,6 +436,40 @@ mod tests {
         .unwrap();
         assert!(parsed.zone.enable_sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
+    }
+
+    #[test]
+    fn p2p_ip_check_bypass_is_explicit_and_requires_manifest_mode() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer-key",
+            "0x01",
+        ];
+
+        let without_manifest =
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--p2p.bypass-ip-check"]))
+                .unwrap_err();
+        assert_eq!(
+            without_manifest.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let default = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert!(!default.zone.p2p_bypass_ip_check);
+
+        let enabled = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+            "--p2p.bypass-ip-check",
+        ]))
+        .unwrap();
+        assert!(enabled.zone.p2p_bypass_ip_check);
     }
 
     #[test]
