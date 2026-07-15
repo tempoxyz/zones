@@ -11,6 +11,7 @@ use alloy_eips::NumHash;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
+use std::time::Duration;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
@@ -21,10 +22,48 @@ use zone_l1::ChainTempoStateExt;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, WITHDRAWAL_TX_GAS, ZoneTestNode, approve_outbox,
-    local_dev_zone_account, poll_until, seed_fixture_for_zone, start_local_zone_with_fixture,
+    local_dev_zone_account, poll_until, seed_fixture_for_zone, start_local_p2p_pair,
+    start_local_zone_with_fixture,
 };
 
 const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
+
+/// A follower imports the leader's executed block and exposes the resulting state over RPC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (leader, follower, mut fixture) = start_local_p2p_pair(10).await?;
+    // Commonware deliberately drops messages for offline peers. Wait comfortably
+    // longer than the ~2s peer dial/handshake (loopback dials every 500ms) before producing the
+    // first block so this happy-path replication test does not race the initial connection.
+    tokio::time::sleep(Duration::from_secs(8)).await;
+
+    let depositor = address!("0x0000000000000000000000000000000000001234");
+    let recipient = address!("0x0000000000000000000000000000000000005678");
+    let amount = 1_000_000_u128;
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, depositor, recipient, amount);
+    fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
+
+    leader
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            recipient,
+            U256::from(amount),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+    let follower_balance = follower
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            recipient,
+            U256::from(amount),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+    assert_eq!(follower_balance, U256::from(amount));
+    Ok(())
+}
 
 /// Self-contained test: inject a deposit via the queue and verify the zone
 /// mints the corresponding pathUSD balance on L2.

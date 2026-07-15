@@ -7,6 +7,8 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter};
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolEvent, SolValue};
+use commonware_codec::Encode as _;
+use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
 use eyre::WrapErr;
 use k256::SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
@@ -19,6 +21,7 @@ use reth_tasks::Runtime;
 use std::{
     collections::BTreeMap,
     future::Future,
+    net::{SocketAddr, TcpListener},
     ops::Deref,
     pin::Pin,
     sync::{
@@ -38,10 +41,12 @@ use tempo_contracts::precompiles::{
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
 use zone_node::ZoneNode;
+use zone_p2p::{P2pConfig, Role};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -586,6 +591,8 @@ impl ZoneTestNode {
             signer,
             8,
             initial_tokens,
+            None,
+            true,
         )
         .await
     }
@@ -609,6 +616,8 @@ impl ZoneTestNode {
             signer,
             withdrawal_batch_interval_blocks,
             Some(vec![]),
+            None,
+            true,
         )
         .await
     }
@@ -705,6 +714,8 @@ impl ZoneTestNode {
             sequencer_signer,
             8,
             Some(vec![]),
+            None,
+            true,
         )
         .await
     }
@@ -719,6 +730,8 @@ impl ZoneTestNode {
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
         withdrawal_batch_interval_blocks: u64,
         initial_tokens: Option<Vec<Address>>,
+        p2p_config: Option<P2pConfig>,
+        spawn_engine: bool,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -744,6 +757,9 @@ impl ZoneTestNode {
         }
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
+        }
+        if let Some(p2p_config) = p2p_config {
+            zone_node = zone_node.with_p2p(p2p_config);
         }
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
@@ -775,34 +791,36 @@ impl ZoneTestNode {
             .launch_with_debug_capabilities()
             .await?;
 
-        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&l1_provider_url)
-            .await?
-            .erased();
-        let policy_provider = zone_l1::PolicyProvider::new(
-            policy_cache.clone(),
-            l1_provider,
-            tokio::runtime::Handle::current(),
-        );
-        let provider = node_handle.node.provider();
-        let last_header = provider
-            .sealed_header(provider.best_block_number()?)?
-            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
-        let engine = zone_node::ZoneEngine::new(
-            provider.chain_spec(),
-            node_handle.node.add_ons_handle.beacon_engine_handle.clone(),
-            node_handle.node.payload_builder_handle.clone(),
-            deposit_queue.clone(),
-            last_header,
-            sequencer_signer.address(),
-            SecretKey::from(sequencer_signer.credential()),
-            portal_address,
-            policy_provider,
-        );
-        node_handle
-            .node
-            .task_executor
-            .spawn_critical_task("zone-engine", engine.run());
+        if spawn_engine {
+            let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(&l1_provider_url)
+                .await?
+                .erased();
+            let policy_provider = zone_l1::PolicyProvider::new(
+                policy_cache.clone(),
+                l1_provider,
+                tokio::runtime::Handle::current(),
+            );
+            let provider = node_handle.node.provider();
+            let last_header = provider
+                .sealed_header(provider.best_block_number()?)?
+                .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let engine = zone_node::ZoneEngine::new(
+                provider.chain_spec(),
+                node_handle.node.add_ons_handle.beacon_engine_handle.clone(),
+                node_handle.node.payload_builder_handle.clone(),
+                deposit_queue.clone(),
+                last_header,
+                sequencer_signer.address(),
+                SecretKey::from(sequencer_signer.credential()),
+                portal_address,
+                policy_provider,
+            );
+            node_handle
+                .node
+                .task_executor
+                .spawn_critical_task("zone-engine", engine.run());
+        }
 
         let http_url: url::Url = node_handle
             .node
@@ -2499,6 +2517,148 @@ pub(crate) async fn start_local_zone_with_fixture(
         seed_blocks,
     );
     Ok((zone, fixture))
+}
+
+/// Start a leader and follower with identical genesis state and authenticated P2P identities.
+pub(crate) async fn start_local_p2p_pair(
+    seed_blocks: u64,
+) -> eyre::Result<(ZoneTestNode, ZoneTestNode, L1Fixture)> {
+    fn available_address() -> eyre::Result<SocketAddr> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        Ok(listener.local_addr()?)
+    }
+
+    async fn spawn_test_l1_rpc() -> eyre::Result<String> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    let mut request = vec![0_u8; 16 * 1024];
+                    let Ok(read) = stream.read(&mut request).await else {
+                        return;
+                    };
+                    let request = String::from_utf8_lossy(&request[..read]);
+                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
+                    let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+                    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
+                    let result = match value.get("method").and_then(|method| method.as_str()) {
+                        Some("eth_chainId") => serde_json::json!("0x539"),
+                        Some("eth_blockNumber") => serde_json::json!("0x0"),
+                        _ => serde_json::Value::Null,
+                    };
+                    let response_body = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": id,
+                        "result": result,
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    );
+                    let _ = stream.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        Ok(format!("http://{address}"))
+    }
+
+    let addresses = [
+        available_address()?,
+        available_address()?,
+        available_address()?,
+    ];
+    let identities = [
+        Ed25519PrivateKey::from_seed(101),
+        Ed25519PrivateKey::from_seed(102),
+        Ed25519PrivateKey::from_seed(103),
+    ];
+    let public_keys = identities.each_ref().map(|key| key.public_key());
+
+    let unique = NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed);
+    let config_dir = std::env::temp_dir().join(format!(
+        "tempo-zone-p2p-test-{}-{unique}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&config_dir)?;
+    let manifest_path = config_dir.join("manifest.toml");
+    let mut manifest = format!(
+        "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
+        const_hex::encode_prefixed(public_keys[0].as_ref())
+    );
+    for (index, (public_key, address)) in public_keys.iter().zip(addresses).enumerate() {
+        manifest.push_str(&format!(
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref())
+        ));
+    }
+    std::fs::write(&manifest_path, manifest)?;
+
+    let mut configs = Vec::with_capacity(2);
+    for (index, role) in [(0, Role::Leader), (1, Role::Follower)] {
+        let key_path = config_dir.join(format!("node-{index}.key"));
+        std::fs::write(
+            &key_path,
+            const_hex::encode_prefixed(identities[index].encode().as_ref()),
+        )?;
+        configs.push(P2pConfig::load(
+            &manifest_path,
+            &key_path,
+            addresses[index],
+            false,
+            0,
+            Some(role),
+        )?);
+    }
+    let _ = std::fs::remove_dir_all(&config_dir);
+
+    let chain_id = next_unique_chain_id();
+    let l1_rpc_url = spawn_test_l1_rpc().await?;
+    let genesis: Genesis = serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)?;
+    let signer = l1_dev_signer();
+    let leader = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
+        l1_rpc_url.clone(),
+        Address::ZERO,
+        None,
+        chain_id,
+        Some(genesis.clone()),
+        signer.clone(),
+        8,
+        Some(vec![]),
+        Some(configs.remove(0)),
+        true,
+    )
+    .await?;
+    let follower = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
+        l1_rpc_url,
+        Address::ZERO,
+        None,
+        chain_id,
+        Some(genesis),
+        signer,
+        8,
+        Some(vec![]),
+        Some(configs.remove(0)),
+        false,
+    )
+    .await?;
+
+    let fixture = L1Fixture::new();
+    for zone in [&leader, &follower] {
+        seed_local_policy_cache(zone.policy_cache());
+        fixture.seed_l1_cache(
+            zone.l1_state_cache(),
+            Address::ZERO,
+            Address::ZERO,
+            seed_blocks,
+        );
+    }
+    Ok((leader, follower, fixture))
 }
 
 /// Seed an existing L1Fixture's cache into a zone node's L1 state cache.

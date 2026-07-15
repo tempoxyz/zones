@@ -7,9 +7,13 @@ use crate::{
     ZoneEngine,
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
+use alloy_consensus::BlockHeader as _;
 use alloy_primitives::Address;
 use alloy_provider::Provider as _;
+use alloy_rlp::Decodable as _;
+use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_signer_local::PrivateKeySigner;
+use futures::StreamExt as _;
 use k256::SecretKey;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
@@ -27,8 +31,8 @@ use reth_node_builder::{
         PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::SealedHeader;
-use reth_provider::ChainSpecProvider;
+use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_provider::{CanonStateSubscriptions, ChainSpecProvider};
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
@@ -44,7 +48,7 @@ use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
 use tempo_primitives::{
-    self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
+    self as primitives, Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
@@ -56,6 +60,7 @@ use tempo_transaction_pool::{
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
+use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
@@ -65,7 +70,7 @@ use zone_l1::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
-use zone_p2p::{P2pConfig, P2pNetworkId, spawn_p2p};
+use zone_p2p::{P2pCommand, P2pConfig, P2pEvent, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
@@ -96,6 +101,137 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 struct SequencerWithdrawalRevealEncryptor {
     encryption_key: Arc<SecretKey>,
     zone_id: u32,
+}
+
+/// Broadcast every newly canonical leader block in canonical order.
+async fn broadcast_canonical_blocks<P>(provider: P, commands: mpsc::Sender<P2pCommand>)
+where
+    P: CanonStateSubscriptions<Primitives = TempoPrimitives> + Clone + Send + Sync + 'static,
+{
+    let mut canonical = provider.canonical_state_stream();
+    while let Some(notification) = canonical.next().await {
+        for block in notification.committed().blocks_iter() {
+            let sealed = block.clone_sealed_block();
+            let number = sealed.number();
+            let hash = sealed.hash();
+            let encoded = alloy_rlp::encode(sealed.into_block());
+            if commands
+                .send(P2pCommand::BroadcastBlock(encoded))
+                .await
+                .is_err()
+            {
+                debug!(target: "zone::p2p", "P2P command channel closed");
+                return;
+            }
+            debug!(target: "zone::p2p", number, ?hash, "Queued canonical block for followers");
+        }
+    }
+    debug!(target: "zone::p2p", "Canonical block stream closed");
+}
+
+/// Decode, fully execute, and canonicalize blocks received by a follower.
+async fn import_leader_blocks<P>(
+    provider: P,
+    engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+    mut events: tokio::sync::mpsc::Receiver<P2pEvent>,
+    _commands: tokio::sync::mpsc::Sender<P2pCommand>,
+) where
+    P: reth_storage_api::BlockNumReader
+        + reth_storage_api::HeaderProvider<Header = TempoHeader>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    while let Some(event) = events.recv().await {
+        let P2pEvent::BlockReceived { block, .. } = event else {
+            continue;
+        };
+        if let Err(err) = import_leader_block(&provider, &engine, &block).await {
+            tracing::error!(target: "zone::p2p", %err, "Rejected leader block");
+        }
+    }
+    debug!(target: "zone::p2p", "P2P event channel closed");
+}
+
+async fn import_leader_block<P>(
+    provider: &P,
+    engine: &reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+    encoded: &[u8],
+) -> eyre::Result<()>
+where
+    P: reth_storage_api::BlockNumReader
+        + reth_storage_api::HeaderProvider<Header = TempoHeader>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    // Check the recieved block
+    let mut input = encoded;
+    let block = Block::decode(&mut input)
+        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
+    if !input.is_empty() {
+        eyre::bail!("encoded zone block has {} trailing bytes", input.len());
+    }
+
+    let block = SealedBlock::seal_slow(block);
+    let block_number = block.number();
+    let hash = block.hash();
+    let best_block = provider.best_block_number()?;
+
+    // 1. Block number is correct
+    if block_number <= best_block {
+        let existing = provider.sealed_header(block_number)?.ok_or_else(|| {
+            eyre::eyre!("missing local canonical header at height {block_number}")
+        })?;
+        if existing.hash() == hash {
+            debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate leader block");
+            return Ok(());
+        }
+        eyre::bail!(
+            "leader block conflicts with canonical block at height {block_number}: local={}, received={hash}",
+            existing.hash()
+        );
+    }
+
+    let expected_number = best_block.saturating_add(1);
+    if block_number != expected_number {
+        eyre::bail!(
+            "leader block gap: local head is {best_block}, received height {block_number}, expected {expected_number}; backfill is not implemented yet"
+        );
+    }
+
+    // 2. Block's parent hash is correct
+    let parent = provider
+        .sealed_header(best_block)?
+        .ok_or_else(|| eyre::eyre!("missing local canonical head at height {best_block}"))?;
+    if block.parent_hash() != parent.hash() {
+        eyre::bail!(
+            "leader block parent mismatch at height {block_number}: local={}, received={}",
+            parent.hash(),
+            block.parent_hash()
+        );
+    }
+
+    // 3. All txns in the block execute properly
+    let payload = ZonePayloadTypes::block_to_payload(block, None);
+    let status = engine.new_payload(payload).await?;
+    if !status.is_valid() {
+        eyre::bail!("execution engine rejected leader block {block_number} ({hash}): {status:?}");
+    }
+
+    // 4. Forkchoice
+    let forkchoice = ForkchoiceState::same_hash(hash);
+    let result = engine.fork_choice_updated(forkchoice, None).await?;
+    if !result.is_valid() {
+        eyre::bail!(
+            "execution engine rejected forkchoice for block {block_number} ({hash}): {result:?}"
+        );
+    }
+
+    info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
+    Ok(())
 }
 
 impl SequencerWithdrawalRevealEncryptor {
@@ -464,14 +600,30 @@ where
             .erased();
 
         self.resolve_and_seed_tokens(&l1_provider).await?;
-        self.spawn_l1_subscriber(&ctx);
+        let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
+        if p2p_role == Some(Role::Follower) {
+            // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
+            // enqueueing. Followers import complete blocks from the leader and do not consume
+            // DepositQueue; starting the unified subscriber here would grow that queue forever.
+            // On promotion/restart the subscriber resumes from the tempoBlockNumber persisted in
+            // the follower's imported zone state.
+            info!(target: "reth::cli", "Skipping L1 deposit subscriber on follower");
+        } else {
+            self.spawn_l1_subscriber(&ctx);
+        }
         self.spawn_policy_tasks(&l1_provider, &ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         if let Some(config) = self.p2p_config.take() {
             let network_id =
                 P2pNetworkId::new(l1_provider.get_chain_id().await?, self.portal_address);
-            Self::launch_p2p(config, network_id, &task_executor)?;
+            Self::launch_p2p(
+                config,
+                network_id,
+                &task_executor,
+                ctx.node.provider().clone(),
+                ctx.beacon_engine_handle.clone(),
+            )?;
         }
 
         if let Some(ref config) = self.sequencer_config {
@@ -532,15 +684,38 @@ where
         config: P2pConfig,
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
+        provider: N::Provider,
+        engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
+        let role = config.role();
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
             mut stopped,
             thread,
-            commands: _commands,
-            events: _events,
+            commands,
+            events,
         } = handle.into_parts();
+
+        match role {
+            Role::Leader => {
+                task_executor.spawn_critical_task(
+                    "zone-p2p-block-broadcast",
+                    broadcast_canonical_blocks(provider, commands),
+                );
+                // Leaders do not receive block messages. Dropping this receiver is harmless: the
+                // runtime only emits BlockReceived on followers.
+                drop(events);
+            }
+            Role::Follower => {
+                // Keep the command sender alive so the runtime's command loop remains available
+                // for later ACK/backfill commands even though followers send nothing in this PR.
+                task_executor.spawn_critical_task(
+                    "zone-p2p-block-import",
+                    import_leader_blocks(provider, engine, events, commands),
+                );
+            }
+        }
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
