@@ -31,6 +31,7 @@ use alloy_evm::{
     revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
 };
 use alloy_provider::{Provider, ProviderBuilder};
+use reth_chainspec::EthChainSpec;
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
     block::StateDB,
@@ -39,7 +40,7 @@ use reth_evm::{
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork, spec::TempoHardforks};
+use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
     TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmError,
     TempoHaltReason, TempoNextBlockEnvAttributes,
@@ -56,6 +57,7 @@ use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -192,9 +194,9 @@ pub struct ZoneBlockAssembler {
 
 impl ZoneBlockAssembler {
     /// Create a new [`ZoneBlockAssembler`] with the given chain spec.
-    pub fn new(chain_spec: Arc<TempoChainSpec>) -> Self {
+    pub fn new(chain_spec: Arc<ZoneChainSpec>) -> Self {
         Self {
-            inner: TempoBlockAssembler::new(chain_spec),
+            inner: TempoBlockAssembler::new(Arc::new(chain_spec.as_tempo().clone())),
         }
     }
 }
@@ -242,6 +244,7 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
 #[derive(Debug, Clone)]
 pub struct ZoneEvmConfig {
     inner: TempoEvmConfig,
+    chain_spec: Arc<ZoneChainSpec>,
     zone_factory: ZoneEvmFactory,
     block_assembler: ZoneBlockAssembler,
 }
@@ -249,7 +252,7 @@ pub struct ZoneEvmConfig {
 impl ZoneEvmConfig {
     /// Creates a Zone EVM config using Tempo hardfork conditions from the parent L1 spec.
     pub fn new(
-        zone_chain_spec: Arc<TempoChainSpec>,
+        zone_chain_spec: Arc<ZoneChainSpec>,
         tempo_chain_spec: Arc<TempoChainSpec>,
         l1_provider: L1StateProvider,
     ) -> Self {
@@ -258,23 +261,18 @@ impl ZoneEvmConfig {
     }
 
     /// Copies the Zone chain spec and applies the Tempo hardfork conditions from its parent chain.
-    fn compose_chain_spec(zone: &TempoChainSpec, tempo: &TempoChainSpec) -> Arc<TempoChainSpec> {
-        let mut chain_spec = zone.clone();
-        for &hardfork in TempoHardfork::VARIANTS {
-            chain_spec
-                .inner
-                .hardforks
-                .insert(hardfork, tempo.tempo_fork_activation(hardfork));
-        }
-        Arc::new(chain_spec)
+    fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneChainSpec> {
+        Arc::new(zone.clone().with_tempo_hardforks_from(tempo))
     }
 
-    fn from_chain_spec(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
+    fn from_chain_spec(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1StateProvider) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_provider);
-        let inner = TempoEvmConfig::new(chain_spec.clone());
-        let block_assembler = ZoneBlockAssembler::new(chain_spec);
+        let tempo_chain_spec = Arc::new(chain_spec.as_tempo().clone());
+        let inner = TempoEvmConfig::new(tempo_chain_spec);
+        let block_assembler = ZoneBlockAssembler::new(chain_spec.clone());
         Self {
             inner,
+            chain_spec,
             zone_factory,
             block_assembler,
         }
@@ -286,7 +284,7 @@ impl ZoneEvmConfig {
     /// EVM config but don't have access to an L1 RPC connection. Tempo hardfork conditions come
     /// from `chain_spec` because the parent L1 spec cannot be resolved in this mode. The portal
     /// address defaults to zero, so sequencer reads are unavailable.
-    pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
+    pub fn new_without_l1(chain_spec: Arc<ZoneChainSpec>) -> Self {
         let cache = L1StateCache::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
@@ -303,8 +301,13 @@ impl ZoneEvmConfig {
         self
     }
 
-    /// Returns the chain spec used by Tempo execution.
-    pub fn chain_spec(&self) -> &Arc<TempoChainSpec> {
+    /// Returns the Zone chain specification.
+    pub fn chain_spec(&self) -> &Arc<ZoneChainSpec> {
+        &self.chain_spec
+    }
+
+    /// Returns the underlying chain specification used by Tempo execution.
+    pub fn tempo_chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
     }
 }
@@ -358,7 +361,14 @@ impl ConfigureEvm for ZoneEvmConfig {
         parent: &TempoHeader,
         attributes: &Self::NextBlockEnvCtx,
     ) -> Result<EvmEnvFor<Self>, Self::Error> {
-        self.inner.next_evm_env(parent, attributes)
+        let mut env = self.inner.next_evm_env(parent, attributes)?;
+        // TempoEvmConfig is concrete over TempoChainSpec, so apply the Zone fee policy after
+        // delegating the rest of the environment construction.
+        env.block_env.inner.basefee = self
+            .chain_spec
+            .next_block_base_fee(parent, attributes.timestamp)
+            .unwrap_or_default();
+        Ok(env)
     }
 
     fn context_for_block<'a>(
@@ -429,11 +439,15 @@ impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
 mod tests {
     use super::*;
     use reth_chainspec::{EthChainSpec, ForkCondition};
-    use tempo_chainspec::spec::{DEV, MODERATO};
+    use tempo_chainspec::{
+        hardfork::TempoHardfork,
+        spec::{DEV, MODERATO, TempoHardforks},
+    };
 
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
-        let composed = ZoneEvmConfig::compose_chain_spec(&DEV, &MODERATO);
+        let zone = ZoneChainSpec::new(DEV.as_ref().clone());
+        let composed = ZoneEvmConfig::compose_chain_spec(&zone, &MODERATO);
 
         assert_eq!(composed.chain().id(), DEV.chain().id());
         assert_eq!(composed.genesis_hash(), DEV.genesis_hash());
@@ -447,7 +461,8 @@ mod tests {
 
     #[test]
     fn tempo_evm_selects_parent_fork_from_zone_block_timestamp() {
-        let composed = ZoneEvmConfig::compose_chain_spec(&DEV, &MODERATO);
+        let zone = ZoneChainSpec::new(DEV.as_ref().clone());
+        let composed = ZoneEvmConfig::compose_chain_spec(&zone, &MODERATO);
         let activation_timestamp = TempoHardfork::VARIANTS
             .iter()
             .find_map(|&hardfork| match MODERATO.tempo_fork_activation(hardfork) {
@@ -463,7 +478,7 @@ mod tests {
             ..Default::default()
         };
 
-        let config = TempoEvmConfig::new(composed);
+        let config = TempoEvmConfig::new(Arc::new(composed.as_tempo().clone()));
         let env = config.evm_env(&header).expect("valid EVM environment");
 
         assert_eq!(

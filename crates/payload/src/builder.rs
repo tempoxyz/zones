@@ -38,7 +38,6 @@ use reth_transaction_pool::{
     error::InvalidPoolTransactionError,
 };
 use std::{sync::Arc, time::Instant};
-use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
@@ -47,6 +46,7 @@ use tempo_primitives::{
 };
 use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTransaction};
 use tracing::{error, info, warn};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
@@ -92,7 +92,7 @@ where
     Node: FullNodeTypes,
     Node::Types: NodeTypes<
             Primitives = tempo_primitives::TempoPrimitives,
-            ChainSpec = TempoChainSpec,
+            ChainSpec = ZoneChainSpec,
             Payload = ZonePayloadTypes,
         >,
     EvmConfig: ConfigureEvm<
@@ -138,8 +138,7 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
 
 impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
 where
-    Provider:
-        StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
+    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = ZoneChainSpec> + Clone + 'static,
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
