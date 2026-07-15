@@ -12,7 +12,7 @@ use reth_chainspec::{
     ForkCondition, ForkFilter, ForkId, Hardfork, Hardforks, Head,
 };
 use reth_network_peers::NodeRecord;
-use std::fmt::Display;
+use std::{fmt::Display, sync::Arc};
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork, spec::TempoHardforks};
 use tempo_primitives::TempoHeader;
 
@@ -21,21 +21,22 @@ use tempo_primitives::TempoHeader;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneChainSpec {
     /// Underlying Tempo chain specification.
-    pub inner: TempoChainSpec,
+    pub inner: Arc<TempoChainSpec>,
 }
 
 impl ZoneChainSpec {
     /// Converts a genesis configuration into a Zone chain specification.
     pub fn from_genesis(genesis: Genesis) -> Self {
         Self {
-            inner: TempoChainSpec::from_genesis(genesis),
+            inner: Arc::new(TempoChainSpec::from_genesis(genesis)),
         }
     }
 
     /// Applies Tempo hardfork activations from the parent chain.
     pub fn with_tempo_hardforks_from(mut self, parent: &impl TempoHardforks) -> Self {
+        let inner = Arc::make_mut(&mut self.inner);
         for &hardfork in TempoHardfork::VARIANTS {
-            self.inner
+            inner
                 .inner
                 .hardforks
                 .insert(hardfork, parent.tempo_fork_activation(hardfork));
@@ -46,6 +47,14 @@ impl ZoneChainSpec {
 
 impl From<TempoChainSpec> for ZoneChainSpec {
     fn from(inner: TempoChainSpec) -> Self {
+        Self {
+            inner: Arc::new(inner),
+        }
+    }
+}
+
+impl From<Arc<TempoChainSpec>> for ZoneChainSpec {
+    fn from(inner: Arc<TempoChainSpec>) -> Self {
         Self { inner }
     }
 }
@@ -160,8 +169,7 @@ impl reth_cli::chainspec::ChainSpecParser for ZoneChainSpecParser {
     const SUPPORTED_CHAINS: &'static [&'static str] = tempo_chainspec::spec::SUPPORTED_CHAINS;
 
     fn parse(s: &str) -> eyre::Result<std::sync::Arc<Self::ChainSpec>> {
-        tempo_chainspec::spec::chain_value_parser(s)
-            .map(|spec| std::sync::Arc::new(spec.as_ref().clone().into()))
+        tempo_chainspec::spec::chain_value_parser(s).map(|spec| Arc::new(ZoneChainSpec::from(spec)))
     }
 }
 
@@ -174,10 +182,11 @@ mod tests {
 
     #[test]
     fn delegates_tempo_chain_behavior() {
-        let zone = ZoneChainSpec::from(DEV.as_ref().clone());
+        let zone = ZoneChainSpec::from(DEV.clone());
         let parent = zone.genesis_header();
         let timestamp = parent.inner.timestamp;
 
+        assert!(Arc::ptr_eq(&zone.inner, &DEV));
         assert_eq!(zone.chain(), DEV.chain());
         assert_eq!(zone.genesis_hash(), DEV.genesis_hash());
         assert_eq!(
