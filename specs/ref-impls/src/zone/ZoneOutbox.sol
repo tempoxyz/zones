@@ -77,7 +77,6 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Pending withdrawals waiting to be batched
     PendingWithdrawal[] internal _pendingWithdrawals;
-    uint32 internal _pendingWithdrawalsHead;
 
     /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
     /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
@@ -402,7 +401,7 @@ contract ZoneOutbox is IZoneOutbox {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
         if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
-        uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        uint256 pending = _pendingWithdrawals.length;
 
         if (count != pending) revert InvalidWithdrawalCount(count, pending);
         if (encryptedSenders.length != count) {
@@ -415,13 +414,10 @@ contract ZoneOutbox is IZoneOutbox {
         if (count > 0) {
             withdrawalQueueHash = EMPTY_SENTINEL;
 
-            uint256 start = _pendingWithdrawalsHead;
-            uint256 end = start + count;
-
-            for (uint256 i = end; i > start;) {
+            for (uint256 i = count; i > 0;) {
                 uint256 index = i - 1;
                 PendingWithdrawal memory pendingWithdrawal = _pendingWithdrawals[index];
-                bytes memory encryptedSender = encryptedSenders[index - start];
+                bytes memory encryptedSender = encryptedSenders[index];
                 _validateEncryptedSender(pendingWithdrawal.revealTo, encryptedSender);
 
                 Withdrawal memory w = Withdrawal({
@@ -445,12 +441,7 @@ contract ZoneOutbox is IZoneOutbox {
                 }
             }
 
-            _pendingWithdrawalsHead = uint32(end);
-
-            if (_pendingWithdrawalsHead == _pendingWithdrawals.length) {
-                delete _pendingWithdrawals;
-                _pendingWithdrawalsHead = 0;
-            }
+            delete _pendingWithdrawals;
         }
 
         // Increment withdrawal batch index (matches Tempo portal's next expected withdrawal batch index)
@@ -470,22 +461,15 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
-        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
-            return 0;
-        }
-        return _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        return _pendingWithdrawals.length;
     }
 
     /// @notice Pending withdrawals in FIFO order.
     function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
-        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
-            return pending;
-        }
-
-        uint256 count = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        uint256 count = _pendingWithdrawals.length;
         pending = new PendingWithdrawal[](count);
         for (uint256 i = 0; i < count;) {
-            pending[i] = _pendingWithdrawals[_pendingWithdrawalsHead + i];
+            pending[i] = _pendingWithdrawals[i];
             unchecked {
                 i++;
             }
