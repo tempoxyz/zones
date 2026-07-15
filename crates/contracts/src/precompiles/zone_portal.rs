@@ -136,6 +136,8 @@ crate::sol! {
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
+        event BouncebackGasUpdated(uint64 bouncebackGas);
+
         event SequencerTransferStarted(
             address indexed currentSequencer,
             address indexed pendingSequencer
@@ -218,6 +220,7 @@ crate::sol! {
 
         function transferSequencer(address newSequencer) external;
         function acceptSequencer() external;
+        function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
@@ -247,6 +250,7 @@ crate::sol! {
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
+        function bouncebackGas() external view returns (uint64);
         function pendingSequencer() external view returns (address);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);

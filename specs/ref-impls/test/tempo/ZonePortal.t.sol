@@ -378,6 +378,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
         assertEq(portal.withdrawalBatchIndex(), 0);
         assertEq(portal.messenger(), address(messenger));
+        assertEq(portal.bouncebackGas(), 0);
+        assertEq(portal.calculateBouncebackFee(), 0);
     }
 
     function test_zoneFactoryTracksZones() public view {
@@ -430,6 +432,9 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.setZoneGasRate(1);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setBouncebackGas(1);
 
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.setRpcUrl("https://rpc.example");
@@ -3027,7 +3032,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
     ///        slot 4: blockHash (bytes32)
     ///        slot 5: currentDepositQueueHash (bytes32)
-    ///        slot 6: deposit counters
+    ///        slot 6: deposit counters + bouncebackGas (uint64) [packed]
     ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
     ///        slot 17: zoneId (uint32) + messenger (address) [packed]
     ///        slot 18: verifier + genesisTempoBlockNumber + _initialized [packed]
@@ -3068,13 +3073,16 @@ contract ZonePortalTest is BaseTest {
             slot5, portal.currentDepositQueueHash(), "slot 5: currentDepositQueueHash mismatch"
         );
 
-        // --- Slot 6: deposit counters ---
+        // --- Slot 6: deposit counters + bouncebackGas (uint64) packed ---
+        uint64 testBouncebackGas = 43;
+        portal.setBouncebackGas(testBouncebackGas);
         bytes32 slot6 = vm.load(address(portal), bytes32(uint256(6)));
         assertEq(
             uint64(uint256(slot6) >> 128),
             portal.lastSyncedTempoBlockNumber(),
             "slot 6: lastSyncedTempoBlockNumber mismatch"
         );
+        assertEq(uint64(uint256(slot6) >> 192), testBouncebackGas, "slot 6: bouncebackGas mismatch");
 
         // --- Slot 7: _encryptionKeys array length ---
         // Before adding keys, length should be 0
@@ -3294,6 +3302,24 @@ contract ZonePortalTest is BaseTest {
         portal.setZoneGasRate(1);
     }
 
+    /// @notice Sequencer updates the gas amount used for bounce-back fees.
+    function test_setBouncebackGas_updatesGasAndEmits() public {
+        uint64 newBouncebackGas = 42;
+
+        vm.expectEmit(false, false, false, true, address(portal));
+        emit IZonePortal.BouncebackGasUpdated(newBouncebackGas);
+        portal.setBouncebackGas(newBouncebackGas);
+
+        assertEq(portal.bouncebackGas(), newBouncebackGas);
+    }
+
+    /// @notice Only the sequencer can update the bounce-back gas amount.
+    function test_setBouncebackGas_revertsIfNotSequencer() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setBouncebackGas(1);
+    }
+
     /// @notice Claiming with no refund emits and returns zero without changing state.
     function test_claimRefund_zeroAmount() public {
         vm.expectEmit(true, true, false, true, address(portal));
@@ -3418,14 +3444,15 @@ contract ZonePortalTest is BaseTest {
     }
 
     /// @notice Bounceback fee rounds basefee gas cost up to token units.
-    function testFuzz_calculateBouncebackFee(uint256 basefee) public {
+    function testFuzz_calculateBouncebackFee(uint64 bouncebackGas, uint256 basefee) public {
         basefee = bound(basefee, 0, 1e18);
+        portal.setBouncebackGas(bouncebackGas);
         vm.fee(basefee);
 
-        uint256 expected = (uint256(300_000) * basefee + 1e12 - 1) / 1e12;
+        uint256 expected = (uint256(bouncebackGas) * basefee + 1e12 - 1) / 1e12;
         uint128 fee = portal.calculateBouncebackFee();
 
-        assertEq(fee, uint128(expected));
+        assertEq(uint256(fee), expected);
     }
 
     /// @notice Deposits below fees revert and valid amounts enqueue the net amount.
@@ -3433,6 +3460,7 @@ contract ZonePortalTest is BaseTest {
         amount = uint128(bound(amount, 0, 1000e6));
         vm.fee(1e12);
         portal.setZoneGasRate(1);
+        portal.setBouncebackGas(300_000);
         uint128 minimum = portal.calculateDepositFee() + portal.calculateBouncebackFee();
 
         vm.startPrank(alice);
