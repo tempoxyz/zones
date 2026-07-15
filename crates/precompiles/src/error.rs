@@ -13,35 +13,20 @@ pub use tempo_precompiles::error::{Result, TempoPrecompileError};
 ///
 /// Upstream Tempo errors retain their original halt/revert/fatal behavior, while
 /// each zone-specific error is returned as an ABI-encoded EVM revert.
-#[derive(Clone)]
+/// Top-level error type for all zone precompile operations.
+#[derive(
+    Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::From, derive_more::TryInto,
+)]
 pub enum ZonePrecompileError {
     /// An error originating in the upstream Tempo precompiles crate.
+    #[error(transparent)]
     Tempo(TempoPrecompileError),
-    /// The zone TIP-20 factory was called by an address other than the zone inbox.
+    /// Error from the zone TIP-20 factory.
+    #[error("Zone TIP-20 factory error: {0:?}")]
     ZoneTokenFactory(ZoneTokenFactoryError),
-    /// A mutating call was attempted on the read-only zone TIP-403 registry.
+    /// Error from the zone TIP-403 registry.
+    #[error("Zone TIP-403 registry error: {0:?}")]
     Zone403Registry(ReadOnlyRegistry),
-}
-
-impl From<TempoPrecompileError> for ZonePrecompileError {
-    #[inline]
-    fn from(error: TempoPrecompileError) -> Self {
-        Self::Tempo(error)
-    }
-}
-
-impl From<ZoneTokenFactoryError> for ZonePrecompileError {
-    #[inline]
-    fn from(error: ZoneTokenFactoryError) -> Self {
-        Self::ZoneTokenFactory(error)
-    }
-}
-
-impl From<ReadOnlyRegistry> for ZonePrecompileError {
-    #[inline]
-    fn from(error: ReadOnlyRegistry) -> Self {
-        Self::Zone403Registry(error)
-    }
 }
 
 impl IntoPrecompileResult for ZonePrecompileError {

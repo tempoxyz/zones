@@ -27,6 +27,7 @@ use tempo_precompiles_macros::contract;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 alloy_sol_types::sol! {
+    #[derive(Debug, PartialEq, Eq)]
     interface IZoneTokenFactory {
         /// Initialize a TIP20 token on the zone and grant issuer roles.
         function enableToken(address token, string name, string symbol, string currency) external;

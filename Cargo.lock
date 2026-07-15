@@ -13571,6 +13571,7 @@ dependencies = [
  "alloy-rlp",
  "alloy-sol-types",
  "const-hex",
+ "derive_more",
  "k256",
  "paste",
  "rand 0.8.7",
@@ -13582,6 +13583,7 @@ dependencies = [
  "tempo-precompiles-macros",
  "tempo-primitives",
  "tempo-zone-contracts",
+ "thiserror 2.0.18",
  "tracing",
  "zone-primitives",
 ]
