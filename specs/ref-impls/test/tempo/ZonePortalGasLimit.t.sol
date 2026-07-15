@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZonePortal, Withdrawal } from "../../src/interfaces/IZone.sol";
+import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
@@ -51,7 +51,8 @@ contract ZonePortalGasLimitTest is Test {
 
     function setUp() public {
         token = new MockPortalToken();
-        portal = new ZonePortal(address(this));
+        portal = new ZonePortal();
+        vm.prank(ZONE_FACTORY_ADDRESS);
         portal.initialize(
             1,
             address(token),

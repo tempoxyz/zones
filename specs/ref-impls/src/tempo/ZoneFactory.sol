@@ -72,9 +72,9 @@ contract ZoneFactory is IZoneFactory {
 
         address predictedPortal = _computeCreateAddress(address(this), currentNonce);
 
-        // Deploy and atomically initialize the portal. The portal binds this factory as its only
-        // initializer authority when it is created.
-        ZonePortal portalContract = new ZonePortal(address(this));
+        // Deploy and atomically initialize the portal. TIP-1091 fixes this factory's address as
+        // the portal's only initializer authority.
+        ZonePortal portalContract = new ZonePortal();
         portalContract.initialize(
             zoneId,
             params.initialToken,

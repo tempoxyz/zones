@@ -16,7 +16,8 @@ import {
     MAX_WITHDRAWAL_CALLBACK_GAS,
     QueuedDeposit,
     TokenConfig,
-    Withdrawal
+    Withdrawal,
+    ZONE_FACTORY_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
@@ -61,10 +62,6 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
-
-    /// @dev The explicitly configured factory is the only initializer authority.
-    ///      This is protocol-wide code configuration and does not consume proxy storage.
-    address internal immutable _factory;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -143,10 +140,6 @@ contract ZonePortal is IZonePortal {
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address factory) {
-        _factory = factory;
-    }
-
     function initialize(
         uint32 _zoneId,
         address _initialToken,
@@ -160,7 +153,7 @@ contract ZonePortal is IZonePortal {
     )
         external
     {
-        if (msg.sender != _factory) revert NotFactory();
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
 
         _initialized = true;

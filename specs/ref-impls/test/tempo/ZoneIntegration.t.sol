@@ -95,7 +95,7 @@ contract ZoneIntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        l1Factory = new ZoneFactory(); // Keep for verifier only
+        l1Factory = _deployZoneFactory(); // Keep for verifier only
         receiver = new TrackingReceiver();
 
         // Deploy zone token FIRST
@@ -115,7 +115,8 @@ contract ZoneIntegrationTest is BaseTest {
         MockZoneFactoryForIntegrationMessenger messengerFactory =
             new MockZoneFactoryForIntegrationMessenger();
         ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
-        l1Portal = new ZonePortal(address(this));
+        l1Portal = new ZonePortal();
+        vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1,
             address(l2ZoneToken),

@@ -25,6 +25,7 @@ import {
     PORTAL_PENDING_SEQUENCER_SLOT,
     PORTAL_SEQUENCER_SLOT,
     Withdrawal,
+    ZONE_FACTORY_ADDRESS,
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
@@ -197,9 +198,8 @@ contract ZonePortalProxyStorageTest is Test {
             initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
         );
 
-        address authorizedFactory = makeAddr("authorized factory");
-        ZonePortal implementation = new ZonePortal(authorizedFactory);
-        assertNotEq(address(this), authorizedFactory, "logic deployer must differ from factory");
+        ZonePortal implementation = new ZonePortal();
+        assertNotEq(address(this), ZONE_FACTORY_ADDRESS, "logic deployer must differ from factory");
 
         address proxyA = makeAddr("portal proxy A");
         address proxyB = makeAddr("portal proxy B");
@@ -228,7 +228,7 @@ contract ZonePortalProxyStorageTest is Test {
                 ""
             );
 
-        vm.startPrank(authorizedFactory);
+        vm.startPrank(ZONE_FACTORY_ADDRESS);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
         _initializePortal(proxyB, initialToken, 2, messengerB, verifierB, 200);
 
@@ -292,7 +292,7 @@ contract ZonePortalTest is BaseTest {
         super.setUp();
 
         // Deploy zone infrastructure
-        zoneFactory = new ZoneFactory();
+        zoneFactory = _deployZoneFactory();
         withdrawalReceiver = new MockWithdrawalReceiver();
         gasConsumingReceiver = new GasConsumingReceiver();
         successfulReceiver = new SuccessfulReceiver();
