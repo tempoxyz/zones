@@ -34,8 +34,10 @@ pub mod ecies;
 
 /// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
 pub mod dispatch {
-    pub use tempo_precompiles::dispatch::typed::{mutate, mutate_void, view};
-    pub use tempo_precompiles::metadata;
+    pub use tempo_precompiles::{
+        dispatch::typed::{mutate, mutate_void, view},
+        metadata,
+    };
 }
 
 pub mod policy;
