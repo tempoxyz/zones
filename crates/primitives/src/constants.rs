@@ -35,6 +35,10 @@ pub const CONTRACT_DEPLOYER_ALLOWLIST: &[Address] = &[];
 /// ZoneTxContext precompile address on Zone L2.
 pub const ZONE_TX_CONTEXT_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000005");
 
+/// ZoneFeeManager precompile address on Zone L2.
+pub const ZONE_FEE_MANAGER_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000006");
+
 /// Chaum-Pedersen verification precompile address.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
     address!("0x1C00000000000000000000000000000000000100");
@@ -63,6 +67,13 @@ pub const PORTAL_ADMIN_SLOT: B256 = {
 pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
     let mut bytes = [0u8; 32];
     bytes[31] = 2;
+    B256::new(bytes)
+};
+
+/// ZonePortal storage slot 8: `_tokenConfigs` mapping.
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 8;
     B256::new(bytes)
 };
 

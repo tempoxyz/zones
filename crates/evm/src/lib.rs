@@ -8,6 +8,7 @@
 #![allow(unnameable_types)]
 
 mod executor;
+mod fee_manager;
 pub mod precompiles;
 mod tx_context;
 mod zone_evm;
@@ -16,10 +17,11 @@ pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
     executor::ZoneBlockExecutor,
+    fee_manager::ZoneProtocolFeeManager,
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
-        ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
+        ZoneFeeManager, ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
     tx_context::ZoneTxContext,
 };
@@ -49,13 +51,14 @@ use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
     TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
-    storage::actions::StorageActions, storage_credits::NonCreditableSlots,
-    tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
+    storage::actions::StorageActions, storage_credits::NonCreditableSlots, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_FEE_MANAGER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
+};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -85,14 +88,18 @@ impl ZoneEvmFactory {
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
         &self,
-        mut evm: TempoEvm<DB, I>,
+        evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
         let cfg = evm.ctx().cfg.clone();
+        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new(self.l1_provider.clone()));
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
             Some(TempoState::create(self.l1_provider.clone(), &cfg))
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
+        precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, |_| {
+            Some(ZoneFeeManager::create(self.l1_provider.clone(), &cfg))
+        });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
             Some(ChaumPedersenVerify::create(&cfg))
         });
@@ -121,7 +128,8 @@ impl ZoneEvmFactory {
         //
         // This replaces the upstream `extend_tempo_precompiles` lookup, so we
         // must also handle the non-TIP-20 Tempo precompiles that are zone-relevant
-        // (FeeManager, NonceManager, AccountKeychain).
+        // (NonceManager, AccountKeychain). FeeManager is deliberately disabled
+        // here because protocol fees use ZoneFeeManager above.
         // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
         // static map via `apply_precompile` and take priority over this.
         let zone_cfg = cfg.clone();
@@ -138,9 +146,7 @@ impl ZoneEvmFactory {
                     registry.clone(),
                     sequencer.clone(),
                 ))
-            } else if *address == TIP_FEE_MANAGER_ADDRESS {
-                Some(TipFeeManager::create_precompile(&zone_env))
-            } else if *address == STABLECOIN_DEX_ADDRESS {
+            } else if *address == TIP_FEE_MANAGER_ADDRESS || *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
                 Some(NonceManager::create_precompile(&zone_env))

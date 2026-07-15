@@ -3,7 +3,7 @@
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
 //! preserving the zone-facing checkpoint and Tempo storage read ABI.
 
-use alloc::vec::Vec;
+use alloc::{format, vec::Vec};
 
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
@@ -61,6 +61,11 @@ impl TempoState {
         }
         self.write_checkpoint(header_rlp, header.number())?;
         Ok(())
+    }
+
+    /// Returns the finalized Tempo block number that zone state reads are bound to.
+    pub fn finalized_block_number(&self) -> tempo_precompiles::Result<u64> {
+        self.tempo_block_number.read()
     }
 
     fn write_checkpoint(

@@ -20,6 +20,8 @@ const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 /// ZoneConfig predeploy address.
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
+/// ZoneFeeManager predeploy address.
+const ZONE_FEE_MANAGER_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000006");
 
 /// `tempoPortal` immutable occurrences in ZoneInbox deployed bytecode.
 const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 4;
@@ -148,7 +150,14 @@ mod tests {
 
     #[test]
     fn template_parses() {
-        genesis_template().unwrap();
+        let genesis = genesis_template().unwrap();
+        assert!(
+            genesis.alloc[&ZONE_FEE_MANAGER_ADDRESS]
+                .code
+                .as_ref()
+                .is_some_and(|code| !code.is_empty()),
+            "ZoneFeeManager missing from genesis template"
+        );
     }
 
     #[test]

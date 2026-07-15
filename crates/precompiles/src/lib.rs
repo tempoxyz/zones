@@ -16,6 +16,7 @@
 //! - **TIP-20 Factory** ([`tip20_factory`]) — zone-side TIP-20 token factory.
 //! - **TIP-403 Proxy** ([`tip403_proxy`]) — read-only TIP-403 registry proxy.
 //! - **Zone TIP-20** ([`ztip20`]) — policy-aware TIP-20 wrapper.
+//! - **Zone Fee Manager** ([`zone_fee_manager`]) — multi-token fees without FeeAMM.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::too_many_arguments)]
@@ -44,6 +45,7 @@ pub mod policy;
 pub mod tempo_state;
 pub mod tip20_factory;
 pub mod tip403_proxy;
+pub mod zone_fee_manager;
 pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
@@ -51,6 +53,7 @@ pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use tempo_state::{L1StorageReader, TempoState};
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
+pub use zone_fee_manager::{ZoneConfigReader, ZoneFeeManager};
 pub use ztip20::{SequencerExt, ZoneTip20Token};
 
 use revm::precompile::PrecompileError;

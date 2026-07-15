@@ -20,7 +20,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-CHAIN-ID-UNIQUE` | Each live zone uses the chain ID derived from its zone ID, and no two live zones share a chain ID | 🟡 | Cross-zone replay protection fails; signed transactions may be valid on more than one zone |
 | `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
 | `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash`, `genesisTempoBlockNumber`, and emitted zone creation parameters match the zone genesis file | 🔴 | The zone may prove batches from a different genesis state than the portal expects |
-| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
+| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, `ZoneTxContext`, and `ZoneFeeManager` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, fee collection, proofs, and Tempo reads |
 
 ### Access Control and Configuration
 
@@ -36,6 +36,9 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
+| `TEMPO-ZONE-FEE-TOKEN-ENABLED` | Every nonzero gas fee is paid in a token enabled by the portal registry at the zone's finalized Tempo checkpoint | 🔴 | The zone can create unbacked demand or accept an asset outside its configured trust domain |
+| `TEMPO-ZONE-FEE-NO-SWAP` | Zone fee settlement credits the sequencer in exactly the token paid by the user and never reads or mutates FeeAMM pool state | 🟡 | Fee accounting can depend on unavailable liquidity or diverge between execution and proving |
+
 | `TEMPO-ZONE-TOKEN-ENABLEMENT-APPEND-ONLY` | Once enabled, a token remains enabled and remains in the append-only enabled token list | 🔴 | Withdrawals can be disabled after deposits, breaking the non-custodial bridge guarantee |
 | `TEMPO-ZONE-TOKEN-DEPOSIT-PAUSE-ONLY` | Pausing a token only disables new deposits; withdrawals for enabled tokens remain requestable and processable | 🔴 | Admin can lock users inside the zone by pausing deposits |
 | `TEMPO-ZONE-MESSENGER-AUTH` | The shared messenger only relays when `msg.sender == ZoneFactory.zones(zoneId).portal` | 🟡 | A caller can spoof a source zone or invoke receiver callbacks outside the portal-controlled withdrawal path |

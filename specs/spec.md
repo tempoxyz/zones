@@ -77,6 +77,7 @@
     - [Proof Requirements](#proof-requirements)
   - [Zone Precompiles](#zone-precompiles)
     - [TIP-20 Token Precompile](#tip-20-token-precompile)
+    - [Zone Fee Manager](#zone-fee-manager)
     - [Chaum-Pedersen Verify](#chaum-pedersen-verify)
     - [AES-GCM Decrypt](#aes-gcm-decrypt)
   - [Contracts and Interfaces](#contracts-and-interfaces)
@@ -89,6 +90,7 @@
     - [IZoneInbox](#izoneinbox)
     - [IZoneOutbox](#izoneoutbox)
     - [IZoneConfig](#izoneconfig)
+    - [IZoneFeeManager](#izonefeemanager)
     - [TIP-403 Registry](#tip-403-registry)
   - [Network Upgrades and Hard Fork Activation](#network-upgrades-and-hard-fork-activation)
 
@@ -262,7 +264,7 @@ The shared `ZoneMessenger` relays withdrawal callbacks for all zones created by 
 
 ### Zone Predeploys
 
-Each zone has five system contracts deployed at genesis at fixed addresses:
+Each zone has six system contracts deployed at genesis at fixed addresses:
 
 | Predeploy | Address | Purpose |
 |-----------|---------|---------|
@@ -271,8 +273,11 @@ Each zone has five system contracts deployed at genesis at fixed addresses:
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
+| `ZoneFeeManager` | `0x1c00...0006` | Collects gas fees in any token enabled by `ZoneConfig`, without AMM routing, and credits the sequencer in that token. |
 
 `ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
+
+`ZoneFeeManager` replaces Tempo's `TipFeeManager` for protocol fee collection. Before execution it requires the resolved fee token to be enabled in the portal registry at the finalized `TempoState` checkpoint and escrows the maximum fee. After execution it refunds unused gas and credits the actual spend to the block sequencer in the same token. Zones never inspect FeeAMM pools, select a validator token, or swap gas fees.
 
 ### Zone Token Model
 
@@ -1426,7 +1431,7 @@ The proof must validate:
 
 ## Zone Precompiles
 
-Zones have three categories of precompiles: TIP-20 token precompiles (one per enabled token) and two cryptographic precompiles for encrypted deposit verification.
+Zones have TIP-20 token precompiles (one per enabled token), a zone-native fee manager, and two cryptographic precompiles for encrypted deposit verification.
 
 ### TIP-20 Token Precompile
 
@@ -1435,6 +1440,14 @@ Each enabled TIP-20 token is deployed as a precompile at the same address as on 
 - `balanceOf` and `allowance` are restricted to the account owner (or sequencer).
 - Transfer-family operations (`transfer`, `transferFrom`, `approve`) charge a fixed 100,000 gas.
 - `mint` is restricted to `ZoneInbox`, `burn` is restricted to `ZoneOutbox`.
+
+### Zone Fee Manager
+
+| | |
+|---|---|
+| **Address** | `0x1c00000000000000000000000000000000000006` |
+
+The zone EVM invokes this precompile's deterministic fee hooks before and after every charged transaction. It accepts a fee token only when the portal's `_tokenConfigs[token].enabled` value is true at the block number finalized in `TempoState`. The pre-transaction hook escrows the maximum fee. The post-transaction hook refunds the unused portion and credits the actual spend to the sequencer under the same token. It never reads or modifies FeeAMM pools.
 
 ### Chaum-Pedersen Verify
 
@@ -2042,6 +2055,22 @@ interface IZoneConfig {
 ```
 
 Reads the sequencer address, token registry, and encryption key from the portal on Tempo via `TempoState` storage reads.
+
+### IZoneFeeManager
+
+Address: `0x1c00000000000000000000000000000000000006`
+
+```solidity
+interface IZoneFeeManager {
+    function userTokens(address user) external view returns (address);
+    function collectedFees(address sequencer, address token) external view returns (uint256);
+    function setUserToken(address token) external;
+    function distributeFees(address sequencer, address token) external;
+    function isEnabledToken(address token) external view returns (bool);
+}
+```
+
+The protocol fee hooks share this precompile's storage and registry-validation logic, so fee collection is part of normal journaled EVM execution and is reproduced by the prover.
 
 ### TIP-403 Registry
 
