@@ -29,7 +29,7 @@ contract ZoneFactory is IZoneFactory {
     mapping(address => bool) internal _validVerifiers;
     address internal _verifier;
     address internal _messenger;
-    address internal _owner;
+    address public owner;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment,
@@ -41,7 +41,7 @@ contract ZoneFactory is IZoneFactory {
     //////////////////////////////////////////////////////////////*/
 
     constructor() {
-        _owner = msg.sender;
+        owner = msg.sender;
         emit OwnershipTransferred(address(0), msg.sender);
 
         address v = address(new Verifier());
@@ -58,7 +58,7 @@ contract ZoneFactory is IZoneFactory {
         external
         returns (uint32 zoneId, address portal)
     {
-        if (msg.sender != _owner) revert NotOwner();
+        if (msg.sender != owner) revert NotOwner();
 
         // Validate initial token is a TIP-20
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(params.initialToken)) {
@@ -128,11 +128,11 @@ contract ZoneFactory is IZoneFactory {
 
     /// @inheritdoc IZoneFactory
     function transferOwnership(address newOwner) external {
-        if (msg.sender != _owner) revert NotOwner();
+        if (msg.sender != owner) revert NotOwner();
         if (newOwner == address(0)) revert InvalidOwner();
 
-        address previousOwner = _owner;
-        _owner = newOwner;
+        address previousOwner = owner;
+        owner = newOwner;
         emit OwnershipTransferred(previousOwner, newOwner);
     }
 
@@ -171,10 +171,6 @@ contract ZoneFactory is IZoneFactory {
     /// @notice Returns the number of zones created (not including reserved zone 0)
     function zoneCount() external view returns (uint32) {
         return _nextZoneId - 1;
-    }
-
-    function owner() external view returns (address) {
-        return _owner;
     }
 
     function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
