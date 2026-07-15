@@ -152,7 +152,7 @@ contract ZoneBridgeTest is BaseTest {
         super.setUp();
 
         // === Deploy L1 Contracts ===
-        l1Factory = new ZoneFactory(); // Keep factory for verifier only
+        l1Factory = _deployZoneFactory(); // Keep factory for verifier only
         withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Deploy zone token FIRST (used for both L1 escrow and zone-side operations).
@@ -173,14 +173,16 @@ contract ZoneBridgeTest is BaseTest {
         // mock factory registry so the shared messenger can authenticate the source portal.
         MockZoneFactoryForBridgeMessenger messengerFactory = new MockZoneFactoryForBridgeMessenger();
         ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
-        l1Portal = new ZonePortal(address(this));
+        l1Portal = new ZonePortal();
+        address verifier = l1Factory.verifier();
+        vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
             address(messengerContract),
             admin, // admin
             sequencer, // sequencer
-            l1Factory.verifier(),
+            verifier,
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
             ""
@@ -243,7 +245,7 @@ contract ZoneBridgeTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -1162,7 +1164,7 @@ contract ZoneBridgeTest is BaseTest {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });

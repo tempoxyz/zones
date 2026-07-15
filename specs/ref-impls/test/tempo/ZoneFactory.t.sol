@@ -18,7 +18,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function setUp() public override {
         super.setUp();
-        zoneFactory = new ZoneFactory();
+        zoneFactory = _deployZoneFactory();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -55,6 +55,45 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
+    }
+
+    function test_createZone_revertsForNonOwner() public {
+        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            admin: admin,
+            sequencer: sequencer,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+
+        vm.prank(alice);
+        vm.expectRevert(IZoneFactory.NotOwner.selector);
+        zoneFactory.createZone(params);
+    }
+
+    function test_transferOwnership_updatesZoneCreator() public {
+        vm.expectEmit(true, true, false, false);
+        emit IZoneFactory.OwnershipTransferred(address(this), alice);
+        zoneFactory.transferOwnership(alice);
+
+        assertEq(zoneFactory.owner(), alice);
+
+        vm.expectRevert(IZoneFactory.NotOwner.selector);
+        zoneFactory.transferOwnership(admin);
+
+        vm.prank(alice);
+        zoneFactory.transferOwnership(admin);
+        assertEq(zoneFactory.owner(), admin);
+    }
+
+    function test_transferOwnership_revertsForZeroAddress() public {
+        vm.expectRevert(IZoneFactory.InvalidOwner.selector);
+        zoneFactory.transferOwnership(address(0));
     }
 
     function test_createZone_usesSharedMessenger() public {

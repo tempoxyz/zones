@@ -95,7 +95,7 @@ contract ZoneIntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        l1Factory = new ZoneFactory(); // Keep for verifier only
+        l1Factory = _deployZoneFactory(); // Keep for verifier only
         receiver = new TrackingReceiver();
 
         // Deploy zone token FIRST
@@ -115,14 +115,16 @@ contract ZoneIntegrationTest is BaseTest {
         MockZoneFactoryForIntegrationMessenger messengerFactory =
             new MockZoneFactoryForIntegrationMessenger();
         ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
-        l1Portal = new ZonePortal(address(this));
+        l1Portal = new ZonePortal();
+        address verifier = l1Factory.verifier();
+        vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1,
             address(l2ZoneToken),
             address(messengerContract),
             admin,
             sequencer,
-            l1Factory.verifier(),
+            verifier,
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
             ""
@@ -192,7 +194,7 @@ contract ZoneIntegrationTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });

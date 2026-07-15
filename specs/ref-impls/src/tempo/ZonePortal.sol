@@ -16,7 +16,8 @@ import {
     MAX_WITHDRAWAL_CALLBACK_GAS,
     QueuedDeposit,
     TokenConfig,
-    Withdrawal
+    Withdrawal,
+    ZONE_FACTORY_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
@@ -61,10 +62,6 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
-
-    /// @dev The explicitly configured factory is the only initializer authority.
-    ///      This is protocol-wide code configuration and does not consume proxy storage.
-    address internal immutable _factory;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -143,10 +140,6 @@ contract ZonePortal is IZonePortal {
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address factory) {
-        _factory = factory;
-    }
-
     function initialize(
         uint32 _zoneId,
         address _initialToken,
@@ -160,7 +153,7 @@ contract ZonePortal is IZonePortal {
     )
         external
     {
-        if (msg.sender != _factory) revert NotFactory();
+        if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
 
         _initialized = true;
@@ -726,7 +719,7 @@ contract ZonePortal is IZonePortal {
 
         address _token = withdrawal.token;
 
-        if (withdrawal.fallbackRecipient == address(0)) {
+        if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
         }
@@ -739,7 +732,7 @@ contract ZonePortal is IZonePortal {
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
-            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
             emit WithdrawalProcessed(
                 withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
             );
@@ -766,7 +759,7 @@ contract ZonePortal is IZonePortal {
 
         if (!success) {
             // Callback failed: bounce back to zone (only amount, not fee)
-            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
         }
         emit WithdrawalProcessed(
             withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success
@@ -855,18 +848,12 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     /// @param _token The token from the failed withdrawal
     /// @param amount The amount to bounce back
-    /// @param fallbackRecipient The zone address to receive the bounce-back
-    function _enqueueBounceBack(
-        address _token,
-        uint128 amount,
-        address fallbackRecipient
-    )
-        internal
-    {
+    /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
+    function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
         Deposit memory depositData = Deposit({
             token: _token,
             sender: address(this),
-            to: fallbackRecipient,
+            to: address(uint160(fallbackNonce)),
             amount: amount,
             bouncebackRecipient: address(0),
             memo: bytes32(0)
@@ -878,7 +865,7 @@ contract ZonePortal is IZonePortal {
         uint64 thisDeposit = ++depositCount;
 
         emit WithdrawalBounceBack(
-            newCurrentDepositQueueHash, fallbackRecipient, _token, amount, thisDeposit
+            newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
         );
     }
 
