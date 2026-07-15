@@ -7,18 +7,21 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter};
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolEvent, SolValue};
+use commonware_codec::Encode as _;
+use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
 use eyre::WrapErr;
 use k256::SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
-use reth_node_core::args::RpcServerArgs;
+use reth_node_core::{args::RpcServerArgs, exit::NodeExitFuture};
 use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
     collections::BTreeMap,
     future::Future,
+    net::{SocketAddr, TcpListener},
     ops::Deref,
     pin::Pin,
     sync::{
@@ -42,6 +45,7 @@ use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
 use zone_node::ZoneNode;
+use zone_p2p::{P2pConfig, Role};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -325,6 +329,8 @@ pub(crate) trait TestNodeHandle: Send {
     fn subscribe_to_canonical_state(
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives>;
+
+    fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture;
 }
 
 impl<Node, AddOns> TestNodeHandle for NodeHandle<Node, AddOns>
@@ -339,6 +345,10 @@ where
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives> {
         use reth_provider::CanonStateSubscriptions;
         self.node.provider().subscribe_to_canonical_state()
+    }
+
+    fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture {
+        &mut self.node_exit_future
     }
 }
 
@@ -412,6 +422,10 @@ impl ZoneTestNode {
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives> {
         self.node_handle.subscribe_to_canonical_state()
+    }
+
+    pub(crate) async fn wait_for_node_exit(&mut self) -> eyre::Result<()> {
+        self.node_handle.node_exit_future_mut().await
     }
 
     /// Wait for a TIP-20 token balance to reach at least `min_balance` on this zone.
@@ -590,6 +604,7 @@ impl ZoneTestNode {
             signer,
             8,
             initial_tokens,
+            None,
         )
         .await
     }
@@ -613,6 +628,7 @@ impl ZoneTestNode {
             signer,
             withdrawal_batch_interval_blocks,
             Some(vec![]),
+            None,
         )
         .await
     }
@@ -672,6 +688,26 @@ impl ZoneTestNode {
         Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
     }
 
+    pub(crate) async fn start_local_with_p2p(
+        l1_rpc_url: String,
+        p2p_config: P2pConfig,
+    ) -> eyre::Result<Self> {
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
+        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
+            l1_rpc_url,
+            Address::ZERO,
+            None,
+            next_unique_chain_id(),
+            None,
+            signer,
+            8,
+            Some(vec![]),
+            Some(p2p_config),
+        )
+        .await
+    }
+
     async fn launch(
         l1_ws_url: String,
         portal_address: Address,
@@ -709,6 +745,7 @@ impl ZoneTestNode {
             sequencer_signer,
             8,
             Some(vec![]),
+            None,
         )
         .await
     }
@@ -723,6 +760,7 @@ impl ZoneTestNode {
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
         withdrawal_batch_interval_blocks: u64,
         initial_tokens: Option<Vec<Address>>,
+        p2p_config: Option<P2pConfig>,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -748,6 +786,9 @@ impl ZoneTestNode {
         }
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
+        }
+        if let Some(p2p_config) = p2p_config {
+            zone_node = zone_node.with_p2p(p2p_config);
         }
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
@@ -2503,6 +2544,144 @@ pub(crate) async fn start_local_zone_with_fixture(
         seed_blocks,
     );
     Ok((zone, fixture))
+}
+
+pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
+    fn available_address() -> eyre::Result<SocketAddr> {
+        Ok(TcpListener::bind("127.0.0.1:0")?.local_addr()?)
+    }
+
+    let identities = [
+        Ed25519PrivateKey::from_seed(201),
+        Ed25519PrivateKey::from_seed(202),
+        Ed25519PrivateKey::from_seed(203),
+    ];
+    let public_keys = identities.each_ref().map(|key| key.public_key());
+    let addresses = [listen, available_address()?, available_address()?];
+    let config_dir = std::env::temp_dir().join(format!(
+        "tempo-zone-p2p-config-{}-{}",
+        std::process::id(),
+        next_unique_chain_id()
+    ));
+    std::fs::create_dir_all(&config_dir)?;
+    let manifest_path = config_dir.join("manifest.toml");
+    let key_path = config_dir.join("leader.key");
+    let mut manifest = format!(
+        "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
+        const_hex::encode_prefixed(public_keys[0].as_ref())
+    );
+    for (index, (public_key, address)) in public_keys.iter().zip(addresses).enumerate() {
+        manifest.push_str(&format!(
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref())
+        ));
+    }
+    std::fs::write(&manifest_path, manifest)?;
+    std::fs::write(
+        &key_path,
+        const_hex::encode_prefixed(identities[0].encode().as_ref()),
+    )?;
+    let config = P2pConfig::load(
+        &manifest_path,
+        &key_path,
+        listen,
+        false,
+        0,
+        Some(Role::Leader),
+    )?;
+    let _ = std::fs::remove_dir_all(config_dir);
+    Ok(config)
+}
+
+pub(crate) async fn start_chain_id_rpc(chain_id: u64) -> eyre::Result<url::Url> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let local_addr = listener.local_addr()?;
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _peer)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(handle_chain_id_rpc_request(stream, chain_id));
+        }
+    });
+    Ok(format!("http://{local_addr}").parse()?)
+}
+
+async fn handle_chain_id_rpc_request(mut stream: tokio::net::TcpStream, chain_id: u64) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let mut request = Vec::new();
+    let mut buf = [0u8; 1024];
+    let mut headers_end = None;
+    let mut content_length = 0usize;
+
+    loop {
+        let Ok(read) = stream.read(&mut buf).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buf[..read]);
+
+        if headers_end.is_none()
+            && let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            headers_end = Some(end + 4);
+            let headers = String::from_utf8_lossy(&request[..end]);
+            content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+        }
+
+        if let Some(end) = headers_end
+            && request.len() >= end + content_length
+        {
+            break;
+        }
+    }
+
+    let body = headers_end
+        .and_then(|end| request.get(end..end + content_length))
+        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let id = body
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = body
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let body = if method == "eth_chainId" {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": format!("0x{chain_id:x}"),
+        })
+    } else {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": -32601,
+                "message": "method not found",
+            },
+        })
+    };
+    let body = body.to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
 }
 
 /// Seed an existing L1Fixture's cache into a zone node's L1 state cache.
