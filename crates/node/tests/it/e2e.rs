@@ -5,13 +5,14 @@
 //! subscriber retries a dummy URL in the background, but L2 execution is fully
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
+use std::time::Duration;
+
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
-use std::time::Duration;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
@@ -34,10 +35,15 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (leader, follower, mut fixture) = start_local_p2p_pair(10).await?;
-    // Commonware deliberately drops messages for offline peers. Wait comfortably
-    // longer than the ~2s peer dial/handshake (loopback dials every 500ms) before producing the
-    // first block so this happy-path replication test does not race the initial connection.
-    tokio::time::sleep(Duration::from_secs(8)).await;
+
+    // Commonware deliberately drops messages for offline peers. Wait for
+    // peer dial/handshake (loopback dials every 500ms) before producing the
+    // first block.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    fixture.inject_empty_block(leader.deposit_queue());
+    leader.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
+    follower.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
 
     let depositor = address!("0x0000000000000000000000000000000000001234");
     let recipient = address!("0x0000000000000000000000000000000000005678");
@@ -61,6 +67,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
             DEFAULT_TIMEOUT,
         )
         .await?;
+    follower.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
     assert_eq!(follower_balance, U256::from(amount));
     Ok(())
 }

@@ -16,6 +16,8 @@ use crate::{
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const BROADCAST_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const BROADCAST_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const COMMAND_BACKLOG: usize = 128;
 const EVENT_BACKLOG: usize = 128;
 
@@ -317,10 +319,34 @@ async fn run_commands(
             continue;
         }
         let P2pCommand::BroadcastBlock(block) = command;
-        let sent = sender
-            .send(Recipients::Some(followers.clone()), block, true)
-            .await
-            .map_err(|err| eyre::eyre!("failed broadcasting zone block: {err}"))?;
+        let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
+            loop {
+                let sent = sender
+                    .send(Recipients::Some(followers.clone()), block.clone(), true)
+                    .await
+                    .map_err(|err| eyre::eyre!("failed broadcasting zone block: {err}"))?;
+                if !sent.is_empty() || followers.is_empty() {
+                    return Ok::<_, eyre::Report>(sent);
+                }
+                debug!(
+                    target: "zone::p2p",
+                    "No followers are connected; retrying canonical block broadcast"
+                );
+                tokio::time::sleep(BROADCAST_RETRY_INTERVAL).await;
+            }
+        })
+        .await;
+        let sent = match sent {
+            Ok(sent) => sent?,
+            Err(_) => {
+                warn!(
+                    target: "zone::p2p",
+                    timeout_secs = BROADCAST_RETRY_TIMEOUT.as_secs(),
+                    "No followers connected before block broadcast timed out"
+                );
+                continue;
+            }
+        };
         if sent.len() != followers.len() {
             debug!(target: "zone::p2p", connected = sent.len(), configured = followers.len(), "Some followers are not connected; block was not sent to them");
         }

@@ -478,6 +478,31 @@ impl ZoneTestNode {
         .await
     }
 
+    /// Wait for the zone L2 RPC head to reach at least `target`.
+    ///
+    /// This polls `eth_blockNumber`, which is useful when a test needs to assert
+    /// that a follower imported leader-produced zone blocks over P2P.
+    pub(crate) async fn wait_for_block_number(
+        &self,
+        target: u64,
+        timeout: Duration,
+    ) -> eyre::Result<u64> {
+        let provider = self.provider();
+        poll_until(
+            timeout,
+            DEFAULT_POLL,
+            &format!("eth_blockNumber >= {target}"),
+            || {
+                let provider = &provider;
+                async move {
+                    let n = provider.get_block_number().await?;
+                    if n >= target { Ok(Some(n)) } else { Ok(None) }
+                }
+            },
+        )
+        .await
+    }
+
     /// Read a TIP-20 token balance on this zone (single-shot, no polling).
     pub(crate) async fn balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
         use tempo_contracts::precompiles::ITIP20;
