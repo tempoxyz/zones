@@ -22,12 +22,24 @@
 
 extern crate alloc;
 
-// Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).
-pub(crate) use tempo_precompiles::{error, storage};
+// Required by the `#[contract]` proc macro expansion (references `crate::storage`).
+pub(crate) use tempo_precompiles::storage;
+
+pub mod error;
+pub use error::{Result, ZonePrecompileError, ZoneResult};
 
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
+
+/// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
+pub mod dispatch {
+    pub use tempo_precompiles::{
+        dispatch::typed::{mutate, mutate_void, view},
+        metadata,
+    };
+}
+
 pub mod policy;
 pub mod tempo_state;
 pub mod tip20_factory;

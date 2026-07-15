@@ -40,7 +40,9 @@ sha2 = { version = "0.10.9", default-features = false }
 rand = { version = "0.8.5", default-features = false }
 
 # misc
+derive_more.workspace = true
 paste = "1.0.15"
+thiserror.workspace = true
 tracing = { version = "0.1.41", default-features = false }
 
 [dev-dependencies]

@@ -230,7 +230,7 @@ fn forge_deployed_bytecode_with_address_immutable(
     Ok(bytecode.into())
 }
 
-fn install_reference_zone_factory(genesis: &mut Genesis) -> eyre::Result<()> {
+fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
     const VERIFIER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000001");
     const MESSENGER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000002");
 
@@ -249,7 +249,11 @@ fn install_reference_zone_factory(genesis: &mut Genesis) -> eyre::Result<()> {
         B256::with_last_byte(5),
         B256::left_padding_from(MESSENGER_ADDRESS.as_slice()),
     );
-    factory_storage.insert(B256::with_last_byte(6), B256::with_last_byte(3));
+    factory_storage.insert(
+        B256::with_last_byte(6),
+        B256::left_padding_from(owner.as_slice()),
+    );
+    factory_storage.insert(B256::with_last_byte(7), B256::with_last_byte(3));
 
     genesis.alloc.insert(
         ZONE_FACTORY_ADDRESS,
@@ -1786,7 +1790,7 @@ impl L1TestNode {
         let genesis: serde_json::Value =
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
         let mut genesis = serde_json::from_value(genesis)?;
-        install_reference_zone_factory(&mut genesis)?;
+        install_reference_zone_factory(&mut genesis, l1_dev_signer().address())?;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
