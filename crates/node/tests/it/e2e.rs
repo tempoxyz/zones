@@ -550,11 +550,15 @@ async fn submit_withdrawal(
             Bytes::new(),
             Bytes::new(),
         )
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(WITHDRAWAL_TX_GAS)
         .send()
         .await?;
+    let tx_hash = *pending.tx_hash();
     fixture.inject_empty_block(zone.deposit_queue());
-    let receipt = pending.get_receipt().await?;
+    let receipt = tokio::time::timeout(DEFAULT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("timed out waiting for withdrawal transaction {tx_hash}"))??;
     assert!(
         receipt.status(),
         "withdrawal should succeed (gas used: {})",
@@ -574,7 +578,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
-    let deposit_amount: u128 = 2_000_000;
+    let deposit_amount: u128 = 25_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
     zone.wait_for_balance(
@@ -709,12 +713,12 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
-    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 2_000_000);
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 50_000_000);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
     zone.wait_for_balance(
         PATH_USD_ADDRESS,
         dev_address,
-        U256::from(2_000_000u128),
+        U256::from(50_000_000u128),
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -847,12 +851,12 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
     )
     .await?;
 
-    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 1_000_000);
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 25_000_000);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
     zone.wait_for_balance(
         PATH_USD_ADDRESS,
         dev_address,
-        U256::from(1_000_000u128),
+        U256::from(25_000_000u128),
         DEFAULT_TIMEOUT,
     )
     .await?;
@@ -972,7 +976,7 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
-    let deposit_amount: u128 = 1_000_000;
+    let deposit_amount: u128 = 25_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
 
@@ -1000,6 +1004,7 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
             Bytes::from_static(b"callback"),
             Bytes::new(),
         )
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(WITHDRAWAL_TX_GAS)
         .send()
         .await?;

@@ -7,6 +7,7 @@
 use alloy::primitives::{U256, address};
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{ITIP20, ITIP403Registry};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use zone_l1::state::tip403::{CompoundData, PolicyEvent};
@@ -52,6 +53,7 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
         .await?;

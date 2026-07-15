@@ -27,7 +27,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TempoChainSpec;
+use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TempoChainSpec};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, ITIP20,
     account_keychain::IAccountKeychain::{
@@ -109,11 +109,15 @@ where
     let zone_token = ITIP20::new(PATH_USD_ADDRESS, provider);
     let approve_pending = zone_token
         .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
         .await?;
+    let approve_hash = *approve_pending.tx_hash();
     fixture.inject_empty_block(zone.deposit_queue());
-    let approve_receipt = approve_pending.get_receipt().await?;
+    let approve_receipt = tokio::time::timeout(DEFAULT_TIMEOUT, approve_pending.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("timed out waiting for approve transaction {approve_hash}"))??;
     assert!(approve_receipt.status(), "approve should succeed");
     Ok(())
 }
