@@ -24,7 +24,6 @@ use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
     ITIP20 as ContractTip20,
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
@@ -558,7 +557,6 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
         .connect_http(ctx.zone.http_url().clone());
     let approve_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
         .approve(spender, U256::from(allowance_amount))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
         .await?;
@@ -1016,13 +1014,11 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
 
     let owner_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
         .approve(spender, U256::from(111u64))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
         .await?;
     let outsider_pending = ContractTip20::new(PATH_USD_ADDRESS, &outsider_provider)
         .approve(spender, U256::from(222u64))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
         .await?;

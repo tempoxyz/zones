@@ -269,7 +269,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
 
     // --- Step 8: Fund user account on L1 ---
     let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
-    let pathusd_gas_amount: u128 = 25_000_000; // pathUSD for L2 gas
+    let pathusd_gas_amount: u128 = 5_000_000; // 5 pathUSD for L2 gas
     let alpha_deposit_amount: u128 = 2_000_000; // 2 AlphaUSD
 
     l1.fund_user(account.address(), pathusd_gas_amount * 2)

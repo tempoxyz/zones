@@ -4,7 +4,6 @@ use alloy::{
     signers::local::{MnemonicBuilder, PrivateKeySigner},
     sol_types::SolEvent,
 };
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
 use tempo_zone_contracts::ZonePortal;
@@ -67,7 +66,6 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
             zone_admin,
             utils::ZONE_TEST_TOKEN_SALT,
         )
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(500_000)
         .send()
         .await?
@@ -83,7 +81,6 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
     // System tx sender (Address::ZERO) needs ISSUER_ROLE to mint deposits
     roles
         .grantRole(*ISSUER_ROLE, Address::ZERO)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(300_000)
         .send()
         .await?

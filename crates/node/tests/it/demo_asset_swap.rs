@@ -73,14 +73,14 @@ async fn test_multiasset_deposit_and_withdraw() -> eyre::Result<()> {
     let beta_deposit: u128 = 2_000_000; // 2 BetaUSD
 
     // Fund Alice on L1
-    l1.fund_user(account.address(), 50_000_000).await?; // pathUSD for gas and deposit
+    l1.fund_user(account.address(), 10_000_000).await?; // pathUSD for gas
     l1.fund_user_token(l1_alpha, account.address(), alpha_deposit * 2)
         .await?;
     l1.fund_user_token(l1_beta, account.address(), beta_deposit * 2)
         .await?;
 
     // Deposit pathUSD for L2 gas
-    account.deposit(25_000_000, L1_TIMEOUT, &zone).await?;
+    account.deposit(5_000_000, L1_TIMEOUT, &zone).await?;
 
     // Deposit AlphaUSD
     let alpha_minted = account
