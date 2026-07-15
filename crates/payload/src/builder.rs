@@ -255,7 +255,6 @@ where
 
         let block_gas_limit = parent_header.gas_limit();
 
-        let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
 
         let next_block_env_attributes = TempoNextBlockEnvAttributes {
@@ -299,7 +298,7 @@ where
         })?;
 
         let pending_withdrawals_at_block_start =
-            read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
+            read_pending_withdrawals_from_outbox(&mut builder, block_number)?;
         let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
@@ -329,9 +328,7 @@ where
                         ),
                     )));
                 }
-                Ok(gas_used) => {
-                    cumulative_gas_used += gas_used.tx_gas_used();
-                }
+                Ok(_) => {}
                 Err(err) => {
                     error!(
                         ?err,
@@ -344,33 +341,33 @@ where
             }
         }
 
-        // Execute pool transactions
-        // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
+        // Execute pool transactions. The block executor owns gas-capacity accounting.
         let mut best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
-            let gas_limit_left = block_gas_limit;
-            if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
-                best_txs.mark_invalid(
-                    &pool_tx,
-                    InvalidPoolTransactionError::ExceedsGasLimit(
-                        pool_tx.gas_limit(),
-                        gas_limit_left.saturating_sub(cumulative_gas_used),
-                    ),
-                );
-                continue;
-            }
-
             if cancel.is_cancelled() {
                 return Ok(BuildOutcome::Cancelled);
             }
 
             let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
             match builder.execute_transaction(tx_with_env) {
-                Ok(gas_used) => {
-                    cumulative_gas_used += gas_used.tx_gas_used();
+                Ok(_) => {}
+                Err(reth_evm::block::BlockExecutionError::Validation(
+                    reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                        transaction_gas_limit,
+                        block_available_gas,
+                    },
+                )) => {
+                    best_txs.mark_invalid(
+                        &pool_tx,
+                        InvalidPoolTransactionError::ExceedsGasLimit(
+                            transaction_gas_limit,
+                            block_available_gas,
+                        ),
+                    );
+                    continue;
                 }
                 Err(reth_evm::block::BlockExecutionError::Validation(
                     reth_evm::block::BlockValidationError::InvalidTx { error, .. },
@@ -401,9 +398,8 @@ where
         if has_prior_withdrawals
             || block_number.is_multiple_of(self.withdrawal_batch_interval_blocks)
         {
-            let remaining_gas = block_gas_limit.saturating_sub(cumulative_gas_used);
             let pending_withdrawals =
-                read_pending_withdrawals_from_outbox(&mut builder, remaining_gas, block_number)?;
+                read_pending_withdrawals_from_outbox(&mut builder, block_number)?;
             let encrypted_senders = pending_withdrawals
                 .iter()
                 .map(|request| {
@@ -589,7 +585,6 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
 /// Read all pending withdrawals in the ZoneOutbox
 fn read_pending_withdrawals_from_outbox<B>(
     builder: &mut B,
-    gas_limit: u64,
     block_number: u64,
 ) -> Result<Vec<abi::ZoneOutbox::PendingWithdrawal>, PayloadBuilderError>
 where
@@ -599,7 +594,6 @@ where
     let output = execute_outbox_view_call(
         builder,
         calldata.into(),
-        gas_limit,
         block_number,
         "getPendingWithdrawals",
     )?;
@@ -614,7 +608,6 @@ where
 fn execute_outbox_view_call<B>(
     builder: &mut B,
     calldata: Bytes,
-    gas_limit: u64,
     block_number: u64,
     label: &str,
 ) -> Result<Bytes, PayloadBuilderError>
@@ -625,7 +618,9 @@ where
         chain_id: None,
         nonce: 0,
         gas_price: 0,
-        gas_limit,
+        // Tempo applies its fixed internal system-call limit and reports zero gas used.
+        // Keeping the envelope limit at zero also lets this simulation run after a full block.
+        gas_limit: 0,
         to: ZONE_OUTBOX_ADDRESS.into(),
         value: U256::ZERO,
         input: calldata,
