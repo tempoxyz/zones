@@ -18,8 +18,6 @@ use tempo_primitives::TempoHeader;
 
 /// Chain specification for a Tempo Zone.
 ///
-/// Zone behavior delegates to Tempo by default. Zone-specific protocol rules can be overridden
-/// here without changing the parent Tempo chain specification.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZoneChainSpec {
     /// Underlying Tempo chain specification.
