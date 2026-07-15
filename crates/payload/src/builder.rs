@@ -329,7 +329,9 @@ where
                         ),
                     )));
                 }
-                Ok(_) => {}
+                Ok(gas_used) => {
+                    cumulative_gas_used += gas_used.tx_gas_used();
+                }
                 Err(err) => {
                     error!(
                         ?err,
@@ -399,8 +401,9 @@ where
         if has_prior_withdrawals
             || block_number.is_multiple_of(self.withdrawal_batch_interval_blocks)
         {
+            let remaining_gas = block_gas_limit.saturating_sub(cumulative_gas_used);
             let pending_withdrawals =
-                read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
+                read_pending_withdrawals_from_outbox(&mut builder, remaining_gas, block_number)?;
             let encrypted_senders = pending_withdrawals
                 .iter()
                 .map(|request| {

@@ -45,7 +45,7 @@ jobs:
       - name: Build and compile tests
         run: cargo nextest run --profile ci --no-run
       - name: Run tests
-        run: cargo nextest run --profile ci -E 'test(test_consecutive_withdrawal_blocks_joined_into_one_batch)'
+        run: cargo nextest run --profile ci
 
   test-success:
     name: test success

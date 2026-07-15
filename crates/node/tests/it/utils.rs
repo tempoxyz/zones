@@ -113,11 +113,8 @@ where
         .gas(TIP20_TX_GAS)
         .send()
         .await?;
-    let approve_hash = *approve_pending.tx_hash();
     fixture.inject_empty_block(zone.deposit_queue());
-    let approve_receipt = tokio::time::timeout(DEFAULT_TIMEOUT, approve_pending.get_receipt())
-        .await
-        .map_err(|_| eyre::eyre!("timed out waiting for approve transaction {approve_hash}"))??;
+    let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     Ok(())
 }
