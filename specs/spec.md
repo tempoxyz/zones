@@ -1993,13 +1993,12 @@ interface IZoneOutbox {
     function tempoGasRate() external view returns (uint128);
     function nextWithdrawalIndex() external view returns (uint64);
     function lastFallbackNonce() external view returns (uint64);
-    function withdrawalBatchIndex() external view returns (uint64);
     function lastBatch() external view returns (LastBatch memory);
     function pendingWithdrawalsCount() external view returns (uint256);
-    function maxWithdrawalsPerBlock() external view returns (uint256);
+    function maxWithdrawalsPerBlock() external view returns (uint32);
 
     function setTempoGasRate(uint128 _tempoGasRate) external;
-    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
+    function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
     /// @notice Compute the withdrawal fee for the current Tempo gas rate. Reads
     ///         zone-side `tempoGasRate` and snapshots it onto the queued withdrawal
     ///         at request time.

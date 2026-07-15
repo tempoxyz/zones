@@ -67,16 +67,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
-    /// @notice Current withdrawal batch index (monotonically increasing)
-    uint64 public withdrawalBatchIndex;
+    /// @notice Last finalized withdrawal queue hash (slot 1, for proof access via state root)
+    bytes32 internal _withdrawalQueueHash;
 
-    /// @notice Last finalized batch parameters (for proof access via state root)
-    /// @dev Written on each finalizeWithdrawalBatch() call so proofs can read from state
-    ///      instead of parsing event logs
-    LastBatch internal _lastBatch;
-
-    /// @notice Pending withdrawals waiting to be batched
-    PendingWithdrawal[] internal _pendingWithdrawals;
+    /// @notice Current withdrawal batch index (lower 8 bytes of slot 2, for proof access)
+    uint64 internal _withdrawalBatchIndex;
 
     /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
     /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
@@ -92,6 +87,9 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Timestamp of the latest withdrawal batch finalization.
     uint64 public lastFinalizedTimestamp;
+
+    /// @notice Pending withdrawals waiting to be batched
+    PendingWithdrawal[] internal _pendingWithdrawals;
 
     /// @notice Last nonce assigned to a user withdrawal fallback recipient
     uint64 public lastFallbackNonce;
@@ -444,14 +442,11 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Increment withdrawal batch index (matches Tempo portal's next expected withdrawal batch index)
-        withdrawalBatchIndex += 1;
-        uint64 currentWithdrawalBatchIndex = withdrawalBatchIndex;
+        _withdrawalBatchIndex += 1;
+        uint64 currentWithdrawalBatchIndex = _withdrawalBatchIndex;
 
-        // Write withdrawal batch parameters to state (for proof access via state root)
-        _lastBatch = LastBatch({
-            withdrawalQueueHash: withdrawalQueueHash,
-            withdrawalBatchIndex: currentWithdrawalBatchIndex
-        });
+        // Write the proof-facing queue hash; the index is already stored in packed slot 2.
+        _withdrawalQueueHash = withdrawalQueueHash;
         lastFinalizedTimestamp = uint64(block.timestamp);
 
         // Emit event for observability (proof reads from state, not events)
@@ -477,7 +472,10 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory) {
-        return _lastBatch;
+        return LastBatch({
+            withdrawalQueueHash: _withdrawalQueueHash,
+            withdrawalBatchIndex: _withdrawalBatchIndex
+        });
     }
 
     /// @notice Revert if a withdrawal callback gas limit exceeds the protocol cap
