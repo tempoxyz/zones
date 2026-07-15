@@ -26,11 +26,18 @@ extern crate alloc;
 pub(crate) use tempo_precompiles::storage;
 
 pub mod error;
-pub use error::{Result, ZonePrecompileError};
+pub use error::{Result, ZonePrecompileError, ZoneResult};
 
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
+
+/// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
+pub mod dispatch {
+    pub use tempo_precompiles::dispatch::typed::{mutate, mutate_void, view};
+    pub use tempo_precompiles::metadata;
+}
+
 pub mod policy;
 pub mod tempo_state;
 pub mod tip20_factory;

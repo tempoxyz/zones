@@ -9,11 +9,13 @@ use crate::{tip20_factory::ZoneTokenFactoryError, tip403_proxy::ReadOnlyRegistry
 // Required by the `#[contract]` proc macro expansion.
 pub use tempo_precompiles::error::{Result, TempoPrecompileError};
 
+/// Result type for zone-native precompile operations.
+pub type ZoneResult<T> = core::result::Result<T, ZonePrecompileError>;
+
 /// An error raised while executing a zone-specific precompile.
 ///
-/// Upstream Tempo errors retain their original halt/revert/fatal behavior, while
-/// each zone-specific error is returned as an ABI-encoded EVM revert.
-/// Top-level error type for all zone precompile operations.
+/// Upstream Tempo errors retain their original halt/revert/fatal behavior, while each
+/// zone-specific error is returned as an ABI-encoded EVM revert.
 #[derive(
     Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::From, derive_more::TryInto,
 )]
