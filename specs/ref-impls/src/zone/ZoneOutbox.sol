@@ -147,9 +147,8 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
     function setMaxWithdrawalsPerBlock(uint256 maxWithdrawals) external {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        uint32 clampedMax = maxWithdrawals > type(uint32).max
-            ? type(uint32).max
-            : uint32(maxWithdrawals);
+        uint32 clampedMax =
+            maxWithdrawals > type(uint32).max ? type(uint32).max : uint32(maxWithdrawals);
         _maxWithdrawalsPerBlock = clampedMax;
         emit MaxWithdrawalsPerBlockUpdated(clampedMax);
     }
