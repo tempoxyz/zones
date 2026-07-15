@@ -473,8 +473,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory) {
         return LastBatch({
-            withdrawalQueueHash: _withdrawalQueueHash,
-            withdrawalBatchIndex: _withdrawalBatchIndex
+            withdrawalQueueHash: _withdrawalQueueHash, withdrawalBatchIndex: _withdrawalBatchIndex
         });
     }
 
