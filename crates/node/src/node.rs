@@ -1017,7 +1017,8 @@ where
         ctx: &BuilderContext<Node>,
         evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::Pool> {
-        let mut pool_config = ctx.pool_config();
+        // Zone blocks have no protocol base fee, so allow zero-fee transactions into the pool.
+        let mut pool_config = ctx.pool_config().with_disabled_protocol_base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         // this store is effectively a noop
