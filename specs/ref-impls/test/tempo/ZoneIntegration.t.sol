@@ -116,6 +116,7 @@ contract ZoneIntegrationTest is BaseTest {
             new MockZoneFactoryForIntegrationMessenger();
         ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
         l1Portal = new ZonePortal();
+        address verifier = l1Factory.verifier();
         vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1,
@@ -123,7 +124,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(messengerContract),
             admin,
             sequencer,
-            l1Factory.verifier(),
+            verifier,
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
             ""

@@ -140,6 +140,7 @@ contract BaseTest is Test {
         ZoneMessenger messenger = new ZoneMessenger(ZONE_FACTORY_ADDRESS);
 
         vm.etch(ZONE_FACTORY_ADDRESS, type(ZoneFactory).runtimeCode);
+        vm.setNonce(ZONE_FACTORY_ADDRESS, 3);
         vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(1)));
         vm.store(
             ZONE_FACTORY_ADDRESS,
