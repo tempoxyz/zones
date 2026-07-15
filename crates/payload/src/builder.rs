@@ -302,44 +302,16 @@ where
         let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
-        {
-            let advance_tx = build_advance_tempo_tx(prepared);
-            let mut reverted = false;
-            match builder.execute_transaction_with_result_closure(advance_tx, |result| {
-                let evm_result = result.result();
-                if !evm_result.result.is_success() {
-                    let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-                    error!(
-                        target: "zone::payload",
-                        l1_block = prepared.header.inner.number,
-                        deposits = total_deposits,
-                        is_halt = evm_result.result.is_halt(),
-                        revert_data = %revert_data,
-                        "advanceTempo system tx reverted on-chain"
-                    );
-                    reverted = true;
-                }
-            }) {
-                Ok(_) if reverted => {
-                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                        format!(
-                            "advanceTempo reverted at L1 block {}",
-                            prepared.header.inner.number
-                        ),
-                    )));
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    error!(
-                        ?err,
-                        l1_block = prepared.header.inner.number,
-                        deposits = total_deposits,
-                        "advanceTempo system tx failed"
-                    );
-                    return Err(PayloadBuilderError::evm(err));
-                }
-            }
-        }
+        execute_required_system_transaction(&mut builder, build_advance_tempo_tx(prepared))
+            .map_err(|err| {
+                error!(
+                    ?err,
+                    l1_block = prepared.header.inner.number,
+                    deposits = total_deposits,
+                    "advanceTempo system tx failed"
+                );
+                err
+            })?;
 
         // Execute pool transactions. The block executor owns gas-capacity accounting.
         let mut best_txs = self
@@ -427,32 +399,13 @@ where
             let count = U256::from(pending_withdrawals.len());
             let finalize_tx =
                 build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
-            let mut finalize_reverted = false;
-            match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
-                let evm_result = result.result();
-                if !evm_result.result.is_success() {
-                    let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-                    error!(
-                        target: "zone::payload",
-                        block_number,
-                        is_halt = evm_result.result.is_halt(),
-                        revert_data = %revert_data,
-                        "finalizeWithdrawalBatch system tx reverted on-chain"
-                    );
-                    finalize_reverted = true;
-                }
-            }) {
-                Ok(_) if finalize_reverted => {
-                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                        format!("finalizeWithdrawalBatch reverted at zone block {block_number}"),
-                    )));
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    error!(?err, "finalizeWithdrawalBatch system tx failed");
-                    return Err(PayloadBuilderError::evm(err));
-                }
-            }
+            execute_required_system_transaction(&mut builder, finalize_tx).map_err(|err| {
+                error!(
+                    ?err,
+                    block_number, "finalizeWithdrawalBatch system tx failed"
+                );
+                err
+            })?;
         }
 
         let BlockBuilderOutcome {
@@ -582,6 +535,23 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     )
 }
 
+/// Execute a required system transaction and fail the payload if the executor rejects it.
+///
+/// Tempo's EVM reports system-call reverts as transaction errors, so successful execution does
+/// not need a second result-status check.
+fn execute_required_system_transaction<B>(
+    builder: &mut B,
+    tx: Recovered<TempoTxEnvelope>,
+) -> Result<(), PayloadBuilderError>
+where
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+{
+    builder
+        .execute_transaction(tx)
+        .map(|_| ())
+        .map_err(PayloadBuilderError::evm)
+}
+
 /// Read all pending withdrawals in the ZoneOutbox
 fn read_pending_withdrawals_from_outbox<B>(
     builder: &mut B,
@@ -630,29 +600,12 @@ where
         TEMPO_SYSTEM_TX_SENDER,
     );
     let mut output = None;
-    let mut reverted = false;
 
     match builder.execute_transaction_with_commit_condition(tx, |result| {
         let evm_result = result.result();
-        if evm_result.result.is_success() {
-            output = Some(evm_result.result.output().cloned().unwrap_or_default());
-        } else {
-            let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-            error!(
-                target: "zone::payload",
-                block_number,
-                label,
-                is_halt = evm_result.result.is_halt(),
-                revert_data = %revert_data,
-                "ZoneOutbox view simulation reverted"
-            );
-            reverted = true;
-        }
+        output = Some(evm_result.result.output().cloned().unwrap_or_default());
         CommitChanges::No
     }) {
-        Ok(_) if reverted => Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-            format!("ZoneOutbox {label} view reverted at zone block {block_number}"),
-        ))),
         Ok(_) => output.ok_or_else(|| {
             PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
                 "ZoneOutbox {label} view returned no output at zone block {block_number}"
