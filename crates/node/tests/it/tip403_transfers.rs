@@ -123,9 +123,12 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let withdrawal_fee = outbox.calculateWithdrawalFee(0).call().await?;
+    let gas_buffer = u128::from(TIP20_TX_GAS)
+        .checked_add(u128::from(WITHDRAWAL_TX_GAS))
+        .expect("test gas buffer should not overflow");
     let deposit_amount = withdrawal_amount
         .checked_add(withdrawal_fee)
-        .and_then(|value| value.checked_add(100_000))
+        .and_then(|value| value.checked_add(gas_buffer))
         .expect("test deposit amount should not overflow");
 
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
