@@ -31,10 +31,10 @@ use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
-use reth_revm::{State, database::StateProviderDatabase};
+use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
 use reth_storage_api::{BlockReader, HeaderProvider, StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
-    BestTransactions, BestTransactionsAttributes, TransactionPool,
+    BestTransactions, BestTransactionsAttributes, TransactionPool, ValidPoolTransaction,
     error::InvalidPoolTransactionError,
 };
 use std::{sync::Arc, time::Instant};
@@ -45,7 +45,7 @@ use tempo_primitives::{
     TempoHeader, TempoReceipt, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
-use tempo_transaction_pool::TempoTransactionPool;
+use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTransaction};
 use tracing::{error, info, warn};
 use zone_l1::{PreparedL1Block, TempoStateExt};
 
@@ -178,57 +178,9 @@ where
 
         let start = Instant::now();
 
-        // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
-        // to validate the next L1 block we process is the expected successor.
         let sp = self.provider.state_by_block_hash(parent_header.hash())?;
-        let stored_l1 = sp
-            .tempo_num_hash()
-            .map_err(|e| PayloadBuilderError::Internal(e.into()))?;
-        let stored_l1_block_hash = stored_l1.hash;
-        let expected_tempo_block_number = stored_l1.number + 1;
-
-        info!(
-            target: "zone::payload",
-            %stored_l1_block_hash,
-            expected_tempo_block_number,
-            "TempoState current state"
-        );
-
         let prepared = attributes.l1_block();
-
-        // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
-        // and its parent hash must match the stored tempoBlockHash.
-        if prepared.header.inner.number != expected_tempo_block_number {
-            error!(
-                target: "zone::payload",
-                got = prepared.header.inner.number,
-                expected = expected_tempo_block_number,
-                "L1 block number mismatch — chain continuity broken"
-            );
-            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                format!(
-                    "L1 block number mismatch: got {} expected {}",
-                    prepared.header.inner.number, expected_tempo_block_number
-                ),
-            )));
-        }
-        if prepared.header.inner.parent_hash != stored_l1_block_hash {
-            error!(
-                target: "zone::payload",
-                got = %prepared.header.inner.parent_hash,
-                expected = %stored_l1_block_hash,
-                l1_block = prepared.header.inner.number,
-                "L1 parent hash mismatch — chain continuity broken"
-            );
-            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                format!(
-                    "L1 parent hash mismatch at block {}: got {} expected {}",
-                    prepared.header.inner.number,
-                    prepared.header.inner.parent_hash,
-                    stored_l1_block_hash
-                ),
-            )));
-        }
+        validate_l1_continuity(sp.as_ref(), prepared)?;
 
         let total_deposits = prepared.queued_deposits.len();
 
@@ -317,96 +269,19 @@ where
         let mut best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
-
-        while let Some(pool_tx) = best_txs.next() {
-            if cancel.is_cancelled() {
-                return Ok(BuildOutcome::Cancelled);
-            }
-
-            let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-            match builder.execute_transaction(tx_with_env) {
-                Ok(_) => {}
-                Err(reth_evm::block::BlockExecutionError::Validation(
-                    reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
-                        transaction_gas_limit,
-                        block_available_gas,
-                    },
-                )) => {
-                    best_txs.mark_invalid(
-                        &pool_tx,
-                        InvalidPoolTransactionError::ExceedsGasLimit(
-                            transaction_gas_limit,
-                            block_available_gas,
-                        ),
-                    );
-                    continue;
-                }
-                Err(reth_evm::block::BlockExecutionError::Validation(
-                    reth_evm::block::BlockValidationError::InvalidTx { error, .. },
-                )) => {
-                    if !error.is_nonce_too_low() {
-                        best_txs.mark_invalid(
-                            &pool_tx,
-                            InvalidPoolTransactionError::Consensus(
-                                reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
-                            ),
-                        );
-                    }
-                    continue;
-                }
-                Err(reth_evm::block::BlockExecutionError::Internal(
-                    reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
-                )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
-                    warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
-                    continue;
-                }
-                Err(err) => return Err(PayloadBuilderError::evm(err)),
-            }
-        }
-
-        // Finalize when this block started with pending withdrawals, folding in any
-        // withdrawals created by the current block, or at a empty-batch
-        // boundary so the L2 and L1 batch indexes stay in lockstep.
-        if has_prior_withdrawals
-            || block_number.is_multiple_of(self.withdrawal_batch_interval_blocks)
+        if execute_pool_transactions(&mut builder, &mut best_txs, &cancel)?
+            == PoolExecutionOutcome::Cancelled
         {
-            let pending_withdrawals =
-                read_pending_withdrawals_from_outbox(&mut builder, block_number)?;
-            let encrypted_senders = pending_withdrawals
-                .iter()
-                .map(|request| {
-                    if request.revealTo.is_empty() {
-                        Ok(Bytes::new())
-                    } else {
-                        let encryptor =
-                            self.withdrawal_reveal_encryptor.as_ref().ok_or_else(|| {
-                                PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                                    "withdrawal reveal encryption requested but no encryptor is configured",
-                                ))
-                            })?;
-                        encryptor
-                            .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
-                        .map(Bytes::from)
-                        .ok_or_else(|| {
-                            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                                "failed to encrypt authenticated sender reveal for tx {}",
-                                request.txHash
-                            )))
-                        })
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let count = U256::from(pending_withdrawals.len());
-            let finalize_tx =
-                build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
-            execute_required_system_transaction(&mut builder, finalize_tx).map_err(|err| {
-                error!(
-                    ?err,
-                    block_number, "finalizeWithdrawalBatch system tx failed"
-                );
-                err
-            })?;
+            return Ok(BuildOutcome::Cancelled);
         }
+
+        finalize_withdrawal_batch_if_needed(
+            &mut builder,
+            block_number,
+            self.withdrawal_batch_interval_blocks,
+            has_prior_withdrawals,
+            self.withdrawal_reveal_encryptor.as_deref(),
+        )?;
 
         let BlockBuilderOutcome {
             execution_result,
@@ -493,6 +368,171 @@ where
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
     }
+}
+
+/// Validate that the prepared L1 block is the next block expected by TempoState.
+fn validate_l1_continuity(
+    state_provider: &dyn StateProvider,
+    prepared: &PreparedL1Block,
+) -> Result<(), PayloadBuilderError> {
+    let stored_l1 = state_provider
+        .tempo_num_hash()
+        .map_err(|err| PayloadBuilderError::Internal(err.into()))?;
+    let expected_block_number = stored_l1.number + 1;
+
+    info!(
+        target: "zone::payload",
+        stored_l1_block_hash = %stored_l1.hash,
+        expected_tempo_block_number = expected_block_number,
+        "TempoState current state"
+    );
+
+    if prepared.header.inner.number != expected_block_number {
+        error!(
+            target: "zone::payload",
+            got = prepared.header.inner.number,
+            expected = expected_block_number,
+            "L1 block number mismatch — chain continuity broken"
+        );
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!(
+                "L1 block number mismatch: got {} expected {expected_block_number}",
+                prepared.header.inner.number
+            ),
+        )));
+    }
+
+    if prepared.header.inner.parent_hash != stored_l1.hash {
+        error!(
+            target: "zone::payload",
+            got = %prepared.header.inner.parent_hash,
+            expected = %stored_l1.hash,
+            l1_block = prepared.header.inner.number,
+            "L1 parent hash mismatch — chain continuity broken"
+        );
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!(
+                "L1 parent hash mismatch at block {}: got {} expected {}",
+                prepared.header.inner.number, prepared.header.inner.parent_hash, stored_l1.hash
+            ),
+        )));
+    }
+
+    Ok(())
+}
+
+/// Execute the best pool transactions until the iterator is exhausted or the build is cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolExecutionOutcome {
+    Complete,
+    Cancelled,
+}
+
+fn execute_pool_transactions<B, T>(
+    builder: &mut B,
+    best_txs: &mut T,
+    cancel: &CancelOnDrop,
+) -> Result<PoolExecutionOutcome, PayloadBuilderError>
+where
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+    <B::Executor as reth_evm::execute::BlockExecutor>::Evm:
+        alloy_evm::Evm<Tx = tempo_revm::TempoTxEnv>,
+    T: BestTransactions<Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
+{
+    while let Some(pool_tx) = best_txs.next() {
+        if cancel.is_cancelled() {
+            return Ok(PoolExecutionOutcome::Cancelled);
+        }
+
+        let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
+        match builder.execute_transaction(tx_with_env) {
+            Ok(_) => {}
+            Err(reth_evm::block::BlockExecutionError::Validation(
+                reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit,
+                    block_available_gas,
+                },
+            )) => {
+                best_txs.mark_invalid(
+                    &pool_tx,
+                    InvalidPoolTransactionError::ExceedsGasLimit(
+                        transaction_gas_limit,
+                        block_available_gas,
+                    ),
+                );
+            }
+            Err(reth_evm::block::BlockExecutionError::Validation(
+                reth_evm::block::BlockValidationError::InvalidTx { error, .. },
+            )) => {
+                if !error.is_nonce_too_low() {
+                    best_txs.mark_invalid(
+                        &pool_tx,
+                        InvalidPoolTransactionError::Consensus(
+                            reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                        ),
+                    );
+                }
+            }
+            Err(reth_evm::block::BlockExecutionError::Internal(
+                reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
+            )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
+                warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+            }
+            Err(err) => return Err(PayloadBuilderError::evm(err)),
+        }
+    }
+
+    Ok(PoolExecutionOutcome::Complete)
+}
+
+/// Finalize withdrawals when the block started with pending requests or reaches a batch boundary.
+fn finalize_withdrawal_batch_if_needed<B>(
+    builder: &mut B,
+    block_number: u64,
+    interval_blocks: u64,
+    has_prior_withdrawals: bool,
+    encryptor: Option<&dyn WithdrawalRevealEncryptor>,
+) -> Result<(), PayloadBuilderError>
+where
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+{
+    if !has_prior_withdrawals && !block_number.is_multiple_of(interval_blocks) {
+        return Ok(());
+    }
+
+    let pending_withdrawals = read_pending_withdrawals_from_outbox(builder, block_number)?;
+    let encrypted_senders = pending_withdrawals
+        .iter()
+        .map(|request| {
+            if request.revealTo.is_empty() {
+                Ok(Bytes::new())
+            } else {
+                let encryptor = encryptor.ok_or_else(|| {
+                    PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                        "withdrawal reveal encryption requested but no encryptor is configured",
+                    ))
+                })?;
+                encryptor
+                    .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
+                    .map(Bytes::from)
+                    .ok_or_else(|| {
+                        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                            "failed to encrypt authenticated sender reveal for tx {}",
+                            request.txHash
+                        )))
+                    })
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let count = U256::from(pending_withdrawals.len());
+    let finalize_tx = build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
+    execute_required_system_transaction(builder, finalize_tx).map_err(|err| {
+        error!(
+            ?err,
+            block_number, "finalizeWithdrawalBatch system tx failed"
+        );
+        err
+    })
 }
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
