@@ -30,12 +30,19 @@
 
 extern crate alloc;
 
-// Required by the `#[contract]` proc macro expansion (references `crate::error`).
-pub(crate) use tempo_precompiles::error;
+pub mod error;
+pub use error::{Result, ZonePrecompileError, ZoneResult};
 
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
+
+/// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
+pub mod dispatch {
+    pub use tempo_precompiles::dispatch::typed::{mutate, mutate_void, view};
+    pub use tempo_precompiles::metadata;
+}
+
 mod execution;
 pub mod outbox;
 pub mod storage;

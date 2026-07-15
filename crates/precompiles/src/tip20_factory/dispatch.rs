@@ -1,14 +1,15 @@
 //! ABI dispatch for the [`ZoneTokenFactory`] precompile.
 
 use alloy_primitives::Address;
-use alloy_sol_types::SolError;
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     Precompile as TempoPrecompile, charge_input_cost, dispatch, mutate_void, storage::StorageCtx,
 };
 use zone_primitives::constants::ZONE_INBOX_ADDRESS;
 
-use super::{IZoneTokenFactory, OnlyZoneInbox, ZoneTokenFactory};
+use crate::ZonePrecompileError;
+
+use super::{IZoneTokenFactory, ZoneTokenFactory, ZoneTokenFactoryError};
 
 impl TempoPrecompile for ZoneTokenFactory {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
@@ -17,7 +18,9 @@ impl TempoPrecompile for ZoneTokenFactory {
         }
 
         if msg_sender != ZONE_INBOX_ADDRESS {
-            return Ok(StorageCtx.revert_output(OnlyZoneInbox {}.abi_encode().into()));
+            return StorageCtx.error_result(ZonePrecompileError::from(
+                ZoneTokenFactoryError::only_zone_inbox(),
+            ));
         }
 
         dispatch!(

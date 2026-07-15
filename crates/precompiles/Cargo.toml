@@ -42,6 +42,8 @@ rand = { version = "0.8.5", default-features = false }
 # misc
 paste = "1.0.15"
 tracing = { version = "0.1.41", default-features = false }
+derive_more.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 const-hex.workspace = true

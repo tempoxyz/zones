@@ -1,6 +1,8 @@
 //! `ZoneOutbox` — deployed on the Zone L2.
 
-pub use IZoneOutbox::{LastBatch, PendingWithdrawal, StaticCallNotAllowed};
+pub use IZoneOutbox::{
+    IZoneOutboxErrors as ZoneOutboxError, LastBatch, PendingWithdrawal, StaticCallNotAllowed,
+};
 
 crate::sol! {
     /// Legacy seven-argument withdrawal interface. The current overload adds `revealTo`.
@@ -16,8 +18,25 @@ crate::sol! {
             bytes calldata data
         ) external;
     }
+}
 
-    #[derive(Debug)]
+impl From<ILegacyZoneOutbox::requestWithdrawalCall> for IZoneOutbox::requestWithdrawalCall {
+    fn from(call: ILegacyZoneOutbox::requestWithdrawalCall) -> Self {
+        Self {
+            token: call.token,
+            to: call.to,
+            amount: call.amount,
+            memo: call.memo,
+            gasLimit: call.gasLimit,
+            fallbackRecipient: call.fallbackRecipient,
+            data: call.data,
+            revealTo: Default::default(),
+        }
+    }
+}
+
+crate::sol! {
+    #[derive(Debug, PartialEq, Eq)]
     contract IZoneOutbox {
 
         struct LastBatch {

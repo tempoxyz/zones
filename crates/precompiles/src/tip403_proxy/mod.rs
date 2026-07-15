@@ -5,12 +5,10 @@
 //! storage. The zone keeps mutating selectors read-only and otherwise follows upstream dispatch,
 //! gas, delegate-call, and receive-policy behavior.
 
-use alloy_primitives::Address;
-use alloy_sol_types::{SolCall, SolError};
-use tempo_contracts::precompiles::{ITIP403Registry, TIP403_REGISTRY_ADDRESS};
-use tempo_precompiles::storage::StorageCtx;
-
 use crate::execution::{CallCheck, CallRules, ZoneCall};
+use alloy_primitives::Address;
+use alloy_sol_types::SolCall;
+use tempo_contracts::precompiles::{ITIP403Registry, TIP403_REGISTRY_ADDRESS};
 
 /// Canonical TIP-403 registry address, shared with Tempo L1.
 pub const ZONE_TIP403_PROXY_ADDRESS: Address = TIP403_REGISTRY_ADDRESS;
@@ -27,6 +25,7 @@ const TIP403_MUTATING_SELECTORS: &[[u8; 4]] = &[
 
 alloy_sol_types::sol! {
     /// Returned when a mutating call is attempted on the zone's read-only, L1-backed, registry.
+    #[derive(Debug, PartialEq, Eq)]
     error ReadOnlyRegistry();
 }
 
@@ -39,9 +38,7 @@ impl CallRules for Tip403Rules {
             .selector()
             .is_some_and(|selector| TIP403_MUTATING_SELECTORS.contains(&selector))
         {
-            return CallCheck::Return(Ok(
-                StorageCtx::default().revert_output(ReadOnlyRegistry {}.abi_encode().into())
-            ));
+            return CallCheck::from_error(ReadOnlyRegistry {});
         }
 
         CallCheck::Continue
@@ -54,6 +51,7 @@ mod tests {
 
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{Bytes, U256, address};
+    use alloy_sol_types::SolError;
     use revm::precompile::{PrecompileError, PrecompileOutput};
     use tempo_precompiles::{DelegateCallNotAllowed, storage::PrecompileStorageProvider};
 
