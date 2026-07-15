@@ -82,7 +82,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
     ///      This limits the number of requestWithdrawal() calls per block, complementing
     ///      the gas fee mechanism which already provides economic rate-limiting.
-    uint32 internal _maxWithdrawalsPerBlock;
+    uint32 public maxWithdrawalsPerBlock;
 
     /// @notice Number of withdrawal requests in the current block
     uint32 internal _withdrawalsThisBlock;
@@ -139,17 +139,10 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
-    function setMaxWithdrawalsPerBlock(uint256 maxWithdrawals) external {
+    function setMaxWithdrawalsPerBlock(uint32 maxWithdrawals) external {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        uint32 clampedMax =
-            maxWithdrawals > type(uint32).max ? type(uint32).max : uint32(maxWithdrawals);
-        _maxWithdrawalsPerBlock = clampedMax;
-        emit MaxWithdrawalsPerBlockUpdated(clampedMax);
-    }
-
-    /// @notice Return the configured per-block withdrawal cap.
-    function maxWithdrawalsPerBlock() external view returns (uint256) {
-        return _maxWithdrawalsPerBlock;
+        maxWithdrawalsPerBlock = maxWithdrawals;
+        emit MaxWithdrawalsPerBlockUpdated(maxWithdrawals);
     }
 
     /// @notice Calculate the fee for a withdrawal with the given callback gas limit
@@ -265,13 +258,13 @@ contract ZoneOutbox is IZoneOutbox {
         _validateRevealTo(revealTo);
 
         // Enforce per-block withdrawal cap (0 = unlimited)
-        if (_maxWithdrawalsPerBlock > 0) {
+        if (maxWithdrawalsPerBlock > 0) {
             uint64 blockNumber = uint64(block.number);
             if (blockNumber != _currentBlockNumber) {
                 _currentBlockNumber = blockNumber;
                 _withdrawalsThisBlock = 0;
             }
-            if (_withdrawalsThisBlock >= _maxWithdrawalsPerBlock) {
+            if (_withdrawalsThisBlock >= maxWithdrawalsPerBlock) {
                 revert TooManyWithdrawalsThisBlock();
             }
             _withdrawalsThisBlock++;

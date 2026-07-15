@@ -1061,7 +1061,7 @@ interface IZoneOutbox {
 
     event TempoGasRateUpdated(uint128 tempoGasRate);
 
-    event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
+    event MaxWithdrawalsPerBlockUpdated(uint32 maxWithdrawalsPerBlock);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
@@ -1093,7 +1093,7 @@ interface IZoneOutbox {
     function lastFinalizedTimestamp() external view returns (uint64);
 
     /// @notice Maximum number of withdrawal requests per zone block (0 = unlimited)
-    function maxWithdrawalsPerBlock() external view returns (uint256);
+    function maxWithdrawalsPerBlock() external view returns (uint32);
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
@@ -1102,7 +1102,7 @@ interface IZoneOutbox {
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
-    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
+    function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
