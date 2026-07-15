@@ -65,6 +65,7 @@ use zone_l1::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
+use zone_p2p::{P2pConfig, P2pNetworkId, spawn_p2p};
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
@@ -187,6 +188,8 @@ pub struct ZoneNode {
     private_rpc_config: ZonePrivateRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Optional static Zone P2P networking config.
+    p2p_config: Option<P2pConfig>,
 }
 
 impl ZoneNode {
@@ -231,6 +234,7 @@ impl ZoneNode {
             withdrawal_reveal_encryptor: None,
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
+            p2p_config: None,
         }
     }
 
@@ -249,6 +253,12 @@ impl ZoneNode {
             config.zone_id,
         )));
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Enable static Zone P2P networking for this node.
+    pub fn with_p2p(mut self, config: P2pConfig) -> Self {
+        self.p2p_config = Some(config);
         self
     }
 
@@ -372,6 +382,8 @@ where
     private_rpc_config: ZonePrivateRpcConfig,
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Static Zone P2P networking configuration.
+    p2p_config: Option<P2pConfig>,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -397,6 +409,7 @@ where
         initial_tokens: Option<Vec<Address>>,
         private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
+        p2p_config: Option<P2pConfig>,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -414,6 +427,7 @@ where
             initial_tokens,
             private_rpc_config,
             sequencer_config,
+            p2p_config,
         }
     }
 }
@@ -453,13 +467,18 @@ where
         self.spawn_l1_subscriber(&ctx);
         self.spawn_policy_tasks(&l1_provider, &ctx);
 
+        let task_executor = ctx.node.task_executor().clone();
+        if let Some(config) = self.p2p_config.take() {
+            let network_id =
+                P2pNetworkId::new(l1_provider.get_chain_id().await?, self.portal_address);
+            Self::launch_p2p(config, network_id, &task_executor)?;
+        }
+
         if let Some(ref config) = self.sequencer_config {
             let sequencer_addr = config.sequencer_signer.address();
             let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
             self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
         }
-
-        let task_executor = ctx.node.task_executor().clone();
 
         let chain_id = ctx
             .node
@@ -509,6 +528,56 @@ where
         >,
     TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
+    fn launch_p2p(
+        config: P2pConfig,
+        network_id: P2pNetworkId,
+        task_executor: &reth_tasks::TaskExecutor,
+    ) -> eyre::Result<()> {
+        let handle = spawn_p2p(config, network_id)?;
+        let zone_p2p::P2pHandleParts {
+            shutdown: shutdown_token,
+            mut stopped,
+            thread,
+            commands: _commands,
+            events: _events,
+        } = handle.into_parts();
+
+        task_executor.spawn_critical_with_graceful_shutdown_signal(
+            "zone-p2p",
+            |shutdown| async move {
+                tokio::select! {
+                    guard = shutdown => {
+                        let _guard = guard;
+                        shutdown_token.cancel();
+                        match stopped.await {
+                            Ok(Ok(())) => info!(target: "reth::cli", "P2P runtime stopped"),
+                            Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed during shutdown"),
+                            Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed during shutdown"),
+                        }
+                    }
+                    result = &mut stopped => {
+                        match result {
+                            Ok(Ok(())) => tracing::error!(target: "reth::cli", "P2P runtime stopped unexpectedly"),
+                            Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed"),
+                            Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed unexpectedly"),
+                        }
+                    }
+                }
+
+                match tokio::task::spawn_blocking(move || thread.join()).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => {
+                        tracing::error!(target: "reth::cli", "P2P runtime thread panicked")
+                    }
+                    Err(err) => {
+                        tracing::error!(target: "reth::cli", %err, "Failed joining P2P runtime thread")
+                    }
+                }
+            },
+        );
+        Ok(())
+    }
+
     /// Resolve enabled tokens and seed the policy cache.
     async fn resolve_and_seed_tokens(
         &mut self,
@@ -819,6 +888,7 @@ where
             self.initial_tokens.clone(),
             self.private_rpc_config.clone(),
             self.sequencer_config.clone(),
+            self.p2p_config.clone(),
         )
     }
 }

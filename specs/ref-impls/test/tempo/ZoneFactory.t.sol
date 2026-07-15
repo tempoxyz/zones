@@ -18,7 +18,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function setUp() public override {
         super.setUp();
-        zoneFactory = new ZoneFactory();
+        zoneFactory = _deployZoneFactory();
     }
 
     /*//////////////////////////////////////////////////////////////
