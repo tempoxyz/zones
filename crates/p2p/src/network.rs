@@ -12,7 +12,9 @@ use crate::ZoneManifest;
 /// Leader-to-follower sealed block replication channel.
 pub(crate) const BLOCK_CHANNEL: u64 = 0;
 pub(crate) const BLOCK_BACKLOG: usize = 128;
-pub(crate) const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
+
+// At 30M gas, calldata is bounded below 7.5 MiB; leave headroom for block overhead.
+pub(crate) const MAX_MESSAGE_SIZE: u32 = 20 * 1024 * 1024;
 
 /// Version of the Tempo Zone P2P wire protocol.
 pub(crate) const WIRE_PROTOCOL_VERSION: u8 = 0;

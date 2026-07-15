@@ -30,6 +30,7 @@ zone-rpc.workspace = true
 zone-sequencer.workspace = true
 
 # reth
+reth-chain-state.workspace = true
 reth-chainspec.workspace = true
 reth-consensus = { workspace = true, optional = true }
 reth-eth-wire-types.workspace = true

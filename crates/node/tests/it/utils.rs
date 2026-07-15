@@ -783,6 +783,7 @@ impl ZoneTestNode {
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
         }
+        let p2p_enabled = p2p_config.is_some();
         if let Some(p2p_config) = p2p_config {
             zone_node = zone_node.with_p2p(p2p_config);
         }
@@ -800,6 +801,10 @@ impl ZoneTestNode {
             )
             .apply(|mut c| {
                 c.network.discovery.disable_discovery = true;
+                if p2p_enabled {
+                    c.engine.persistence_threshold = 0;
+                    c.engine.memory_block_buffer_target = 0;
+                }
                 c
             });
 

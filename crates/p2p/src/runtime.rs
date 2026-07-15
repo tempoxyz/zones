@@ -7,12 +7,12 @@ use commonware_p2p::{
 use commonware_runtime::{Runner as _, Spawner as _};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     P2pNetworkId, Role, ZoneManifest,
     identity::Ed25519Identity,
-    network::{self, BLOCK_BACKLOG, BLOCK_CHANNEL},
+    network::{self, BLOCK_BACKLOG, BLOCK_CHANNEL, MAX_MESSAGE_SIZE},
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -319,6 +319,15 @@ async fn run_commands(
             continue;
         }
         let P2pCommand::BroadcastBlock(block) = command;
+        if block.len() > MAX_MESSAGE_SIZE as usize {
+            error!(
+                target: "zone::p2p",
+                block_size_bytes = block.len(),
+                max_message_size_bytes = MAX_MESSAGE_SIZE,
+                "Canonical block exceeds the P2P message size limit; block was not broadcast"
+            );
+            continue;
+        }
         let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
             loop {
                 let sent = sender
@@ -398,7 +407,7 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{P2pCommand, P2pConfig, P2pEvent, spawn_p2p, validate_ip_check_configuration};
-    use crate::{P2pNetworkId, ZoneManifest, identity::Ed25519Identity};
+    use crate::{P2pNetworkId, ZoneManifest, identity::Ed25519Identity, network::MAX_MESSAGE_SIZE};
 
     fn available_address() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -480,6 +489,11 @@ mod tests {
 
         let block = vec![0xf8, 0x01, 0x80];
         let commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        let oversized_block = vec![0; MAX_MESSAGE_SIZE as usize + 1];
+        commands
+            .send(P2pCommand::BroadcastBlock(oversized_block))
+            .await
+            .expect("P2P command channel should remain open");
         let broadcast_block = block.clone();
         let broadcaster = tokio::spawn(async move {
             loop {

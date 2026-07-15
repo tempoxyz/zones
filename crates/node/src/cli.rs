@@ -129,6 +129,12 @@ fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         }
 
         let manifest_mode = p2p_config.is_some();
+        if manifest_mode {
+            // Replicate only durable blocks. Persist every block immediately so followers can
+            // acknowledge each block without waiting for Reth's in-memory buffer to fill.
+            builder.config_mut().engine.persistence_threshold = 0;
+            builder.config_mut().engine.memory_block_buffer_target = 0;
+        }
         let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_role);
         let sequencer_signer = (should_sequence_blocks || manifest_mode)
             .then(|| {

@@ -13477,6 +13477,7 @@ dependencies = [
  "p256",
  "rand 0.8.7",
  "reqwest 0.13.4",
+ "reth-chain-state",
  "reth-chainspec",
  "reth-consensus",
  "reth-eth-wire-types",

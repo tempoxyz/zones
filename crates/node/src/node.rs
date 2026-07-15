@@ -15,6 +15,7 @@ use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_signer_local::PrivateKeySigner;
 use futures::StreamExt as _;
 use k256::SecretKey;
+use reth_chain_state::PersistedBlockSubscriptions;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
@@ -32,10 +33,12 @@ use reth_node_builder::{
     },
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use reth_provider::{CanonStateSubscriptions, ChainSpecProvider};
+use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
+use reth_storage_api::{
+    BlockNumReader, BlockReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory,
+};
 use reth_transaction_pool::{
     Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
@@ -103,17 +106,57 @@ struct SequencerWithdrawalRevealEncryptor {
     zone_id: u32,
 }
 
-/// Broadcast every newly canonical leader block in canonical order.
-async fn broadcast_canonical_blocks<P>(provider: P, commands: mpsc::Sender<P2pCommand>)
+/// Broadcast every newly persisted leader block in canonical order.
+async fn broadcast_persisted_blocks<P>(provider: P, commands: mpsc::Sender<P2pCommand>)
 where
-    P: CanonStateSubscriptions<Primitives = TempoPrimitives> + Clone + Send + Sync + 'static,
+    P: PersistedBlockSubscriptions + BlockReader<Block = Block> + Clone + Send + Sync + 'static,
 {
-    let mut canonical = provider.canonical_state_stream();
-    while let Some(notification) = canonical.next().await {
-        for block in notification.committed().blocks_iter() {
-            let sealed = block.clone_sealed_block();
+    // Subscribe before reading the database height so persistence cannot race task startup.
+    let mut persisted = provider.persisted_block_stream();
+    let mut last_broadcast = match provider.last_block_number() {
+        Ok(number) => number,
+        Err(err) => {
+            tracing::error!(target: "zone::p2p", %err, "Failed reading persisted zone head");
+            return;
+        }
+    };
+
+    while let Some(persisted_tip) = persisted.next().await {
+        if persisted_tip.number < last_broadcast {
+            tracing::error!(
+                target: "zone::p2p",
+                persisted = persisted_tip.number,
+                last_broadcast,
+                "Persisted zone head moved backwards"
+            );
+            return;
+        }
+
+        for number in last_broadcast.saturating_add(1)..=persisted_tip.number {
+            let block = match provider.block_by_number(number) {
+                Ok(Some(block)) => block,
+                Ok(None) => {
+                    tracing::error!(target: "zone::p2p", number, "Persisted zone block is missing");
+                    return;
+                }
+                Err(err) => {
+                    tracing::error!(target: "zone::p2p", %err, number, "Failed reading persisted zone block");
+                    return;
+                }
+            };
+            let sealed = SealedBlock::seal_slow(block);
             let number = sealed.number();
             let hash = sealed.hash();
+            if number == persisted_tip.number && hash != persisted_tip.hash {
+                tracing::error!(
+                    target: "zone::p2p",
+                    number,
+                    expected = %persisted_tip.hash,
+                    actual = %hash,
+                    "Persisted zone block hash does not match notification"
+                );
+                return;
+            }
             let encoded = alloy_rlp::encode(sealed.into_block());
             if commands
                 .send(P2pCommand::BroadcastBlock(encoded))
@@ -123,10 +166,11 @@ where
                 debug!(target: "zone::p2p", "P2P command channel closed");
                 return;
             }
-            debug!(target: "zone::p2p", number, ?hash, "Queued canonical block for followers");
+            debug!(target: "zone::p2p", number, ?hash, "Queued persisted block for followers");
+            last_broadcast = number;
         }
     }
-    debug!(target: "zone::p2p", "Canonical block stream closed");
+    debug!(target: "zone::p2p", "Persisted block stream closed");
 }
 
 /// Decode, fully execute, and canonicalize blocks received by a follower.
@@ -701,7 +745,7 @@ where
             Role::Leader => {
                 task_executor.spawn_critical_task(
                     "zone-p2p-block-broadcast",
-                    broadcast_canonical_blocks(provider, commands),
+                    broadcast_persisted_blocks(provider, commands),
                 );
                 // Leaders do not receive block messages. Dropping this receiver is harmless: the
                 // runtime only emits BlockReceived on followers.

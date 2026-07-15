@@ -127,6 +127,7 @@ zone-sequencer = { path = "crates/sequencer" }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
+reth-chain-state = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
 reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
 reth-cli-util = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
 reth-consensus = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
