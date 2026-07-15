@@ -123,7 +123,7 @@ impl L1PortalEvents {
                 info!(
                     l1_block = block_number,
                     token = %event.token,
-                    to = %event.fallbackRecipient,
+                    fallback_nonce = event.fallbackNonce,
                     amount = %event.amount,
                     "↩️ Bounce-back deposit from L1"
                 );

@@ -32,7 +32,7 @@ contract ZoneConfigTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        zoneFactory = new ZoneFactory();
+        zoneFactory = _deployZoneFactory();
         genesisTempoBlockNumber = uint64(block.number);
 
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({

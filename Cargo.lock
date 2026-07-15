@@ -11518,6 +11518,9 @@ dependencies = [
  "alloy-eips",
  "alloy-rlp",
  "clap",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-math",
  "const-hex",
  "eyre",
  "futures",
@@ -13513,11 +13516,32 @@ dependencies = [
  "url",
  "zone-evm",
  "zone-l1",
+ "zone-p2p",
  "zone-payload",
  "zone-precompiles",
  "zone-primitives",
  "zone-rpc",
  "zone-sequencer",
+]
+
+[[package]]
+name = "zone-p2p"
+version = "0.1.0"
+dependencies = [
+ "alloy-primitives",
+ "commonware-codec",
+ "commonware-cryptography",
+ "commonware-p2p",
+ "commonware-runtime",
+ "commonware-utils",
+ "const-hex",
+ "eyre",
+ "serde",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
 ]
 
 [[package]]

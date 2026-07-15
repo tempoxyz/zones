@@ -22,7 +22,7 @@ crate::sol! {
             uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
-            address fallbackRecipient;
+            uint64 fallbackNonce;
             bytes callbackData;
             bytes encryptedSender;
         }
@@ -114,7 +114,7 @@ crate::sol! {
 
         event WithdrawalBounceBack(
             bytes32 indexed newCurrentDepositQueueHash,
-            address indexed fallbackRecipient,
+            uint64 indexed fallbackNonce,
             address token,
             uint128 amount,
             uint64 depositNumber
@@ -364,7 +364,7 @@ impl Withdrawal {
         tx_hash: B256,
         encrypted_sender: Bytes,
     ) -> Self {
-        let sender_tag = if event.sender.is_zero() && event.fallbackRecipient.is_zero() {
+        let sender_tag = if event.sender.is_zero() && event.fallbackNonce == 0 {
             Self::sender_tag(Address::ZERO, B256::ZERO)
         } else {
             Self::sender_tag(event.sender, tx_hash)
@@ -378,7 +378,7 @@ impl Withdrawal {
             fee: event.fee,
             memo: event.memo,
             gasLimit: event.gasLimit,
-            fallbackRecipient: event.fallbackRecipient,
+            fallbackNonce: event.fallbackNonce,
             callbackData: event.data.clone(),
             encryptedSender: encrypted_sender,
         }

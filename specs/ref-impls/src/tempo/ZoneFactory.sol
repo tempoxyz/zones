@@ -72,9 +72,10 @@ contract ZoneFactory is IZoneFactory {
 
         address predictedPortal = _computeCreateAddress(address(this), currentNonce);
 
-        // Deploy portal with the shared messenger address and initial token
-        // The portal constructor enables the initial token automatically
-        ZonePortal portalContract = new ZonePortal(
+        // Deploy and atomically initialize the portal. TIP-1091 fixes this factory's address as
+        // the portal's only initializer authority.
+        ZonePortal portalContract = new ZonePortal();
+        portalContract.initialize(
             zoneId,
             params.initialToken,
             _messenger,

@@ -518,11 +518,12 @@ async fn test_resolve_start_block_falls_back_to_genesis_override_when_local_stat
 #[test]
 fn test_push_log_decodes_bounce_back_as_regular_deposit() {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let fallback_recipient = address!("0x00000000000000000000000000000000000000F1");
+    let fallback_nonce = 0xF1;
+    let encoded_fallback_nonce = address!("0x00000000000000000000000000000000000000F1");
     let token = address!("0x0000000000000000000000000000000000002000");
     let event = WithdrawalBounceBack {
         newCurrentDepositQueueHash: B256::with_last_byte(0x42),
-        fallbackRecipient: fallback_recipient,
+        fallbackNonce: fallback_nonce,
         token,
         amount: 123_456,
         depositNumber: 1,
@@ -552,7 +553,7 @@ fn test_push_log_decodes_bounce_back_as_regular_deposit() {
     };
     assert_eq!(deposit.token, token);
     assert_eq!(deposit.sender, portal_address);
-    assert_eq!(deposit.to, fallback_recipient);
+    assert_eq!(deposit.to, encoded_fallback_nonce);
     assert_eq!(deposit.amount, event.amount);
     assert_eq!(deposit.fee, 0, "bounce-back deposits should be fee-free");
     assert_eq!(

@@ -2,8 +2,9 @@
 use crate::{
     create_zone::CreateZone, demo_blacklist::DemoBlacklist,
     demo_swap_and_deposit::DemoSwapAndDeposit, deploy_router::DeployRouter,
-    encrypted_deposit::EncryptedDeposit, generate_zone_genesis::GenerateZoneGenesis,
-    set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
+    encrypted_deposit::EncryptedDeposit, generate_p2p_key::GenerateP2pKey,
+    generate_zone_genesis::GenerateZoneGenesis, set_encryption_key::SetEncryptionKey,
+    spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
@@ -13,6 +14,7 @@ mod demo_blacklist;
 mod demo_swap_and_deposit;
 mod deploy_router;
 mod encrypted_deposit;
+mod generate_p2p_key;
 mod generate_zone_genesis;
 mod set_encryption_key;
 mod spam_deposits;
@@ -41,6 +43,7 @@ async fn main() -> eyre::Result<()> {
         Action::GenerateZoneGenesis(args) => {
             args.run().await.wrap_err("failed to generate zone genesis")
         }
+        Action::GenerateP2pKey(args) => args.run().wrap_err("failed to generate P2P key"),
         Action::SetEncryptionKey(args) => args.run().await.wrap_err("failed to set encryption key"),
         Action::SpamDeposits(args) => args.run().await.wrap_err("failed to spam deposits"),
         Action::ZoneInfo(args) => args.run().await.wrap_err("failed to fetch zone info"),
@@ -64,6 +67,7 @@ enum Action {
     DemoSwapAndDeposit(DemoSwapAndDeposit),
     DeployRouter(DeployRouter),
     EncryptedDeposit(EncryptedDeposit),
+    GenerateP2pKey(GenerateP2pKey),
     GenerateZoneGenesis(GenerateZoneGenesis),
     SetEncryptionKey(SetEncryptionKey),
     SpamDeposits(SpamDeposits),
