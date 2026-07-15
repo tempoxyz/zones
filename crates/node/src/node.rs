@@ -11,6 +11,7 @@ use alloy_primitives::Address;
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
+use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
@@ -481,15 +482,7 @@ where
             self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
         }
 
-        let chain_id = ctx
-            .node
-            .provider()
-            .chain_spec()
-            .as_tempo()
-            .inner
-            .genesis()
-            .config
-            .chain_id;
+        let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
         let handle = self.inner.launch_add_ons(ctx).await?;
 
         Self::launch_private_rpc(
@@ -1040,7 +1033,7 @@ where
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
         .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
         .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().as_tempo().inner.genesis().gas_limit)
+        .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
         .disable_balance_check()
         .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
         .with_custom_tx_type(TempoTxType::AA as u8)
