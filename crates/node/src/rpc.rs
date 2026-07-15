@@ -45,7 +45,7 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
-use alloy_rpc_client::ConnectionConfig;
+use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{
     DepositType, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
 };
@@ -60,6 +60,7 @@ use zone_rpc::{
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 fn filter_not_found_error() -> JsonRpcError {
     JsonRpcError::invalid_params("filter not found")
@@ -1141,11 +1142,32 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
     ConnectionConfig::new()
         .with_max_retries(u32::MAX)
         .with_retry_interval(retry_connection_interval)
+        .with_ws_config(
+            WebSocketConfig::default()
+                // Large blocks can exceed tungstenite's default 16 MiB frame limit.
+                .max_frame_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE))
+                .max_message_size(Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)),
+        )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_connection_config_allows_large_ws_responses() {
+        let config = rpc_connection_config(Duration::from_secs(1));
+        let ws_config = config.ws_config.unwrap();
+
+        assert_eq!(
+            ws_config.max_frame_size,
+            Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)
+        );
+        assert_eq!(
+            ws_config.max_message_size,
+            Some(MAX_WS_FRAME_AND_MESSAGE_SIZE)
+        );
+    }
 
     #[test]
     fn regular_deposit_status_maps_terminal_events() {
