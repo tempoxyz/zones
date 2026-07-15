@@ -1090,7 +1090,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: to,
+            fallbackNonce: 1,
             callbackData: Default::default(),
             encryptedSender: Default::default(),
         }

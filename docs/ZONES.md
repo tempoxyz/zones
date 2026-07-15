@@ -555,7 +555,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Contract | Address |
 |----------|---------|
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
-| ZoneFactory (moderato) | `0x179B44a4B7eC74f3957Ed5137Dc4F1a6dEeBB19b` |
+| ZoneFactory (moderato) | `0xd97052545B978cc79Dd083912C72CA62f889dFaF` |
 
 The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` uses `zoneFactory` from `zone.json` before falling back to this address. Pass `--zone-factory` or set `ZONE_FACTORY` to override it.
 
@@ -591,10 +591,10 @@ Current deployment:
 
 | Field | Value |
 |-------|-------|
-| Address | `0x179B44a4B7eC74f3957Ed5137Dc4F1a6dEeBB19b` |
-| Transaction | `0x91b6ae5d07b7a6589242bd6c4a1ae7caffcd18d918e915e66ad40f67d5348ef9` |
-| Block | `26198694` |
-| Deployed | `2026-07-12 08:36:09 UTC` |
+| Address | `0xd97052545B978cc79Dd083912C72CA62f889dFaF` |
+| Transaction | `0xb99ae18e4223b4176fac475dfa6fdfe2c43da9e95777bd5ff0387b6b20b99b44` |
+| Block | `26546762` |
+| Deployed | `2026-07-14 18:26:32 UTC` |
 
 ### Zone Node CLI Options
 

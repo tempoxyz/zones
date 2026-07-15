@@ -47,4 +47,5 @@ tracing.workspace = true
 
 [dev-dependencies]
 eyre.workspace = true
+reth-chainspec.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }

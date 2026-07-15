@@ -702,7 +702,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: to,
+            fallbackNonce: 1,
             callbackData: Default::default(),
             encryptedSender: Default::default(),
         }
@@ -744,7 +744,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            fallbackNonce: 1,
             callbackData: Default::default(),
             encryptedSender: Default::default(),
         };
