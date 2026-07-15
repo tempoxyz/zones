@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
-    EvmFactory,
+    Evm, EvmFactory,
     block::{BlockExecutorFactory, CommitChanges, TxResult},
     revm::context_interface::block::Block as RevmBlock,
 };
@@ -23,7 +23,7 @@ use reth_basic_payload_builder::{
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
-    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes, TxEnvFor,
+    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes,
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
 };
 use reth_node_api::{FullNodeTypes, NodeTypes};
@@ -32,7 +32,7 @@ use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
-use reth_storage_api::{BlockReader, HeaderProvider, StateProvider, StateProviderFactory};
+use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool, ValidPoolTransaction,
     error::InvalidPoolTransactionError,
@@ -42,7 +42,7 @@ use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
-    TempoHeader, TempoReceipt, TempoTxEnvelope,
+    TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTransaction};
@@ -138,20 +138,12 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
 
 impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
 where
-    Provider: StateProviderFactory
-        + ChainSpecProvider<ChainSpec = TempoChainSpec>
-        + HeaderProvider<Header = TempoHeader>
-        + BlockReader<
-            Block = tempo_primitives::Block,
-            Transaction = TempoTxEnvelope,
-            Receipt = TempoReceipt,
-        > + Clone
-        + 'static,
+    Provider:
+        StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
         > + 'static,
-    TxEnvFor<EvmConfig>: From<tempo_revm::TempoTxEnv>,
     <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
         EvmFactory<Tx = tempo_revm::TempoTxEnv>,
     BlockEnvFor<EvmConfig>: RevmBlock,
@@ -178,9 +170,9 @@ where
 
         let start = Instant::now();
 
-        let sp = self.provider.state_by_block_hash(parent_header.hash())?;
+        let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let prepared = attributes.l1_block();
-        validate_l1_continuity(sp.as_ref(), prepared)?;
+        validate_l1_continuity(state_provider.as_ref(), prepared)?;
 
         let total_deposits = prepared.queued_deposits.len();
 
@@ -193,9 +185,7 @@ where
             "Including advanceTempo system tx (chain continuity OK)"
         );
 
-        let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
-        let state_provider: Box<dyn StateProvider> = state_provider;
-        let state = StateProviderDatabase::new(&state_provider);
+        let state = StateProviderDatabase::new(state_provider.as_ref());
         let mut db = State::builder()
             .with_database(
                 Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
@@ -206,8 +196,6 @@ where
         let chain_spec = self.provider.chain_spec();
 
         let block_gas_limit = parent_header.gas_limit();
-
-        let total_fees = U256::ZERO;
 
         let next_block_env_attributes = TempoNextBlockEnvAttributes {
             inner: NextBlockEnvAttributes {
@@ -228,21 +216,17 @@ where
             consensus_context: None,
             subblock_fee_recipients: Default::default(),
         };
-        let next_env = self
-            .evm_config
-            .next_evm_env(parent_header.header(), &next_block_env_attributes)
-            .map_err(PayloadBuilderError::other)?;
-        let base_fee = next_env.block_env.basefee();
-        let block_number: u64 = next_env
-            .block_env
-            .number()
-            .try_into()
-            .expect("block number fits u64");
-
         let mut builder = self
             .evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
             .map_err(PayloadBuilderError::other)?;
+        let base_fee = builder.evm().block().basefee();
+        let block_number: u64 = builder
+            .evm()
+            .block()
+            .number()
+            .try_into()
+            .expect("block number fits u64");
 
         builder.apply_pre_execution_changes().map_err(|err| {
             warn!(%err, "failed to apply pre-execution changes");
@@ -315,7 +299,7 @@ where
         let execution_block_size_estimate = execution_block_encoded
             .get_or_encode(sealed_block.as_ref())
             .len();
-        let eth_payload = EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
+        let eth_payload = EthBuiltPayload::new(recovered_block.clone(), U256::ZERO, requests, None);
 
         let execution_output = BlockExecutionOutput {
             result: execution_result,
@@ -339,7 +323,6 @@ where
             execution_block_encoded,
         );
 
-        drop(db);
         // Zone payloads are deterministic (one L1 block = one zone block), so freeze
         // the payload to prevent reth from re-triggering try_build on the rebuild interval.
         // Without this, the next rebuild attempt would find the deposit queue empty.
