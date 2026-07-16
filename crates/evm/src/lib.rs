@@ -49,7 +49,7 @@ use tempo_primitives::{
 };
 use tempo_zone_contracts::ZONE_TX_CONTEXT_ADDRESS;
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
+use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -58,22 +58,12 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory {
     l1_provider: L1StateProvider,
-    policy_provider: Option<PolicyProvider>,
 }
 
 impl ZoneEvmFactory {
     /// Create a new factory with the given L1 state provider.
     pub fn new(l1_provider: L1StateProvider) -> Self {
-        Self {
-            l1_provider,
-            policy_provider: None,
-        }
-    }
-
-    /// Set the policy provider for the TIP-403 proxy precompile.
-    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
-        self.policy_provider = Some(policy_provider);
-        self
+        Self { l1_provider }
     }
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
@@ -87,7 +77,6 @@ impl ZoneEvmFactory {
             precompiles,
             &cfg,
             self.l1_provider.clone(),
-            self.policy_provider.clone(),
             sequencer,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
@@ -234,12 +223,6 @@ impl ZoneEvmConfig {
         let config = L1StateProviderConfig::default();
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
         Self::from_chain_spec(chain_spec, l1_provider)
-    }
-
-    /// Set the policy provider for the TIP-403 proxy precompile.
-    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
-        self.zone_factory = self.zone_factory.with_policy_provider(policy_provider);
-        self
     }
 
     /// Returns the Zone chain specification.
