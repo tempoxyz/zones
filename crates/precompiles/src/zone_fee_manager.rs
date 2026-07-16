@@ -117,10 +117,7 @@ impl ZoneFeeManager {
         self.ensure_enabled(provider, fee_token)?;
 
         let mut token = TIP20Token::from_address(fee_token)?;
-        // Tempo's specialized fee-transfer helpers use the canonical fee-manager
-        // address as protocol custody. The public precompile and all accounting at
-        // that address remain disabled on zones.
-        token.ensure_transfer_authorized(fee_payer, tempo_precompiles::TIP_FEE_MANAGER_ADDRESS)?;
+        token.ensure_transfer_authorized(fee_payer, self.address)?;
         token.transfer_fee_pre_tx(fee_payer, max_amount)?;
         Ok(fee_token)
     }
@@ -154,10 +151,8 @@ impl ZoneFeeManager {
         self.collected_fees[sequencer][token].write(U256::ZERO)?;
 
         let mut tip20 = TIP20Token::from_address(token)?;
-        // `transfer_fee_pre_tx` escrows here inside TIP-20 storage; ZoneFeeManager
-        // owns the corresponding sequencer ledger and is the only enabled fee API.
         tip20.transfer(
-            tempo_precompiles::TIP_FEE_MANAGER_ADDRESS,
+            self.address,
             ITIP20::transferCall {
                 to: sequencer,
                 amount,

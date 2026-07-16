@@ -37,7 +37,7 @@ pub const ZONE_TX_CONTEXT_ADDRESS: Address = address!("0x1c000000000000000000000
 
 /// ZoneFeeManager precompile address on Zone L2.
 pub const ZONE_FEE_MANAGER_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000006");
+    address!("0xfeEC000000000000000000000000000000000000");
 
 /// Chaum-Pedersen verification precompile address.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =

@@ -50,8 +50,8 @@ use tempo_evm::{
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
-    TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
-    storage::actions::StorageActions, storage_credits::NonCreditableSlots, tip20::is_tip20_prefix,
+    account_keychain::AccountKeychain, nonce::NonceManager, storage::actions::StorageActions,
+    storage_credits::NonCreditableSlots, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -128,8 +128,8 @@ impl ZoneEvmFactory {
         //
         // This replaces the upstream `extend_tempo_precompiles` lookup, so we
         // must also handle the non-TIP-20 Tempo precompiles that are zone-relevant
-        // (NonceManager, AccountKeychain). FeeManager is deliberately disabled
-        // here because protocol fees use ZoneFeeManager above.
+        // (NonceManager, AccountKeychain). The upstream FeeManager lookup is
+        // disabled because ZoneFeeManager occupies the same address in the static map.
         // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
         // static map via `apply_precompile` and take priority over this.
         let zone_cfg = cfg.clone();
@@ -146,7 +146,7 @@ impl ZoneEvmFactory {
                     registry.clone(),
                     sequencer.clone(),
                 ))
-            } else if *address == TIP_FEE_MANAGER_ADDRESS || *address == STABLECOIN_DEX_ADDRESS {
+            } else if *address == ZONE_FEE_MANAGER_ADDRESS || *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
                 Some(NonceManager::create_precompile(&zone_env))

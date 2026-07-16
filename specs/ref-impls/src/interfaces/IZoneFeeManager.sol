@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-// ZoneFeeManager precompile address (0x1c00...0006).
-address constant ZONE_FEE_MANAGER = 0x1c00000000000000000000000000000000000006;
+// ZoneFeeManager replaces Tempo's fee manager at the canonical precompile address.
+address constant ZONE_FEE_MANAGER = 0xfeEC000000000000000000000000000000000000;
 
 /// @title IZoneFeeManager
 /// @notice Zone-native fee manager with no AMM or validator-token preference.

@@ -264,7 +264,7 @@ The shared `ZoneMessenger` relays withdrawal callbacks for all zones created by 
 
 ### Zone Predeploys
 
-Each zone has six system contracts deployed at genesis at fixed addresses:
+Each zone has five system contracts deployed at genesis at fixed addresses:
 
 | Predeploy | Address | Purpose |
 |-----------|---------|---------|
@@ -273,7 +273,6 @@ Each zone has six system contracts deployed at genesis at fixed addresses:
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
-| `ZoneFeeManager` | `0x1c00...0006` | Collects gas fees in any token enabled by `ZoneConfig`, without AMM routing, and credits the sequencer in that token. |
 
 `ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
@@ -1445,7 +1444,7 @@ Each enabled TIP-20 token is deployed as a precompile at the same address as on 
 
 | | |
 |---|---|
-| **Address** | `0x1c00000000000000000000000000000000000006` |
+| **Address** | `0xfeEC000000000000000000000000000000000000` |
 
 The zone EVM invokes this precompile's deterministic fee hooks before and after every charged transaction. It accepts a fee token only when the portal's `_tokenConfigs[token].enabled` value is true at the block number finalized in `TempoState`. The pre-transaction hook escrows the maximum fee. The post-transaction hook refunds the unused portion and credits the actual spend to the sequencer under the same token. It never reads or modifies FeeAMM pools.
 
@@ -2058,7 +2057,7 @@ Reads the sequencer address, token registry, and encryption key from the portal 
 
 ### IZoneFeeManager
 
-Address: `0x1c00000000000000000000000000000000000006`
+Address: `0xfeEC000000000000000000000000000000000000`
 
 ```solidity
 interface IZoneFeeManager {

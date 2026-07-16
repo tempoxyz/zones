@@ -20,8 +20,8 @@ const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 /// ZoneConfig predeploy address.
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
-/// ZoneFeeManager predeploy address.
-const ZONE_FEE_MANAGER_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000006");
+/// ZoneFeeManager precompile address.
+const ZONE_FEE_MANAGER_ADDRESS: Address = address!("0xfeEC000000000000000000000000000000000000");
 
 /// `tempoPortal` immutable occurrences in ZoneInbox deployed bytecode.
 const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 4;
