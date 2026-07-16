@@ -114,23 +114,6 @@ impl Default for BatchAnchorConfig {
     }
 }
 
-/// Reuse an ancestry anchor while it is ahead of the batch and remains inside
-/// the effective EIP-2935 window; otherwise select a fresh safe anchor.
-fn select_ancestry_anchor(
-    cached_anchor: Option<u64>,
-    tempo_block_number: u64,
-    current_l1_block: u64,
-    anchor_config: BatchAnchorConfig,
-) -> u64 {
-    cached_anchor
-        .filter(|anchor| {
-            *anchor > tempo_block_number
-                && *anchor <= current_l1_block
-                && current_l1_block - *anchor < anchor_config.effective_window()
-        })
-        .unwrap_or_else(|| current_l1_block.saturating_sub(anchor_config.safety_margin()))
-}
-
 /// Maximum number of pending withdrawal queue slots in the portal ring buffer.
 pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
 
@@ -199,9 +182,6 @@ pub struct BatchSubmitter {
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
     ancestry_header_cache: RwLock<LruCache<u64, CachedAncestryHeader>>,
-    /// Recent L1 anchor reused across ancestry batches until it approaches the
-    /// edge of the EIP-2935 history window.
-    ancestry_anchor: RwLock<Option<u64>>,
 }
 
 /// One validated L1 header retained for ancestry proof construction.
@@ -247,7 +227,6 @@ impl BatchSubmitter {
             ancestry_header_cache: RwLock::new(LruCache::new(
                 NonZeroUsize::new(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY).unwrap(),
             )),
-            ancestry_anchor: RwLock::new(None),
         }
     }
 
@@ -425,17 +404,7 @@ impl BatchSubmitter {
             return Ok(AnchorMode::Direct);
         }
 
-        let anchor_block = {
-            let mut cached_anchor = self.ancestry_anchor.write();
-            let anchor = select_ancestry_anchor(
-                *cached_anchor,
-                tempo_block_number,
-                current_l1_block,
-                self.anchor_config,
-            );
-            *cached_anchor = Some(anchor);
-            anchor
-        };
+        let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
         let ancestry_headers = self
             .fetch_ancestry_headers(tempo_block_number, anchor_block)
             .await?;
@@ -1244,21 +1213,6 @@ mod tests {
         assert!(BatchAnchorConfig::new(0, 0).is_err());
         assert!(BatchAnchorConfig::new(10, 10).is_err());
         assert!(BatchAnchorConfig::new(10, 11).is_err());
-    }
-
-    #[test]
-    fn ancestry_anchor_is_reused_until_it_nears_expiry() {
-        let config = BatchAnchorConfig::new(10, 2).unwrap();
-
-        let anchor = select_ancestry_anchor(None, 50, 100, config);
-        assert_eq!(anchor, 98);
-        assert_eq!(select_ancestry_anchor(Some(anchor), 60, 105, config), 98);
-
-        // At the effective-window boundary, rotate to a fresh safe anchor.
-        assert_eq!(select_ancestry_anchor(Some(anchor), 60, 106, config), 104);
-
-        // The anchor must also remain strictly ahead of the batch's Tempo block.
-        assert_eq!(select_ancestry_anchor(Some(anchor), 98, 106, config), 104);
     }
 
     #[tokio::test]
