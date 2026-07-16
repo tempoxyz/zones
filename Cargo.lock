@@ -13716,6 +13716,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "zone-spf"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-sol-types",
+ "reth-trie-common",
+ "reth-trie-sparse",
+ "revm",
+ "serde",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-primitives",
+ "tempo-revm",
+ "tempo-zone-contracts",
+ "thiserror 2.0.18",
+ "zone-chainspec",
+ "zone-evm",
+ "zone-precompiles",
+ "zone-primitives",
+]
+
+[[package]]
 name = "zstd"
 version = "0.13.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

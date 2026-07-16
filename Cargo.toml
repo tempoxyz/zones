@@ -19,6 +19,7 @@ members = [
   "crates/primitives",
   "crates/rpc",
   "crates/sequencer",
+  "crates/spf",
   "xtask",
 ]
 
@@ -126,6 +127,7 @@ zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-rpc = { path = "crates/rpc" }
 zone-sequencer = { path = "crates/sequencer" }
+zone-spf = { path = "crates/spf" }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
@@ -160,6 +162,12 @@ reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384", default-features = false, features = [
+  "std",
+] }
+reth-trie-sparse = { git = "https://github.com/paradigmxyz/reth", rev = "1bf2384", default-features = false, features = [
+  "std",
+] }
 revm = { version = "41.0.0", features = [
   "optional_fee_charge",
 ], default-features = false }

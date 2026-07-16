@@ -7,7 +7,7 @@ use alloy_rlp::Encodable as _;
 /// Simplified zone block header for hash computation.
 ///
 /// The zone block hash is `keccak256(rlp_encode(header))`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZoneHeader {
     pub parent_hash: B256,

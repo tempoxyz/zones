@@ -1,0 +1,1022 @@
+//! Stateless state transition function for Tempo Zones.
+//!
+//! The implementation is built incrementally around strict witness-backed
+//! execution. It is presently a normal Rust verifier rather than a `no_std`
+//! proving guest.
+
+use alloy_consensus::{
+    BlockHeader as _, TxReceipt,
+    proofs::{calculate_receipt_root, calculate_transaction_root},
+};
+use alloy_primitives::{B256, U256, keccak256};
+use alloy_rlp::Decodable as _;
+use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
+use tempo_primitives::TempoHeader;
+use zone_precompiles::tempo_state::slots as tempo_state_slots;
+use zone_primitives::constants::{
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_HASH_SLOT,
+    ZONE_INBOX_PROCESSED_NUMBER_SLOT, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_LAST_BATCH_HASH_SLOT,
+    ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT,
+};
+
+mod execution;
+mod mpt;
+mod types;
+
+pub use execution::database::{TempoWitnessDatabase, WitnessDatabase, WitnessDatabaseError};
+pub use mpt::StatelessSparseTrieError;
+pub use types::*;
+
+/// Execute a Zone batch witness and return its public commitments.
+///
+/// `config` is trusted network configuration chosen by the verifier. Every
+/// other value is prover supplied and must be validated against witness-backed
+/// execution.
+pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
+    // The parent header is the committed starting point for this batch. Its
+    // hash binds the witness to the previously submitted Zone block, and its
+    // state root selects the initial Zone state.
+    let previous_header_hash = witness.parent_header.hash();
+    if previous_header_hash != witness.public_inputs.prev_block_hash {
+        return Err(Error::PreviousBlockHashMismatch {
+            expected: witness.public_inputs.prev_block_hash,
+            actual: previous_header_hash,
+        });
+    }
+    if witness.zone_blocks.is_empty() {
+        return Err(Error::EmptyZoneBatch);
+    }
+    // The Zone database is backed by the parent state root and the supplied
+    // trie nodes. Reads performed during execution are therefore limited to
+    // state proven by the witness, while writes remain in REVM's overlay.
+    let zone_database = WitnessDatabase::from_zone_state_witness(
+        witness.zone_state_witness,
+        witness.parent_header.state_root,
+    )?;
+    let mut zone_state = State::builder()
+        .with_database(zone_database)
+        .with_bundle_update()
+        .build();
+
+    // Capture the pre-batch deposit state from the parent Zone state. The
+    // transition output commits to this exact pair.
+    let previous_processed_hash = B256::from(
+        read_zone_storage(
+            &mut zone_state,
+            ZONE_INBOX_ADDRESS,
+            ZONE_INBOX_PROCESSED_HASH_SLOT,
+        )?
+        .to_be_bytes::<32>(),
+    );
+    let previous_processed_number = read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        ZONE_INBOX_PROCESSED_NUMBER_SLOT,
+    )?
+    .to::<u64>();
+
+    // The initial Tempo header supplies the root for Tempo-side reads. The
+    // Zone's own TempoState must already contain the same number and hash;
+    // otherwise the witness would describe a different L1 checkpoint.
+    let mut tempo_database =
+        TempoWitnessDatabase::from_tempo_state_witness(witness.tempo_state_witness)?;
+    let (witnessed_tempo_number, witnessed_tempo_hash) = tempo_database.checkpoint();
+    let zone_tempo_hash = B256::from(
+        read_zone_storage(
+            &mut zone_state,
+            TEMPO_STATE_ADDRESS,
+            U256::from(tempo_state_slots::TEMPO_BLOCK_HASH),
+        )?
+        .to_be_bytes::<32>(),
+    );
+    let zone_tempo_number = read_zone_storage(
+        &mut zone_state,
+        TEMPO_STATE_ADDRESS,
+        U256::from(tempo_state_slots::TEMPO_BLOCK_NUMBER),
+    )?
+    .to::<u64>();
+    if (zone_tempo_number, zone_tempo_hash) != (witnessed_tempo_number, witnessed_tempo_hash) {
+        return Err(Error::InitialTempoCheckpointMismatch {
+            expected_number: zone_tempo_number,
+            expected_hash: zone_tempo_hash,
+            actual_number: witnessed_tempo_number,
+            actual_hash: witnessed_tempo_hash,
+        });
+    }
+
+    // Each block is checked against the header produced by its predecessor.
+    // After execution, the post-state, transaction, and receipt roots form a
+    // new simplified Zone header that becomes the next block's parent.
+    let mut previous_header = witness.parent_header.clone();
+    let block_count = witness.zone_blocks.len();
+    for (block_index, block) in witness.zone_blocks.iter().enumerate() {
+        let expected_parent_hash = previous_header.hash();
+        if block.parent_hash != expected_parent_hash {
+            return Err(Error::BlockParentHashMismatch {
+                expected: expected_parent_hash,
+                actual: block.parent_hash,
+            });
+        }
+
+        let expected_number = previous_header
+            .number
+            .checked_add(1)
+            .ok_or(Error::BlockNumberOverflow)?;
+        if block.number != expected_number {
+            return Err(Error::BlockNumberMismatch {
+                expected: expected_number,
+                actual: block.number,
+            });
+        }
+        if block.timestamp < previous_header.timestamp {
+            return Err(Error::BlockTimestampRegression {
+                previous: previous_header.timestamp,
+                actual: block.timestamp,
+            });
+        }
+        if block.beneficiary != witness.public_inputs.sequencer {
+            return Err(Error::BlockBeneficiaryMismatch {
+                expected: witness.public_inputs.sequencer,
+                actual: block.beneficiary,
+            });
+        }
+        validate_system_inputs(block, block_index, block_index + 1 == block_count)?;
+
+        // The EVM environment uses the verifier-selected fork schedule at this
+        // block's timestamp. An imported Tempo header changes the L1 reader
+        // used by the subsequent system and user execution in this block.
+        let env = execution::evm::ZoneEvmEnv::new(config, witness.public_inputs.zone_id, block);
+        if let Some(header) = &block.tempo_header_rlp {
+            tempo_database = tempo_database.with_imported_checkpoint(header)?;
+        }
+        let executed_block = execution::evm::execute_zone_block(
+            &env,
+            config,
+            &mut zone_state,
+            &tempo_database,
+            block_index,
+            witness.public_inputs.sequencer,
+            block,
+        )?;
+
+        let state_root = zone_state.database.state_root(&zone_state.bundle_state)?;
+        let transactions_root = calculate_transaction_root(&executed_block.transactions);
+        let receipts_with_bloom = executed_block
+            .receipts
+            .iter()
+            .map(TxReceipt::with_bloom_ref)
+            .collect::<Vec<_>>();
+        let receipts_root = calculate_receipt_root(&receipts_with_bloom);
+        previous_header = ZoneHeader {
+            parent_hash: expected_parent_hash,
+            beneficiary: block.beneficiary,
+            state_root,
+            transactions_root,
+            receipts_root,
+            number: block.number,
+            timestamp: block.timestamp,
+            protocol_version: block.protocol_version,
+        };
+    }
+
+    // These reads see the final execution overlay rather than just the parent
+    // witness. They are the contract state values committed by the batch
+    // output: inbox progress, the finalized withdrawal batch, and TempoState.
+    let next_processed_hash = B256::from(
+        read_zone_storage(
+            &mut zone_state,
+            ZONE_INBOX_ADDRESS,
+            ZONE_INBOX_PROCESSED_HASH_SLOT,
+        )?
+        .to_be_bytes::<32>(),
+    );
+    let next_processed_number = read_zone_storage(
+        &mut zone_state,
+        ZONE_INBOX_ADDRESS,
+        ZONE_INBOX_PROCESSED_NUMBER_SLOT,
+    )?
+    .to::<u64>();
+    let withdrawal_queue_hash = B256::from(
+        read_zone_storage(
+            &mut zone_state,
+            ZONE_OUTBOX_ADDRESS,
+            ZONE_OUTBOX_LAST_BATCH_HASH_SLOT,
+        )?
+        .to_be_bytes::<32>(),
+    );
+    let withdrawal_batch_index = read_zone_storage(
+        &mut zone_state,
+        ZONE_OUTBOX_ADDRESS,
+        ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT,
+    )?
+    .to::<u64>();
+    let final_tempo_hash = B256::from(
+        read_zone_storage(
+            &mut zone_state,
+            TEMPO_STATE_ADDRESS,
+            U256::from(tempo_state_slots::TEMPO_BLOCK_HASH),
+        )?
+        .to_be_bytes::<32>(),
+    );
+    let final_tempo_number = read_zone_storage(
+        &mut zone_state,
+        TEMPO_STATE_ADDRESS,
+        U256::from(tempo_state_slots::TEMPO_BLOCK_NUMBER),
+    )?
+    .to::<u64>();
+
+    // The final Tempo checkpoint must be the publicly declared target. When
+    // the anchor is newer, the supplied headers extend that checkpoint to the
+    // public anchor hash.
+    if final_tempo_number != witness.public_inputs.tempo_block_number {
+        return Err(Error::FinalTempoBlockNumberMismatch {
+            expected: witness.public_inputs.tempo_block_number,
+            actual: final_tempo_number,
+        });
+    }
+    validate_tempo_anchor(
+        final_tempo_number,
+        final_tempo_hash,
+        &witness.public_inputs,
+        &witness.tempo_ancestry_headers,
+    )?;
+
+    // The result links the public parent hash to the final carried header and
+    // exposes the state transitions the portal will commit on successful proof
+    // verification.
+    if withdrawal_batch_index != witness.public_inputs.expected_withdrawal_batch_index {
+        return Err(Error::WithdrawalBatchIndexMismatch {
+            expected: witness.public_inputs.expected_withdrawal_batch_index,
+            actual: withdrawal_batch_index,
+        });
+    }
+    Ok(BatchOutput {
+        block_transition: BlockTransition {
+            prevBlockHash: witness.public_inputs.prev_block_hash,
+            nextBlockHash: previous_header.hash(),
+        },
+        deposit_queue_transition: DepositQueueTransition {
+            prevProcessedHash: previous_processed_hash,
+            nextProcessedHash: next_processed_hash,
+            prevDepositNumber: previous_processed_number,
+            nextDepositNumber: next_processed_number,
+        },
+        withdrawal_queue_hash,
+        last_batch_commitment: LastBatchCommitment {
+            withdrawal_batch_index,
+        },
+    })
+}
+
+fn read_zone_storage(
+    zone_state: &mut State<WitnessDatabase>,
+    address: alloy_primitives::Address,
+    slot: U256,
+) -> Result<U256, Error> {
+    match zone_state.storage(address, slot) {
+        Ok(value) => Ok(value),
+        Err(EvmDatabaseError::Database(error)) => Err(error.into()),
+        Err(EvmDatabaseError::Bal(_)) => Err(Error::UnexpectedBalancedAccess { address, slot }),
+    }
+}
+
+fn validate_tempo_anchor(
+    tempo_block_number: u64,
+    tempo_block_hash: B256,
+    public_inputs: &PublicInputs,
+    ancestry_headers: &[alloy_primitives::Bytes],
+) -> Result<(), Error> {
+    if public_inputs.anchor_block_number < tempo_block_number {
+        return Err(Error::AnchorBlockNumberBeforeTempo {
+            tempo_block_number,
+            anchor_block_number: public_inputs.anchor_block_number,
+        });
+    }
+
+    if public_inputs.anchor_block_number == tempo_block_number {
+        if !ancestry_headers.is_empty() {
+            return Err(Error::UnexpectedTempoAncestryHeaders);
+        }
+        if tempo_block_hash != public_inputs.anchor_block_hash {
+            return Err(Error::TempoAnchorHashMismatch {
+                expected: public_inputs.anchor_block_hash,
+                actual: tempo_block_hash,
+            });
+        }
+        return Ok(());
+    }
+
+    let expected_len = (public_inputs.anchor_block_number - tempo_block_number) as usize;
+    if ancestry_headers.len() != expected_len {
+        return Err(Error::TempoAncestryLengthMismatch {
+            expected: expected_len,
+            actual: ancestry_headers.len(),
+        });
+    }
+
+    let mut previous_number = tempo_block_number;
+    let mut previous_hash = tempo_block_hash;
+    for (index, encoded_header) in ancestry_headers.iter().enumerate() {
+        let mut encoded = encoded_header.as_ref();
+        let header = TempoHeader::decode(&mut encoded)
+            .map_err(|_| Error::TempoAncestryHeaderDecoding { index })?;
+        if !encoded.is_empty() {
+            return Err(Error::TempoAncestryHeaderDecoding { index });
+        }
+        let expected_number = previous_number
+            .checked_add(1)
+            .ok_or(Error::TempoAncestryBlockNumberOverflow)?;
+        if header.number() != expected_number {
+            return Err(Error::TempoAncestryHeaderNumberMismatch {
+                index,
+                expected: expected_number,
+                actual: header.number(),
+            });
+        }
+        if header.parent_hash() != previous_hash {
+            return Err(Error::TempoAncestryParentHashMismatch {
+                index,
+                expected: previous_hash,
+                actual: header.parent_hash(),
+            });
+        }
+        previous_number = header.number();
+        previous_hash = keccak256(encoded_header);
+    }
+
+    if previous_hash != public_inputs.anchor_block_hash {
+        return Err(Error::TempoAnchorHashMismatch {
+            expected: public_inputs.anchor_block_hash,
+            actual: previous_hash,
+        });
+    }
+    Ok(())
+}
+
+fn validate_system_inputs(block: &ZoneBlock, index: usize, is_final: bool) -> Result<(), Error> {
+    if block.tempo_header_rlp.is_none()
+        && (!block.deposits.is_empty()
+            || !block.decryptions.is_empty()
+            || !block.enabled_tokens.is_empty())
+    {
+        return Err(Error::TempoInputsWithoutHeader { block_index: index });
+    }
+
+    match (is_final, block.finalize_withdrawal_batch_count) {
+        (true, None) => return Err(Error::MissingFinalization { block_index: index }),
+        (false, Some(_)) => return Err(Error::UnexpectedFinalization { block_index: index }),
+        _ => {}
+    }
+
+    match block.finalize_withdrawal_batch_count {
+        Some(count)
+            if count != U256::from(block.finalize_withdrawal_batch_encrypted_senders.len()) =>
+        {
+            return Err(Error::FinalizationEncryptedSenderCountMismatch {
+                block_index: index,
+                expected: count,
+                actual: block.finalize_withdrawal_batch_encrypted_senders.len(),
+            });
+        }
+        None if !block.finalize_withdrawal_batch_encrypted_senders.is_empty() => {
+            return Err(Error::FinalizationEncryptedSendersWithoutCount { block_index: index });
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Errors emitted by the stateless state transition function.
+#[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// The Zone MPT witness did not prove one of its supplied reads.
+    #[error(transparent)]
+    MptValidation(#[from] StatelessSparseTrieError),
+    /// A read against the provided state witness failed.
+    #[error(transparent)]
+    WitnessDatabase(#[from] WitnessDatabaseError),
+    /// The previous header does not hash to the committed previous block hash.
+    #[error("previous block hash mismatch: expected {expected:?}, got {actual:?}")]
+    PreviousBlockHashMismatch { expected: B256, actual: B256 },
+    /// A batch must execute at least one Zone block.
+    #[error("zone batch contains no blocks")]
+    EmptyZoneBatch,
+    /// The initial Tempo witness header is not the checkpoint stored in the
+    /// parent Zone state.
+    #[error(
+        "initial Tempo checkpoint mismatch: expected ({expected_number}, {expected_hash:?}), got ({actual_number}, {actual_hash:?})"
+    )]
+    InitialTempoCheckpointMismatch {
+        expected_number: u64,
+        expected_hash: B256,
+        actual_number: u64,
+        actual_hash: B256,
+    },
+    /// The first Zone block is not chained to the previous committed header.
+    #[error("zone block parent hash mismatch: expected {expected:?}, got {actual:?}")]
+    BlockParentHashMismatch { expected: B256, actual: B256 },
+    /// A Zone block number does not increment by one.
+    #[error("zone block number mismatch: expected {expected}, got {actual}")]
+    BlockNumberMismatch { expected: u64, actual: u64 },
+    /// Zone block numbering cannot advance past `u64::MAX`.
+    #[error("zone block number overflow")]
+    BlockNumberOverflow,
+    /// A Zone block timestamp regressed from its predecessor.
+    #[error("zone block timestamp regressed: previous {previous}, got {actual}")]
+    BlockTimestampRegression { previous: u64, actual: u64 },
+    /// A Zone block beneficiary is not the public sequencer.
+    #[error("zone block beneficiary mismatch: expected {expected:?}, got {actual:?}")]
+    BlockBeneficiaryMismatch {
+        expected: alloy_primitives::Address,
+        actual: alloy_primitives::Address,
+    },
+    /// Tempo-dependent inputs appeared without a Tempo header import.
+    #[error("zone block {block_index} has Tempo inputs without a Tempo header")]
+    TempoInputsWithoutHeader { block_index: usize },
+    /// An intermediate Zone block attempted withdrawal finalization.
+    #[error("intermediate zone block {block_index} attempted withdrawal finalization")]
+    UnexpectedFinalization { block_index: usize },
+    /// The final Zone block omitted withdrawal finalization.
+    #[error("final zone block {block_index} omitted withdrawal finalization")]
+    MissingFinalization { block_index: usize },
+    /// Finalization sender data was supplied without a finalization count.
+    #[error("zone block {block_index} has finalization senders without a count")]
+    FinalizationEncryptedSendersWithoutCount { block_index: usize },
+    /// Finalization sender data has a different length than its declared count.
+    #[error(
+        "zone block {block_index} finalization sender count mismatch: expected {expected}, got {actual}"
+    )]
+    FinalizationEncryptedSenderCountMismatch {
+        block_index: usize,
+        expected: alloy_primitives::U256,
+        actual: usize,
+    },
+    /// A raw user transaction was not a complete Tempo EIP-2718 envelope.
+    #[error("failed to decode transaction {transaction_index} in zone block {block_index}")]
+    TransactionDecoding {
+        block_index: usize,
+        transaction_index: usize,
+    },
+    /// A system transaction appeared in the user-transaction list.
+    #[error(
+        "system transaction {transaction_index} appeared in zone block {block_index} user transactions"
+    )]
+    SystemTransactionInUserList {
+        block_index: usize,
+        transaction_index: usize,
+    },
+    /// Production block pre-execution changes could not be applied.
+    #[error("failed to apply pre-execution changes in zone block {block_index}")]
+    BlockPreExecution { block_index: usize },
+    /// The ZoneInbox system transaction failed while advancing Tempo.
+    #[error("failed to execute advanceTempo in zone block {block_index}")]
+    AdvanceTempoExecution { block_index: usize },
+    /// The ZoneOutbox system transaction failed while finalizing withdrawals.
+    #[error("failed to execute finalizeWithdrawalBatch in zone block {block_index}")]
+    FinalizeWithdrawalBatchExecution { block_index: usize },
+    /// A decoded user transaction had an invalid sender signature.
+    #[error("invalid signature for transaction {transaction_index} in zone block {block_index}")]
+    TransactionSignature {
+        block_index: usize,
+        transaction_index: usize,
+    },
+    /// The Tempo EVM rejected or failed to execute a user transaction.
+    #[error("failed to execute transaction {transaction_index} in zone block {block_index}")]
+    TransactionExecution {
+        block_index: usize,
+        transaction_index: usize,
+    },
+    /// Production block post-execution changes could not be finalized.
+    #[error("failed to finalize execution of zone block {block_index}")]
+    BlockPostExecution { block_index: usize },
+    /// An internal post-execution state read unexpectedly hit BAL state.
+    #[error("unexpected balanced access while reading {address:?} slot {slot:?}")]
+    UnexpectedBalancedAccess {
+        address: alloy_primitives::Address,
+        slot: U256,
+    },
+    /// The final Tempo checkpoint number differs from the public value.
+    #[error("final Tempo block number mismatch: expected {expected}, got {actual}")]
+    FinalTempoBlockNumberMismatch { expected: u64, actual: u64 },
+    /// The requested anchor predates the proven Tempo checkpoint.
+    #[error("Tempo anchor block {anchor_block_number} precedes checkpoint {tempo_block_number}")]
+    AnchorBlockNumberBeforeTempo {
+        tempo_block_number: u64,
+        anchor_block_number: u64,
+    },
+    /// Direct Tempo anchoring must not include ancestry headers.
+    #[error("direct Tempo anchor included ancestry headers")]
+    UnexpectedTempoAncestryHeaders,
+    /// The supplied ancestry chain has the wrong number of headers.
+    #[error("Tempo ancestry length mismatch: expected {expected}, got {actual}")]
+    TempoAncestryLengthMismatch { expected: usize, actual: usize },
+    /// An ancestry header is not complete Tempo header RLP.
+    #[error("invalid Tempo ancestry header at index {index}")]
+    TempoAncestryHeaderDecoding { index: usize },
+    /// An ancestry header number is not consecutive.
+    #[error("Tempo ancestry header {index} number mismatch: expected {expected}, got {actual}")]
+    TempoAncestryHeaderNumberMismatch {
+        index: usize,
+        expected: u64,
+        actual: u64,
+    },
+    /// Tempo block numbering overflowed while validating ancestry.
+    #[error("Tempo ancestry block number overflow")]
+    TempoAncestryBlockNumberOverflow,
+    /// An ancestry header does not point to the preceding Tempo block.
+    #[error(
+        "Tempo ancestry header {index} parent hash mismatch: expected {expected:?}, got {actual:?}"
+    )]
+    TempoAncestryParentHashMismatch {
+        index: usize,
+        expected: B256,
+        actual: B256,
+    },
+    /// The direct Tempo checkpoint or ancestry chain did not reach the anchor.
+    #[error("Tempo anchor hash mismatch: expected {expected:?}, got {actual:?}")]
+    TempoAnchorHashMismatch { expected: B256, actual: B256 },
+    /// The final withdrawal batch index does not match the public value.
+    #[error("withdrawal batch index mismatch: expected {expected}, got {actual}")]
+    WithdrawalBatchIndexMismatch { expected: u64, actual: u64 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+    use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+    use reth_trie_common::{EMPTY_ROOT_HASH, LeafNode, Nibbles, TrieAccount, TrieNode};
+    use revm::{
+        DatabaseCommit as _,
+        database::{State, states::bundle_state::BundleRetention},
+    };
+    use std::sync::Arc;
+    use tempo_primitives::TempoHeader;
+    use zone_precompiles::L1StorageReader as _;
+
+    fn test_config() -> SpfConfig {
+        SpfConfig::new(
+            Arc::new(zone_chainspec::ZoneChainSpec::from(
+                tempo_chainspec::spec::MODERATO.clone(),
+            )),
+            30_000_000,
+        )
+    }
+
+    fn minimal_batch_witness() -> BatchWitness {
+        let parent_header = ZoneHeader {
+            parent_hash: B256::ZERO,
+            beneficiary: Address::ZERO,
+            state_root: EMPTY_ROOT_HASH,
+            transactions_root: B256::ZERO,
+            receipts_root: B256::ZERO,
+            number: 0,
+            timestamp: 0,
+            protocol_version: 0,
+        };
+
+        BatchWitness {
+            public_inputs: PublicInputs {
+                zone_id: 1,
+                prev_block_hash: parent_header.hash(),
+                tempo_block_number: 2,
+                anchor_block_number: 2,
+                anchor_block_hash: B256::ZERO,
+                expected_withdrawal_batch_index: 3,
+                sequencer: Address::ZERO,
+            },
+            parent_header,
+            zone_blocks: Vec::new(),
+            zone_state_witness: ZoneStateWitness {
+                node_pool: Vec::new(),
+                bytecodes: Vec::new(),
+            },
+            tempo_state_witness: empty_tempo_witness(2),
+            tempo_ancestry_headers: Vec::new(),
+        }
+    }
+
+    fn empty_tempo_witness(number: u64) -> TempoStateWitness {
+        let header = TempoHeader {
+            inner: Header {
+                number,
+                state_root: EMPTY_ROOT_HASH,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(header)),
+            node_pool: Vec::new(),
+        }
+    }
+
+    fn witnessed_account_state(
+        address: Address,
+        nonce: u64,
+        balance: U256,
+        code_hash: B256,
+        bytecodes: Vec<Bytes>,
+        storage: Option<(U256, U256)>,
+    ) -> (B256, ZoneStateWitness) {
+        let mut node_pool = Vec::new();
+        let storage_root = match storage {
+            Some((slot, value)) => {
+                let storage_node = TrieNode::Leaf(LeafNode::new(
+                    Nibbles::unpack(keccak256(slot.to_be_bytes::<32>())),
+                    alloy_rlp::encode(value),
+                ));
+                let encoded = alloy_rlp::encode(&storage_node);
+                let root = keccak256(&encoded);
+                node_pool.push(Bytes::from(encoded));
+                root
+            }
+            None => EMPTY_ROOT_HASH,
+        };
+        let account = TrieAccount {
+            nonce,
+            balance,
+            storage_root,
+            code_hash,
+        };
+        let account_node = TrieNode::Leaf(LeafNode::new(
+            Nibbles::unpack(keccak256(address)),
+            alloy_rlp::encode(account),
+        ));
+        let encoded = alloy_rlp::encode(&account_node);
+        let state_root = keccak256(&encoded);
+        node_pool.push(Bytes::from(encoded));
+
+        (
+            state_root,
+            ZoneStateWitness {
+                node_pool,
+                bytecodes,
+            },
+        )
+    }
+
+    #[test]
+    fn constructs_a_minimal_batch_witness() {
+        let witness = minimal_batch_witness();
+
+        assert_eq!(witness.public_inputs.zone_id, 1);
+        assert!(witness.zone_blocks.is_empty());
+    }
+
+    #[test]
+    fn rejects_an_empty_zone_batch() {
+        let witness = minimal_batch_witness();
+
+        assert_eq!(
+            prove_zone_batch(&test_config(), witness),
+            Err(Error::EmptyZoneBatch)
+        );
+    }
+
+    #[test]
+    fn rejects_a_previous_header_not_bound_to_public_inputs() {
+        let mut witness = minimal_batch_witness();
+        witness.public_inputs.prev_block_hash = B256::ZERO;
+        assert_ne!(witness.parent_header.hash(), B256::ZERO);
+
+        assert_eq!(
+            prove_zone_batch(&test_config(), witness),
+            Err(Error::PreviousBlockHashMismatch {
+                expected: B256::ZERO,
+                actual: minimal_batch_witness().parent_header.hash(),
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_a_zone_witness_without_the_parent_state_root_node() {
+        let database = WitnessDatabase::from_zone_state_witness(
+            ZoneStateWitness {
+                node_pool: Vec::new(),
+                bytecodes: Vec::new(),
+            },
+            B256::repeat_byte(1),
+        );
+
+        assert!(matches!(
+            database,
+            Err(Error::MptValidation(
+                StatelessSparseTrieError::MissingStateRootNode { state_root }
+            )) if state_root == B256::repeat_byte(1)
+        ));
+    }
+
+    #[test]
+    fn resolves_zone_state_reads_from_trie_leaves() {
+        let account = Address::repeat_byte(0x11);
+        let code = Bytes::from([0x60, 0x00]);
+        let code_hash = keccak256(&code);
+        let (state_root, witness) = witnessed_account_state(
+            account,
+            7,
+            U256::from(42),
+            code_hash,
+            vec![code.clone()],
+            Some((U256::from(3), U256::from(9))),
+        );
+        let mut database = WitnessDatabase::from_zone_state_witness(witness, state_root).unwrap();
+
+        let info = database.basic(account).unwrap().unwrap();
+        assert_eq!(info.nonce, 7);
+        assert_eq!(info.balance, U256::from(42));
+        assert_eq!(
+            database
+                .code_by_hash(code_hash)
+                .unwrap()
+                .original_byte_slice(),
+            code.as_ref()
+        );
+        assert_eq!(
+            database.storage(account, U256::from(3)).unwrap(),
+            U256::from(9)
+        );
+    }
+
+    #[test]
+    fn keeps_evm_state_in_the_bundle_overlay() {
+        let address = Address::repeat_byte(0x22);
+        let database = WitnessDatabase::from_zone_state_witness(
+            ZoneStateWitness {
+                node_pool: Vec::new(),
+                bytecodes: Vec::new(),
+            },
+            EMPTY_ROOT_HASH,
+        )
+        .unwrap();
+        let mut state = State::builder()
+            .with_database(database)
+            .with_bundle_update()
+            .build();
+        let mut changes = revm::primitives::AddressMap::default();
+        let mut account = revm::state::Account::default();
+        account.info.balance = U256::from(42);
+        account.mark_touch();
+        changes.insert(address, account);
+
+        state.commit(changes);
+        state.merge_transitions(BundleRetention::PlainState);
+
+        assert_eq!(
+            state.basic(address).unwrap().unwrap().balance,
+            U256::from(42)
+        );
+        assert_eq!(state.database.basic(address).unwrap(), None);
+        assert!(state.bundle_state.state.contains_key(&address));
+
+        let expected_account = TrieAccount {
+            nonce: 0,
+            balance: U256::from(42),
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: alloy_consensus::constants::KECCAK_EMPTY,
+        };
+        let expected_root = keccak256(alloy_rlp::encode(TrieNode::Leaf(LeafNode::new(
+            Nibbles::unpack(keccak256(address)),
+            alloy_rlp::encode(expected_account),
+        ))));
+        assert_eq!(
+            state.database.state_root(&state.bundle_state).unwrap(),
+            expected_root
+        );
+    }
+
+    #[test]
+    fn ignores_stale_nodes_outside_the_bound_state_root() {
+        let address = Address::repeat_byte(0x23);
+        let stale_node = TrieNode::Leaf(LeafNode::new(
+            Nibbles::unpack(keccak256(address)),
+            alloy_rlp::encode(TrieAccount::default()),
+        ));
+        let mut database = WitnessDatabase::from_zone_state_witness(
+            ZoneStateWitness {
+                node_pool: vec![Bytes::from(alloy_rlp::encode(stale_node))],
+                bytecodes: Vec::new(),
+            },
+            EMPTY_ROOT_HASH,
+        )
+        .unwrap();
+
+        assert_eq!(database.basic(address).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_zone_bytecode_absent_from_the_bytecode_pool() {
+        let account = Address::repeat_byte(0x44);
+        let code_hash = keccak256([0x60, 0x00]);
+        let (state_root, witness) =
+            witnessed_account_state(account, 1, U256::from(2), code_hash, Vec::new(), None);
+        let mut database = WitnessDatabase::from_zone_state_witness(witness, state_root).unwrap();
+
+        assert_eq!(
+            database.code_by_hash(code_hash),
+            Err(WitnessDatabaseError::MissingCode { code_hash })
+        );
+    }
+
+    #[test]
+    fn resolves_tempo_state_from_its_initial_header() {
+        let account = Address::repeat_byte(0x33);
+        let slot = B256::repeat_byte(0x07);
+        let database =
+            TempoWitnessDatabase::from_tempo_state_witness(empty_tempo_witness(9)).unwrap();
+
+        assert_eq!(
+            database
+                .for_sequencer(Address::ZERO)
+                .read_l1_storage(account, slot, 9)
+                .unwrap(),
+            B256::ZERO
+        );
+        assert!(
+            database
+                .for_sequencer(Address::ZERO)
+                .read_l1_storage(account, slot, 8)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fully_reveals_the_active_tempo_checkpoint() {
+        let account = Address::repeat_byte(0x34);
+        let slot = U256::from(7);
+        let value = U256::from(11);
+        let (state_root, zone_witness) = witnessed_account_state(
+            account,
+            0,
+            U256::ZERO,
+            keccak256([]),
+            Vec::new(),
+            Some((slot, value)),
+        );
+        let header = TempoHeader {
+            inner: Header {
+                number: 9,
+                state_root,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let database = TempoWitnessDatabase::from_tempo_state_witness(TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(header)),
+            node_pool: zone_witness.node_pool,
+        })
+        .unwrap();
+
+        assert_eq!(
+            database
+                .read_l1_storage(account, B256::from(slot.to_be_bytes::<32>()), 9)
+                .unwrap(),
+            B256::from(value.to_be_bytes::<32>())
+        );
+    }
+
+    #[test]
+    fn prepares_a_zone_block_execution_environment() {
+        let witness = minimal_batch_witness();
+        let block = ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash(),
+            timestamp: 0,
+            beneficiary: witness.public_inputs.sequencer,
+            protocol_version: 0,
+            tempo_header_rlp: None,
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: Some(U256::ZERO),
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        };
+
+        let env =
+            execution::evm::ZoneEvmEnv::new(&test_config(), witness.public_inputs.zone_id, &block);
+
+        assert_eq!(
+            env.cfg.chain_id,
+            zone_primitives::constants::zone_chain_id(1)
+        );
+        assert_eq!(env.block.number, U256::from(1));
+        assert_eq!(env.block.beneficiary, Address::ZERO);
+        assert_eq!(env.block.timestamp, U256::ZERO);
+    }
+
+    #[test]
+    fn rejects_a_final_block_without_finalization() {
+        let witness = minimal_batch_witness();
+        let block = ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash(),
+            timestamp: 0,
+            beneficiary: witness.public_inputs.sequencer,
+            protocol_version: 0,
+            tempo_header_rlp: None,
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: None,
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: Vec::new(),
+        };
+
+        assert_eq!(
+            validate_system_inputs(&block, 0, true),
+            Err(Error::MissingFinalization { block_index: 0 })
+        );
+    }
+
+    #[test]
+    fn binds_the_initial_tempo_checkpoint_before_block_execution() {
+        let mut witness = minimal_batch_witness();
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash(),
+            timestamp: 0,
+            beneficiary: witness.public_inputs.sequencer,
+            protocol_version: 0,
+            tempo_header_rlp: None,
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: Some(U256::ZERO),
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: vec![Bytes::from([0x01])],
+        });
+
+        assert!(matches!(
+            prove_zone_batch(&test_config(), witness),
+            Err(Error::InitialTempoCheckpointMismatch {
+                expected_number: 0,
+                expected_hash: B256::ZERO,
+                actual_number: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn initial_tempo_checkpoint_binding_precedes_header_import_validation() {
+        let mut witness = minimal_batch_witness();
+        witness.zone_blocks.push(ZoneBlock {
+            number: 1,
+            parent_hash: witness.parent_header.hash(),
+            timestamp: 0,
+            beneficiary: witness.public_inputs.sequencer,
+            protocol_version: 0,
+            tempo_header_rlp: Some(Bytes::from([0x01])),
+            deposits: Vec::new(),
+            decryptions: Vec::new(),
+            enabled_tokens: Vec::new(),
+            finalize_withdrawal_batch_count: Some(U256::ZERO),
+            finalize_withdrawal_batch_encrypted_senders: Vec::new(),
+            transactions: vec![Bytes::from([0x01])],
+        });
+
+        assert!(matches!(
+            prove_zone_batch(&test_config(), witness),
+            Err(Error::InitialTempoCheckpointMismatch {
+                expected_number: 0,
+                expected_hash: B256::ZERO,
+                actual_number: 2,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn validates_a_tempo_ancestry_anchor() {
+        let checkpoint = TempoHeader {
+            inner: Header {
+                number: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let checkpoint_hash = keccak256(alloy_rlp::encode(checkpoint));
+        let anchor = TempoHeader {
+            inner: Header {
+                parent_hash: checkpoint_hash,
+                number: 8,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let anchor_rlp = Bytes::from(alloy_rlp::encode(anchor));
+        let anchor_hash = keccak256(&anchor_rlp);
+        let mut public_inputs = minimal_batch_witness().public_inputs;
+        public_inputs.tempo_block_number = 7;
+        public_inputs.anchor_block_number = 8;
+        public_inputs.anchor_block_hash = anchor_hash;
+
+        assert_eq!(
+            validate_tempo_anchor(7, checkpoint_hash, &public_inputs, &[anchor_rlp]),
+            Ok(())
+        );
+    }
+}

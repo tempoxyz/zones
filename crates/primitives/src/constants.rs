@@ -79,6 +79,13 @@ pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
 /// ZoneInbox storage slot 0: `processedDepositQueueHash` (bytes32).
 pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
 
+/// ZoneInbox storage slot 1: `processedDepositNumber` (uint64, lower 8 bytes).
+pub const ZONE_INBOX_PROCESSED_NUMBER_SLOT: U256 = {
+    let mut le = [0u8; 32];
+    le[0] = 1;
+    U256::from_le_bytes(le)
+};
+
 /// ZoneOutbox storage slot 1: `_lastBatch.withdrawalQueueHash` (bytes32).
 ///
 /// Slot 0 is packed `(tempoGasRate, nextWithdrawalIndex, withdrawalBatchIndex)`.
