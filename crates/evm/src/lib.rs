@@ -12,8 +12,8 @@ pub mod precompiles;
 mod tx_context;
 mod zone_evm;
 
-pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 pub use executor::ZoneBlockExecutor;
+pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
     precompiles::{
