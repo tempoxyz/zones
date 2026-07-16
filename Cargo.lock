@@ -13438,6 +13438,7 @@ dependencies = [
  "eyre",
  "futures",
  "k256",
+ "lru 0.16.4",
  "metrics",
  "parking_lot",
  "reth-metrics",

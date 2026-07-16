@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
 use alloy_consensus::Transaction;
@@ -34,6 +34,7 @@ use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
+use lru::LruCache;
 use parking_lot::RwLock;
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tracing::{info, instrument, warn};
@@ -180,9 +181,7 @@ pub struct BatchSubmitter {
     /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
-    ancestry_header_cache: RwLock<BTreeMap<u64, CachedAncestryHeader>>,
-    /// Hard entry limit for [`Self::ancestry_header_cache`].
-    ancestry_header_cache_capacity: usize,
+    ancestry_header_cache: RwLock<LruCache<u64, CachedAncestryHeader>>,
 }
 
 /// One validated L1 header retained for ancestry proof construction.
@@ -225,8 +224,9 @@ impl BatchSubmitter {
             genesis_tempo_block_number,
             l1_fetch_concurrency: 16,
             anchor_config,
-            ancestry_header_cache: RwLock::new(BTreeMap::new()),
-            ancestry_header_cache_capacity: DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
+            ancestry_header_cache: RwLock::new(LruCache::new(
+                NonZeroUsize::new(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY).unwrap(),
+            )),
         }
     }
 
@@ -438,11 +438,18 @@ impl BatchSubmitter {
             return Ok(Vec::new());
         }
 
-        let missing = {
-            let cache = self.ancestry_header_cache.read();
-            (from..=to)
-                .filter(|block_number| !cache.contains_key(block_number))
-                .collect::<Vec<_>>()
+        let (mut resolved, missing) = {
+            let mut cache = self.ancestry_header_cache.write();
+            let mut resolved = BTreeMap::new();
+            let mut missing = Vec::new();
+            for block_number in from..=to {
+                if let Some(header) = cache.get(&block_number) {
+                    resolved.insert(block_number, header.clone());
+                } else {
+                    missing.push(block_number);
+                }
+            }
+            (resolved, missing)
         };
         let cache_hits = (to - from + 1) as usize - missing.len();
 
@@ -477,13 +484,6 @@ impl BatchSubmitter {
             ));
         }
 
-        let mut resolved = {
-            let cache = self.ancestry_header_cache.read();
-            cache
-                .range(from..=to)
-                .map(|(block_number, header)| (*block_number, header.clone()))
-                .collect::<BTreeMap<_, _>>()
-        };
         for (block_number, header) in new_headers {
             if let Some(existing) = resolved.get(&block_number)
                 && existing.hash != header.hash
@@ -522,7 +522,7 @@ impl BatchSubmitter {
 
         let mut cache = self.ancestry_header_cache.write();
         for (block_number, header) in resolved {
-            if let Some(existing) = cache.get(&block_number)
+            if let Some(existing) = cache.peek(&block_number)
                 && existing.hash != header.hash
             {
                 return Err(eyre::eyre!(
@@ -532,14 +532,7 @@ impl BatchSubmitter {
                     header.hash
                 ));
             }
-            cache.insert(block_number, header);
-        }
-
-        // Ordered settlement advances the lower bound monotonically, so the
-        // lowest block numbers are also the least recently useful entries.
-        cache.retain(|block_number, _| *block_number >= from);
-        while cache.len() > self.ancestry_header_cache_capacity {
-            cache.pop_first();
+            cache.put(block_number, header);
         }
 
         info!(
@@ -1228,8 +1221,8 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let mut submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
-        submitter.ancestry_header_cache_capacity = 4;
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        *submitter.ancestry_header_cache.write() = LruCache::new(NonZeroUsize::new(4).unwrap());
 
         let mut parent_hash = B256::ZERO;
         let mut headers = Vec::new();
