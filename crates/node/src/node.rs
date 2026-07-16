@@ -5,7 +5,7 @@
 
 use crate::{
     ZoneEngine,
-    replication::{broadcast_persisted_blocks, import_leader_blocks},
+    replication::{broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
 use alloy_primitives::Address;
@@ -557,25 +557,17 @@ where
             events,
         } = handle.into_parts();
 
-        match role {
-            Role::Leader => {
-                task_executor.spawn_critical_task(
-                    "zone-p2p-block-broadcast",
-                    broadcast_persisted_blocks(provider, commands),
-                );
-                // Leaders do not receive block messages. Dropping this receiver is harmless: the
-                // runtime only emits BlockReceived on followers.
-                drop(events);
-            }
-            Role::Follower => {
-                // Keep the command sender alive so the runtime's command loop remains available
-                // for later ACK/backfill commands even though followers send nothing in this PR.
-                task_executor.spawn_critical_task(
-                    "zone-p2p-block-import",
-                    import_leader_blocks(provider, engine, events, commands),
-                );
-            }
+        if role == Role::Leader {
+            // Only a leader can build + broadcast blocks
+            task_executor.spawn_critical_task(
+                "zone-p2p-block-broadcast",
+                broadcast_persisted_blocks(provider.clone(), commands.clone()),
+            );
         }
+        task_executor.spawn_critical_task(
+            "zone-p2p-block-sync",
+            run_block_sync(provider, engine, events, commands),
+        );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",

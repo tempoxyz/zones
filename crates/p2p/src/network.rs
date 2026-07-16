@@ -11,6 +11,12 @@ use crate::ZoneManifest;
 
 /// Leader-to-follower sealed block replication channel.
 pub(crate) const BLOCK_CHANNEL: u64 = 0;
+/// Catch-up range requests sent by a lagging node to eligible peers.
+pub(crate) const BACKFILL_REQUEST_CHANNEL: u64 = 1;
+/// Sealed blocks returned for a catch-up request.
+pub(crate) const BACKFILL_BLOCK_CHANNEL: u64 = 2;
+/// Snapshot tip returned after all available blocks in one response page.
+pub(crate) const BACKFILL_COMPLETE_CHANNEL: u64 = 3;
 pub(crate) const BLOCK_BACKLOG: usize = 128;
 
 // At 30M gas, calldata is bounded below 7.5 MiB; leave headroom for block overhead.
