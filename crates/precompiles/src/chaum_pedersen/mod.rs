@@ -12,7 +12,6 @@ use alloc::vec::Vec;
 
 mod dispatch;
 
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
@@ -21,8 +20,6 @@ use k256::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
-use revm::precompile::PrecompileId;
-
 /// Chaum-Pedersen Verify precompile address on Zone L2.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
     address!("0x1C00000000000000000000000000000000000100");
@@ -65,42 +62,6 @@ pub use IChaumPedersenVerify::verifyProofCall;
 /// - `c' = keccak256(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
 /// - Check: `c == c'`
 pub struct ChaumPedersenVerify;
-
-impl ChaumPedersenVerify {
-    /// Wrap this precompile in a [`DynPrecompile`] with the Tempo storage context
-    /// required by the upstream dispatch macro.
-    pub fn create(
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> DynPrecompile {
-        use tempo_precompiles::{
-            Precompile as _,
-            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-        };
-
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-        DynPrecompile::new_stateful(
-            PrecompileId::Custom("ChaumPedersenVerify".into()),
-            move |input| {
-                let mut storage = EvmPrecompileStorageProvider::new(
-                    input.internals,
-                    input.gas,
-                    input.reservoir,
-                    spec,
-                    amsterdam_eip8037_enabled,
-                    input.is_static,
-                    gas_params.clone(),
-                );
-
-                StorageCtx::enter(&mut storage, || {
-                    let mut precompile = Self;
-                    precompile.call(input.data, input.caller)
-                })
-            },
-        )
-    }
-}
 
 /// Recover a secp256k1 affine point from compressed form (x coordinate + y parity).
 ///

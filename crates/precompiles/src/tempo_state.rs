@@ -7,16 +7,12 @@ use alloc::{format, vec::Vec};
 
 use crate::storage::L1StorageReader;
 use alloy_consensus::BlockHeader;
-use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    DelegateCallNotAllowed, charge_input_cost, dispatch,
-    error::TempoPrecompileError,
-    storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
-    view,
+    charge_input_cost, dispatch, error::TempoPrecompileError, storage::Handler, view,
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
@@ -178,41 +174,8 @@ impl TempoState {
         ))
     }
 
-    /// Wraps this precompile for registration in the zone EVM.
-    pub fn create<P: L1StorageReader>(
-        provider: P,
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> DynPrecompile {
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-
-        DynPrecompile::new_stateful(PrecompileId::Custom("TempoState".into()), move |input| {
-            if !input.is_direct_call() {
-                return Ok(PrecompileOutput::revert(
-                    0,
-                    SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-                    input.reservoir,
-                ));
-            }
-
-            let mut storage = EvmPrecompileStorageProvider::new(
-                input.internals,
-                input.gas,
-                input.reservoir,
-                spec,
-                amsterdam_eip8037_enabled,
-                input.is_static,
-                gas_params.clone(),
-            );
-
-            StorageCtx::enter(&mut storage, || {
-                Self::new().call_with_provider(&provider, input.data, input.caller)
-            })
-        })
-    }
-
-    fn call_with_provider<P: L1StorageReader>(
+    /// Dispatch a `TempoState` call using `provider` for anchored Tempo storage reads.
+    pub(crate) fn call_with_provider<P: L1StorageReader>(
         &mut self,
         provider: &P,
         calldata: &[u8],
@@ -245,15 +208,14 @@ impl TempoState {
 mod tests {
     use super::*;
 
-    use crate::test_utils::{MockL1Reader, TestContext, test_context, test_storage_provider};
-    use alloy_evm::{
-        EvmInternals,
-        precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
+    use crate::test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_storage_provider,
     };
-    use alloy_primitives::{U256, address, b256};
+    use alloy_evm::precompiles::DynPrecompile;
+    use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
-    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+    use tempo_precompiles::storage::StorageCtx;
 
     fn encode_header(header: &TempoHeader) -> Bytes {
         let mut encoded = Vec::new();
@@ -261,7 +223,7 @@ mod tests {
         encoded.into()
     }
 
-    fn initialize(ctx: &mut TestContext, header: &[u8]) -> TestResult {
+    fn initialize(ctx: &mut TestContext, header: &[u8]) -> eyre::Result<()> {
         let mut storage = test_storage_provider(ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || TempoState::new().initialize(header))?;
@@ -275,37 +237,15 @@ mod tests {
         calldata: Bytes,
         is_static: bool,
     ) -> PrecompileResult {
-        call_with_bytecode_address(
+        call_precompile(
             ctx,
             precompile,
             caller,
-            calldata,
+            &calldata,
+            u64::MAX,
             is_static,
             TEMPO_STATE_ADDRESS,
-        )
-    }
-
-    fn call_with_bytecode_address(
-        ctx: &mut TestContext,
-        precompile: &DynPrecompile,
-        caller: Address,
-        calldata: Bytes,
-        is_static: bool,
-        bytecode_address: Address,
-    ) -> PrecompileResult {
-        AlloyEvmPrecompile::call(
-            precompile,
-            PrecompileInput {
-                data: &calldata,
-                gas: u64::MAX,
-                reservoir: 0,
-                caller,
-                value: U256::ZERO,
-                target_address: TEMPO_STATE_ADDRESS,
-                is_static,
-                bytecode_address,
-                internals: EvmInternals::from_context(ctx),
-            },
+            TEMPO_STATE_ADDRESS,
         )
     }
 
@@ -350,7 +290,7 @@ mod tests {
         precompile: &DynPrecompile,
         expected_hash: B256,
         expected_number: u64,
-    ) -> TestResult {
+    ) -> eyre::Result<()> {
         let block_hash = call(
             ctx,
             precompile,
@@ -378,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_sets_checkpoint() -> TestResult {
+    fn initialize_sets_checkpoint() -> eyre::Result<()> {
         let header = child_header(B256::repeat_byte(0xaa), 42);
         let header_rlp = encode_header(&header);
         let mut ctx = test_context();
@@ -391,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_updates_checkpoint() -> TestResult {
+    fn finalize_tempo_updates_checkpoint() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -417,7 +357,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_for_non_inbox_caller() -> TestResult {
+    fn finalize_tempo_reverts_for_non_inbox_caller() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -441,28 +381,35 @@ mod tests {
     }
 
     #[test]
-    fn delegate_call_reverts() -> TestResult {
+    fn delegate_call_reverts() -> eyre::Result<()> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
 
         let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
-        let output = call_with_bytecode_address(
+        let calldata = TempoStateAbi::tempoBlockHashCall {}.abi_encode();
+        let output = call_precompile(
             &mut ctx,
             &precompile,
             Address::ZERO,
-            TempoStateAbi::tempoBlockHashCall {}.abi_encode().into(),
+            &calldata,
+            u64::MAX,
             true,
+            TEMPO_STATE_ADDRESS,
             address!("0x000000000000000000000000000000000000dEaD"),
         )?;
 
         assert!(output.is_revert());
+        assert_eq!(
+            output.gas_used,
+            tempo_precompiles::input_cost(calldata.len())
+        );
 
         Ok(())
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_static_call() -> TestResult {
+    fn finalize_tempo_reverts_on_static_call() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -486,7 +433,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_invalid_rlp() -> TestResult {
+    fn finalize_tempo_reverts_on_invalid_rlp() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -509,7 +456,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_trailing_header_bytes() -> TestResult {
+    fn finalize_tempo_reverts_on_trailing_header_bytes() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -535,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_invalid_parent_hash() -> TestResult {
+    fn finalize_tempo_reverts_on_invalid_parent_hash() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -559,7 +506,7 @@ mod tests {
     }
 
     #[test]
-    fn finalize_tempo_reverts_on_invalid_block_number() -> TestResult {
+    fn finalize_tempo_reverts_on_invalid_block_number() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
         let genesis_hash = keccak256(&genesis_rlp);
@@ -583,7 +530,7 @@ mod tests {
     }
 
     #[test]
-    fn read_tempo_storage_slot_is_system_only() -> TestResult {
+    fn read_tempo_storage_slot_is_system_only() -> eyre::Result<()> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
@@ -616,7 +563,7 @@ mod tests {
     }
 
     #[test]
-    fn read_tempo_storage_slots_returns_batch() -> TestResult {
+    fn read_tempo_storage_slots_returns_batch() -> eyre::Result<()> {
         let genesis_rlp = encode_header(&TempoHeader::default());
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
