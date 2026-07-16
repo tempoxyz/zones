@@ -277,34 +277,25 @@ impl BatchSubmitter {
             nextDepositNumber: batch.next_deposit_number,
         };
 
-        let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
+        let ResolvedAnchor {
+            current_l1_block,
+            mode: anchor_mode,
+        } = self.resolve_anchor_mode(batch.tempo_block_number).await?;
         let recent_tempo_block_number = anchor_mode.recent_block_number();
-        let (current_l1_block, portal_block_hash) = tokio::join!(
-            self.l1_provider.get_block_number(),
-            self.read_portal_block_hash(),
-        );
-        let current_l1_block = current_l1_block?;
-        let portal_block_hash = portal_block_hash?;
 
         info!(
-            ?anchor_mode,
+            anchor_mode = anchor_mode.name(),
             recent_tempo_block_number,
             current_l1_block,
-            portal_block_hash = %portal_block_hash,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
             "Preparing submitBatch to ZonePortal on L1"
         );
 
-        if portal_block_hash != batch.prev_block_hash {
-            warn!(
-                portal_block_hash = %portal_block_hash,
-                batch_prev_block_hash = %batch.prev_block_hash,
-                "Portal block hash does not match batch prev hash before submitBatch"
-            );
-        }
-
-        info!(?anchor_mode, "Submitting batch to ZonePortal on L1");
+        info!(
+            anchor_mode = anchor_mode.name(),
+            recent_tempo_block_number, "Submitting batch to ZonePortal on L1"
+        );
 
         let pending = self
             .portal
@@ -388,7 +379,7 @@ impl BatchSubmitter {
     /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
     ///   behind the configured safety margin is used as anchor. Ancestry headers
     ///   are collected and validated for future prover integration.
-    async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
+    async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<ResolvedAnchor> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
         if tempo_block_number >= current_l1_block {
@@ -401,7 +392,10 @@ impl BatchSubmitter {
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
         if gap < self.anchor_config.effective_window() {
-            return Ok(AnchorMode::Direct);
+            return Ok(ResolvedAnchor {
+                current_l1_block,
+                mode: AnchorMode::Direct,
+            });
         }
 
         let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
@@ -419,9 +413,12 @@ impl BatchSubmitter {
             "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
         );
 
-        Ok(AnchorMode::Ancestry {
-            anchor_block,
-            ancestry_headers,
+        Ok(ResolvedAnchor {
+            current_l1_block,
+            mode: AnchorMode::Ancestry {
+                anchor_block,
+                ancestry_headers,
+            },
         })
     }
 
@@ -438,20 +435,22 @@ impl BatchSubmitter {
             return Ok(Vec::new());
         }
 
+        let range_len = (to - from + 1) as usize;
         let (mut resolved, missing) = {
-            let mut cache = self.ancestry_header_cache.write();
-            let mut resolved = BTreeMap::new();
+            let cache = self.ancestry_header_cache.read();
+            let mut resolved = Vec::with_capacity(range_len);
             let mut missing = Vec::new();
             for block_number in from..=to {
-                if let Some(header) = cache.get(&block_number) {
-                    resolved.insert(block_number, header.clone());
+                if let Some(header) = cache.peek(&block_number) {
+                    resolved.push(Some(header.clone()));
                 } else {
+                    resolved.push(None);
                     missing.push(block_number);
                 }
             }
             (resolved, missing)
         };
-        let cache_hits = (to - from + 1) as usize - missing.len();
+        let cache_hits = range_len - missing.len();
 
         let mut fetched = stream::iter(missing.iter().copied())
             .map(|block_number| {
@@ -466,40 +465,28 @@ impl BatchSubmitter {
                     Ok::<_, eyre::Report>((block_number, header.inner.inner))
                 }
             })
-            .buffered(self.l1_fetch_concurrency);
-
-        let mut new_headers = Vec::with_capacity(missing.len());
+            .buffer_unordered(self.l1_fetch_concurrency);
 
         while let Some((block_number, header)) = fetched.try_next().await? {
             let mut buf = Vec::with_capacity(600);
             header.encode(&mut buf);
             let header_hash = alloy_primitives::keccak256(&buf);
-            new_headers.push((
-                block_number,
-                CachedAncestryHeader {
-                    parent_hash: header.inner.parent_hash,
-                    hash: header_hash,
-                    encoded: Bytes::from(buf),
-                },
-            ));
-        }
-
-        for (block_number, header) in new_headers {
-            if let Some(existing) = resolved.get(&block_number)
-                && existing.hash != header.hash
-            {
+            let index = (block_number - from) as usize;
+            let cached_header = CachedAncestryHeader {
+                parent_hash: header.inner.parent_hash,
+                hash: header_hash,
+                encoded: Bytes::from(buf),
+            };
+            if resolved[index].replace(cached_header).is_some() {
                 return Err(eyre::eyre!(
-                    "conflicting L1 header at cached block {block_number}: \
-                     cached={}, fetched={}",
-                    existing.hash,
-                    header.hash
+                    "received duplicate L1 header for block {block_number}"
                 ));
             }
-            resolved.insert(block_number, header);
         }
 
         let base_hash = resolved
-            .get(&from)
+            .first()
+            .and_then(Option::as_ref)
             .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?
             .hash;
         let mut prev_hash = base_hash;
@@ -507,7 +494,8 @@ impl BatchSubmitter {
 
         for block_number in (from + 1)..=to {
             let header = resolved
-                .get(&block_number)
+                .get((block_number - from) as usize)
+                .and_then(Option::as_ref)
                 .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
             if header.parent_hash != prev_hash {
                 return Err(eyre::eyre!(
@@ -521,16 +509,21 @@ impl BatchSubmitter {
         }
 
         let mut cache = self.ancestry_header_cache.write();
-        for (block_number, header) in resolved {
-            if let Some(existing) = cache.get(&block_number)
-                && existing.hash != header.hash
-            {
-                return Err(eyre::eyre!(
-                    "conflicting L1 header at cached block {block_number}: \
-                     cached={}, fetched={}",
-                    existing.hash,
-                    header.hash
-                ));
+        for block_number in missing.iter().copied() {
+            let index = (block_number - from) as usize;
+            let header = resolved[index]
+                .take()
+                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+            if let Some(existing) = cache.peek(&block_number) {
+                if existing.hash != header.hash {
+                    return Err(eyre::eyre!(
+                        "conflicting L1 header at cached block {block_number}: \
+                         cached={}, fetched={}",
+                        existing.hash,
+                        header.hash
+                    ));
+                }
+                continue;
             }
             if !cache.insert(block_number, header) {
                 return Err(eyre::eyre!(
@@ -1114,7 +1107,6 @@ fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
 /// `submit_batch` can use ancestry mode when the batch-final block's
 /// `tempoBlockNumber` has fallen outside the configured direct-submission
 /// window.
-#[derive(Debug)]
 #[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
 enum AnchorMode {
     /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
@@ -1134,6 +1126,14 @@ enum AnchorMode {
 }
 
 impl AnchorMode {
+    /// Stable, payload-free name suitable for structured logging.
+    const fn name(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::Ancestry { .. } => "ancestry",
+        }
+    }
+
     /// Returns the `recentTempoBlockNumber` argument for `submitBatch`:
     /// `0` for direct mode, or the anchor block number for ancestry mode.
     const fn recent_block_number(&self) -> u64 {
@@ -1142,6 +1142,15 @@ impl AnchorMode {
             Self::Ancestry { anchor_block, .. } => *anchor_block,
         }
     }
+}
+
+/// Anchor decision together with the L1 tip used to make it.
+///
+/// Carrying the observed tip into submission avoids immediately repeating the
+/// same `eth_blockNumber` request solely for logging.
+struct ResolvedAnchor {
+    current_l1_block: u64,
+    mode: AnchorMode,
 }
 
 /// Zone L2 state read at a specific block, used to populate [`BatchData`].
@@ -1240,7 +1249,11 @@ mod tests {
             asserter.push_success(header);
         }
         let first = submitter.fetch_ancestry_headers(10, 14).await.unwrap();
-        assert_eq!(first.len(), 4);
+        let expected_first = headers[1..5]
+            .iter()
+            .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
+            .collect::<Vec<_>>();
+        assert_eq!(first, expected_first);
         assert_eq!(submitter.ancestry_header_cache.read().len(), 4);
 
         // The overlapping range reuses blocks 11..=14 and fetches only block 15.
@@ -1248,7 +1261,72 @@ mod tests {
         // additional response queued and the test fails.
         asserter.push_success(&headers[5]);
         let second = submitter.fetch_ancestry_headers(11, 15).await.unwrap();
-        assert_eq!(second.len(), 4);
+        let expected_second = headers[2..6]
+            .iter()
+            .map(|header| Bytes::from(alloy_rlp::encode(&header.inner.inner)))
+            .collect::<Vec<_>>();
+        assert_eq!(second, expected_second);
+
+        let cache = submitter.ancestry_header_cache.read();
+        assert!(cache.peek(&11).is_none());
+        for block_number in 12..=15 {
+            assert!(cache.peek(&block_number).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn ancestry_header_cache_hits_do_not_rewrite_entries() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
+
+        let mut parent_hash = B256::ZERO;
+        for number in 10..=13 {
+            let (header, hash) = mock_l1_header(number, parent_hash);
+            asserter.push_success(&header);
+            parent_hash = hash;
+        }
+
+        submitter.fetch_ancestry_headers(10, 13).await.unwrap();
+        assert_eq!(
+            submitter
+                .ancestry_header_cache
+                .read()
+                .peek_oldest()
+                .map(|(block_number, _)| *block_number),
+            Some(10)
+        );
+
+        // Resolving a fully cached range must not promote or replace every hit.
+        submitter.fetch_ancestry_headers(10, 12).await.unwrap();
+        assert_eq!(
+            submitter
+                .ancestry_header_cache
+                .read()
+                .peek_oldest()
+                .map(|(block_number, _)| *block_number),
+            Some(10)
+        );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn anchor_resolution_carries_observed_l1_tip() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+
+        asserter.push_success(&100_u64);
+        let resolution = submitter.resolve_anchor_mode(99).await.unwrap();
+
+        assert_eq!(resolution.current_l1_block, 100);
+        assert!(matches!(resolution.mode, AnchorMode::Direct));
+        assert!(asserter.read_q().is_empty());
     }
 
     #[test]
