@@ -500,7 +500,7 @@ contract ZonePortalTest is BaseTest {
         address[] memory signers = _activateSequencerSet(2);
 
         vm.prank(admin);
-        vm.expectRevert(IZonePortal.SequencerSetUnchanged.selector);
+        vm.expectRevert(IZonePortal.SequencerConfigurationUnchanged.selector);
         portal.setSequencerSet(signers, 2);
 
         address removed = signers[2];
@@ -552,6 +552,8 @@ contract ZonePortalTest is BaseTest {
         vm.prank(admin);
         portal.setSequencerSet(signers, 3);
 
+        assertEq(portal.sequencerSetVersion(), 2);
+        assertEq(portal.sequencerQuorum(), 3);
         assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
     }
 

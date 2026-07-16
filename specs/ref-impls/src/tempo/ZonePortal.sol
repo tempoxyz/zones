@@ -74,9 +74,6 @@ contract ZonePortal is IZonePortal {
     bytes32 internal constant ZONE_BLOCK_ATTESTATION_TYPEHASH = keccak256(
         "ZoneBlockAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,bytes32 parentBlockHash,bytes32 zoneBlockHash)"
     );
-    uint256 internal constant SECP256K1N_DIV_2 =
-        0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
-
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -265,15 +262,19 @@ contract ZonePortal is IZonePortal {
             previous = signer;
         }
 
-        if (newQuorum == sequencerQuorum && length == _sequencers.length) {
-            bool unchanged = true;
+        bool membersUnchanged = length == _sequencers.length;
+        if (membersUnchanged) {
             for (uint256 i = 0; i < length; ++i) {
                 if (newSequencers[i] != _sequencers[i]) {
-                    unchanged = false;
+                    membersUnchanged = false;
                     break;
                 }
             }
-            if (unchanged) revert SequencerSetUnchanged();
+        }
+        // Quorum is part of the versioned configuration: changing only the threshold is valid
+        // and must invalidate certificates collected under the previous version.
+        if (membersUnchanged && newQuorum == sequencerQuorum) {
+            revert SequencerConfigurationUnchanged();
         }
 
         for (uint256 i = 0; i < _sequencers.length; ++i) {
@@ -1160,21 +1161,16 @@ contract ZonePortal is IZonePortal {
 
         for (uint256 i = 0; i < signatures.length; ++i) {
             bytes memory signature = signatures[i];
-            if (signature.length != 65) return false;
-
-            bytes32 r = bytes32(0);
-            bytes32 s = bytes32(0);
-            uint8 v = 0;
-            assembly ("memory-safe") {
-                r := mload(add(signature, 0x20))
-                s := mload(add(signature, 0x40))
-                v := byte(0, mload(add(signature, 0x60)))
+            address signer;
+            // The shared TIP-1020 verifier owns signature-format and canonicality checks.
+            // Convert its reverts into `false` so the public verifier remains non-reverting.
+            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signature) returns (
+                address recoveredSigner
+            ) {
+                signer = recoveredSigner;
+            } catch {
+                return false;
             }
-            if (v < 27) v += 27;
-            if (v != 27 && v != 28) return false;
-            if (uint256(s) == 0 || uint256(s) > SECP256K1N_DIV_2) return false;
-
-            address signer = ecrecover(digest, v, r, s);
             if (signer == address(0) || !isSequencer[signer]) return false;
             for (uint256 j = 0; j < i; ++j) {
                 if (recovered[j] == signer) return false;
