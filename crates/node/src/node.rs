@@ -5,17 +5,13 @@
 
 use crate::{
     ZoneEngine,
+    replication::{broadcast_persisted_blocks, import_leader_blocks},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
-use alloy_consensus::BlockHeader as _;
 use alloy_primitives::Address;
 use alloy_provider::Provider as _;
-use alloy_rlp::Decodable as _;
-use alloy_rpc_types_engine::ForkchoiceState;
 use alloy_signer_local::PrivateKeySigner;
-use futures::StreamExt as _;
 use k256::SecretKey;
-use reth_chain_state::PersistedBlockSubscriptions;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
@@ -33,13 +29,11 @@ use reth_node_builder::{
         PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{
-    BlockNumReader, BlockReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory,
-};
+use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{
     Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
@@ -52,7 +46,7 @@ use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
 use tempo_primitives::{
-    self as primitives, Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
+    self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
@@ -64,7 +58,6 @@ use tempo_transaction_pool::{
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -75,7 +68,7 @@ use zone_l1::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
-use zone_p2p::{P2pCommand, P2pConfig, P2pEvent, P2pNetworkId, Role, spawn_p2p};
+use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
@@ -106,178 +99,6 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 struct SequencerWithdrawalRevealEncryptor {
     encryption_key: Arc<SecretKey>,
     zone_id: u32,
-}
-
-/// Broadcast every newly persisted leader block in canonical order.
-async fn broadcast_persisted_blocks<P>(provider: P, commands: mpsc::Sender<P2pCommand>)
-where
-    P: PersistedBlockSubscriptions + BlockReader<Block = Block> + Clone + Send + Sync + 'static,
-{
-    // Subscribe before reading the database height so persistence cannot race task startup.
-    let mut persisted = provider.persisted_block_stream();
-    let mut last_broadcast = match provider.last_block_number() {
-        Ok(number) => number,
-        Err(err) => {
-            tracing::error!(target: "zone::p2p", %err, "Failed reading persisted zone head");
-            return;
-        }
-    };
-
-    while let Some(persisted_tip) = persisted.next().await {
-        if persisted_tip.number < last_broadcast {
-            tracing::error!(
-                target: "zone::p2p",
-                persisted = persisted_tip.number,
-                last_broadcast,
-                "Persisted zone head moved backwards"
-            );
-            return;
-        }
-
-        for number in last_broadcast.saturating_add(1)..=persisted_tip.number {
-            let block = match provider.block_by_number(number) {
-                Ok(Some(block)) => block,
-                Ok(None) => {
-                    tracing::error!(target: "zone::p2p", number, "Persisted zone block is missing");
-                    return;
-                }
-                Err(err) => {
-                    tracing::error!(target: "zone::p2p", %err, number, "Failed reading persisted zone block");
-                    return;
-                }
-            };
-            let sealed = SealedBlock::seal_slow(block);
-            let number = sealed.number();
-            let hash = sealed.hash();
-            if number == persisted_tip.number && hash != persisted_tip.hash {
-                tracing::error!(
-                    target: "zone::p2p",
-                    number,
-                    expected = %persisted_tip.hash,
-                    actual = %hash,
-                    "Persisted zone block hash does not match notification"
-                );
-                return;
-            }
-            let encoded = alloy_rlp::encode(sealed.into_block());
-            if commands
-                .send(P2pCommand::BroadcastBlock(encoded))
-                .await
-                .is_err()
-            {
-                debug!(target: "zone::p2p", "P2P command channel closed");
-                return;
-            }
-            debug!(target: "zone::p2p", number, ?hash, "Queued persisted block for followers");
-            last_broadcast = number;
-        }
-    }
-    debug!(target: "zone::p2p", "Persisted block stream closed");
-}
-
-/// Decode, fully execute, and canonicalize blocks received by a follower.
-async fn import_leader_blocks<P>(
-    provider: P,
-    engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
-    mut events: tokio::sync::mpsc::Receiver<P2pEvent>,
-    _commands: tokio::sync::mpsc::Sender<P2pCommand>,
-) where
-    P: reth_storage_api::BlockNumReader
-        + reth_storage_api::HeaderProvider<Header = TempoHeader>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    while let Some(event) = events.recv().await {
-        let P2pEvent::BlockReceived { block, .. } = event else {
-            continue;
-        };
-        if let Err(err) = import_leader_block(&provider, &engine, &block).await {
-            tracing::error!(target: "zone::p2p", %err, "Rejected leader block");
-        }
-    }
-    debug!(target: "zone::p2p", "P2P event channel closed");
-}
-
-async fn import_leader_block<P>(
-    provider: &P,
-    engine: &reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
-    encoded: &[u8],
-) -> eyre::Result<()>
-where
-    P: reth_storage_api::BlockNumReader
-        + reth_storage_api::HeaderProvider<Header = TempoHeader>
-        + Clone
-        + Send
-        + Sync
-        + 'static,
-{
-    // Check the received block
-    let mut input = encoded;
-    let block = Block::decode(&mut input)
-        .map_err(|err| eyre::eyre!("invalid RLP-encoded zone block: {err}"))?;
-    if !input.is_empty() {
-        eyre::bail!("encoded zone block has {} trailing bytes", input.len());
-    }
-
-    let block = SealedBlock::seal_slow(block);
-    let block_number = block.number();
-    let hash = block.hash();
-    let best_block = provider.best_block_number()?;
-
-    // 1. Block number is correct
-    if block_number <= best_block {
-        let existing = provider.sealed_header(block_number)?.ok_or_else(|| {
-            eyre::eyre!("missing local canonical header at height {block_number}")
-        })?;
-        if existing.hash() == hash {
-            debug!(target: "zone::p2p", block_number, ?hash, "Ignoring duplicate leader block");
-            return Ok(());
-        }
-        eyre::bail!(
-            "leader block conflicts with canonical block at height {block_number}: local={}, received={hash}",
-            existing.hash()
-        );
-    }
-
-    let expected_number = best_block.saturating_add(1);
-    if block_number != expected_number {
-        eyre::bail!(
-            "leader block gap: local head is {best_block}, received height {block_number}, expected {expected_number}; backfill is not implemented yet"
-        );
-    }
-
-    // 2. Block's parent hash is correct
-    let parent = provider
-        .sealed_header(best_block)?
-        .ok_or_else(|| eyre::eyre!("missing local canonical head at height {best_block}"))?;
-    if block.parent_hash() != parent.hash() {
-        eyre::bail!(
-            "leader block parent mismatch at height {block_number}: local={}, received={}",
-            parent.hash(),
-            block.parent_hash()
-        );
-    }
-
-    // 3. All txns in the block execute properly
-    let payload = ZonePayloadTypes::block_to_payload(block, None);
-    let status = engine.new_payload(payload).await?;
-    if !status.is_valid() {
-        eyre::bail!("execution engine rejected leader block {block_number} ({hash}): {status:?}");
-    }
-
-    // 4. Forkchoice
-    let forkchoice = ForkchoiceState::same_hash(hash);
-    let result = engine.fork_choice_updated(forkchoice, None).await?;
-    if !result.is_valid() {
-        eyre::bail!(
-            "execution engine rejected forkchoice for block {block_number} ({hash}): {result:?}"
-        );
-    }
-
-    info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
-    Ok(())
 }
 
 impl SequencerWithdrawalRevealEncryptor {
