@@ -23,7 +23,7 @@
 //! configured direct window by falling back to ancestry mode — a recent anchor
 //! block plus a locally validated parent-hash header chain.
 
-use std::{collections::BTreeMap, num::NonZeroUsize};
+use std::collections::BTreeMap;
 
 use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
 use alloy_consensus::Transaction;
@@ -34,8 +34,8 @@ use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
-use lru::LruCache;
 use parking_lot::RwLock;
+use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tracing::{info, instrument, warn};
 
@@ -52,7 +52,7 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 ///
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
 /// map overhead while covering more than the current Zone E recovery gap.
-const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: usize = 262_144;
+const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
 /// EIP-2935 anchor limits used by the batch submitter.
 ///
@@ -181,7 +181,7 @@ pub struct BatchSubmitter {
     /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
-    ancestry_header_cache: RwLock<LruCache<u64, CachedAncestryHeader>>,
+    ancestry_header_cache: RwLock<LruMap<u64, CachedAncestryHeader>>,
 }
 
 /// One validated L1 header retained for ancestry proof construction.
@@ -224,9 +224,9 @@ impl BatchSubmitter {
             genesis_tempo_block_number,
             l1_fetch_concurrency: 16,
             anchor_config,
-            ancestry_header_cache: RwLock::new(LruCache::new(
-                NonZeroUsize::new(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY).unwrap(),
-            )),
+            ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
+                DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
+            ))),
         }
     }
 
@@ -522,7 +522,7 @@ impl BatchSubmitter {
 
         let mut cache = self.ancestry_header_cache.write();
         for (block_number, header) in resolved {
-            if let Some(existing) = cache.peek(&block_number)
+            if let Some(existing) = cache.get(&block_number)
                 && existing.hash != header.hash
             {
                 return Err(eyre::eyre!(
@@ -532,7 +532,11 @@ impl BatchSubmitter {
                     header.hash
                 ));
             }
-            cache.put(block_number, header);
+            if !cache.insert(block_number, header) {
+                return Err(eyre::eyre!(
+                    "failed to cache L1 header for block {block_number}"
+                ));
+            }
         }
 
         info!(
@@ -1222,7 +1226,7 @@ mod tests {
             .connect_mocked_client(asserter.clone())
             .erased();
         let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
-        *submitter.ancestry_header_cache.write() = LruCache::new(NonZeroUsize::new(4).unwrap());
+        *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
         let mut headers = Vec::new();

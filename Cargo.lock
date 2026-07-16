@@ -13703,6 +13703,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "reth-metrics",
+ "schnellru",
  "serde_json",
  "tempo-alloy",
  "tempo-primitives",

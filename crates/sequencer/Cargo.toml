@@ -35,9 +35,9 @@ alloy-transport.workspace = true
 eyre.workspace = true
 futures.workspace = true
 k256.workspace = true
-lru.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
+schnellru.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
