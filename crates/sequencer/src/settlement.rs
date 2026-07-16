@@ -30,6 +30,7 @@ use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
+use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
@@ -49,8 +50,8 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
-/// Encoded header sizes vary, so this bounds the number of retained entries
-/// rather than their exact memory usage.
+/// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
+/// map overhead while covering more than the current Zone E recovery gap.
 const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
 /// EIP-2935 anchor limits used by the batch submitter.
@@ -208,17 +209,9 @@ fn resolve_ancestry_headers(
     cached: Vec<(u64, CachedAncestryHeader)>,
     fetched: Vec<(u64, CachedAncestryHeader)>,
 ) -> Result<ResolvedAncestry> {
-    if from >= to {
-        return Err(eyre::eyre!(
-            "ancestry range must contain a base and at least one child: {from}..={to}"
-        ));
-    }
+    debug_assert!(from < to, "caller skips empty ancestry ranges");
 
-    let range_len = to
-        .checked_sub(from)
-        .and_then(|span| span.checked_add(1))
-        .and_then(|len| usize::try_from(len).ok())
-        .ok_or_else(|| eyre::eyre!("ancestry range is too large: {from}..={to}"))?;
+    let range_len = (to - from + 1) as usize;
     let fetched_count = fetched.len();
     let mut merged = vec![None; range_len];
 
@@ -228,8 +221,7 @@ fn resolve_ancestry_headers(
                 "received out-of-range L1 header for block {block_number}; expected {from}..={to}"
             ));
         }
-        let index = usize::try_from(block_number - from)
-            .map_err(|_| eyre::eyre!("L1 header index overflow at block {block_number}"))?;
+        let index = (block_number - from) as usize;
         if merged[index].replace((header, was_fetched)).is_some() {
             return Err(eyre::eyre!(
                 "received duplicate L1 header for block {block_number}"
@@ -244,22 +236,10 @@ fn resolve_ancestry_headers(
         insert(block_number, header, true)?;
     }
 
-    let merged = merged
-        .into_iter()
-        .enumerate()
-        .map(|(index, header)| {
-            let offset = u64::try_from(index)
-                .map_err(|_| eyre::eyre!("L1 header index overflow at offset {index}"))?;
-            let block_number = from
-                .checked_add(offset)
-                .ok_or_else(|| eyre::eyre!("L1 block number overflow at offset {index}"))?;
-            header.ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let mut merged = merged.into_iter().enumerate();
-    let (_, (base, base_was_fetched)) = merged
+    let mut merged = merged.into_iter();
+    let (base, base_was_fetched) = merged
         .next()
+        .flatten()
         .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
     let mut parent_hash = base.hash;
     let mut headers = Vec::with_capacity(range_len - 1);
@@ -268,8 +248,9 @@ fn resolve_ancestry_headers(
         fetched_headers.push((from, base));
     }
 
-    for (index, (header, was_fetched)) in merged {
-        let block_number = from + u64::try_from(index)?;
+    for (block_number, entry) in ((from + 1)..=to).zip(merged) {
+        let (header, was_fetched) =
+            entry.ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
         if header.parent_hash != parent_hash {
             return Err(eyre::eyre!(
                 "parent-hash chain broken at block {block_number}: \
@@ -540,8 +521,7 @@ impl BatchSubmitter {
         };
         let cache_hits = cached.len();
 
-        // Fetch and encode only the cache misses. `alloy_rlp::encode` allocates
-        // from the header's exact encoded length instead of using a size guess.
+        // Fetch and encode only the cache misses.
         let fetched = stream::iter(missing.iter().copied())
             .map(|block_number| {
                 let provider = &self.l1_provider;
@@ -553,11 +533,12 @@ impl BatchSubmitter {
                             eyre::eyre!("L1 header not found for block {block_number}")
                         })?;
                     let header = header.inner.inner;
-                    let encoded = Bytes::from(alloy_rlp::encode(&header));
+                    let mut encoded = Vec::with_capacity(600);
+                    header.encode(&mut encoded);
                     let cached_header = CachedAncestryHeader {
                         parent_hash: header.inner.parent_hash,
                         hash: alloy_primitives::keccak256(&encoded),
-                        encoded,
+                        encoded: Bytes::from(encoded),
                     };
                     Ok::<_, eyre::Report>((block_number, cached_header))
                 }
