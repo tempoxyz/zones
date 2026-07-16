@@ -1,4 +1,5 @@
 use super::*;
+use tempo_node::rpc::consensus::{CertifiedBlock, Query};
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -342,6 +343,11 @@ impl L1Subscriber {
                     })?;
                     let block_hash = header_resp.hash();
                     let block = NumHash::new(block_number, block_hash);
+                    fetch_and_validate_finalization_for_header(provider, block)
+                        .await
+                        .inspect_err(|_| {
+                            fetch_failures.increment(1);
+                        })?;
                     let expected_receipts_root = header_resp.receipts_root();
                     let expected_logs_bloom = header_resp.logs_bloom();
                     let receipts = fetch_and_verify_receipts_for_header(
@@ -575,6 +581,65 @@ impl L1Subscriber {
             .write()
             .update_anchor(NumHash::new(number, hash));
     }
+}
+
+/// Require the configured L1 endpoint to attest that the header is finalized by Tempo consensus.
+///
+/// `eth_getBlockByNumber("finalized")` is a transport-level label. The follower's consensus RPC
+/// supplies the corresponding certificate-bearing finalized block. The follower verifies the BLS
+/// certificate before exposing it; this check binds that result to the header and receipts that the
+/// subscriber is about to ingest.
+///
+/// This deliberately does not treat an RPC response as an independently verified BLS certificate:
+/// doing so requires an authenticated, epoch-aware Tempo DKG scheme provider, which Zones does not
+/// yet have. Until that interface exists, `l1_rpc_url` must point to a Tempo follower that verifies
+/// finalizations.
+async fn fetch_and_validate_finalization_for_header(
+    provider: &impl Provider<TempoNetwork>,
+    block: NumHash,
+) -> eyre::Result<CertifiedBlock> {
+    let finalization: CertifiedBlock = provider
+        .raw_request(
+            "consensus_getFinalization".into(),
+            [Query::Height(block.number)],
+        )
+        .await?;
+
+    verify_finalization_matches_header(
+        block,
+        finalization.block.number(),
+        finalization.block.hash(),
+        &finalization.certificate,
+    )?;
+
+    Ok(finalization)
+}
+
+fn verify_finalization_matches_header(
+    block: NumHash,
+    finalization_height: u64,
+    finalization_hash: B256,
+    certificate: &str,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        !certificate.is_empty(),
+        "consensus finalization for block {} did not include a certificate",
+        block.number,
+    );
+    eyre::ensure!(
+        finalization_height == block.number,
+        "consensus finalization height mismatch: expected {}, got {}",
+        block.number,
+        finalization_height,
+    );
+    eyre::ensure!(
+        finalization_hash == block.hash,
+        "consensus finalization hash mismatch at height {}: expected {}, got {}",
+        block.number,
+        block.hash,
+        finalization_hash,
+    );
+    Ok(())
 }
 
 /// Fetch receipts for the L1 header by block hash and verify they match the

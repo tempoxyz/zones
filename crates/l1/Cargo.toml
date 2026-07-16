@@ -19,6 +19,7 @@ zone-primitives = { workspace = true, features = ["std", "serde"] }
 # tempo
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
+tempo-node.workspace = true
 tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
 tempo-revm.workspace = true

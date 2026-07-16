@@ -160,6 +160,20 @@ fn test_subscriber(
     }
 }
 
+#[test]
+fn consensus_finalization_must_match_the_finalized_header() {
+    let block = NumHash::new(42, B256::repeat_byte(0x42));
+
+    verify_finalization_matches_header(block, 42, B256::repeat_byte(0x42), "0x1234").unwrap();
+    assert!(
+        verify_finalization_matches_header(block, 43, B256::repeat_byte(0x42), "0x1234").is_err()
+    );
+    assert!(
+        verify_finalization_matches_header(block, 42, B256::repeat_byte(0x43), "0x1234").is_err()
+    );
+    assert!(verify_finalization_matches_header(block, 42, B256::repeat_byte(0x42), "").is_err());
+}
+
 fn make_test_header(number: u64) -> TempoHeader {
     TempoHeader {
         inner: Header {
