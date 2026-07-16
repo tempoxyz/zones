@@ -285,12 +285,7 @@ impl BatchSubmitter {
             recent_tempo_block_number,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
-            "Preparing submitBatch to ZonePortal on L1"
-        );
-
-        info!(
-            anchor_mode = %anchor_mode,
-            recent_tempo_block_number, "Submitting batch to ZonePortal on L1"
+            "Submitting batch to ZonePortal on L1"
         );
 
         let pending = self
