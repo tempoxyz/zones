@@ -464,6 +464,13 @@ impl BatchSubmitter {
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
         if gap < self.anchor_config.effective_window() {
+            // The cache is only useful during ancestry recovery. Replace it
+            // instead of clearing it so the hash table's allocation is freed.
+            let has_cached_headers = !self.ancestry_header_cache.read().is_empty();
+            if has_cached_headers {
+                *self.ancestry_header_cache.write() =
+                    LruMap::new(ByLength::new(DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY));
+            }
             return Ok((AnchorMode::Direct, current_l1_block));
         }
 
@@ -1528,6 +1535,34 @@ mod tests {
 
         assert!(matches!(mode, AnchorMode::Direct));
         assert_eq!(current_l1_block, 100);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn direct_anchor_resolution_drops_ancestry_cache() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+
+        let cached_header = CachedAncestryHeader {
+            parent_hash: B256::ZERO,
+            hash: B256::repeat_byte(0x11),
+            encoded: Bytes::from_static(&[0x01]),
+        };
+        assert!(
+            submitter
+                .ancestry_header_cache
+                .write()
+                .insert(98, cached_header)
+        );
+
+        asserter.push_success(&100_u64);
+        let (mode, _) = submitter.resolve_anchor_mode(99).await.unwrap();
+
+        assert!(matches!(mode, AnchorMode::Direct));
+        assert!(submitter.ancestry_header_cache.read().is_empty());
         assert!(asserter.read_q().is_empty());
     }
 
