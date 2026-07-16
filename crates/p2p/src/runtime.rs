@@ -35,6 +35,7 @@ const EVENT_BACKLOG: usize = 128;
 pub type P2pPeerId = PublicKey;
 
 type CommonwareSender = lookup::Sender<PublicKey, commonware_runtime::tokio::Context>;
+type CommonwareReceiver = lookup::Receiver<PublicKey>;
 type OutstandingBackfillResponses = Arc<Mutex<HashMap<PublicKey, Instant>>>;
 
 struct P2pSenders {
@@ -42,6 +43,13 @@ struct P2pSenders {
     backfill_requests: CommonwareSender,
     backfill_blocks: CommonwareSender,
     backfill_completions: CommonwareSender,
+}
+
+struct P2pReceivers {
+    blocks: CommonwareReceiver,
+    backfill_requests: CommonwareReceiver,
+    backfill_blocks: CommonwareReceiver,
+    backfill_completions: CommonwareReceiver,
 }
 
 /// Fully validated configuration for one node's Zone P2P runtime.
@@ -350,10 +358,12 @@ fn run(
         let receive_loop = run_receivers(
             config.role,
             config.manifest,
-            block_receiver,
-            backfill_request_receiver,
-            backfill_block_receiver,
-            backfill_complete_receiver,
+            P2pReceivers {
+                blocks: block_receiver,
+                backfill_requests: backfill_request_receiver,
+                backfill_blocks: backfill_block_receiver,
+                backfill_completions: backfill_complete_receiver,
+            },
             outstanding_backfill_responses,
             events,
         );
@@ -488,17 +498,20 @@ async fn run_commands(
 async fn run_receivers(
     role: Role,
     manifest: Arc<ZoneManifest>,
-    mut block_receiver: lookup::Receiver<PublicKey>,
-    mut backfill_request_receiver: lookup::Receiver<PublicKey>,
-    mut backfill_block_receiver: lookup::Receiver<PublicKey>,
-    mut backfill_complete_receiver: lookup::Receiver<PublicKey>,
+    receivers: P2pReceivers,
     outstanding_backfill_responses: OutstandingBackfillResponses,
     events: mpsc::Sender<P2pEvent>,
 ) -> eyre::Result<()> {
+    let P2pReceivers {
+        mut blocks,
+        mut backfill_requests,
+        mut backfill_blocks,
+        mut backfill_completions,
+    } = receivers;
     let leader = manifest.leader_ed25519_public_key().clone();
     loop {
         let event = tokio::select! {
-            result = block_receiver.recv() => {
+            result = blocks.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("block channel receive failed: {err}"))?;
                 if role == Role::Leader || peer != leader {
                     warn!(target: "zone::p2p", %peer, "Ignoring live block from non-leader");
@@ -506,7 +519,7 @@ async fn run_receivers(
                 }
                 P2pEvent::BlockReceived { leader_ed25519_public_key: peer, block: bytes.into() }
             }
-            result = backfill_request_receiver.recv() => {
+            result = backfill_requests.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill request receive failed: {err}"))?;
                 let Ok(bytes): Result<[u8; 8], _> = bytes.as_ref().try_into() else {
                     warn!(target: "zone::p2p", %peer, size = bytes.len(), "Ignoring malformed backfill request");
@@ -514,7 +527,7 @@ async fn run_receivers(
                 };
                 P2pEvent::BackfillRequested { peer, start: u64::from_be_bytes(bytes) }
             }
-            result = backfill_block_receiver.recv() => {
+            result = backfill_blocks.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill block receive failed: {err}"))?;
                 let eligible = match role { Role::Leader => peer != leader, Role::Follower => peer == leader };
                 if !eligible {
@@ -531,7 +544,7 @@ async fn run_receivers(
                 }
                 P2pEvent::BackfillBlockReceived { peer, block: bytes.into() }
             }
-            result = backfill_complete_receiver.recv() => {
+            result = backfill_completions.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill completion receive failed: {err}"))?;
                 let eligible = match role { Role::Leader => peer != leader, Role::Follower => peer == leader };
                 if !eligible {
@@ -832,11 +845,10 @@ mod tests {
             .unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                match handles[1].events_mut().recv().await {
-                    Some(P2pEvent::BackfillCompleted { tip: 9, .. }) => {
-                        return;
-                    }
-                    _ => {}
+                if let Some(P2pEvent::BackfillCompleted { tip: 9, .. }) =
+                    handles[1].events_mut().recv().await
+                {
+                    return;
                 }
             }
         })
