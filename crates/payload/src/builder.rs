@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
-    EvmFactory,
+    Evm, EvmFactory,
     block::{BlockExecutorFactory, CommitChanges, TxResult},
     revm::context_interface::block::Block as RevmBlock,
 };
@@ -23,7 +23,7 @@ use reth_basic_payload_builder::{
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
-    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes, TxEnvFor,
+    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes,
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
 };
 use reth_node_api::{FullNodeTypes, NodeTypes};
@@ -31,22 +31,22 @@ use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
-use reth_revm::{State, database::StateProviderDatabase};
-use reth_storage_api::{BlockReader, HeaderProvider, StateProvider, StateProviderFactory};
+use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
+use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
-    BestTransactions, BestTransactionsAttributes, TransactionPool,
+    BestTransactions, BestTransactionsAttributes, TransactionPool, ValidPoolTransaction,
     error::InvalidPoolTransactionError,
 };
 use std::{sync::Arc, time::Instant};
-use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
-    TempoHeader, TempoReceipt, TempoTxEnvelope,
+    TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
-use tempo_transaction_pool::TempoTransactionPool;
+use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTransaction};
 use tracing::{error, info, warn};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
@@ -92,7 +92,7 @@ where
     Node: FullNodeTypes,
     Node::Types: NodeTypes<
             Primitives = tempo_primitives::TempoPrimitives,
-            ChainSpec = TempoChainSpec,
+            ChainSpec = ZoneChainSpec,
             Payload = ZonePayloadTypes,
         >,
     EvmConfig: ConfigureEvm<
@@ -138,20 +138,11 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
 
 impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
 where
-    Provider: StateProviderFactory
-        + ChainSpecProvider<ChainSpec = TempoChainSpec>
-        + HeaderProvider<Header = TempoHeader>
-        + BlockReader<
-            Block = tempo_primitives::Block,
-            Transaction = TempoTxEnvelope,
-            Receipt = TempoReceipt,
-        > + Clone
-        + 'static,
+    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = ZoneChainSpec> + Clone + 'static,
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
         > + 'static,
-    TxEnvFor<EvmConfig>: From<tempo_revm::TempoTxEnv>,
     <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
         EvmFactory<Tx = tempo_revm::TempoTxEnv>,
     BlockEnvFor<EvmConfig>: RevmBlock,
@@ -178,57 +169,9 @@ where
 
         let start = Instant::now();
 
-        // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
-        // to validate the next L1 block we process is the expected successor.
-        let sp = self.provider.state_by_block_hash(parent_header.hash())?;
-        let stored_l1 = sp
-            .tempo_num_hash()
-            .map_err(|e| PayloadBuilderError::Internal(e.into()))?;
-        let stored_l1_block_hash = stored_l1.hash;
-        let expected_tempo_block_number = stored_l1.number + 1;
-
-        info!(
-            target: "zone::payload",
-            %stored_l1_block_hash,
-            expected_tempo_block_number,
-            "TempoState current state"
-        );
-
+        let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let prepared = attributes.l1_block();
-
-        // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
-        // and its parent hash must match the stored tempoBlockHash.
-        if prepared.header.inner.number != expected_tempo_block_number {
-            error!(
-                target: "zone::payload",
-                got = prepared.header.inner.number,
-                expected = expected_tempo_block_number,
-                "L1 block number mismatch — chain continuity broken"
-            );
-            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                format!(
-                    "L1 block number mismatch: got {} expected {}",
-                    prepared.header.inner.number, expected_tempo_block_number
-                ),
-            )));
-        }
-        if prepared.header.inner.parent_hash != stored_l1_block_hash {
-            error!(
-                target: "zone::payload",
-                got = %prepared.header.inner.parent_hash,
-                expected = %stored_l1_block_hash,
-                l1_block = prepared.header.inner.number,
-                "L1 parent hash mismatch — chain continuity broken"
-            );
-            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                format!(
-                    "L1 parent hash mismatch at block {}: got {} expected {}",
-                    prepared.header.inner.number,
-                    prepared.header.inner.parent_hash,
-                    stored_l1_block_hash
-                ),
-            )));
-        }
+        validate_l1_continuity(state_provider.as_ref(), prepared)?;
 
         let total_deposits = prepared.queued_deposits.len();
 
@@ -241,9 +184,7 @@ where
             "Including advanceTempo system tx (chain continuity OK)"
         );
 
-        let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
-        let state_provider: Box<dyn StateProvider> = state_provider;
-        let state = StateProviderDatabase::new(&state_provider);
+        let state = StateProviderDatabase::new(state_provider.as_ref());
         let mut db = State::builder()
             .with_database(
                 Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
@@ -254,9 +195,6 @@ where
         let chain_spec = self.provider.chain_spec();
 
         let block_gas_limit = parent_header.gas_limit();
-
-        let mut cumulative_gas_used = 0u64;
-        let total_fees = U256::ZERO;
 
         let next_block_env_attributes = TempoNextBlockEnvAttributes {
             inner: NextBlockEnvAttributes {
@@ -277,21 +215,17 @@ where
             consensus_context: None,
             subblock_fee_recipients: Default::default(),
         };
-        let next_env = self
-            .evm_config
-            .next_evm_env(parent_header.header(), &next_block_env_attributes)
-            .map_err(PayloadBuilderError::other)?;
-        let base_fee = next_env.block_env.basefee();
-        let block_number: u64 = next_env
-            .block_env
-            .number()
-            .try_into()
-            .expect("block number fits u64");
-
         let mut builder = self
             .evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
             .map_err(PayloadBuilderError::other)?;
+        let base_fee = builder.evm().block().basefee();
+        let block_number: u64 = builder
+            .evm()
+            .block()
+            .number()
+            .try_into()
+            .expect("block number fits u64");
 
         builder.apply_pre_execution_changes().map_err(|err| {
             warn!(%err, "failed to apply pre-execution changes");
@@ -299,165 +233,38 @@ where
         })?;
 
         let pending_withdrawals_at_block_start =
-            read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
+            read_pending_withdrawals_from_outbox(&mut builder, block_number)?;
         let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
-        {
-            let advance_tx = build_advance_tempo_tx(prepared);
-            let mut reverted = false;
-            match builder.execute_transaction_with_result_closure(advance_tx, |result| {
-                let evm_result = result.result();
-                if !evm_result.result.is_success() {
-                    let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-                    error!(
-                        target: "zone::payload",
-                        l1_block = prepared.header.inner.number,
-                        deposits = total_deposits,
-                        is_halt = evm_result.result.is_halt(),
-                        revert_data = %revert_data,
-                        "advanceTempo system tx reverted on-chain"
-                    );
-                    reverted = true;
-                }
-            }) {
-                Ok(_) if reverted => {
-                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                        format!(
-                            "advanceTempo reverted at L1 block {}",
-                            prepared.header.inner.number
-                        ),
-                    )));
-                }
-                Ok(gas_used) => {
-                    cumulative_gas_used += gas_used.tx_gas_used();
-                }
-                Err(err) => {
-                    error!(
-                        ?err,
-                        l1_block = prepared.header.inner.number,
-                        deposits = total_deposits,
-                        "advanceTempo system tx failed"
-                    );
-                    return Err(PayloadBuilderError::evm(err));
-                }
-            }
-        }
+        execute_required_system_transaction(&mut builder, build_advance_tempo_tx(prepared))
+            .map_err(|err| {
+                error!(
+                    ?err,
+                    l1_block = prepared.header.inner.number,
+                    deposits = total_deposits,
+                    "advanceTempo system tx failed"
+                );
+                err
+            })?;
 
-        // Execute pool transactions
-        // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
+        // Execute pool transactions. The block executor owns gas-capacity accounting.
         let mut best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
-
-        while let Some(pool_tx) = best_txs.next() {
-            let gas_limit_left = block_gas_limit;
-            if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
-                best_txs.mark_invalid(
-                    &pool_tx,
-                    InvalidPoolTransactionError::ExceedsGasLimit(
-                        pool_tx.gas_limit(),
-                        gas_limit_left.saturating_sub(cumulative_gas_used),
-                    ),
-                );
-                continue;
-            }
-
-            if cancel.is_cancelled() {
-                return Ok(BuildOutcome::Cancelled);
-            }
-
-            let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-            match builder.execute_transaction(tx_with_env) {
-                Ok(gas_used) => {
-                    cumulative_gas_used += gas_used.tx_gas_used();
-                }
-                Err(reth_evm::block::BlockExecutionError::Validation(
-                    reth_evm::block::BlockValidationError::InvalidTx { error, .. },
-                )) => {
-                    if !error.is_nonce_too_low() {
-                        best_txs.mark_invalid(
-                            &pool_tx,
-                            InvalidPoolTransactionError::Consensus(
-                                reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
-                            ),
-                        );
-                    }
-                    continue;
-                }
-                Err(reth_evm::block::BlockExecutionError::Internal(
-                    reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
-                )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
-                    warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
-                    continue;
-                }
-                Err(err) => return Err(PayloadBuilderError::evm(err)),
-            }
-        }
-
-        // Finalize when this block started with pending withdrawals, folding in any
-        // withdrawals created by the current block, or at a empty-batch
-        // boundary so the L2 and L1 batch indexes stay in lockstep.
-        if has_prior_withdrawals
-            || block_number.is_multiple_of(self.withdrawal_batch_interval_blocks)
+        if execute_pool_transactions(&mut builder, &mut best_txs, &cancel)?
+            == PoolExecutionOutcome::Cancelled
         {
-            let remaining_gas = block_gas_limit.saturating_sub(cumulative_gas_used);
-            let pending_withdrawals =
-                read_pending_withdrawals_from_outbox(&mut builder, remaining_gas, block_number)?;
-            let encrypted_senders = pending_withdrawals
-                .iter()
-                .map(|request| {
-                    if request.revealTo.is_empty() {
-                        Ok(Bytes::new())
-                    } else {
-                        let encryptor =
-                            self.withdrawal_reveal_encryptor.as_ref().ok_or_else(|| {
-                                PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                                    "withdrawal reveal encryption requested but no encryptor is configured",
-                                ))
-                            })?;
-                        encryptor
-                            .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
-                        .map(Bytes::from)
-                        .ok_or_else(|| {
-                            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                                "failed to encrypt authenticated sender reveal for tx {}",
-                                request.txHash
-                            )))
-                        })
-                    }
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let count = U256::from(pending_withdrawals.len());
-            let finalize_tx =
-                build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
-            let mut finalize_reverted = false;
-            match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
-                let evm_result = result.result();
-                if !evm_result.result.is_success() {
-                    let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-                    error!(
-                        target: "zone::payload",
-                        block_number,
-                        is_halt = evm_result.result.is_halt(),
-                        revert_data = %revert_data,
-                        "finalizeWithdrawalBatch system tx reverted on-chain"
-                    );
-                    finalize_reverted = true;
-                }
-            }) {
-                Ok(_) if finalize_reverted => {
-                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                        format!("finalizeWithdrawalBatch reverted at zone block {block_number}"),
-                    )));
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    error!(?err, "finalizeWithdrawalBatch system tx failed");
-                    return Err(PayloadBuilderError::evm(err));
-                }
-            }
+            return Ok(BuildOutcome::Cancelled);
         }
+
+        finalize_withdrawal_batch_if_needed(
+            &mut builder,
+            block_number,
+            self.withdrawal_batch_interval_blocks,
+            has_prior_withdrawals,
+            self.withdrawal_reveal_encryptor.as_deref(),
+        )?;
 
         let BlockBuilderOutcome {
             execution_result,
@@ -491,7 +298,7 @@ where
         let execution_block_size_estimate = execution_block_encoded
             .get_or_encode(sealed_block.as_ref())
             .len();
-        let eth_payload = EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
+        let eth_payload = EthBuiltPayload::new(recovered_block.clone(), U256::ZERO, requests, None);
 
         let execution_output = BlockExecutionOutput {
             result: execution_result,
@@ -516,7 +323,6 @@ where
             execution_block_encoded,
         );
 
-        drop(db);
         // Zone payloads are deterministic (one L1 block = one zone block), so freeze
         // the payload to prevent reth from re-triggering try_build on the rebuild interval.
         // Without this, the next rebuild attempt would find the deposit queue empty.
@@ -545,6 +351,171 @@ where
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
     }
+}
+
+/// Validate that the prepared L1 block is the next block expected by TempoState.
+fn validate_l1_continuity(
+    state_provider: &dyn StateProvider,
+    prepared: &PreparedL1Block,
+) -> Result<(), PayloadBuilderError> {
+    let stored_l1 = state_provider
+        .tempo_num_hash()
+        .map_err(|err| PayloadBuilderError::Internal(err.into()))?;
+    let expected_block_number = stored_l1.number + 1;
+
+    info!(
+        target: "zone::payload",
+        stored_l1_block_hash = %stored_l1.hash,
+        expected_tempo_block_number = expected_block_number,
+        "TempoState current state"
+    );
+
+    if prepared.header.inner.number != expected_block_number {
+        error!(
+            target: "zone::payload",
+            got = prepared.header.inner.number,
+            expected = expected_block_number,
+            "L1 block number mismatch — chain continuity broken"
+        );
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!(
+                "L1 block number mismatch: got {} expected {expected_block_number}",
+                prepared.header.inner.number
+            ),
+        )));
+    }
+
+    if prepared.header.inner.parent_hash != stored_l1.hash {
+        error!(
+            target: "zone::payload",
+            got = %prepared.header.inner.parent_hash,
+            expected = %stored_l1.hash,
+            l1_block = prepared.header.inner.number,
+            "L1 parent hash mismatch — chain continuity broken"
+        );
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!(
+                "L1 parent hash mismatch at block {}: got {} expected {}",
+                prepared.header.inner.number, prepared.header.inner.parent_hash, stored_l1.hash
+            ),
+        )));
+    }
+
+    Ok(())
+}
+
+/// Execute the best pool transactions until the iterator is exhausted or the build is cancelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PoolExecutionOutcome {
+    Complete,
+    Cancelled,
+}
+
+fn execute_pool_transactions<B, T>(
+    builder: &mut B,
+    best_txs: &mut T,
+    cancel: &CancelOnDrop,
+) -> Result<PoolExecutionOutcome, PayloadBuilderError>
+where
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+    <B::Executor as reth_evm::execute::BlockExecutor>::Evm:
+        alloy_evm::Evm<Tx = tempo_revm::TempoTxEnv>,
+    T: BestTransactions<Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
+{
+    while let Some(pool_tx) = best_txs.next() {
+        if cancel.is_cancelled() {
+            return Ok(PoolExecutionOutcome::Cancelled);
+        }
+
+        let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
+        match builder.execute_transaction(tx_with_env) {
+            Ok(_) => {}
+            Err(reth_evm::block::BlockExecutionError::Validation(
+                reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                    transaction_gas_limit,
+                    block_available_gas,
+                },
+            )) => {
+                best_txs.mark_invalid(
+                    &pool_tx,
+                    InvalidPoolTransactionError::ExceedsGasLimit(
+                        transaction_gas_limit,
+                        block_available_gas,
+                    ),
+                );
+            }
+            Err(reth_evm::block::BlockExecutionError::Validation(
+                reth_evm::block::BlockValidationError::InvalidTx { error, .. },
+            )) => {
+                if !error.is_nonce_too_low() {
+                    best_txs.mark_invalid(
+                        &pool_tx,
+                        InvalidPoolTransactionError::Consensus(
+                            reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                        ),
+                    );
+                }
+            }
+            Err(reth_evm::block::BlockExecutionError::Internal(
+                reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
+            )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
+                warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+            }
+            Err(err) => return Err(PayloadBuilderError::evm(err)),
+        }
+    }
+
+    Ok(PoolExecutionOutcome::Complete)
+}
+
+/// Finalize withdrawals when the block started with pending requests or reaches a batch boundary.
+fn finalize_withdrawal_batch_if_needed<B>(
+    builder: &mut B,
+    block_number: u64,
+    interval_blocks: u64,
+    has_prior_withdrawals: bool,
+    encryptor: Option<&dyn WithdrawalRevealEncryptor>,
+) -> Result<(), PayloadBuilderError>
+where
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+{
+    if !has_prior_withdrawals && !block_number.is_multiple_of(interval_blocks) {
+        return Ok(());
+    }
+
+    let pending_withdrawals = read_pending_withdrawals_from_outbox(builder, block_number)?;
+    let encrypted_senders = pending_withdrawals
+        .iter()
+        .map(|request| {
+            if request.revealTo.is_empty() {
+                Ok(Bytes::new())
+            } else {
+                let encryptor = encryptor.ok_or_else(|| {
+                    PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                        "withdrawal reveal encryption requested but no encryptor is configured",
+                    ))
+                })?;
+                encryptor
+                    .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
+                    .map(Bytes::from)
+                    .ok_or_else(|| {
+                        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                            "failed to encrypt authenticated sender reveal for tx {}",
+                            request.txHash
+                        )))
+                    })
+            }
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let count = U256::from(pending_withdrawals.len());
+    let finalize_tx = build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
+    execute_required_system_transaction(builder, finalize_tx).map_err(|err| {
+        error!(
+            ?err,
+            block_number, "finalizeWithdrawalBatch system tx failed"
+        );
+        err
+    })
 }
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
@@ -587,10 +558,26 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     )
 }
 
+/// Execute a required system transaction and fail the payload if the executor rejects it.
+///
+/// Tempo's EVM reports system-call reverts as transaction errors, so successful execution does
+/// not need a second result-status check.
+fn execute_required_system_transaction<B>(
+    builder: &mut B,
+    tx: Recovered<TempoTxEnvelope>,
+) -> Result<(), PayloadBuilderError>
+where
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+{
+    builder
+        .execute_transaction(tx)
+        .map(|_| ())
+        .map_err(PayloadBuilderError::evm)
+}
+
 /// Read all pending withdrawals in the ZoneOutbox
 fn read_pending_withdrawals_from_outbox<B>(
     builder: &mut B,
-    gas_limit: u64,
     block_number: u64,
 ) -> Result<Vec<abi::ZoneOutbox::PendingWithdrawal>, PayloadBuilderError>
 where
@@ -600,7 +587,6 @@ where
     let output = execute_outbox_view_call(
         builder,
         calldata.into(),
-        gas_limit,
         block_number,
         "getPendingWithdrawals",
     )?;
@@ -615,7 +601,6 @@ where
 fn execute_outbox_view_call<B>(
     builder: &mut B,
     calldata: Bytes,
-    gas_limit: u64,
     block_number: u64,
     label: &str,
 ) -> Result<Bytes, PayloadBuilderError>
@@ -626,7 +611,9 @@ where
         chain_id: None,
         nonce: 0,
         gas_price: 0,
-        gas_limit,
+        // Tempo applies its fixed internal system-call limit and reports zero gas used.
+        // Keeping the envelope limit at zero also lets this simulation run after a full block.
+        gas_limit: 0,
         to: ZONE_OUTBOX_ADDRESS.into(),
         value: U256::ZERO,
         input: calldata,
@@ -636,29 +623,12 @@ where
         TEMPO_SYSTEM_TX_SENDER,
     );
     let mut output = None;
-    let mut reverted = false;
 
     match builder.execute_transaction_with_commit_condition(tx, |result| {
         let evm_result = result.result();
-        if evm_result.result.is_success() {
-            output = Some(evm_result.result.output().cloned().unwrap_or_default());
-        } else {
-            let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-            error!(
-                target: "zone::payload",
-                block_number,
-                label,
-                is_halt = evm_result.result.is_halt(),
-                revert_data = %revert_data,
-                "ZoneOutbox view simulation reverted"
-            );
-            reverted = true;
-        }
+        output = Some(evm_result.result.output().cloned().unwrap_or_default());
         CommitChanges::No
     }) {
-        Ok(_) if reverted => Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-            format!("ZoneOutbox {label} view reverted at zone block {block_number}"),
-        ))),
         Ok(_) => output.ok_or_else(|| {
             PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
                 "ZoneOutbox {label} view returned no output at zone block {block_number}"

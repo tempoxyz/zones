@@ -414,6 +414,8 @@ interface IVerifier {
 /// @notice Interface for creating zones
 interface IZoneFactory {
 
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (sequencer can enable more later)
         address admin;
@@ -436,11 +438,19 @@ interface IZoneFactory {
     );
 
     error InvalidToken();
+    error InvalidOwner();
+    error NotOwner();
     error InvalidAdmin();
     error InvalidSequencer();
     error InvalidVerifier();
     error InsufficientGas();
     error ZoneIdOverflow();
+
+    /// @notice Returns the account authorized to create zones.
+    function owner() external view returns (address);
+
+    /// @notice Transfers zone-creation authority to `newOwner`.
+    function transferOwnership(address newOwner) external;
 
     /// @notice Returns whether a verifier contract is approved for zone creation.
     /// @param verifier The verifier contract address to check.
@@ -584,6 +594,7 @@ interface IZonePortal {
         bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event BouncebackGasUpdated(uint64 bouncebackGas);
 
     /// @notice Emitted when admin enables a new TIP-20 token for bridging
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
@@ -640,9 +651,6 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
-    /// @notice Fixed gas value for deposit bounce-back fee calculation (300,000 gas)
-    function FIXED_BOUNCEBACK_GAS() external view returns (uint64);
-
     /// @notice Maximum callback gas accepted for withdrawals
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
@@ -662,6 +670,8 @@ interface IZonePortal {
     function pendingAdmin() external view returns (address);
 
     function zoneGasRate() external view returns (uint128);
+
+    function bouncebackGas() external view returns (uint64);
 
     function verifier() external view returns (address);
 
@@ -778,6 +788,10 @@ interface IZonePortal {
     /// @notice Set zone gas rate. Only callable by sequencer.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
+
+    /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
+    /// @param _bouncebackGas Gas amount used in the Tempo-side bounce-back fee calculation
+    function setBouncebackGas(uint64 _bouncebackGas) external;
 
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);

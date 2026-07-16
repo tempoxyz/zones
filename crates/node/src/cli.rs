@@ -8,7 +8,7 @@ use clap::{Args, CommandFactory, FromArgMatches};
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
-use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
+use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
@@ -31,13 +31,13 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
 
 /// Tempo Zone CLI entry point.
 pub enum ZoneCli {
-    Node(Box<Cli<TempoChainSpecParser, ZoneArgs>>),
+    Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
     Dev(DevCommand),
 }
 
 impl ZoneCli {
     fn command() -> clap::Command {
-        Cli::<TempoChainSpecParser, ZoneArgs>::command()
+        Cli::<ZoneChainSpecParser, ZoneArgs>::command()
             .about("Tempo Zone")
             .subcommand(DevCommand::command())
     }
@@ -84,11 +84,11 @@ impl ZoneCli {
 }
 
 /// Main entry point for the `node` command.
-fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<TempoChainSpec>| {
+    let components = |spec: Arc<ZoneChainSpec>| {
         (
             ZoneEvmConfig::new_without_l1(spec),
             NoopConsensus::default(),
