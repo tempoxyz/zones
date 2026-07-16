@@ -19,37 +19,108 @@ use crate::{
     P2pNetworkId, Role, ZoneManifest,
     identity::Ed25519Identity,
     network::{
-        self, BACKFILL_BLOCK_CHANNEL, BACKFILL_COMPLETE_CHANNEL, BACKFILL_REQUEST_CHANNEL,
-        BLOCK_BACKLOG, BLOCK_CHANNEL, MAX_MESSAGE_SIZE,
+        self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
+        MAX_MESSAGE_SIZE,
     },
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
 const BROADCAST_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BROADCAST_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
-const BACKFILL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const BACKFILL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const COMMAND_BACKLOG: usize = 128;
 const EVENT_BACKLOG: usize = 128;
+const BACKFILL_BLOCK_FRAME: u8 = 0;
+const BACKFILL_COMPLETE_FRAME: u8 = 1;
 
 /// Authenticated Commonware identity used to address one manifest peer.
 pub type P2pPeerId = PublicKey;
 
 type CommonwareSender = lookup::Sender<PublicKey, commonware_runtime::tokio::Context>;
 type CommonwareReceiver = lookup::Receiver<PublicKey>;
-type OutstandingBackfillResponses = Arc<Mutex<HashMap<PublicKey, Instant>>>;
+type SharedBackfillLifecycle = Arc<Mutex<BackfillJob>>;
+
+#[derive(Debug, Clone, Copy)]
+struct OutstandingBackfill {
+    request_id: u64,
+    sent_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct BackfillJob {
+    next_request_id: u64,
+    outstanding: HashMap<PublicKey, OutstandingBackfill>,
+}
+
+impl BackfillJob {
+    fn begin_request(
+        &mut self,
+        peers: &[PublicKey],
+        now: Instant,
+    ) -> Option<(u64, Vec<PublicKey>)> {
+        let request_peers = peers
+            .iter()
+            .filter(|peer| {
+                self.outstanding.get(*peer).is_none_or(|request| {
+                    now.duration_since(request.sent_at) >= BACKFILL_RESPONSE_TIMEOUT
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if request_peers.is_empty() {
+            return None;
+        }
+
+        let request_id = self.next_request_id;
+        self.next_request_id = self.next_request_id.wrapping_add(1);
+        for peer in &request_peers {
+            self.outstanding.insert(
+                peer.clone(),
+                OutstandingBackfill {
+                    request_id,
+                    sent_at: now,
+                },
+            );
+        }
+        Some((request_id, request_peers))
+    }
+
+    fn finish_send(&mut self, request_id: u64, sent: &[PublicKey]) {
+        self.outstanding
+            .retain(|peer, request| request.request_id != request_id || sent.contains(peer));
+    }
+
+    fn cancel_request(&mut self, request_id: u64) {
+        self.outstanding
+            .retain(|_, request| request.request_id != request_id);
+    }
+
+    fn accepts(&self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
+        self.outstanding.get(peer).is_some_and(|request| {
+            request.request_id == request_id
+                && now.duration_since(request.sent_at) < BACKFILL_RESPONSE_TIMEOUT
+        })
+    }
+
+    fn complete(&mut self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
+        if !self.accepts(peer, request_id, now) {
+            return false;
+        }
+        self.outstanding.remove(peer);
+        true
+    }
+}
 
 struct P2pSenders {
     blocks: CommonwareSender,
     backfill_requests: CommonwareSender,
-    backfill_blocks: CommonwareSender,
-    backfill_completions: CommonwareSender,
+    backfill_responses: CommonwareSender,
 }
 
 struct P2pReceivers {
     blocks: CommonwareReceiver,
     backfill_requests: CommonwareReceiver,
-    backfill_blocks: CommonwareReceiver,
-    backfill_completions: CommonwareReceiver,
+    backfill_responses: CommonwareReceiver,
 }
 
 /// Fully validated configuration for one node's Zone P2P runtime.
@@ -137,9 +208,17 @@ pub enum P2pCommand {
     /// Ask the role-appropriate peers for canonical blocks beginning at `start`.
     RequestBackfill { start: u64 },
     /// Return one canonical block to the peer that requested it.
-    SendBackfillBlock { peer: PublicKey, block: Vec<u8> },
+    SendBackfillBlock {
+        peer: PublicKey,
+        request_id: u64,
+        block: Vec<u8>,
+    },
     /// Finish one page of a backfill response and advertise the responder's snapshot tip.
-    CompleteBackfill { peer: PublicKey, tip: u64 },
+    CompleteBackfill {
+        peer: PublicKey,
+        request_id: u64,
+        tip: u64,
+    },
 }
 
 /// Observable lifecycle and block events emitted by the P2P runtime.
@@ -157,7 +236,11 @@ pub enum P2pEvent {
         block: Vec<u8>,
     },
     /// An authenticated peer requested canonical blocks beginning at `start`.
-    BackfillRequested { peer: PublicKey, start: u64 },
+    BackfillRequested {
+        peer: PublicKey,
+        request_id: u64,
+        start: u64,
+    },
     /// A sealed canonical block was returned by an eligible backfill peer.
     BackfillBlockReceived { peer: PublicKey, block: Vec<u8> },
     /// The responder sent all blocks available in this response page.
@@ -288,19 +371,16 @@ fn run(
         oracle.track(0, peers).await;
         let (block_sender, block_receiver) =
             commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
+
+        // The backfill request and responses are on separate channels
         let (backfill_request_sender, backfill_request_receiver) = commonware.register(
             BACKFILL_REQUEST_CHANNEL,
-            network::block_quota(),
+            network::backfill_request_quota(),
             BLOCK_BACKLOG,
         );
-        let (backfill_block_sender, backfill_block_receiver) = commonware.register(
-            BACKFILL_BLOCK_CHANNEL,
-            network::block_quota(),
-            BLOCK_BACKLOG,
-        );
-        let (backfill_complete_sender, backfill_complete_receiver) = commonware.register(
-            BACKFILL_COMPLETE_CHANNEL,
-            network::block_quota(),
+        let (backfill_response_sender, backfill_response_receiver) = commonware.register(
+            BACKFILL_RESPONSE_CHANNEL,
+            network::backfill_response_quota(),
             BLOCK_BACKLOG,
         );
         let mut network_task = commonware.start();
@@ -311,6 +391,7 @@ fn run(
                 "P2P source-IP filtering is disabled; relying on network-level access controls and manifest Ed25519 public keys"
             );
         }
+
         info!(
             target: "zone::p2p",
             zone_id = config.manifest.zone_id(),
@@ -320,6 +401,7 @@ fn run(
             peers = config.manifest.nodes().len(),
             "Started P2P networking"
         );
+
         let _ = events
             .send(P2pEvent::Started {
                 role: config.role,
@@ -335,21 +417,25 @@ fn run(
             .filter(|node| config.manifest.role_of(node.ed25519_public_key()) == Some(Role::Follower))
             .map(|node| node.ed25519_public_key().clone())
             .collect();
+
         let backfill_peers = match config.role {
+            // A recovering leader can backfill from all followers
             Role::Leader => followers.clone(),
+
+            // A recovering follower can backfill from the canonical leader
             Role::Follower => vec![config.manifest.leader_ed25519_public_key().clone()],
         };
-        let outstanding_backfill_responses = Arc::new(Mutex::new(HashMap::new()));
+
+        let backfill_lifecycle = Arc::new(Mutex::new(BackfillJob::default()));
         let command_loop = run_commands(
             config.role,
             followers,
             backfill_peers,
-            outstanding_backfill_responses.clone(),
+            backfill_lifecycle.clone(),
             P2pSenders {
                 blocks: block_sender,
                 backfill_requests: backfill_request_sender,
-                backfill_blocks: backfill_block_sender,
-                backfill_completions: backfill_complete_sender,
+                backfill_responses: backfill_response_sender,
             },
             command_rx,
         );
@@ -361,10 +447,9 @@ fn run(
             P2pReceivers {
                 blocks: block_receiver,
                 backfill_requests: backfill_request_receiver,
-                backfill_blocks: backfill_block_receiver,
-                backfill_completions: backfill_complete_receiver,
+                backfill_responses: backfill_response_receiver,
             },
-            outstanding_backfill_responses,
+            backfill_lifecycle,
             events,
         );
         tokio::pin!(receive_loop);
@@ -392,7 +477,7 @@ async fn run_commands(
     role: Role,
     followers: Vec<PublicKey>,
     backfill_peers: Vec<PublicKey>,
-    outstanding_backfill_responses: OutstandingBackfillResponses,
+    backfill_job: SharedBackfillLifecycle,
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
@@ -403,10 +488,12 @@ async fn run_commands(
                     warn!(target: "zone::p2p", "Ignoring live block broadcast command on follower");
                     continue;
                 }
+
                 if block.len() > MAX_MESSAGE_SIZE as usize {
                     error!(target: "zone::p2p", block_size_bytes = block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Canonical block exceeds the P2P message size limit; block was not broadcast");
                     continue;
                 }
+
                 let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
                         let sent = senders.blocks
@@ -431,61 +518,69 @@ async fn run_commands(
                     debug!(target: "zone::p2p", connected = sent.len(), configured = followers.len(), "Some followers are not connected; block was not sent to them");
                 }
             }
+
             P2pCommand::RequestBackfill { start } => {
                 let now = Instant::now();
-                let request_peers = {
-                    let outstanding = outstanding_backfill_responses.lock().await;
-                    backfill_peers
-                        .iter()
-                        .filter(|peer| {
-                            outstanding.get(*peer).is_none_or(|requested_at| {
-                                now.duration_since(*requested_at) >= BACKFILL_RESPONSE_TIMEOUT
-                            })
-                        })
-                        .cloned()
-                        .collect::<Vec<_>>()
+                let request = {
+                    backfill_job
+                        .lock()
+                        .await
+                        .begin_request(&backfill_peers, now)
                 };
-                if request_peers.is_empty() {
+                let Some((request_id, request_peers)) = request else {
                     debug!(target: "zone::p2p", start, configured = backfill_peers.len(), "Skipping block backfill request because all eligible peers already have outstanding responses");
                     continue;
-                }
-                let sent = senders
+                };
+                let mut request_frame = Vec::with_capacity(16);
+                request_frame.extend_from_slice(&request_id.to_be_bytes());
+                request_frame.extend_from_slice(&start.to_be_bytes());
+                let sent = match senders
                     .backfill_requests
-                    .send(
-                        Recipients::Some(request_peers.clone()),
-                        start.to_be_bytes().to_vec(),
-                        true,
-                    )
+                    .send(Recipients::Some(request_peers.clone()), request_frame, true)
                     .await
-                    .map_err(|err| eyre::eyre!("failed requesting block backfill: {err}"))?;
                 {
-                    let mut outstanding = outstanding_backfill_responses.lock().await;
-                    let sent_at = Instant::now();
-                    for peer in &sent {
-                        outstanding.insert(peer.clone(), sent_at);
+                    Ok(sent) => sent,
+                    Err(err) => {
+                        backfill_job.lock().await.cancel_request(request_id);
+                        return Err(eyre::eyre!("failed requesting block backfill: {err}"));
                     }
-                }
-                debug!(target: "zone::p2p", start, connected = sent.len(), requested = request_peers.len(), configured = backfill_peers.len(), "Sent block backfill request");
+                };
+                backfill_job.lock().await.finish_send(request_id, &sent);
+                debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), configured = backfill_peers.len(), "Sent block backfill request");
             }
-            P2pCommand::SendBackfillBlock { peer, block } => {
-                if block.len() > MAX_MESSAGE_SIZE as usize {
-                    error!(target: "zone::p2p", block_size_bytes = block.len(), max_message_size_bytes = MAX_MESSAGE_SIZE, "Backfill block exceeds the P2P message size limit");
+
+            P2pCommand::SendBackfillBlock {
+                peer,
+                request_id,
+                block,
+            } => {
+                if block.len().saturating_add(9) > MAX_MESSAGE_SIZE as usize {
+                    error!(target: "zone::p2p", block_size_bytes = block.len(), max_frame_size_bytes = MAX_MESSAGE_SIZE, "Backfill block exceeds the P2P response frame size limit");
                     continue;
                 }
+                let mut frame = Vec::with_capacity(block.len() + 9);
+                frame.push(BACKFILL_BLOCK_FRAME);
+                frame.extend_from_slice(&request_id.to_be_bytes());
+                frame.extend_from_slice(&block);
                 senders
-                    .backfill_blocks
-                    .send(Recipients::Some(vec![peer]), block, true)
+                    .backfill_responses
+                    .send(Recipients::Some(vec![peer]), frame, true)
                     .await
                     .map_err(|err| eyre::eyre!("failed sending backfill block: {err}"))?;
             }
-            P2pCommand::CompleteBackfill { peer, tip } => {
+
+            P2pCommand::CompleteBackfill {
+                peer,
+                request_id,
+                tip,
+            } => {
+                let mut frame = Vec::with_capacity(17);
+                frame.push(BACKFILL_COMPLETE_FRAME);
+                frame.extend_from_slice(&request_id.to_be_bytes());
+                frame.extend_from_slice(&tip.to_be_bytes());
                 senders
-                    .backfill_completions
-                    .send(
-                        Recipients::Some(vec![peer]),
-                        tip.to_be_bytes().to_vec(),
-                        true,
-                    )
+                    .backfill_responses
+                    .send(Recipients::Some(vec![peer]), frame, true)
                     .await
                     .map_err(|err| eyre::eyre!("failed completing block backfill: {err}"))?;
             }
@@ -499,18 +594,19 @@ async fn run_receivers(
     role: Role,
     manifest: Arc<ZoneManifest>,
     receivers: P2pReceivers,
-    outstanding_backfill_responses: OutstandingBackfillResponses,
+    backfill_job: SharedBackfillLifecycle,
     events: mpsc::Sender<P2pEvent>,
 ) -> eyre::Result<()> {
     let P2pReceivers {
         mut blocks,
         mut backfill_requests,
-        mut backfill_blocks,
-        mut backfill_completions,
+        mut backfill_responses,
     } = receivers;
+
     let leader = manifest.leader_ed25519_public_key().clone();
     loop {
         let event = tokio::select! {
+            // Got a block
             result = blocks.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("block channel receive failed: {err}"))?;
                 if role == Role::Leader || peer != leader {
@@ -519,59 +615,66 @@ async fn run_receivers(
                 }
                 P2pEvent::BlockReceived { leader_ed25519_public_key: peer, block: bytes.into() }
             }
+
+            // Got backfill request
             result = backfill_requests.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill request receive failed: {err}"))?;
-                let Ok(bytes): Result<[u8; 8], _> = bytes.as_ref().try_into() else {
+                let Ok(bytes): Result<[u8; 16], _> = bytes.as_ref().try_into() else {
                     warn!(target: "zone::p2p", %peer, size = bytes.len(), "Ignoring malformed backfill request");
                     continue;
                 };
-                P2pEvent::BackfillRequested { peer, start: u64::from_be_bytes(bytes) }
+                let request_id = u64::from_be_bytes(bytes[..8].try_into().expect("fixed-size request ID"));
+                let start = u64::from_be_bytes(bytes[8..].try_into().expect("fixed-size backfill start"));
+                P2pEvent::BackfillRequested { peer, request_id, start }
             }
-            result = backfill_blocks.recv() => {
-                let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill block receive failed: {err}"))?;
+
+            // Got backfill response (for an existing request)
+            result = backfill_responses.recv() => {
+                let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill response receive failed: {err}"))?;
                 let eligible = match role { Role::Leader => peer != leader, Role::Follower => peer == leader };
                 if !eligible {
-                    warn!(target: "zone::p2p", %peer, "Ignoring backfill block from ineligible peer");
+                    warn!(target: "zone::p2p", %peer, "Ignoring backfill response from ineligible peer");
                     continue;
                 }
-                if !outstanding_backfill_responses
-                    .lock()
-                    .await
-                    .contains_key(&peer)
-                {
-                    warn!(target: "zone::p2p", %peer, "Ignoring unsolicited backfill block");
-                    continue;
-                }
-                P2pEvent::BackfillBlockReceived { peer, block: bytes.into() }
-            }
-            result = backfill_completions.recv() => {
-                let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill completion receive failed: {err}"))?;
-                let eligible = match role { Role::Leader => peer != leader, Role::Follower => peer == leader };
-                if !eligible {
-                    warn!(target: "zone::p2p", %peer, "Ignoring backfill completion from ineligible peer");
-                    continue;
-                }
-                if !outstanding_backfill_responses
-                    .lock()
-                    .await
-                    .contains_key(&peer)
-                {
-                    warn!(target: "zone::p2p", %peer, "Ignoring unsolicited backfill completion");
-                    continue;
-                }
-                let Ok(bytes): Result<[u8; 8], _> = bytes.as_ref().try_into() else {
-                    outstanding_backfill_responses.lock().await.remove(&peer);
-                    warn!(target: "zone::p2p", %peer, size = bytes.len(), "Ignoring malformed backfill completion");
+                let Some((&frame_kind, frame_payload)) = bytes.as_ref().split_first() else {
+                    warn!(target: "zone::p2p", %peer, "Ignoring empty backfill response frame");
                     continue;
                 };
-                {
-                    let mut outstanding = outstanding_backfill_responses.lock().await;
-                    if outstanding.remove(&peer).is_none() {
-                        warn!(target: "zone::p2p", %peer, "Ignoring unsolicited backfill completion");
+                let Some((request_id_bytes, payload)) = frame_payload.split_at_checked(8) else {
+                    warn!(target: "zone::p2p", %peer, size = frame_payload.len(), "Ignoring backfill response without a request ID");
+                    continue;
+                };
+                let request_id = u64::from_be_bytes(request_id_bytes.try_into().expect("fixed-size request ID"));
+                let received_at = Instant::now();
+
+                let mut backfill_job = backfill_job.lock().await;
+                match frame_kind {
+                    BACKFILL_BLOCK_FRAME => {
+                        if !backfill_job
+                            .accepts(&peer, request_id, received_at)
+                        {
+                            warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill block");
+                            continue;
+                        }
+                        P2pEvent::BackfillBlockReceived { peer, block: payload.to_vec() }
+                    }
+                    BACKFILL_COMPLETE_FRAME => {
+                        let accepted = backfill_job.complete(&peer, request_id, received_at);
+                        if !accepted {
+                            warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill completion");
+                            continue;
+                        }
+                        let Ok(tip_bytes): Result<[u8; 8], _> = payload.try_into() else {
+                            warn!(target: "zone::p2p", %peer, request_id, size = payload.len(), "Ignoring malformed backfill completion");
+                            continue;
+                        };
+                        P2pEvent::BackfillCompleted { peer, tip: u64::from_be_bytes(tip_bytes) }
+                    }
+                    _ => {
+                        warn!(target: "zone::p2p", %peer, frame_kind, "Ignoring backfill response with unknown frame kind");
                         continue;
                     }
                 }
-                P2pEvent::BackfillCompleted { peer, tip: u64::from_be_bytes(bytes) }
             }
         };
         events
@@ -586,14 +689,17 @@ mod tests {
     use std::{
         net::{SocketAddr, TcpListener},
         sync::Arc,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use alloy_primitives::address;
     use commonware_codec::Encode as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
-    use super::{P2pCommand, P2pConfig, P2pEvent, spawn_p2p, validate_ip_check_configuration};
+    use super::{
+        BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, spawn_p2p,
+        validate_ip_check_configuration,
+    };
     use crate::{P2pNetworkId, ZoneManifest, identity::Ed25519Identity, network::MAX_MESSAGE_SIZE};
 
     fn available_address() -> SocketAddr {
@@ -604,6 +710,40 @@ mod tests {
     fn ed25519_identity(seed: u64) -> Ed25519Identity {
         let key = PrivateKey::from_seed(seed);
         Ed25519Identity::from_hex(&const_hex::encode_prefixed(key.encode().as_ref())).unwrap()
+    }
+
+    #[test]
+    fn stale_response_cannot_complete_replacement_request() {
+        let peer = ed25519_identity(1).ed25519_public_key();
+        let now = Instant::now();
+        let mut lifecycle = BackfillJob::default();
+
+        let (first_id, peers) = lifecycle
+            .begin_request(std::slice::from_ref(&peer), now)
+            .unwrap();
+        lifecycle.finish_send(first_id, &peers);
+        assert!(lifecycle.accepts(&peer, first_id, now));
+        let halfway = now + BACKFILL_RESPONSE_TIMEOUT / 2;
+        assert!(lifecycle.accepts(&peer, first_id, halfway));
+        assert!(
+            lifecycle
+                .begin_request(std::slice::from_ref(&peer), halfway)
+                .is_none()
+        );
+
+        let expired_at = now + BACKFILL_RESPONSE_TIMEOUT;
+        assert!(!lifecycle.accepts(&peer, first_id, expired_at));
+        assert!(!lifecycle.complete(&peer, first_id, expired_at));
+
+        let (replacement_id, peers) = lifecycle
+            .begin_request(std::slice::from_ref(&peer), expired_at)
+            .unwrap();
+        lifecycle.finish_send(replacement_id, &peers);
+        assert_ne!(first_id, replacement_id);
+        assert!(!lifecycle.accepts(&peer, first_id, expired_at));
+        assert!(!lifecycle.complete(&peer, first_id, expired_at));
+        assert!(lifecycle.accepts(&peer, replacement_id, expired_at));
+        assert!(lifecycle.complete(&peer, replacement_id, expired_at));
     }
 
     async fn assert_no_backfill_response_events(
@@ -742,6 +882,7 @@ mod tests {
         leader_commands
             .send(P2pCommand::SendBackfillBlock {
                 peer: first_follower_peer.clone(),
+                request_id: 0,
                 block: block.clone(),
             })
             .await
@@ -749,6 +890,7 @@ mod tests {
         leader_commands
             .send(P2pCommand::CompleteBackfill {
                 peer: first_follower_peer.clone(),
+                request_id: 0,
                 tip: 99,
             })
             .await
@@ -764,17 +906,21 @@ mod tests {
             .send(P2pCommand::RequestBackfill { start: 7 })
             .await
             .unwrap();
-        let requesting_peer = tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::BackfillRequested { peer, start: 7 }) =
-                    handles[0].events_mut().recv().await
-                {
-                    return peer;
+        let (requesting_peer, follower_request_id) =
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BackfillRequested {
+                        peer,
+                        request_id,
+                        start: 7,
+                    }) = handles[0].events_mut().recv().await
+                    {
+                        return (peer, request_id);
+                    }
                 }
-            }
-        })
-        .await
-        .expect("leader did not receive backfill request");
+            })
+            .await
+            .expect("leader did not receive backfill request");
 
         follower_commands
             .send(P2pCommand::RequestBackfill { start: 8 })
@@ -798,6 +944,7 @@ mod tests {
         follower_commands
             .send(P2pCommand::SendBackfillBlock {
                 peer: leader_peer.clone(),
+                request_id: 0,
                 block: block.clone(),
             })
             .await
@@ -805,6 +952,7 @@ mod tests {
         follower_commands
             .send(P2pCommand::CompleteBackfill {
                 peer: leader_peer.clone(),
+                request_id: 0,
                 tip: 100,
             })
             .await
@@ -819,45 +967,53 @@ mod tests {
         leader_commands
             .send(P2pCommand::SendBackfillBlock {
                 peer: requesting_peer.clone(),
+                request_id: follower_request_id,
                 block: block.clone(),
             })
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::BackfillBlockReceived {
-                    block: received, ..
-                }) = handles[1].events_mut().recv().await
-                {
-                    assert_eq!(received, block);
-                    return;
-                }
-            }
-        })
-        .await
-        .expect("follower did not receive requested backfill block");
+        let second_block = vec![0xf8, 0x02, 0x80];
+        leader_commands
+            .send(P2pCommand::SendBackfillBlock {
+                peer: requesting_peer.clone(),
+                request_id: follower_request_id,
+                block: second_block.clone(),
+            })
+            .await
+            .unwrap();
         leader_commands
             .send(P2pCommand::CompleteBackfill {
                 peer: requesting_peer,
+                request_id: follower_request_id,
                 tip: 9,
             })
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(15), async {
+            let expected_blocks = [block.clone(), second_block];
+            let mut received_blocks = 0;
             loop {
-                if let Some(P2pEvent::BackfillCompleted { tip: 9, .. }) =
-                    handles[1].events_mut().recv().await
-                {
-                    return;
+                match handles[1].events_mut().recv().await {
+                    Some(P2pEvent::BackfillBlockReceived { block, .. }) => {
+                        assert_eq!(block, expected_blocks[received_blocks]);
+                        received_blocks += 1;
+                    }
+                    Some(P2pEvent::BackfillCompleted { tip: 9, .. }) => {
+                        assert_eq!(received_blocks, expected_blocks.len());
+                        return;
+                    }
+                    Some(_) => {}
+                    None => panic!("follower event channel closed"),
                 }
             }
         })
         .await
-        .expect("follower did not receive requested backfill completion");
+        .expect("follower did not receive ordered backfill response");
 
         leader_commands
             .send(P2pCommand::SendBackfillBlock {
                 peer: first_follower_peer.clone(),
+                request_id: follower_request_id,
                 block: block.clone(),
             })
             .await
@@ -865,6 +1021,7 @@ mod tests {
         leader_commands
             .send(P2pCommand::CompleteBackfill {
                 peer: first_follower_peer.clone(),
+                request_id: follower_request_id,
                 tip: 10,
             })
             .await
@@ -880,12 +1037,15 @@ mod tests {
             .send(P2pCommand::RequestBackfill { start: 11 })
             .await
             .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
+        let leader_request_id = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                if let Some(P2pEvent::BackfillRequested { start: 11, .. }) =
-                    handles[1].events_mut().recv().await
+                if let Some(P2pEvent::BackfillRequested {
+                    request_id,
+                    start: 11,
+                    ..
+                }) = handles[1].events_mut().recv().await
                 {
-                    return;
+                    return request_id;
                 }
             }
         })
@@ -895,6 +1055,7 @@ mod tests {
         follower_commands
             .send(P2pCommand::SendBackfillBlock {
                 peer: leader_peer.clone(),
+                request_id: leader_request_id,
                 block: block.clone(),
             })
             .await
@@ -917,6 +1078,7 @@ mod tests {
         follower_commands
             .send(P2pCommand::CompleteBackfill {
                 peer: leader_peer,
+                request_id: leader_request_id,
                 tip: 12,
             })
             .await

@@ -161,6 +161,21 @@ const BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BLOCK_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_BLOCKS: usize = 128;
 const BACKFILL_PAGE_SIZE: u64 = 64;
+const BACKFILL_SERVE_QUEUE_CAPACITY: usize = 8;
+
+struct BackfillRequest {
+    peer: zone_p2p::P2pPeerId,
+    request_id: u64,
+    start: u64,
+}
+
+struct BackfillServerTask(tokio::task::JoinHandle<()>);
+
+impl Drop for BackfillServerTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 /// Keep track of the backfill exactly. We'll buffer any live blocks received
 /// during backfill.
@@ -251,10 +266,11 @@ fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
     Ok(block.header.number())
 }
 
-async fn serve_backfill<P>(
+fn serve_backfill_page<P>(
     provider: &P,
     commands: &mpsc::Sender<P2pCommand>,
     peer: zone_p2p::P2pPeerId,
+    request_id: u64,
     start: u64,
 ) -> eyre::Result<()>
 where
@@ -262,25 +278,57 @@ where
 {
     let tip = provider.best_block_number()?;
     let end = tip.min(start.saturating_add(BACKFILL_PAGE_SIZE.saturating_sub(1)));
-    if start <= end {
-        for number in start..=end {
-            let block = provider.block_by_number(number)?.ok_or_else(|| {
-                eyre::eyre!("canonical block {number} is missing while serving backfill")
-            })?;
-            commands
-                .send(P2pCommand::SendBackfillBlock {
-                    peer: peer.clone(),
-                    block: alloy_rlp::encode(block),
-                })
-                .await
-                .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
-        }
+    for number in start..=end {
+        let block = provider.block_by_number(number)?.ok_or_else(|| {
+            eyre::eyre!("canonical block {number} is missing while serving backfill")
+        })?;
+        commands
+            .blocking_send(P2pCommand::SendBackfillBlock {
+                peer: peer.clone(),
+                request_id,
+                block: alloy_rlp::encode(block),
+            })
+            .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
     }
     commands
-        .send(P2pCommand::CompleteBackfill { peer, tip })
-        .await
+        .blocking_send(P2pCommand::CompleteBackfill {
+            peer,
+            request_id,
+            tip,
+        })
         .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
     Ok(())
+}
+
+async fn serve_backfill_requests<P>(
+    provider: P,
+    commands: mpsc::Sender<P2pCommand>,
+    mut requests: mpsc::Receiver<BackfillRequest>,
+) where
+    P: BlockNumReader + BlockReader<Block = Block> + Clone + Send + Sync + 'static,
+{
+    // One worker deliberately serializes page construction and sending, bounding serving
+    // concurrency independently of the block import loop.
+    while let Some(BackfillRequest {
+        peer,
+        request_id,
+        start,
+    }) = requests.recv().await
+    {
+        let page_provider = provider.clone();
+        let page_commands = commands.clone();
+        let page = tokio::task::spawn_blocking(move || {
+            serve_backfill_page(&page_provider, &page_commands, peer, request_id, start)
+        })
+        .await;
+        let result = match page {
+            Ok(result) => result,
+            Err(err) => Err(eyre::eyre!("backfill page worker failed: {err}")),
+        };
+        if let Err(err) = result {
+            tracing::error!(target: "zone::p2p", %err, start, "Failed serving block backfill");
+        }
+    }
 }
 
 /// Serve catch-up requests and import live/backfilled blocks in canonical order.
@@ -302,6 +350,14 @@ pub(crate) async fn run_block_sync<P>(
     // This is capped to `MAX_PENDING_BLOCKS`.
     let mut pending = BTreeMap::<u64, Vec<u8>>::new();
     let mut backfill = BackfillProgress::new();
+    let (backfill_requests, backfill_request_rx) = mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
+
+    // Serve backfill requests in a separate task to avoid competing the live blocks
+    let mut backfill_server = BackfillServerTask(tokio::spawn(serve_backfill_requests(
+        provider.clone(),
+        commands.clone(),
+        backfill_request_rx,
+    )));
 
     // Always probe on startup to see if we're behind
     let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
@@ -320,9 +376,9 @@ pub(crate) async fn run_block_sync<P>(
                 };
                 match event {
                     P2pEvent::Started { .. } => {}
-                    P2pEvent::BackfillRequested { peer, start } => {
-                        if let Err(err) = serve_backfill(&provider, &commands, peer, start).await {
-                            tracing::error!(target: "zone::p2p", %err, start, "Failed serving block backfill");
+                    P2pEvent::BackfillRequested { peer, request_id, start } => {
+                        if let Err(err) = backfill_requests.try_send(BackfillRequest { peer, request_id, start }) {
+                            tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
                         }
                     }
                     P2pEvent::BlockReceived { block, .. }
@@ -425,6 +481,13 @@ pub(crate) async fn run_block_sync<P>(
                     debug!(target: "zone::p2p", "P2P command channel closed");
                     return;
                 }
+            }
+            result = &mut backfill_server.0 => {
+                match result {
+                    Ok(()) => tracing::error!(target: "zone::p2p", "Block backfill server stopped unexpectedly"),
+                    Err(err) => tracing::error!(target: "zone::p2p", %err, "Block backfill server task failed"),
+                }
+                return;
             }
         }
     }
