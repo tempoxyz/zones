@@ -3,11 +3,9 @@ pragma solidity ^0.8.13;
 
 import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
-import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { Vm } from "forge-std/Vm.sol";
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 /// @title ZoneFactoryTest
 /// @notice Comprehensive tests for ZoneFactory validation and zone creation
@@ -20,7 +18,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function setUp() public override {
         super.setUp();
-        zoneFactory = new ZoneFactory();
+        zoneFactory = _deployZoneFactory();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -51,7 +49,6 @@ contract ZoneFactoryTest is BaseTest {
         ZoneInfo memory info = zoneFactory.zones(zoneId);
         assertEq(info.zoneId, 1);
         assertEq(info.portal, portal);
-        assertTrue(info.messenger != address(0));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
         assertEq(info.sequencer, sequencer);
@@ -60,7 +57,46 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
     }
 
-    function test_createZone_deploysMessenger() public {
+    function test_createZone_revertsForNonOwner() public {
+        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            admin: admin,
+            sequencer: sequencer,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+
+        vm.prank(alice);
+        vm.expectRevert(IZoneFactory.NotOwner.selector);
+        zoneFactory.createZone(params);
+    }
+
+    function test_transferOwnership_updatesZoneCreator() public {
+        vm.expectEmit(true, true, false, false);
+        emit IZoneFactory.OwnershipTransferred(address(this), alice);
+        zoneFactory.transferOwnership(alice);
+
+        assertEq(zoneFactory.owner(), alice);
+
+        vm.expectRevert(IZoneFactory.NotOwner.selector);
+        zoneFactory.transferOwnership(admin);
+
+        vm.prank(alice);
+        zoneFactory.transferOwnership(admin);
+        assertEq(zoneFactory.owner(), admin);
+    }
+
+    function test_transferOwnership_revertsForZeroAddress() public {
+        vm.expectRevert(IZoneFactory.InvalidOwner.selector);
+        zoneFactory.transferOwnership(address(0));
+    }
+
+    function test_createZone_usesSharedMessenger() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
@@ -76,16 +112,13 @@ contract ZoneFactoryTest is BaseTest {
 
         (uint32 zoneId, address portal) = zoneFactory.createZone(params);
 
-        ZoneInfo memory info = zoneFactory.zones(zoneId);
-        address messengerAddr = info.messenger;
-
-        // Verify messenger is deployed and configured correctly
-        ZoneMessenger messenger = ZoneMessenger(messengerAddr);
-        assertEq(messenger.portal(), portal);
+        address messengerAddr = zoneFactory.messenger();
+        assertTrue(messengerAddr != address(0));
 
         // Verify portal references the messenger
         ZonePortal portalContract = ZonePortal(portal);
         assertEq(portalContract.messenger(), messengerAddr);
+        assertEq(zoneFactory.zones(zoneId).portal, portal);
     }
 
     function test_createZone_multipleZones() public {
@@ -127,12 +160,12 @@ contract ZoneFactoryTest is BaseTest {
         assertTrue(zoneFactory.isZonePortal(portal1));
         assertTrue(zoneFactory.isZonePortal(portal2));
 
-        // Each zone should have its own messenger
         ZoneInfo memory info1 = zoneFactory.zones(zoneId1);
         ZoneInfo memory info2 = zoneFactory.zones(zoneId2);
         assertEq(info1.sequencer, sequencer);
         assertEq(info2.sequencer, secondSequencer);
-        assertTrue(info1.messenger != info2.messenger);
+        assertEq(ZonePortal(portal1).messenger(), zoneFactory.messenger());
+        assertEq(ZonePortal(portal2).messenger(), zoneFactory.messenger());
     }
 
     function test_createZone_emitsEvent() public {
@@ -160,7 +193,7 @@ contract ZoneFactoryTest is BaseTest {
             if (
                 logs[i].topics[0]
                     == keccak256(
-                        "ZoneCreated(uint32,address,address,address,address,address,address,bytes32,bytes32,uint64)"
+                        "ZoneCreated(uint32,address,address,address,address,address,bytes32,bytes32,uint64)"
                     )
             ) {
                 found = true;
@@ -322,7 +355,6 @@ contract ZoneFactoryTest is BaseTest {
         ZoneInfo memory info = zoneFactory.zones(999);
         assertEq(info.zoneId, 0);
         assertEq(info.portal, address(0));
-        assertEq(info.messenger, address(0));
         assertEq(info.initialToken, address(0));
     }
 
@@ -380,18 +412,22 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(pc.admin(), p.admin);
         assertEq(pc.sequencer(), p.sequencer);
         assertEq(pc.verifier(), p.verifier);
-        assertEq(pc.messenger(), zoneFactory.zones(id).messenger);
+        assertEq(pc.messenger(), zoneFactory.messenger());
         assertEq(pc.blockHash(), p.zoneParams.genesisBlockHash);
         assertEq(pc.genesisTempoBlockNumber(), p.zoneParams.genesisTempoBlockNumber);
         assertEq(pc.rpcUrl(), p.rpcUrl);
         assertTrue(pc.isTokenEnabled(address(pathUSD)));
-        assertEq(pathUSD.allowance(portal, pc.messenger()), type(uint256).max);
     }
 
-    function test_createZone_registersMessenger() public {
-        (uint32 id,) = zoneFactory.createZone(_defaultParams());
-        assertTrue(zoneFactory.isZoneMessenger(zoneFactory.zones(id).messenger));
-        assertFalse(zoneFactory.isZoneMessenger(alice));
+    function test_messenger_isShared() public {
+        address messenger = zoneFactory.messenger();
+        assertTrue(messenger != address(0));
+
+        (, address portal1) = zoneFactory.createZone(_defaultParams());
+        (, address portal2) = zoneFactory.createZone(_defaultParams());
+
+        assertEq(ZonePortal(portal1).messenger(), messenger);
+        assertEq(ZonePortal(portal2).messenger(), messenger);
     }
 
     /*//////////////////////////////////////////////////////////////

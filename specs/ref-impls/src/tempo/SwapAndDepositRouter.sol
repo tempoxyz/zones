@@ -5,7 +5,8 @@ import {
     EncryptedDepositPayload,
     IWithdrawalReceiver,
     IZoneFactory,
-    IZonePortal
+    IZonePortal,
+    ZoneInfo
 } from "../interfaces/IZone.sol";
 import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -31,6 +32,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     //////////////////////////////////////////////////////////////*/
 
     error UnauthorizedMessenger();
+    error InvalidSourcePortal();
     error InvalidTargetPortal();
     error InvalidToken();
 
@@ -48,7 +50,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Receive a cross-zone withdrawal, optionally swap tokens, and deposit to target zone
-    /// @dev Implements IWithdrawalReceiver. Only callable by registered zone messengers.
+    /// @dev Implements IWithdrawalReceiver. Only callable by the shared zone messenger.
     ///      The messenger has already transferred tokens to this router.
     ///      On failure, the entire callback reverts, triggering bounce-back to source zone.
     /// @param tokenIn The TIP-20 token received from the source zone withdrawal
@@ -61,6 +63,8 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     ///
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
+        uint32 sourceZoneId,
+        address sourcePortal,
         bytes32, /* senderTag */
         address tokenIn,
         uint128 amount,
@@ -69,8 +73,13 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
-        if (!zoneFactory.isZoneMessenger(msg.sender)) {
+        if (msg.sender != zoneFactory.messenger()) {
             revert UnauthorizedMessenger();
+        }
+
+        ZoneInfo memory sourceZone = zoneFactory.zones(sourceZoneId);
+        if (sourceZone.portal != sourcePortal) {
+            revert InvalidSourcePortal();
         }
 
         bool isEncrypted = abi.decode(data, (bool));

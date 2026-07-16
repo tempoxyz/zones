@@ -522,7 +522,7 @@ impl WithdrawalProcessor {
         // 1. `gasLimit`          — gas the user requested for their callback.
         // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
         //    logic that runs *around* the callback: queue dequeue & hash
-        //    verification, TIP-20 transferFrom (~500k), messenger relay
+        //    verification, TIP-20 transfers, messenger relay
         //    setup, fee payment, event emission, and the bounce-back path
         //    if the callback reverts.
         //
@@ -686,7 +686,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: to,
+            fallbackNonce: 1,
             callbackData: Default::default(),
             encryptedSender: Default::default(),
         }
@@ -728,7 +728,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            fallbackNonce: 1,
             callbackData: Default::default(),
             encryptedSender: Default::default(),
         };

@@ -20,8 +20,10 @@ tempo-transaction-pool.workspace = true
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
+zone-chainspec.workspace = true
 zone-evm.workspace = true
 zone-l1.workspace = true
+zone-p2p.workspace = true
 zone-payload.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
@@ -29,6 +31,7 @@ zone-rpc.workspace = true
 zone-sequencer.workspace = true
 
 # reth
+reth-chain-state.workspace = true
 reth-chainspec.workspace = true
 reth-consensus = { workspace = true, optional = true }
 reth-eth-wire-types.workspace = true
@@ -57,6 +60,7 @@ alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
+alloy-rlp.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -86,10 +90,11 @@ alloy = { workspace = true, features = [
 alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
-alloy-rlp.workspace = true
 alloy-signer.workspace = true
 base64.workspace = true
 const-hex.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
 p256.workspace = true
 rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
@@ -113,7 +118,7 @@ cli = [
   "dep:reth-consensus",
   "dep:reth-ethereum",
   "dep:reth-tracing",
-  "tempo-chainspec/cli",
+  "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]
 test-utils = [

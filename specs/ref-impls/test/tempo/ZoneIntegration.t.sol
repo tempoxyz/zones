@@ -14,6 +14,7 @@ import {
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     QueuedDeposit,
     Withdrawal,
+    ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
@@ -36,6 +37,8 @@ contract TrackingReceiver is IWithdrawalReceiver {
     uint256 public callCount;
 
     function onWithdrawalReceived(
+        uint32,
+        address,
         bytes32,
         address,
         uint128 amount,
@@ -47,6 +50,21 @@ contract TrackingReceiver is IWithdrawalReceiver {
         totalReceived += amount;
         callCount++;
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
+    }
+
+}
+
+contract MockZoneFactoryForIntegrationMessenger {
+
+    mapping(uint32 => ZoneInfo) internal _zones;
+
+    function setPortal(uint32 zoneId, address portal) external {
+        _zones[zoneId].zoneId = zoneId;
+        _zones[zoneId].portal = portal;
+    }
+
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
+        return _zones[zoneId];
     }
 
 }
@@ -77,7 +95,7 @@ contract ZoneIntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        l1Factory = new ZoneFactory(); // Keep for verifier only
+        l1Factory = _deployZoneFactory(); // Keep for verifier only
         receiver = new TrackingReceiver();
 
         // Deploy zone token FIRST
@@ -92,22 +110,27 @@ contract ZoneIntegrationTest is BaseTest {
 
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Deploy messenger and portal directly (bypass factory TIP20 prefix check)
-        uint256 currentNonce = vm.getNonce(address(this));
-        address predictedPortal = vm.computeCreateAddress(address(this), currentNonce + 1);
-        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal);
-        l1Portal = new ZonePortal(
+        // Deploy portal directly (bypass factory TIP20 prefix check), but use a
+        // mock factory registry so the shared messenger can authenticate the source portal.
+        MockZoneFactoryForIntegrationMessenger messengerFactory =
+            new MockZoneFactoryForIntegrationMessenger();
+        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
+        l1Portal = new ZonePortal();
+        address verifier = l1Factory.verifier();
+        vm.prank(_ZONE_FACTORY);
+        l1Portal.initialize(
             1,
             address(l2ZoneToken),
             address(messengerContract),
             admin,
             sequencer,
-            l1Factory.verifier(),
+            verifier,
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
             ""
         );
         zoneId = 1;
+        messengerFactory.setPortal(zoneId, address(l1Portal));
 
         // L2 setup
         l2TempoState =
@@ -171,7 +194,7 @@ contract ZoneIntegrationTest is BaseTest {
             fee: 0,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });

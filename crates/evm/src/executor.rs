@@ -13,22 +13,22 @@ use alloy_evm::{
 use reth_evm::block::StateDB;
 use reth_revm::Inspector;
 use revm::context::{ContextTr, JournalTr, Transaction};
-use tempo_chainspec::TempoChainSpec;
-use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder, evm::TempoEvm};
+use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
 use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use zone_chainspec::ZoneChainSpec;
 
-use crate::tx_context;
+use crate::{ZoneEvm, tx_context};
 
 /// Simplified block executor for zone nodes.
 ///
 /// Wraps [`EthBlockExecutor`] without any subblock validation, gas-section tracking,
 /// or end-of-block metadata system transaction requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I> {
-    inner: EthBlockExecutor<'a, TempoEvm<DB, I>, &'a TempoChainSpec, TempoReceiptBuilder>,
+    inner: EthBlockExecutor<'a, ZoneEvm<DB, I>, &'a ZoneChainSpec, TempoReceiptBuilder>,
 }
 
 impl<'a, DB, I> ZoneBlockExecutor<'a, DB, I>
@@ -36,10 +36,11 @@ where
     DB: StateDB,
     I: Inspector<TempoContext<DB>>,
 {
-    pub(crate) fn new(
-        evm: TempoEvm<DB, I>,
+    /// Create a zone block executor for `evm` and the current block context.
+    pub fn new(
+        evm: ZoneEvm<DB, I>,
         ctx: TempoBlockExecutionCtx<'a>,
-        chain_spec: &'a TempoChainSpec,
+        chain_spec: &'a ZoneChainSpec,
     ) -> Self {
         Self {
             inner: EthBlockExecutor::new(
@@ -85,7 +86,7 @@ where
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type Evm = TempoEvm<DB, I>;
+    type Evm = ZoneEvm<DB, I>;
     type Result = EthTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {

@@ -246,6 +246,17 @@ fn genesis_predeploy_code(addr: Address) -> Vec<u8> {
     const_hex::decode(code.strip_prefix("0x").unwrap_or(code)).expect("decode genesis bytecode")
 }
 
+fn genesis_zone_factory_bytecode() -> Vec<u8> {
+    let genesis: serde_json::Value =
+        serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
+            .expect("zone genesis template should parse");
+    let bytecode = genesis["zoneFactoryBytecode"]
+        .as_str()
+        .expect("zone-dev-genesis.json should contain zoneFactoryBytecode");
+    const_hex::decode(bytecode.strip_prefix("0x").unwrap_or(bytecode))
+        .expect("decode ZoneFactory bytecode")
+}
+
 struct BytecodeView<'a> {
     raw: &'a [u8],
     compared: &'a [u8],
@@ -365,6 +376,22 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
             );
         }
     }
+}
+
+#[test]
+fn zone_test_genesis_factory_bytecode_matches_foundry_artifact() {
+    // The generator copies this creation bytecode directly from the Foundry artifact.
+    // Keep the checked-in dev factory in lockstep with changes to ZoneFactory or any
+    // contract whose creation code it embeds, including ZonePortal.
+    let actual = genesis_zone_factory_bytecode();
+    let expected = load_artifact("ZoneFactory");
+
+    assert_eq!(
+        bytecode_hash(&actual),
+        bytecode_hash(&expected),
+        "ZoneFactory bytecode in zone-dev-genesis.json is stale; refresh it with \
+         `just regen-zone-dev-genesis`"
+    );
 }
 
 /// Build a minimal valid RLP-encoded TempoHeader.

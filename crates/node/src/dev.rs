@@ -1,20 +1,20 @@
 //! Local dev mode.
 //!
 //! Provisions a self-contained zone against a Tempo dev L1: funds the dev account,
-//! deploys the bundled `ZoneFactory` when needed, calls `createZone`, registers the
+//! uses TIP-1091's protocol-managed `ZoneFactory`, calls `createZone`, registers the
 //! sequencer encryption key, and builds an L1-anchored genesis. The `tempo-zone dev`
 //! command wraps [`provision_zone`] and then runs the zone node.
 
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, ReceiptResponse as _};
-use alloy_primitives::{Address, B256, TxKind};
+use alloy_primitives::{Address, B256};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
-use tempo_zone_contracts::ZoneFactory;
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
 use zone_primitives::constants::zone_chain_id;
 use zone_sequencer::register_encryption_key;
 
@@ -23,9 +23,9 @@ use zone_sequencer::register_encryption_key;
 pub struct ProvisionConfig {
     /// Tempo L1 RPC URL (http(s) or ws(s)).
     pub l1_rpc_url: String,
-    /// Dev key: L1 fee payer, factory deployer, portal admin, and zone sequencer.
+    /// Dev key: L1 fee payer, portal admin, and zone sequencer.
     pub dev_key: PrivateKeySigner,
-    /// Existing `ZoneFactory` address. Deploys the bundled factory when `None`.
+    /// Optional factory override, which must equal TIP-1091's protocol address.
     pub factory: Option<Address>,
     /// Initial TIP-20 enabled on the portal.
     pub initial_token: Address,
@@ -52,8 +52,8 @@ pub struct ProvisionedZone {
 
 /// Provisions a fresh zone on a Tempo dev L1.
 ///
-/// Funds the dev account via `tempo_fundAddress` when needed, deploys the bundled
-/// `ZoneFactory` when no address is given, calls `createZone` with the dev account as
+/// Funds the dev account via `tempo_fundAddress` when needed, verifies TIP-1091's
+/// `ZoneFactory`, calls `createZone` with the dev account as
 /// both admin and sequencer, registers the sequencer encryption key on the portal, and
 /// builds a genesis anchored immediately before `createZone` so the zone replays the
 /// portal's initial `TokenEnabled` event.
@@ -76,10 +76,13 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     ensure_canonical_tempo_header_hash(&provider).await?;
     fund_dev_account(&provider, dev_address).await?;
 
-    let factory_address = match factory {
-        Some(address) => address,
-        None => deploy_zone_factory(&l1_rpc_url, wallet).await?,
-    };
+    if let Some(address) = factory {
+        eyre::ensure!(
+            address == ZONE_FACTORY_ADDRESS,
+            "ZoneFactory must use TIP-1091 address {ZONE_FACTORY_ADDRESS}, got {address}"
+        );
+    }
+    let factory_address = deploy_zone_factory(&l1_rpc_url, wallet).await?;
 
     let factory = ZoneFactory::new(factory_address, &provider);
     let verifier = factory.verifier().call().await?;
@@ -196,33 +199,21 @@ async fn fund_dev_account<P: Provider<TempoNetwork>>(
     Ok(())
 }
 
-/// Deploys the bundled `ZoneFactory` on L1 and returns its address.
-///
-/// The factory constructor also deploys a Verifier internally.
+/// Returns TIP-1091's fixed `ZoneFactory` address after verifying it is installed on L1.
 pub async fn deploy_zone_factory(
     l1_rpc_url: &str,
     wallet: EthereumWallet,
 ) -> eyre::Result<Address> {
-    use alloy_rpc_types_eth::TransactionRequest;
-
     let provider = ProviderBuilder::new()
         .wallet(wallet)
         .connect(l1_rpc_url)
         .await?;
 
-    let mut deploy_tx =
-        TransactionRequest::default().input(crate::genesis::zone_factory_bytecode()?.into());
-    deploy_tx.to = Some(TxKind::Create);
-    let receipt = provider
-        .send_transaction(deploy_tx)
-        .await?
-        .get_receipt()
-        .await?;
-    eyre::ensure!(receipt.status(), "ZoneFactory deployment failed");
-
-    receipt
-        .contract_address
-        .ok_or_else(|| eyre::eyre!("ZoneFactory deployment missing contract address"))
+    eyre::ensure!(
+        !provider.get_code_at(ZONE_FACTORY_ADDRESS).await?.is_empty(),
+        "ZoneFactory is not installed at TIP-1091 address {ZONE_FACTORY_ADDRESS}"
+    );
+    Ok(ZONE_FACTORY_ADDRESS)
 }
 
 #[cfg(feature = "cli")]
@@ -258,12 +249,12 @@ mod command {
         )]
         l1_rpc_url: String,
 
-        /// Existing ZoneFactory address on L1. Deploys the bundled factory when omitted.
+        /// Optional ZoneFactory override; must equal TIP-1091's protocol address.
         #[arg(long = "l1.factory-address", env = "ZONE_FACTORY")]
         factory_address: Option<Address>,
 
-        /// Dev private key (hex): L1 fee payer, factory deployer, portal admin, and zone
-        /// sequencer. Funded via `tempo_fundAddress` when the L1 supports it.
+        /// Dev private key (hex): L1 fee payer, portal admin, and zone sequencer. Funded via
+        /// `tempo_fundAddress` when the L1 supports it.
         #[arg(long = "dev.key", env = "DEV_KEY", default_value = DEFAULT_DEV_KEY)]
         dev_key: String,
 

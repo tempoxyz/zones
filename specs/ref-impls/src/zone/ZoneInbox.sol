@@ -388,11 +388,13 @@ contract ZoneInbox is IZoneInbox {
     }
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
-        try IZoneToken(d.token).mint(d.to, d.amount) {
-            emit WithdrawalBounceBackProcessed(d.to, d.token, d.amount);
+        uint64 fallbackNonce = uint64(uint160(d.to));
+        address fallbackRecipient = IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
+        try IZoneToken(d.token).mint(fallbackRecipient, d.amount) {
+            emit WithdrawalBounceBackProcessed(fallbackRecipient, d.token, d.amount);
         } catch {
-            refunds[d.token][d.to] += d.amount;
-            emit WithdrawalBounceBackPending(d.to, d.token, d.amount);
+            refunds[d.token][fallbackRecipient] += d.amount;
+            emit WithdrawalBounceBackPending(fallbackRecipient, d.token, d.amount);
         }
     }
 

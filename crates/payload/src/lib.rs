@@ -9,9 +9,11 @@ pub mod abi {
 
 mod attrs;
 mod builder;
+mod withdrawal_reveal;
 
 pub use attrs::{ZonePayloadAttributes, ZonePayloadTypes};
 pub use builder::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, ZonePayloadBuilder, ZonePayloadFactory,
     build_advance_tempo_tx,
 };
+pub use withdrawal_reveal::WithdrawalRevealEncryptor;

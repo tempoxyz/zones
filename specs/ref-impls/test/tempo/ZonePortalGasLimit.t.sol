@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZonePortal, Withdrawal } from "../../src/interfaces/IZone.sol";
+import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
@@ -51,7 +51,9 @@ contract ZonePortalGasLimitTest is Test {
 
     function setUp() public {
         token = new MockPortalToken();
-        portal = new ZonePortal(
+        portal = new ZonePortal();
+        vm.prank(ZONE_FACTORY_ADDRESS);
+        portal.initialize(
             1,
             address(token),
             address(0x400),
@@ -64,6 +66,27 @@ contract ZonePortalGasLimitTest is Test {
         );
     }
 
+    function test_bouncebackGas_defaultsToZero() public view {
+        assertEq(portal.bouncebackGas(), 0);
+        assertEq(portal.calculateBouncebackFee(), 0);
+    }
+
+    function test_setBouncebackGas_onlySequencer() public {
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setBouncebackGas(300_000);
+    }
+
+    function test_setBouncebackGas_updatesGasAndFee() public {
+        vm.expectEmit(false, false, false, true, address(portal));
+        emit IZonePortal.BouncebackGasUpdated(300_000);
+        portal.setBouncebackGas(300_000);
+        vm.fee(1e12);
+
+        assertEq(portal.bouncebackGas(), 300_000);
+        assertEq(portal.calculateBouncebackFee(), 300_000);
+    }
+
     function test_processWithdrawal_overMaxGasLimit_bouncesBackAndClearsQueue() public {
         Withdrawal memory w = Withdrawal({
             token: address(token),
@@ -73,7 +96,7 @@ contract ZonePortalGasLimitTest is Test {
             fee: 0,
             memo: bytes32(0),
             gasLimit: portal.MAX_WITHDRAWAL_GAS_LIMIT() + 1,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: 1,
             callbackData: "test",
             encryptedSender: ""
         });
@@ -83,9 +106,7 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), _withdrawalQueueSlot(0), wHash);
 
         vm.expectEmit(false, true, false, true, address(portal));
-        emit IZonePortal.WithdrawalBounceBack(
-            bytes32(0), fallbackRecipient, address(token), 500e6, 1
-        );
+        emit IZonePortal.WithdrawalBounceBack(bytes32(0), 1, address(token), 500e6, 1);
         vm.expectEmit(true, true, false, true, address(portal));
         emit IZonePortal.WithdrawalProcessed(recipient, w.senderTag, address(token), 500e6, false);
         portal.processWithdrawal(w, bytes32(0));
@@ -96,6 +117,7 @@ contract ZonePortalGasLimitTest is Test {
     }
 
     function test_processWithdrawal_depositBounceBack_paysFeeAndRefundsNetAmount() public {
+        _configureBouncebackFee();
         token.mint(address(portal), 1000e6);
         uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 refundAmount = 1000e6 - bouncebackFee;
@@ -116,7 +138,7 @@ contract ZonePortalGasLimitTest is Test {
     function test_processWithdrawal_depositBounceBack_feeTransferFailureForgoesFeeAndClearsQueue()
         public
     {
-        vm.fee(1e12);
+        _configureBouncebackFee();
         token.mint(address(portal), 1000e6);
         token.setBlockedRecipient(address(this), true);
 
@@ -138,6 +160,7 @@ contract ZonePortalGasLimitTest is Test {
     }
 
     function test_processWithdrawal_depositBounceBack_parksRefundWhenTransferFails() public {
+        _configureBouncebackFee();
         token.mint(address(portal), 1000e6);
         token.setBlockedRecipient(recipient, true);
         uint128 bouncebackFee = portal.calculateBouncebackFee();
@@ -167,6 +190,11 @@ contract ZonePortalGasLimitTest is Test {
         return keccak256(abi.encode(slot, WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT));
     }
 
+    function _configureBouncebackFee() internal {
+        portal.setBouncebackGas(300_000);
+        vm.fee(1e12);
+    }
+
     function _depositBounceBackWithdrawal(uint128 amount)
         internal
         view
@@ -180,7 +208,7 @@ contract ZonePortalGasLimitTest is Test {
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });
