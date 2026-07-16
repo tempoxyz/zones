@@ -30,7 +30,6 @@ use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
-use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
@@ -50,8 +49,8 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
 /// Maximum number of encoded L1 headers retained between ancestry submissions.
 ///
-/// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
-/// map overhead while covering more than the current Zone E recovery gap.
+/// Encoded header sizes vary, so this bounds the number of retained entries
+/// rather than their exact memory usage.
 const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
 /// EIP-2935 anchor limits used by the batch submitter.
@@ -190,6 +189,105 @@ struct CachedAncestryHeader {
     parent_hash: B256,
     hash: B256,
     encoded: Bytes,
+}
+
+/// A complete, ordered, parent-linked ancestry range.
+///
+/// `headers` excludes the base block at `from`; `fetched_headers` contains only
+/// entries that the caller should commit to the cache after resolution succeeds.
+#[derive(Debug)]
+struct ResolvedAncestry {
+    headers: Vec<Bytes>,
+    fetched_headers: Vec<(u64, CachedAncestryHeader)>,
+}
+
+/// Merge cached and fetched headers into one validated ancestry range.
+fn resolve_ancestry_headers(
+    from: u64,
+    to: u64,
+    cached: Vec<(u64, CachedAncestryHeader)>,
+    fetched: Vec<(u64, CachedAncestryHeader)>,
+) -> Result<ResolvedAncestry> {
+    if from >= to {
+        return Err(eyre::eyre!(
+            "ancestry range must contain a base and at least one child: {from}..={to}"
+        ));
+    }
+
+    let range_len = to
+        .checked_sub(from)
+        .and_then(|span| span.checked_add(1))
+        .and_then(|len| usize::try_from(len).ok())
+        .ok_or_else(|| eyre::eyre!("ancestry range is too large: {from}..={to}"))?;
+    let fetched_count = fetched.len();
+    let mut merged = vec![None; range_len];
+
+    let mut insert = |block_number, header, was_fetched| -> Result<()> {
+        if !(from..=to).contains(&block_number) {
+            return Err(eyre::eyre!(
+                "received out-of-range L1 header for block {block_number}; expected {from}..={to}"
+            ));
+        }
+        let index = usize::try_from(block_number - from)
+            .map_err(|_| eyre::eyre!("L1 header index overflow at block {block_number}"))?;
+        if merged[index].replace((header, was_fetched)).is_some() {
+            return Err(eyre::eyre!(
+                "received duplicate L1 header for block {block_number}"
+            ));
+        }
+        Ok(())
+    };
+    for (block_number, header) in cached {
+        insert(block_number, header, false)?;
+    }
+    for (block_number, header) in fetched {
+        insert(block_number, header, true)?;
+    }
+
+    let merged = merged
+        .into_iter()
+        .enumerate()
+        .map(|(index, header)| {
+            let offset = u64::try_from(index)
+                .map_err(|_| eyre::eyre!("L1 header index overflow at offset {index}"))?;
+            let block_number = from
+                .checked_add(offset)
+                .ok_or_else(|| eyre::eyre!("L1 block number overflow at offset {index}"))?;
+            header.ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut merged = merged.into_iter().enumerate();
+    let (_, (base, base_was_fetched)) = merged
+        .next()
+        .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
+    let mut parent_hash = base.hash;
+    let mut headers = Vec::with_capacity(range_len - 1);
+    let mut fetched_headers = Vec::with_capacity(fetched_count);
+    if base_was_fetched {
+        fetched_headers.push((from, base));
+    }
+
+    for (index, (header, was_fetched)) in merged {
+        let block_number = from + u64::try_from(index)?;
+        if header.parent_hash != parent_hash {
+            return Err(eyre::eyre!(
+                "parent-hash chain broken at block {block_number}: \
+                 expected parent_hash={parent_hash}, got={}",
+                header.parent_hash
+            ));
+        }
+        parent_hash = header.hash;
+        headers.push(header.encoded.clone());
+        if was_fetched {
+            fetched_headers.push((block_number, header));
+        }
+    }
+
+    Ok(ResolvedAncestry {
+        headers,
+        fetched_headers,
+    })
 }
 
 impl BatchSubmitter {
@@ -425,24 +523,26 @@ impl BatchSubmitter {
             return Ok(Vec::new());
         }
 
-        let range_len = (to - from + 1) as usize;
-        let (mut resolved, missing) = {
+        // Snapshot the cache without changing its LRU order. Network requests
+        // and validation happen after the read lock is released.
+        let (cached, missing) = {
             let cache = self.ancestry_header_cache.read();
-            let mut resolved = Vec::with_capacity(range_len);
+            let mut cached = Vec::new();
             let mut missing = Vec::new();
             for block_number in from..=to {
                 if let Some(header) = cache.peek(&block_number) {
-                    resolved.push(Some(header.clone()));
+                    cached.push((block_number, header.clone()));
                 } else {
-                    resolved.push(None);
                     missing.push(block_number);
                 }
             }
-            (resolved, missing)
+            (cached, missing)
         };
-        let cache_hits = range_len - missing.len();
+        let cache_hits = cached.len();
 
-        let mut fetched = stream::iter(missing.iter().copied())
+        // Fetch and encode only the cache misses. `alloy_rlp::encode` allocates
+        // from the header's exact encoded length instead of using a size guess.
+        let fetched = stream::iter(missing.iter().copied())
             .map(|block_number| {
                 let provider = &self.l1_provider;
                 async move {
@@ -452,58 +552,32 @@ impl BatchSubmitter {
                         .ok_or_else(|| {
                             eyre::eyre!("L1 header not found for block {block_number}")
                         })?;
-                    Ok::<_, eyre::Report>((block_number, header.inner.inner))
+                    let header = header.inner.inner;
+                    let encoded = Bytes::from(alloy_rlp::encode(&header));
+                    let cached_header = CachedAncestryHeader {
+                        parent_hash: header.inner.parent_hash,
+                        hash: alloy_primitives::keccak256(&encoded),
+                        encoded,
+                    };
+                    Ok::<_, eyre::Report>((block_number, cached_header))
                 }
             })
-            .buffer_unordered(self.l1_fetch_concurrency);
+            .buffer_unordered(self.l1_fetch_concurrency)
+            .try_collect::<Vec<_>>()
+            .await?;
 
-        while let Some((block_number, header)) = fetched.try_next().await? {
-            let mut buf = Vec::with_capacity(600);
-            header.encode(&mut buf);
-            let header_hash = alloy_primitives::keccak256(&buf);
-            let index = (block_number - from) as usize;
-            let cached_header = CachedAncestryHeader {
-                parent_hash: header.inner.parent_hash,
-                hash: header_hash,
-                encoded: Bytes::from(buf),
-            };
-            if resolved[index].replace(cached_header).is_some() {
-                return Err(eyre::eyre!(
-                    "received duplicate L1 header for block {block_number}"
-                ));
-            }
-        }
+        // Pure resolution owns merging, ordering, completeness, duplicate, and
+        // parent-hash validation. Do not mutate the cache unless it succeeds.
+        let ResolvedAncestry {
+            headers,
+            fetched_headers,
+        } = resolve_ancestry_headers(from, to, cached, fetched)?;
+        let fetched_count = fetched_headers.len();
 
-        let base_hash = resolved
-            .first()
-            .and_then(Option::as_ref)
-            .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?
-            .hash;
-        let mut prev_hash = base_hash;
-        let mut headers = Vec::with_capacity((to - from) as usize);
-
-        for block_number in (from + 1)..=to {
-            let header = resolved
-                .get((block_number - from) as usize)
-                .and_then(Option::as_ref)
-                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
-            if header.parent_hash != prev_hash {
-                return Err(eyre::eyre!(
-                    "parent-hash chain broken at block {block_number}: \
-                     expected parent_hash={prev_hash}, got={}",
-                    header.parent_hash
-                ));
-            }
-            prev_hash = header.hash;
-            headers.push(header.encoded.clone());
-        }
-
+        // Commit only entries fetched from the snapshot's misses. Another task
+        // may have filled one while the network requests were in flight.
         let mut cache = self.ancestry_header_cache.write();
-        for block_number in missing.iter().copied() {
-            let index = (block_number - from) as usize;
-            let header = resolved[index]
-                .take()
-                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+        for (block_number, header) in fetched_headers {
             if let Some(existing) = cache.peek(&block_number) {
                 if existing.hash != header.hash {
                     return Err(eyre::eyre!(
@@ -526,7 +600,7 @@ impl BatchSubmitter {
             from,
             to,
             cache_hits,
-            fetched = missing.len(),
+            fetched = fetched_count,
             "resolved ancestry headers"
         );
 
@@ -1156,6 +1230,7 @@ mod tests {
     use alloy_provider::ProviderBuilder;
     use alloy_rpc_types_eth::Header as RpcHeader;
     use alloy_transport::mock::Asserter;
+    use proptest::prelude::*;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
 
@@ -1181,6 +1256,170 @@ mod tests {
             },
             hash,
         )
+    }
+
+    fn synthetic_ancestry(from: u64, payloads: &[Vec<u8>]) -> Vec<(u64, CachedAncestryHeader)> {
+        let mut parent_hash = B256::ZERO;
+        payloads
+            .iter()
+            .enumerate()
+            .map(|(index, payload)| {
+                let block_number = from + u64::try_from(index).unwrap();
+                let mut encoded = Vec::with_capacity(size_of::<u64>() + payload.len());
+                encoded.extend_from_slice(&block_number.to_be_bytes());
+                encoded.extend_from_slice(payload);
+                let encoded = Bytes::from(encoded);
+                let hash = alloy_primitives::keccak256(&encoded);
+                let header = CachedAncestryHeader {
+                    parent_hash,
+                    hash,
+                    encoded,
+                };
+                parent_hash = hash;
+                (block_number, header)
+            })
+            .collect()
+    }
+
+    fn ancestry_case() -> impl Strategy<Value = (u64, Vec<Vec<u8>>, Vec<u64>)> {
+        (0_u64..10_000, 2_usize..33).prop_flat_map(|(from, len)| {
+            (
+                Just(from),
+                proptest::collection::vec(proptest::collection::vec(any::<u8>(), 0..64), len),
+                proptest::collection::vec(any::<u64>(), len),
+            )
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(128))]
+
+        #[test]
+        fn ancestry_resolution_is_independent_of_fetched_order(
+            (from, payloads, order_keys) in ancestry_case(),
+        ) {
+            let chain = synthetic_ancestry(from, &payloads);
+            let to = chain.last().unwrap().0;
+            let expected = resolve_ancestry_headers(from, to, Vec::new(), chain.clone())
+                .unwrap()
+                .headers;
+
+            let mut permuted = chain
+                .into_iter()
+                .zip(order_keys)
+                .collect::<Vec<_>>();
+            permuted.sort_by_key(|(_, key)| *key);
+            let permuted = permuted
+                .into_iter()
+                .map(|(header, _)| header)
+                .collect();
+
+            let actual = resolve_ancestry_headers(from, to, Vec::new(), permuted)
+                .unwrap()
+                .headers;
+            prop_assert_eq!(actual, expected);
+        }
+
+        #[test]
+        fn ancestry_resolution_is_independent_of_cache_partition(
+            (from, payloads, order_keys) in ancestry_case(),
+            cache_mask in any::<u128>(),
+        ) {
+            let chain = synthetic_ancestry(from, &payloads);
+            let to = chain.last().unwrap().0;
+            let cold = resolve_ancestry_headers(from, to, Vec::new(), chain.clone())
+                .unwrap()
+                .headers;
+            let (cached, fetched): (Vec<_>, Vec<_>) = chain
+                .into_iter()
+                .enumerate()
+                .partition(|(index, _)| cache_mask & (1_u128 << index) != 0);
+            let cached = cached.into_iter().map(|(_, header)| header).collect();
+            let mut fetched = fetched
+                .into_iter()
+                .map(|(index, header)| (order_keys[index], header))
+                .collect::<Vec<_>>();
+            fetched.sort_by_key(|(order_key, _)| *order_key);
+            let fetched = fetched
+                .into_iter()
+                .map(|(_, header)| header)
+                .collect::<Vec<_>>();
+            let mut expected_fetched = fetched
+                .iter()
+                .map(|(block_number, header)| (*block_number, header.hash))
+                .collect::<Vec<_>>();
+            expected_fetched.sort_by_key(|(block_number, _)| *block_number);
+
+            let partitioned = resolve_ancestry_headers(from, to, cached, fetched)
+                .unwrap();
+            let actual_fetched = partitioned
+                .fetched_headers
+                .iter()
+                .map(|(block_number, header)| (*block_number, header.hash))
+                .collect::<Vec<_>>();
+            prop_assert_eq!(partitioned.headers, cold);
+            prop_assert_eq!(actual_fetched, expected_fetched);
+        }
+
+        #[test]
+        fn ancestry_resolution_rejects_parent_hash_corruption(
+            (from, payloads, _) in ancestry_case(),
+            corrupt_index in any::<usize>(),
+        ) {
+            let mut chain = synthetic_ancestry(from, &payloads);
+            let to = chain.last().unwrap().0;
+            let corrupt_index = 1 + corrupt_index % (chain.len() - 1);
+            chain[corrupt_index].1.parent_hash[0] ^= 1;
+
+            prop_assert!(resolve_ancestry_headers(from, to, Vec::new(), chain).is_err());
+        }
+
+        #[test]
+        fn ancestry_resolution_rejects_malformed_header_sets(
+            (from, payloads, _) in ancestry_case(),
+            malformed_index in any::<usize>(),
+        ) {
+            let chain = synthetic_ancestry(from, &payloads);
+            let to = chain.last().unwrap().0;
+            let malformed_index = malformed_index % chain.len();
+
+            let mut missing = chain.clone();
+            missing.remove(malformed_index);
+            prop_assert!(
+                resolve_ancestry_headers(from, to, Vec::new(), missing).is_err(),
+                "missing header was accepted"
+            );
+
+            let mut duplicate = chain.clone();
+            duplicate.push(chain[malformed_index].clone());
+            prop_assert!(
+                resolve_ancestry_headers(from, to, Vec::new(), duplicate).is_err(),
+                "duplicate header was accepted"
+            );
+
+            let mut out_of_range = chain.clone();
+            out_of_range.push((to + 1, chain[malformed_index].1.clone()));
+            prop_assert!(
+                resolve_ancestry_headers(from, to, Vec::new(), out_of_range).is_err(),
+                "out-of-range header was accepted"
+            );
+        }
+
+        #[test]
+        fn ancestry_resolution_returns_exact_range_without_base(
+            (from, payloads, _) in ancestry_case(),
+        ) {
+            let chain = synthetic_ancestry(from, &payloads);
+            let to = chain.last().unwrap().0;
+            let expected = chain[1..]
+                .iter()
+                .map(|(_, header)| header.encoded.clone())
+                .collect::<Vec<_>>();
+
+            let resolved = resolve_ancestry_headers(from, to, Vec::new(), chain).unwrap();
+            prop_assert_eq!(resolved.headers.len(), usize::try_from(to - from).unwrap());
+            prop_assert_eq!(resolved.headers, expected);
+        }
     }
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
