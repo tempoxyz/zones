@@ -6,15 +6,16 @@
 //! # Execution modes
 //!
 //! - [`create_local_precompile`] executes against ordinary zone-local EVM state.
-//! - [`create_l1_backed_precompile`] reads the finalized Tempo block recorded in `TempoState`,
-//!   resolves the Tempo hardfork at that same block, and overlays selected policy storage from L1.
+//! - [`create_l1_backed_precompile`] reads the finalized Tempo block recorded in `TempoState` and
+//!   overlays selected policy storage from that exact L1 block. Execution uses the active Tempo
+//!   hardfork already selected by the composed Zone EVM configuration.
 //!
 //! # Call ordering
 //!
 //! 1. L1-backed execution rejects delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
 //! 3. Apply the local phase of [`CallRules`]. Rejected calls return without touching L1.
-//! 4. For admitted L1-backed calls, resolve the anchor, hardfork, and storage overlay, then apply
+//! 4. For admitted L1-backed calls, resolve the anchor and install the storage overlay, then apply
 //!    the L1-backed rules phase.
 //! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
@@ -41,7 +42,8 @@ use crate::storage::{L1StorageReader, ZonePrecompileStorageProvider};
 /// Shared inputs for precompiles executing over finalized Tempo state.
 ///
 /// Each call combines zone EVM configuration and accounting state with an L1 reader. The exact
-/// L1 block and active hardfork are resolved from the local `TempoState` anchor during execution.
+/// L1 block is resolved from the local `TempoState` anchor during execution, while the active
+/// hardfork comes from the configuration already resolved by the composed Zone EVM.
 #[derive(Clone)]
 pub(crate) struct L1BackedPrecompileEnv<P> {
     cfg: revm::context::CfgEnv<TempoHardfork>,
@@ -213,10 +215,9 @@ pub(crate) fn create_local_precompile(
 /// Create a direct-call-only precompile backed by the finalized Tempo L1 anchor.
 ///
 /// The helper rejects delegate calls before any storage access, reads the `TempoState` anchor once,
-/// and constructs [`ZonePrecompileStorageProvider`] with that exact block. Construction is
-/// fallible because the provider resolves the active hardfork from the same anchor. Any anchor,
-/// hardfork, or L1 storage failure is returned as a precompile error rather than falling back to
-/// local or latest state.
+/// and constructs [`ZonePrecompileStorageProvider`] with that exact block. The active hardfork
+/// comes from the composed Zone EVM configuration rather than the anchor. Any anchor or L1 storage
+/// failure is returned as a precompile error rather than falling back to local or latest state.
 ///
 /// Calls admitted by `rules` are forwarded to `execute` with their original calldata and caller
 /// while the L1 overlay is active.
@@ -415,7 +416,7 @@ mod tests {
         cfg.spec = TempoHardfork::T8;
         let env = L1BackedPrecompileEnv::new(
             &cfg,
-            reader.clone(),
+            reader,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
