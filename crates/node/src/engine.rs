@@ -47,10 +47,10 @@ use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{BuiltPayload, PayloadKind, PayloadTypes};
 use reth_primitives_traits::SealedHeader;
 use std::{sync::Arc, time::Duration};
-use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
 use tracing::{error, warn};
 
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
@@ -68,7 +68,7 @@ use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 #[derive(Debug)]
 pub struct ZoneEngine {
     /// Chain spec for hardfork checks when building attributes.
-    chain_spec: Arc<TempoChainSpec>,
+    chain_spec: Arc<ZoneChainSpec>,
     /// Engine API handle for FCU and newPayload.
     to_engine: ConsensusEngineHandle<ZonePayloadTypes>,
     /// Payload builder handle.
@@ -91,7 +91,7 @@ pub struct ZoneEngine {
 
 impl ZoneEngine {
     pub fn new(
-        chain_spec: Arc<TempoChainSpec>,
+        chain_spec: Arc<ZoneChainSpec>,
         to_engine: ConsensusEngineHandle<ZonePayloadTypes>,
         payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
         deposit_queue: DepositQueue,

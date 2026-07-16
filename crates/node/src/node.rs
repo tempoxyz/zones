@@ -11,6 +11,7 @@ use alloy_primitives::Address;
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
+use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
@@ -57,6 +58,7 @@ use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use tracing::{debug, info, warn};
+use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
@@ -349,7 +351,7 @@ impl ZoneNode {
 
 impl NodeTypes for ZoneNode {
     type Primitives = TempoPrimitives;
-    type ChainSpec = TempoChainSpec;
+    type ChainSpec = ZoneChainSpec;
     type Storage = EmptyBodyStorage<TempoTxEnvelope, TempoHeader>;
     type Payload = ZonePayloadTypes;
 }
@@ -480,14 +482,7 @@ where
             self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
         }
 
-        let chain_id = ctx
-            .node
-            .provider()
-            .chain_spec()
-            .inner
-            .genesis()
-            .config
-            .chain_id;
+        let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
         let handle = self.inner.launch_add_ons(ctx).await?;
 
         Self::launch_private_rpc(
@@ -917,7 +912,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode {
 pub(crate) struct ZonePayloadAttributesBuilder;
 
 impl ZonePayloadAttributesBuilder {
-    pub(crate) fn new(_chain_spec: Arc<TempoChainSpec>) -> Self {
+    pub(crate) fn new(_chain_spec: Arc<ZoneChainSpec>) -> Self {
         Self
     }
 }
@@ -1027,7 +1022,7 @@ where
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
-        let tempo_evm_config = TempoEvmConfig::new(evm_config.chain_spec().clone());
+        let tempo_evm_config = TempoEvmConfig::new(evm_config.tempo_chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
         let mut validator = TransactionValidationTaskExecutor::eth_builder(
@@ -1038,7 +1033,7 @@ where
         .with_local_transactions_config(pool_config.local_transactions_config.clone())
         .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
         .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
+        .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
         .disable_balance_check()
         .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
         .with_custom_tx_type(TempoTxType::AA as u8)
