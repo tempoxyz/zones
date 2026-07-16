@@ -910,16 +910,6 @@ interface IZonePortal {
     )
         external;
 
-    /// @notice Verify a certificate for a proposed successor of the current portal head.
-    function verifyBlock(
-        uint256 zoneHeight,
-        bytes32 zoneBlockHash,
-        bytes[] calldata signatures
-    )
-        external
-        view
-        returns (bool);
-
 }
 
 /// @title IZoneMessenger

@@ -71,8 +71,8 @@ contract ZonePortal is IZonePortal {
     );
     bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
     bytes32 internal constant VERSION_HASH = keccak256("1");
-    bytes32 internal constant ZONE_BLOCK_ATTESTATION_TYPEHASH = keccak256(
-        "ZoneBlockAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,bytes32 parentBlockHash,bytes32 zoneBlockHash)"
+    bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,address sequencer,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -1030,11 +1030,6 @@ contract ZonePortal is IZonePortal {
             revert InvalidProof();
         }
 
-        if (
-            sequencerSetVersion != 0
-                && !_verifyBlock(nextZoneHeight, blockTransition.nextBlockHash, signatures)
-        ) revert InvalidQuorumCertificate();
-
         // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
         if (tempoBlockNumber < genesisTempoBlockNumber) {
             revert InvalidTempoBlockNumber();
@@ -1066,6 +1061,24 @@ contract ZonePortal is IZonePortal {
         }
 
         if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+
+        // The certificate binds every value that affects settlement, rather than only the
+        // zone block hash. A leader therefore cannot reuse signatures for this block with a
+        // different withdrawal root, deposit transition, Tempo anchor, or verifier config.
+        if (
+            sequencerSetVersion != 0
+                && !_verifySettlement(
+                    nextZoneHeight,
+                    tempoBlockNumber,
+                    anchorBlockNumber,
+                    anchorBlockHash,
+                    blockTransition,
+                    depositQueueTransition,
+                    withdrawalQueueHash,
+                    verifierConfig,
+                    signatures
+                )
+        ) revert InvalidQuorumCertificate();
 
         // These are strictly not necessary, but we'll assert them here since they are cheap while
         // the prover doesn't (yet) enforce them.
@@ -1118,22 +1131,15 @@ contract ZonePortal is IZonePortal {
         );
     }
 
-    /// @inheritdoc IZonePortal
-    function verifyBlock(
+    function _verifySettlement(
         uint256 nextZoneHeight,
-        bytes32 zoneBlockHash,
-        bytes[] calldata signatures
-    )
-        external
-        view
-        returns (bool)
-    {
-        return _verifyBlock(nextZoneHeight, zoneBlockHash, signatures);
-    }
-
-    function _verifyBlock(
-        uint256 nextZoneHeight,
-        bytes32 zoneBlockHash,
+        uint64 tempoBlockNumber,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes calldata verifierConfig,
         bytes[] memory signatures
     )
         internal
@@ -1148,12 +1154,19 @@ contract ZonePortal is IZonePortal {
 
         bytes32 structHash = keccak256(
             abi.encode(
-                ZONE_BLOCK_ATTESTATION_TYPEHASH,
+                SETTLEMENT_ATTESTATION_TYPEHASH,
                 zoneId,
                 sequencerSetVersion,
                 nextZoneHeight,
-                blockHash,
-                zoneBlockHash
+                sequencer,
+                verifier,
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                keccak256(abi.encode(blockTransition)),
+                keccak256(abi.encode(depositQueueTransition)),
+                withdrawalQueueHash,
+                keccak256(verifierConfig)
             )
         );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));

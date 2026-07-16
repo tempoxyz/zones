@@ -29,6 +29,7 @@ import {
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
+import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
 import {
     EMPTY_SENTINEL,
@@ -279,8 +280,8 @@ contract ZonePortalTest is BaseTest {
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
     );
-    bytes32 internal constant ZONE_BLOCK_ATTESTATION_TYPEHASH = keccak256(
-        "ZoneBlockAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,bytes32 parentBlockHash,bytes32 zoneBlockHash)"
+    bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,address sequencer,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
 
     uint256 internal constant SIGNER_A_KEY = 2;
@@ -364,7 +365,13 @@ contract ZonePortalTest is BaseTest {
 
     function _attestationDigest(
         uint256 height,
-        bytes32 nextBlockHash
+        uint64 tempoBlockNumber,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
+        BlockTransition memory blockTransition,
+        DepositQueueTransition memory depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes memory verifierConfig
     )
         internal
         view
@@ -381,12 +388,19 @@ contract ZonePortalTest is BaseTest {
         );
         bytes32 structHash = keccak256(
             abi.encode(
-                ZONE_BLOCK_ATTESTATION_TYPEHASH,
+                SETTLEMENT_ATTESTATION_TYPEHASH,
                 portal.zoneId(),
                 portal.sequencerSetVersion(),
                 height,
-                portal.blockHash(),
-                nextBlockHash
+                portal.sequencer(),
+                portal.verifier(),
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                keccak256(abi.encode(blockTransition)),
+                keccak256(abi.encode(depositQueueTransition)),
+                withdrawalQueueHash,
+                keccak256(verifierConfig)
             )
         );
         return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
@@ -514,49 +528,6 @@ contract ZonePortalTest is BaseTest {
         assertFalse(portal.isSequencer(removed));
     }
 
-    function test_verifyBlock_acceptsDistinctCurrentSetQuorum() public {
-        _activateSequencerSet(2);
-        bytes32 nextBlockHash = keccak256("quorum-tip");
-        bytes[] memory signatures = _quorumSignatures(_attestationDigest(10, nextBlockHash));
-
-        assertTrue(portal.verifyBlock(10, nextBlockHash, signatures));
-        assertFalse(portal.verifyBlock(10, keccak256("other-tip"), signatures));
-    }
-
-    function test_verifyBlock_rejectsDuplicatesMalformedAndInsufficientQuorum() public {
-        _activateSequencerSet(2);
-        bytes32 nextBlockHash = keccak256("quorum-tip");
-        bytes32 digest = _attestationDigest(10, nextBlockHash);
-
-        bytes[] memory signatures = new bytes[](2);
-        signatures[0] = _sign(SIGNER_A_KEY, digest);
-        signatures[1] = signatures[0];
-        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
-
-        signatures[1] = hex"1234";
-        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
-
-        bytes[] memory oneSignature = new bytes[](1);
-        oneSignature[0] = signatures[0];
-        assertFalse(portal.verifyBlock(10, nextBlockHash, oneSignature));
-
-        signatures[1] = _sign(99, digest);
-        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
-    }
-
-    function test_verifyBlock_rejectsOldCertificateAfterRotation() public {
-        address[] memory signers = _activateSequencerSet(2);
-        bytes32 nextBlockHash = keccak256("quorum-tip");
-        bytes[] memory signatures = _quorumSignatures(_attestationDigest(10, nextBlockHash));
-
-        vm.prank(admin);
-        portal.setSequencerSet(signers, 3);
-
-        assertEq(portal.sequencerSetVersion(), 2);
-        assertEq(portal.sequencerQuorum(), 3);
-        assertFalse(portal.verifyBlock(10, nextBlockHash, signatures));
-    }
-
     function test_quorumSequencerCannotCallConfigurationMethods() public {
         address[] memory signers = _activateSequencerSet(2);
 
@@ -599,21 +570,34 @@ contract ZonePortalTest is BaseTest {
         address[] memory signers = _activateSequencerSet(2);
         bytes32 nextBlockHash = keccak256("certified-tip");
         uint256 nextZoneHeight = 10;
-        bytes[] memory signatures =
-            _quorumSignatures(_attestationDigest(nextZoneHeight, nextBlockHash));
-
         vm.roll(block.number + 1);
+        uint64 tempoBlockNumber = uint64(block.number - 1);
+        BlockTransition memory blockTransition =
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: nextBlockHash });
+        DepositQueueTransition memory depositQueueTransition = DepositQueueTransition({
+            prevProcessedHash: bytes32(0),
+            nextProcessedHash: bytes32(0),
+            prevDepositNumber: 0,
+            nextDepositNumber: 0
+        });
+        bytes[] memory signatures = _quorumSignatures(
+            _attestationDigest(
+                nextZoneHeight,
+                tempoBlockNumber,
+                tempoBlockNumber,
+                getBlockHash(tempoBlockNumber),
+                blockTransition,
+                depositQueueTransition,
+                bytes32(0),
+                ""
+            )
+        );
         vm.prank(signers[0]);
         portal.submitBatch(
-            uint64(block.number - 1),
+            tempoBlockNumber,
             0,
-            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: nextBlockHash }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0),
-                nextProcessedHash: bytes32(0),
-                prevDepositNumber: 0,
-                nextDepositNumber: 0
-            }),
+            blockTransition,
+            depositQueueTransition,
             bytes32(0),
             "",
             "",
@@ -623,6 +607,48 @@ contract ZonePortalTest is BaseTest {
 
         assertEq(portal.blockHash(), nextBlockHash);
         assertEq(portal.zoneHeight(), nextZoneHeight);
+    }
+
+    function test_submitBatch_rejectsCertificateForDifferentWithdrawalRoot() public {
+        address[] memory signers = _activateSequencerSet(2);
+        vm.roll(block.number + 1);
+
+        uint64 tempoBlockNumber = uint64(block.number - 1);
+        BlockTransition memory blockTransition = BlockTransition({
+            prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("certified-tip")
+        });
+        DepositQueueTransition memory depositQueueTransition = DepositQueueTransition({
+            prevProcessedHash: bytes32(0),
+            nextProcessedHash: bytes32(0),
+            prevDepositNumber: 0,
+            nextDepositNumber: 0
+        });
+        bytes[] memory signatures = _quorumSignatures(
+            _attestationDigest(
+                10,
+                tempoBlockNumber,
+                tempoBlockNumber,
+                getBlockHash(tempoBlockNumber),
+                blockTransition,
+                depositQueueTransition,
+                bytes32(0),
+                ""
+            )
+        );
+
+        vm.prank(signers[0]);
+        vm.expectRevert(IZonePortal.InvalidQuorumCertificate.selector);
+        portal.submitBatch(
+            tempoBlockNumber,
+            0,
+            blockTransition,
+            depositQueueTransition,
+            keccak256("substituted-withdrawal-root"),
+            "",
+            "",
+            10,
+            signatures
+        );
     }
 
     function test_adminCanPauseAndResumeDeposits() public {
