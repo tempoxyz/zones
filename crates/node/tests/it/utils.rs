@@ -38,6 +38,7 @@ use tempo_contracts::precompiles::{
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
@@ -733,7 +734,7 @@ impl ZoneTestNode {
                 .expect("valid zone genesis template")
         });
         genesis.config.chain_id = chain_id;
-        let chain_spec = TempoChainSpec::from_genesis(genesis);
+        let chain_spec = ZoneChainSpec::from_genesis(genesis);
 
         let mut zone_node = ZoneNode::new(
             l1_ws_url,
