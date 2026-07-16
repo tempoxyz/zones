@@ -580,7 +580,7 @@ where
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
             |shutdown| async move {
-                tokio::select! {
+                let unexpected_exit = tokio::select! {
                     guard = shutdown => {
                         let _guard = guard;
                         shutdown_token.cancel();
@@ -589,24 +589,25 @@ where
                             Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed during shutdown"),
                             Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed during shutdown"),
                         }
+                        None
                     }
                     result = &mut stopped => {
-                        match result {
-                            Ok(Ok(())) => tracing::error!(target: "reth::cli", "P2P runtime stopped unexpectedly"),
-                            Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed"),
-                            Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed unexpectedly"),
-                        }
+                        Some(match result {
+                            Ok(Ok(())) => "P2P runtime stopped unexpectedly".to_string(),
+                            Ok(Err(err)) => format!("P2P runtime failed: {err}"),
+                            Err(err) => format!("P2P runtime completion channel closed unexpectedly: {err}"),
+                        })
                     }
-                }
+                };
 
                 match tokio::task::spawn_blocking(move || thread.join()).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => {
-                        tracing::error!(target: "reth::cli", "P2P runtime thread panicked")
-                    }
-                    Err(err) => {
-                        tracing::error!(target: "reth::cli", %err, "Failed joining P2P runtime thread")
-                    }
+                    Ok(Err(_)) => panic!("P2P runtime thread panicked"),
+                    Err(err) => panic!("Failed joining P2P runtime thread: {err}"),
+                }
+
+                if let Some(reason) = unexpected_exit {
+                    panic!("{reason}");
                 }
             },
         );
@@ -1057,7 +1058,8 @@ where
         ctx: &BuilderContext<Node>,
         evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::Pool> {
-        let mut pool_config = ctx.pool_config();
+        // Zone blocks have no protocol base fee, so allow zero-fee transactions into the pool.
+        let mut pool_config = ctx.pool_config().with_disabled_protocol_base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         // this store is effectively a noop

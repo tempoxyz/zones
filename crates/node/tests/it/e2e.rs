@@ -5,7 +5,7 @@
 //! subscriber retries a dummy URL in the background, but L2 execution is fully
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
-use std::time::Duration;
+use std::{net::TcpListener, time::Duration};
 
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
@@ -23,8 +23,8 @@ use zone_l1::ChainTempoStateExt;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, WITHDRAWAL_TX_GAS, ZoneTestNode, approve_outbox,
-    local_dev_zone_account, poll_until, seed_fixture_for_zone, start_local_p2p_pair,
-    start_local_zone_with_fixture,
+    leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
+    start_chain_id_rpc, start_local_p2p_pair, start_local_zone_with_fixture,
 };
 
 const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
@@ -69,6 +69,22 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
         .await?;
     follower.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
     assert_eq!(follower_balance, U256::from(amount));
+    Ok(())
+}
+
+/// A P2P bind failure is fatal rather than leaving the node running without P2P.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_p2p_listener_failure_stops_node() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let occupied_listener = TcpListener::bind("127.0.0.1:0")?;
+    let p2p_config = leader_p2p_config(occupied_listener.local_addr()?)?;
+    let l1_rpc_url = start_chain_id_rpc(1337).await?;
+    let mut zone = ZoneTestNode::start_local_with_p2p(l1_rpc_url.to_string(), p2p_config).await?;
+
+    let _exit = tokio::time::timeout(DEFAULT_TIMEOUT, zone.wait_for_node_exit())
+        .await
+        .expect("node did not exit after its P2P listener failed");
     Ok(())
 }
 

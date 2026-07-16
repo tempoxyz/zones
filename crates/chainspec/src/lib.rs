@@ -134,8 +134,8 @@ impl EthChainSpec for ZoneChainSpec {
         self.inner.final_paris_total_difficulty()
     }
 
-    fn next_block_base_fee(&self, parent: &TempoHeader, target_timestamp: u64) -> Option<u64> {
-        self.inner.next_block_base_fee(parent, target_timestamp)
+    fn next_block_base_fee(&self, _parent: &TempoHeader, _target_timestamp: u64) -> Option<u64> {
+        Some(0)
     }
 }
 
@@ -183,22 +183,26 @@ mod tests {
     #[test]
     fn delegates_tempo_chain_behavior() {
         let zone = ZoneChainSpec::from(DEV.clone());
-        let parent = zone.genesis_header();
-        let timestamp = parent.inner.timestamp;
 
         assert!(Arc::ptr_eq(&zone.inner, &DEV));
         assert_eq!(zone.chain(), DEV.chain());
         assert_eq!(zone.genesis_hash(), DEV.genesis_hash());
-        assert_eq!(
-            zone.next_block_base_fee(parent, timestamp),
-            DEV.next_block_base_fee(parent, timestamp)
-        );
         for &hardfork in TempoHardfork::VARIANTS {
             assert_eq!(
                 zone.tempo_fork_activation(hardfork),
                 DEV.tempo_fork_activation(hardfork)
             );
         }
+    }
+
+    #[test]
+    fn next_block_base_fee_is_zero() {
+        let zone = ZoneChainSpec::from(DEV.clone());
+        let parent = zone.genesis_header();
+        let timestamp = parent.inner.timestamp;
+
+        assert_ne!(DEV.next_block_base_fee(parent, timestamp), Some(0));
+        assert_eq!(zone.next_block_base_fee(parent, timestamp), Some(0));
     }
 
     #[cfg(feature = "cli")]

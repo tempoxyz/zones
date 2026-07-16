@@ -12,14 +12,14 @@ pub mod precompiles;
 mod tx_context;
 mod zone_evm;
 
+pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
-    executor::ZoneBlockExecutor,
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
-        ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
+        L1StorageReader, SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS,
+        ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
     tx_context::ZoneTxContext,
 };
@@ -65,16 +65,19 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// zone-native precompiles.
 #[derive(Debug, Clone)]
-pub struct ZoneEvmFactory {
-    l1_provider: L1StateProvider,
+pub struct ZoneEvmFactory<L1 = L1StateProvider> {
+    l1_reader: L1,
     policy_provider: Option<PolicyProvider>,
 }
 
-impl ZoneEvmFactory {
-    /// Create a new factory with the given L1 state provider.
-    pub fn new(l1_provider: L1StateProvider) -> Self {
+impl<L1> ZoneEvmFactory<L1>
+where
+    L1: L1StorageReader + SequencerExt,
+{
+    /// Create a new factory with the given L1 state reader.
+    pub fn new(l1_reader: L1) -> Self {
         Self {
-            l1_provider,
+            l1_reader,
             policy_provider: None,
         }
     }
@@ -92,7 +95,7 @@ impl ZoneEvmFactory {
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
-            Some(TempoState::create(self.l1_provider.clone(), &cfg))
+            Some(TempoState::create(self.l1_reader.clone(), &cfg))
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
@@ -108,7 +111,7 @@ impl ZoneEvmFactory {
             .policy_provider
             .clone()
             .map(ZoneTip403ProxyRegistry::new);
-        let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_provider.clone());
+        let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_reader.clone());
 
         if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
@@ -156,7 +159,10 @@ impl ZoneEvmFactory {
     }
 }
 
-impl EvmFactory for ZoneEvmFactory {
+impl<L1> EvmFactory for ZoneEvmFactory<L1>
+where
+    L1: L1StorageReader + SequencerExt,
+{
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I>;
     type Context<DB: Database> = TempoCtx<DB>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
