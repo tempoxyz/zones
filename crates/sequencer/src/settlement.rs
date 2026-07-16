@@ -277,12 +277,14 @@ impl BatchSubmitter {
             nextDepositNumber: batch.next_deposit_number,
         };
 
-        let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
+        let (anchor_mode, current_l1_block) =
+            self.resolve_anchor_mode(batch.tempo_block_number).await?;
         let recent_tempo_block_number = anchor_mode.recent_block_number();
 
         info!(
             anchor_mode = %anchor_mode,
             recent_tempo_block_number,
+            current_l1_block,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
             "Submitting batch to ZonePortal on L1"
@@ -370,7 +372,7 @@ impl BatchSubmitter {
     /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
     ///   behind the configured safety margin is used as anchor. Ancestry headers
     ///   are collected and validated for future prover integration.
-    async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
+    async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<(AnchorMode, u64)> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
         if tempo_block_number >= current_l1_block {
@@ -383,7 +385,7 @@ impl BatchSubmitter {
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
         if gap < self.anchor_config.effective_window() {
-            return Ok(AnchorMode::Direct);
+            return Ok((AnchorMode::Direct, current_l1_block));
         }
 
         let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
@@ -401,10 +403,13 @@ impl BatchSubmitter {
             "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
         );
 
-        Ok(AnchorMode::Ancestry {
-            anchor_block,
-            ancestry_headers,
-        })
+        Ok((
+            AnchorMode::Ancestry {
+                anchor_block,
+                ancestry_headers,
+            },
+            current_l1_block,
+        ))
     }
 
     /// Fetch and RLP-encode L1 block headers from `from + 1` to `to` (inclusive),
@@ -1287,6 +1292,22 @@ mod tests {
                 .map(|(block_number, _)| *block_number),
             Some(10)
         );
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn anchor_resolution_returns_observed_l1_tip() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+
+        asserter.push_success(&100_u64);
+        let (mode, current_l1_block) = submitter.resolve_anchor_mode(99).await.unwrap();
+
+        assert!(matches!(mode, AnchorMode::Direct));
+        assert_eq!(current_l1_block, 100);
         assert!(asserter.read_q().is_empty());
     }
 
