@@ -72,7 +72,7 @@ contract ZonePortal is IZonePortal {
     bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
     bytes32 internal constant VERSION_HASH = keccak256("1");
     bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
-        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,address sequencer,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address sequencer,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
     );
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -1158,6 +1158,7 @@ contract ZonePortal is IZonePortal {
                 zoneId,
                 sequencerSetVersion,
                 nextZoneHeight,
+                withdrawalBatchIndex + 1,
                 sequencer,
                 verifier,
                 tempoBlockNumber,
