@@ -47,6 +47,12 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
+/// Maximum number of encoded L1 headers retained between ancestry submissions.
+///
+/// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
+/// map overhead while covering more than the current Zone E recovery gap.
+const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: usize = 262_144;
+
 /// EIP-2935 anchor limits used by the batch submitter.
 ///
 /// Production uses the real 8191-block EIP-2935 history window with a safety
@@ -175,6 +181,8 @@ pub struct BatchSubmitter {
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
     ancestry_header_cache: RwLock<BTreeMap<u64, CachedAncestryHeader>>,
+    /// Hard entry limit for [`Self::ancestry_header_cache`].
+    ancestry_header_cache_capacity: usize,
 }
 
 /// One validated L1 header retained for ancestry proof construction.
@@ -218,6 +226,7 @@ impl BatchSubmitter {
             l1_fetch_concurrency: 16,
             anchor_config,
             ancestry_header_cache: RwLock::new(BTreeMap::new()),
+            ancestry_header_cache_capacity: DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
         }
     }
 
@@ -526,10 +535,12 @@ impl BatchSubmitter {
             cache.insert(block_number, header);
         }
 
-        // Ordered settlement never needs headers older than the current base.
-        // Retain the base itself because it commonly becomes part of the next
-        // overlapping range and anchors validation without another RPC call.
+        // Ordered settlement advances the lower bound monotonically, so the
+        // lowest block numbers are also the least recently useful entries.
         cache.retain(|block_number, _| *block_number >= from);
+        while cache.len() > self.ancestry_header_cache_capacity {
+            cache.pop_first();
+        }
 
         info!(
             from,
@@ -1217,7 +1228,8 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        let mut submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        submitter.ancestry_header_cache_capacity = 4;
 
         let mut parent_hash = B256::ZERO;
         let mut headers = Vec::new();
@@ -1233,6 +1245,7 @@ mod tests {
         }
         let first = submitter.fetch_ancestry_headers(10, 14).await.unwrap();
         assert_eq!(first.len(), 4);
+        assert_eq!(submitter.ancestry_header_cache.read().len(), 4);
 
         // The overlapping range reuses blocks 11..=14 and fetches only block 15.
         // If the implementation repeats any cached RPC call, the mock has no
