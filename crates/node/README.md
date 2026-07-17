@@ -126,21 +126,16 @@ header chain linking back to the target block.
 The zone enforces TIP-403 transfer policies (whitelist, blacklist, compound)
 using Tempo's upstream policy implementation over anchored raw L1 state:
 
-1. **L1Subscriber** — observes L1 block receipts (via
-   `eth_getBlockReceipts`) and conservatively invalidates raw state for the
-   TIP-403 registry and tracked TIP-20 tokens when their logs indicate a
-   possible mutation.
-2. **L1StateProvider** — resolves storage slots at an explicit L1 block through
+1. **L1StateProvider** — resolves storage slots at an explicit L1 block through
    the block-versioned `L1StateCache`, falling back to an exact-block L1 RPC
-   read and caching the result. Mutation barriers and reorg resets prevent
-   stale values from being inherited across state changes.
-3. **ZonePrecompileStorageProvider** — composes ordinary zone EVM storage with
-   the raw L1 reader at the exact finalized block recorded in `TempoState`.
-   TIP-403 registry state and each token's L1-owned transfer-policy field come
-   from L1; balances and all other TIP-20 state remain zone-local. Mirrored
-   reads retain normal EVM gas, warming, and storage accounting, while
-   persistent writes to L1-owned slots are rejected.
-4. **Tempo TIP-20 and TIP-403 precompiles** — execute the upstream business
+   read and caching the result.
+2. **AnchoredZoneDb** — composes ordinary zone EVM storage with the raw L1
+   reader at the exact finalized block recorded in `TempoState`. TIP-403
+   registry state and each token's L1-owned transfer-policy field come from L1;
+   balances and all other TIP-20 state remain zone-local. Mirrored reads retain
+   normal EVM gas, warming, and storage accounting, while persistent writes to
+   L1-owned slots are rejected.
+3. **Tempo TIP-20 and TIP-403 precompiles** — execute the upstream business
    logic against that composed storage view, replacing the zone's duplicated
    policy dispatch. Missing or invalid anchored state fails closed, and zone
    privacy, bridge authorization, admission, and fixed-gas rules remain in the

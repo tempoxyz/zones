@@ -1099,16 +1099,6 @@ async fn test_chain_tempo_state_ext_from_canon_notification() -> eyre::Result<()
     // Wait for tempoBlockNumber to reach 3 via RPC (ensures blocks are mined).
     zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
 
-    // The engine does not own the raw cache floor. Reaching 3 here proves the role-independent
-    // canonical-state task observed the imports and advanced the shared cache.
-    let cache = zone.l1_state_cache().clone();
-    let floor = poll_until(DEFAULT_TIMEOUT, DEFAULT_POLL, "L1 cache floor >= 3", || {
-        let floor = cache.read().block_floor();
-        async move { Ok((floor >= 3).then_some(floor)) }
-    })
-    .await?;
-    assert_eq!(floor, 3, "raw L1 cache floor should match the Zone anchor");
-
     // Drain canon notifications and collect the L1 NumHash from each committed chain.
     let mut num_hashes: Vec<NumHash> = Vec::new();
     while let Ok(notification) = canon_rx.try_recv() {

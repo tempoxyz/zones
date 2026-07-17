@@ -329,20 +329,19 @@ fn pack_transfer_policy_id(policy_id: u64) -> U256 {
 }
 
 /// Seed a TIP-20 transfer policy ID in the canonical packed L1 storage slot.
-#[must_use = "check whether the policy seed was admitted above the cache floor"]
 pub(crate) fn seed_raw_tip20_policy_id(
     cache: &mut zone_l1::state::L1StateCacheInner,
     block_number: u64,
     token: Address,
     policy_id: u64,
-) -> bool {
+) {
     let packed = pack_transfer_policy_id(policy_id);
     cache.set(
         token,
         B256::from(tip20_slots::TRANSFER_POLICY_ID.to_be_bytes()),
         block_number,
         B256::from(packed.to_be_bytes()),
-    )
+    );
 }
 
 /// A TIP-403 policy write for [`seed_raw_tip403_policy`].
@@ -433,17 +432,13 @@ pub(crate) fn seed_raw_tip403_policy(
     })?;
 
     let mut cache = cache.write();
-    let block_floor = cache.block_floor();
     for slot in slots {
         let value = storage.sload(TIP403_REGISTRY_ADDRESS, slot)?;
-        eyre::ensure!(
-            cache.set(
-                TIP403_REGISTRY_ADDRESS,
-                slot.into(),
-                block_number,
-                value.into(),
-            ),
-            "TIP-403 seed rejected below cache floor: block={block_number} floor={block_floor} slot={slot}"
+        cache.set(
+            TIP403_REGISTRY_ADDRESS,
+            slot.into(),
+            block_number,
+            value.into(),
         );
     }
     Ok(())
@@ -987,10 +982,7 @@ impl ZoneTestNode {
         if is_local_dummy_l1 {
             seed_local_policy_cache(&policy_cache);
             let mut cache = l1_state_cache.write();
-            assert!(
-                seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID),
-                "pathUSD policy seed must be admitted before node startup"
-            );
+            seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         }
 
         let node_handle = NodeBuilder::new(node_config)
@@ -3681,42 +3673,39 @@ impl L1Fixture {
 
         // Local fixtures have no RPC fallback. A withdrawal transfers to the outbox, so seed the
         // absence of its address-level receive policy as baseline raw L1 state.
-        assert!(cache.set(
+        cache.set(
             TIP403_REGISTRY_ADDRESS,
             B256::from(outbox_receive_policy_slot.to_be_bytes()),
             0,
             B256::ZERO,
-        ));
+        );
 
         for block in 0..=num_blocks {
             let mut sequencer_bytes = [0u8; 32];
             sequencer_bytes[12..].copy_from_slice(sequencer.as_slice());
-            assert!(cache.set(
+            cache.set(
                 portal_address,
                 B256::ZERO,
                 block,
                 B256::new(sequencer_bytes),
-            ));
+            );
             // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
-            assert!(cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO));
-            assert!(cache.set(portal_address, refunds_slot, block, B256::ZERO));
+            cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
+            cache.set(portal_address, refunds_slot, block, B256::ZERO);
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
             // RPC fallback on self-contained tests.
-            assert!(cache.set(
+            cache.set(
                 portal_address,
                 path_usd_config_slot,
                 block,
                 enabled_token_config,
-            ));
+            );
         }
 
-        assert!(
-            seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID),
-            "pathUSD policy baseline must be admitted before the cache floor advances"
-        );
+        seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         cache.update_anchor(NumHash {
             number: num_blocks,
             hash: B256::ZERO,
@@ -3735,16 +3724,11 @@ impl L1Fixture {
         // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
         let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
         for cache in self.caches.lock().unwrap().iter() {
-            let mut cache = cache.write();
-            let block_floor = cache.block_floor();
-            eyre::ensure!(
-                cache.set(
-                    TIP403_REGISTRY_ADDRESS,
-                    B256::from(receive_policy_slot.to_be_bytes()),
-                    block_number,
-                    B256::ZERO,
-                ),
-                "receive-policy seed rejected below cache floor: recipient={recipient} block={block_number} floor={block_floor} slot={receive_policy_slot}"
+            cache.write().set(
+                TIP403_REGISTRY_ADDRESS,
+                B256::from(receive_policy_slot.to_be_bytes()),
+                block_number,
+                B256::ZERO,
             );
         }
         Ok(())
@@ -3761,14 +3745,11 @@ impl L1Fixture {
         for cache in self.caches.lock().unwrap().iter() {
             let mut cache = cache.write();
             for token in tokens {
-                assert!(
-                    seed_raw_tip20_policy_id(
-                        &mut cache,
-                        block_number,
-                        token.token,
-                        ALLOW_ALL_POLICY_ID,
-                    ),
-                    "enabled-token policy fixture seed must be admitted"
+                seed_raw_tip20_policy_id(
+                    &mut cache,
+                    block_number,
+                    token.token,
+                    ALLOW_ALL_POLICY_ID,
                 );
             }
         }

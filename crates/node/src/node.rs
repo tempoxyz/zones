@@ -30,7 +30,7 @@ use reth_node_builder::{
     },
 };
 use reth_primitives_traits::SealedHeader;
-use reth_provider::{CanonStateSubscriptions, ChainSpecProvider};
+use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
@@ -62,7 +62,7 @@ use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    ChainTempoStateExt, DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
+    DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
     state::{
         L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider,
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
@@ -392,8 +392,6 @@ where
     l1_config: L1SubscriberConfig,
     /// TIP-403 policy cache
     policy_cache: PolicyCache,
-    /// Block-versioned L1 storage cache shared with the subscriber and precompiles.
-    l1_state_cache: L1StateCache,
     /// ZonePortal address on L1.
     portal_address: Address,
     /// Pre-configured list of initial tokens.
@@ -425,7 +423,6 @@ where
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
         policy_cache: PolicyCache,
-        l1_state_cache: L1StateCache,
         portal_address: Address,
         initial_tokens: Option<Vec<Address>>,
         private_rpc_config: ZonePrivateRpcConfig,
@@ -444,7 +441,6 @@ where
             deposit_queue,
             l1_config,
             policy_cache,
-            l1_state_cache,
             portal_address,
             initial_tokens,
             private_rpc_config,
@@ -475,11 +471,7 @@ where
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
-        self.l1_state_cache
-            .write()
-            .advance_floor(tempo_block_number);
-        self.spawn_l1_state_cache_floor_task(&ctx);
-        info!(target: "reth::cli", tempo_block_number, "Initialized L1 cache progress from local TempoState");
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -690,72 +682,6 @@ where
         }
         info!(target: "reth::cli", "Seeded token policies from L1");
         Ok(())
-    }
-
-    /// Track the canonical Zone anchor and advance the raw L1 cache floor for every node role.
-    fn spawn_l1_state_cache_floor_task(&self, ctx: &AddOnsContext<'_, N>) {
-        let provider = ctx.node.provider().clone();
-        let mut notifications = provider.subscribe_to_canonical_state();
-        let cache = self.l1_state_cache.clone();
-
-        ctx.node.task_executor().spawn_critical_task(
-            "l1-state-cache-floor",
-            async move {
-                loop {
-                    let block_number = match notifications.recv().await {
-                        Ok(notification) => {
-                            let committed = notification.committed();
-                            if committed.is_empty() {
-                                // A pure revert has no new execution outcome. The floor is
-                                // monotonic, but read the new canonical head for completeness.
-                                match provider
-                                    .latest()
-                                    .and_then(|state| state.tempo_block_number())
-                                {
-                                    Ok(block_number) => block_number,
-                                    Err(err) => {
-                                        warn!(target: "zone::l1_cache", %err, "Failed to resync L1 cache floor after canonical revert");
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                committed.tempo_block_number()
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            // A later notification normally catches the floor up, but resync now
-                            // so an idle follower cannot remain behind after notification loss.
-                            warn!(target: "zone::l1_cache", skipped, "Canonical notifications lagged; resyncing L1 cache floor");
-                            match provider
-                                .latest()
-                                .and_then(|state| state.tempo_block_number())
-                            {
-                                Ok(block_number) => block_number,
-                                Err(err) => {
-                                    warn!(target: "zone::l1_cache", %err, "Failed to resync lagged L1 cache floor");
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            panic!("canonical state notifications closed unexpectedly")
-                        }
-                    };
-
-                    let mut cache = cache.write();
-                    let previous_floor = cache.block_floor();
-                    cache.advance_floor(block_number);
-                    if block_number > previous_floor {
-                        debug!(
-                            target: "zone::l1_cache",
-                            previous_floor,
-                            block_number,
-                            "Advanced L1 cache floor from canonical Zone state"
-                        );
-                    }
-                }
-            },
-        );
     }
 
     /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
@@ -1008,7 +934,6 @@ where
             self.deposit_queue.clone(),
             self.l1_config.clone(),
             self.policy_cache.clone(),
-            self.l1_state_cache.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
             self.private_rpc_config.clone(),
