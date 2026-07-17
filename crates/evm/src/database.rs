@@ -262,6 +262,7 @@ mod tests {
         let slot = U256::from(7);
         let expected = U256::from(99);
         let l1 = TestL1::default();
+        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor - 1, U256::from(98));
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
         let mut db = AnchoredZoneDb::new(test_db(anchor), l1);
 

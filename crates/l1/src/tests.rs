@@ -1117,13 +1117,12 @@ fn test_enqueue_and_transition_consistency() {
 }
 
 #[tokio::test]
-async fn test_prepare_rejects_unauthorized_encrypted_deposit_without_decryption_data() {
+async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
     use k256::{AffinePoint, ProjectivePoint, Scalar};
-    use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 
     let token = address!("0x0000000000000000000000000000000000001000");
     let sender = address!("0x0000000000000000000000000000000000001234");
-    let unauthorized_recipient = address!("0x000000000000000000000000000000000000BEEF");
+    let recipient = address!("0x000000000000000000000000000000000000BEEF");
     let portal = address!("0x0000000000000000000000000000000000000ABC");
     let block_number = 10;
 
@@ -1135,25 +1134,12 @@ async fn test_prepare_rejects_unauthorized_encrypted_deposit_without_decryption_
     let encrypted = crate::precompiles::ecies::encrypt_deposit(
         &seq_pub_x,
         seq_pub_y_parity,
-        unauthorized_recipient,
+        recipient,
         B256::ZERO,
         portal,
         U256::ZERO,
     )
     .expect("encrypted deposit should be valid");
-
-    let policy_cache = crate::PolicyCache::default();
-    {
-        let mut cache = policy_cache.write();
-        cache.set_token_policy(token, block_number, 2);
-        cache.set_policy_type(2, PolicyType::BLACKLIST);
-        cache.set_policy_status(2, unauthorized_recipient, block_number, true);
-    }
-    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .connect_mocked_client(Asserter::new())
-        .erased();
-    let policy_provider =
-        crate::PolicyProvider::new(policy_cache, provider, tokio::runtime::Handle::current());
 
     let block = L1BlockDeposits {
         header: seal(make_test_header(block_number)),
@@ -1176,9 +1162,9 @@ async fn test_prepare_rejects_unauthorized_encrypted_deposit_without_decryption_
     };
 
     let prepared = block
-        .prepare(&sequencer_key, portal, &policy_provider)
+        .prepare(&sequencer_key, portal)
         .await
-        .expect("cached policy check should prepare block");
+        .expect("decrypted deposit should prepare without an engine-side policy read");
 
     assert_eq!(prepared.queued_deposits.len(), 1);
     assert_eq!(
@@ -1186,12 +1172,13 @@ async fn test_prepare_rejects_unauthorized_encrypted_deposit_without_decryption_
         DepositType::Encrypted
     );
     assert!(
-        prepared.queued_deposits[0].rejected,
-        "unauthorized encrypted recipient must be rejected for deposit bounce-back"
+        !prepared.queued_deposits[0].rejected,
+        "policy is enforced by upstream TIP-20 mint execution"
     );
-    assert!(
-        prepared.decryptions.is_empty(),
-        "rejected encrypted deposits must not consume DecryptionData"
+    assert_eq!(
+        prepared.decryptions.len(),
+        1,
+        "successfully decrypted deposits must provide on-chain decryption data"
     );
 }
 

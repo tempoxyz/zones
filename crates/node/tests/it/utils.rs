@@ -931,7 +931,6 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
-        let l1_provider_url = l1_ws_url.clone();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -1000,15 +999,6 @@ impl ZoneTestNode {
             .await?;
 
         if spawn_engine {
-            let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect(&l1_provider_url)
-                .await?
-                .erased();
-            let policy_provider = zone_l1::PolicyProvider::new(
-                policy_cache.clone(),
-                l1_provider,
-                tokio::runtime::Handle::current(),
-            );
             let provider = node_handle.node.provider();
             let last_header = provider
                 .sealed_header(provider.best_block_number()?)?
@@ -1022,7 +1012,6 @@ impl ZoneTestNode {
                 sequencer_signer.address(),
                 SecretKey::from(sequencer_signer.credential()),
                 portal_address,
-                policy_provider,
             );
             node_handle
                 .node

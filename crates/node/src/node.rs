@@ -64,8 +64,8 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     ChainTempoStateExt, DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
     state::{
-        L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider,
-        spawn_policy_resolution_task, spawn_pool_prefetch_task,
+        L1StateCache, L1StateProvider, L1StateProviderConfig, spawn_policy_resolution_task,
+        spawn_pool_prefetch_task,
     },
 };
 use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
@@ -519,7 +519,7 @@ where
         if let Some(ref config) = self.sequencer_config {
             let sequencer_addr = config.sequencer_signer.address();
             let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
-            self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
+            self.spawn_zone_engine(&ctx, sequencer_addr, sequencer_key)?;
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
@@ -793,16 +793,10 @@ where
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
     fn spawn_zone_engine(
         &self,
-        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
         sequencer_key: SecretKey,
     ) -> eyre::Result<()> {
-        let policy_provider = PolicyProvider::new(
-            self.policy_cache.clone(),
-            l1_provider,
-            tokio::runtime::Handle::current(),
-        );
         let provider = ctx.node.provider();
         let last_header = provider
             .sealed_header(provider.best_block_number()?)?
@@ -816,7 +810,6 @@ where
             fee_recipient,
             sequencer_key,
             self.portal_address,
-            policy_provider,
         );
         ctx.node
             .task_executor()

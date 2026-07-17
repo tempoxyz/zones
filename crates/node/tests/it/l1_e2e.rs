@@ -12,9 +12,13 @@ use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
 };
+use alloy_rpc_types_eth::Filter;
+use alloy_sol_types::SolEvent;
 use std::time::Duration;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox,
+};
 use zone_node::dev::{ProvisionConfig, provision_zone};
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
@@ -1171,12 +1175,11 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
 ///
 ///  1. Start L1 dev node, deploy zone, register encryption key.
 ///  2. Create a blacklist policy, assign to pathUSD, blacklist the recipient.
-///  3. Fund the policy cache so the zone knows about the blacklist.
-///  4. Make an encrypted deposit targeting the blacklisted recipient.
-///  5. Verify the deposit is refunded to the sender on L1.
+///  3. Make an encrypted deposit targeting the blacklisted recipient.
+///  4. Verify upstream TIP-20 mint enforcement fails and refunds the sender on L1.
 ///
-/// NOTE: This test validates the builder-level policy check in `build_encrypted_deposit`.
-/// The zone's policy cache must be pre-populated for the check to trigger.
+/// No semantic policy cache is seeded: `AnchoredZoneDb` exposes the finalized
+/// L1 policy state to upstream Tempo TIP-20/TIP-403 execution.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1210,23 +1213,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     l1.set_sequencer_encryption_key(portal_address, &encryption_key)
         .await?;
 
-    // --- Step 5: Pre-populate zone's policy cache ---
-    // The builder checks PolicyCacheInner during encrypted deposit processing.
-    // Since the L1 subscriber may not have caught up yet, seed it manually.
-    {
-        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
-        let policy_cache = zone.policy_cache();
-        // Fetch L1 block number before acquiring the write lock to avoid
-        // holding a parking_lot guard across an await point.
-        let l1_block = l1.provider().get_block_number().await?;
-        let mut cache = policy_cache.write();
-        cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
-        cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
-        cache.set_policy_status(policy_id, blacklisted_recipient, l1_block, true);
-    }
-
-    // --- Step 6: Make an encrypted deposit targeting the blacklisted recipient ---
+    // --- Step 5: Make an encrypted deposit targeting the blacklisted recipient ---
     let depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
     let deposit_amount: u128 = 1_000_000;
     l1.fund_user(depositor.address(), deposit_amount).await?;
@@ -1296,7 +1283,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     )
     .await?;
 
-    // The blacklisted recipient should NOT have received the deposit
+    // The blacklisted recipient should NOT have received the deposit.
     let recipient_balance = zone
         .balance_of(ZONE_TOKEN_ADDRESS, blacklisted_recipient)
         .await?;
@@ -1306,6 +1293,19 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
         U256::ZERO,
         "Blacklisted recipient should not have received the deposit"
     );
+
+    // Policy rejection is handled by the upstream mint failure path, not by
+    // an engine-generated `QueuedDeposit.rejected` decision.
+    let failed_filter = Filter::new()
+        .address(ZONE_INBOX_ADDRESS)
+        .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH);
+    let failed = zone
+        .provider()
+        .get_logs(&failed_filter)
+        .await?
+        .into_iter()
+        .any(|log| ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner).is_ok());
+    assert!(failed, "expected upstream mint failure event");
 
     Ok(())
 }
