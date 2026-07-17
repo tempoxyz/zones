@@ -792,9 +792,9 @@ contract ZonePortal is IZonePortal {
 
         bool success;
         if (withdrawal.gasLimit == 0) {
-            // Re-check current roles without reverting so an in-flight withdrawal to a revoked
-            // account or newly registered gateway bounces without blocking the FIFO.
-            success = !zoneGateway[withdrawal.to] && allowedAccount[withdrawal.to]
+            // Re-check current membership without reverting so an in-flight withdrawal to a
+            // revoked account bounces without blocking the FIFO.
+            success = allowedAccount[withdrawal.to]
                 && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
             // Isolate callback effects so failure can be caught without reverting the dequeue.
