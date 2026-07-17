@@ -715,6 +715,7 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint128 fee, uint128 netAmount)
     {
+        // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
         fee = calculateDepositFee();
         uint128 bouncebackFee = calculateBouncebackFee();
         if (amount < fee + bouncebackFee) revert DepositTooSmall();
@@ -996,7 +997,6 @@ contract ZonePortal is IZonePortal {
         // opaque, so an enforced gateway is trusted to constrain the operation and return the
         // intended result. Open access imposes no source-deposit invariant: callback value may go
         // to another zone or leave the zone system entirely.
-        // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
         if (
             accessMode() == ZoneAccessMode.Closed
                 && currentDepositQueueHash == depositQueueHashBefore
