@@ -166,6 +166,8 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.mint(bob, 100_000e6);
         l2ZoneToken.setMinter(address(this), false);
 
+        _mockTokenPolicyMigration(address(l2ZoneToken), true);
+
         // Record genesis block number for Tempo
         genesisTempoBlockNumber = uint64(block.number);
 

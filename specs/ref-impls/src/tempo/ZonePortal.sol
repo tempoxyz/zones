@@ -34,6 +34,8 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
+error UnknownFunctionSelector(bytes4 selector);
+
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
@@ -406,10 +408,22 @@ contract ZonePortal is IZonePortal {
     function _enableTokenInternal(address _token) internal {
         address[] memory tokens = new address[](1);
         tokens[0] = _token;
-        TIP403_REGISTRY.migrateTransferPolicyIds(tokens);
-        (bool isSet,) = TIP403_REGISTRY.tokenTransferPolicyId(_token);
-        if (!isSet) {
-            revert TokenTransferPolicyNotSet();
+
+        (bool success, bytes memory result) = address(TIP403_REGISTRY)
+            .call(abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)));
+        if (!success) {
+            if (!_isUnknownFunctionSelector(
+                    result, ITIP403Registry.migrateTransferPolicyIds.selector
+                )) {
+                assembly ("memory-safe") {
+                    revert(add(result, 0x20), mload(result))
+                }
+            }
+        } else {
+            (bool isSet,) = TIP403_REGISTRY.tokenTransferPolicyId(_token);
+            if (!isSet) {
+                revert TokenTransferPolicyNotSet();
+            }
         }
 
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
@@ -421,6 +435,26 @@ contract ZonePortal is IZonePortal {
         string memory currency = ITIP20(_token).currency();
 
         emit TokenEnabled(_token, name, symbol, currency);
+    }
+
+    /// @dev TIP-1092 selectors return this error before the T9 activation gate.
+    function _isUnknownFunctionSelector(
+        bytes memory result,
+        bytes4 selector
+    )
+        internal
+        pure
+        returns (bool)
+    {
+        if (result.length != 36) return false;
+
+        bytes4 errorSelector;
+        bytes4 rejectedSelector;
+        assembly ("memory-safe") {
+            errorSelector := mload(add(result, 0x20))
+            rejectedSelector := mload(add(result, 0x24))
+        }
+        return errorSelector == UnknownFunctionSelector.selector && rejectedSelector == selector;
     }
 
     /// @notice Update the zone's public RPC endpoint.

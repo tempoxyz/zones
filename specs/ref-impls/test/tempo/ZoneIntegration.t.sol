@@ -108,6 +108,8 @@ contract ZoneIntegrationTest is BaseTest {
         l2ZoneToken.mint(charlie, 1_000_000e6);
         l2ZoneToken.setMinter(address(this), false);
 
+        _mockTokenPolicyMigration(address(l2ZoneToken), true);
+
         genesisTempoBlockNumber = uint64(block.number);
 
         // Deploy portal directly (bypass factory TIP20 prefix check).

@@ -5,6 +5,8 @@ import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfa
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 contract MockPortalToken {
 
@@ -54,6 +56,20 @@ contract ZonePortalGasLimitTest is Test {
         portal = new ZonePortal();
         address[] memory sequencers = new address[](1);
         sequencers[0] = address(this);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(token);
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(uint256(1))
+        );
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (address(token))),
+            abi.encode(true, uint64(1))
+        );
+
         vm.prank(ZONE_FACTORY_ADDRESS);
         portal.initialize(1, address(token), address(0x400), admin, sequencers, 1, address(0), "");
     }
