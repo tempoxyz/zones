@@ -454,18 +454,6 @@ async fn test_cross_zone_encrypted_router_bounceback_recipient() -> eyre::Result
     l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())
         .await?;
 
-    {
-        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
-        let l1_block = l1.provider().get_block_number().await?;
-        for policy_cache in [zone_a.policy_cache(), zone_b.policy_cache()] {
-            let mut cache = policy_cache.write();
-            cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
-            cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
-            cache.set_policy_status(policy_id, blacklisted_recipient, l1_block, true);
-        }
-    }
-
     let mut alice = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
     let deposit_amount: u128 = 2_000_000;
     let cross_amount: u128 = 1_000_000;
@@ -1343,26 +1331,6 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
 
-    // Seed the policy cache manually so it has policy data before test execution.
-    {
-        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
-        let l1_block = l1.provider().get_block_number().await?;
-        let mut cache = zone.policy_cache().write();
-        cache.set_token_policy(PATH_USD_ADDRESS, l1_block, compound_policy_id);
-        cache.set_policy_type(compound_policy_id, PolicyType::COMPOUND);
-        cache.set_compound(
-            compound_policy_id,
-            zone_l1::state::tip403::CompoundData {
-                sender_policy_id,
-                recipient_policy_id: 1,
-                mint_recipient_policy_id: 1,
-            },
-        );
-        cache.set_policy_type(sender_policy_id, PolicyType::BLACKLIST);
-        cache.set_policy_status(sender_policy_id, alice, l1_block, true);
-    }
-
     // --- Step 4: Deposit to Alice via the dev account ---
     // Alice is blacklisted as a sender, so she can't transfer pathUSD on L1
     // herself. The dev account deposits on her behalf (recipient = allow-all).
@@ -1398,10 +1366,9 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     )
     .await?;
 
-    // --- Step 5: Alice attempts a transfer → should be rejected ---
-    // The transfer may be rejected at the pool level (send() returns Err) or
-    // accepted into a block but reverted (receipt.status() == false). Either
-    // outcome proves the blacklist is enforced.
+    // --- Step 5: Alice simulates a transfer → should be rejected ---
+    // Use an exact stateful call instead of waiting on pool inclusion: policy-invalid
+    // transactions are allowed to remain pending, so absence of a receipt is not proof.
     let bob = Address::with_last_byte(0xBB);
 
     let alice_provider = alloy::providers::ProviderBuilder::new()
@@ -1409,28 +1376,15 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
         .connect_http(zone.http_url().clone());
 
     let tip20 = tempo_contracts::precompiles::ITIP20::new(ZONE_TOKEN_ADDRESS, &alice_provider);
-    let send_result = tip20
+    let transfer = tip20
         .transfer(bob, U256::from(200_000u128))
-        .gas_price(tempo_chainspec::spec::TEMPO_T1_BASE_FEE as u128)
-        .gas(500_000)
-        .send()
+        .from(alice)
+        .call()
         .await;
-
-    match send_result {
-        Err(_) => {
-            // Pool-level rejection — blacklist enforced before inclusion.
-        }
-        Ok(pending) => {
-            // Tx was accepted into the pool — wait for it to be included and
-            // verify it reverted.
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            let receipt = pending.get_receipt().await?;
-            assert!(
-                !receipt.status(),
-                "transfer from blacklisted sender should revert, but succeeded"
-            );
-        }
-    }
+    assert!(
+        transfer.is_err(),
+        "transfer simulation from blacklisted sender should revert"
+    );
 
     // Bob should have zero balance
     let bob_balance = zone.balance_of(ZONE_TOKEN_ADDRESS, bob).await?;

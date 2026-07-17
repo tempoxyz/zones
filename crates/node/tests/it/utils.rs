@@ -306,23 +306,6 @@ fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
 
-/// Seed the local test policy cache with the default pathUSD transfer policy.
-///
-/// Self-contained zone tests boot without a real L1, so startup can't resolve the
-/// token's `transferPolicyId` via RPC. pathUSD defaults to builtin policy `1`
-/// (allow all), and local tests rely on that behavior for outbox `transferFrom`
-/// flows.
-fn seed_local_policy_cache(policy_cache: &zone_l1::PolicyCache) {
-    const LOCAL_POLICY_CACHE_SEED_BLOCK: u64 = 1;
-
-    policy_cache.set_last_l1_block(LOCAL_POLICY_CACHE_SEED_BLOCK);
-    policy_cache.write().set_token_policy(
-        PATH_USD_ADDRESS,
-        LOCAL_POLICY_CACHE_SEED_BLOCK,
-        ALLOW_ALL_POLICY_ID,
-    );
-}
-
 // TODO(rusowsky): Remove once Tempo L1 stores transfer policy IDs in the TIP403 precompile.
 fn pack_transfer_policy_id(policy_id: u64) -> U256 {
     U256::from(policy_id) << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8)
@@ -512,7 +495,6 @@ pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
     l1_state_cache: L1StateCache,
-    policy_cache: zone_l1::PolicyCache,
     rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
     _tasks: Runtime,
@@ -539,11 +521,6 @@ impl ZoneTestNode {
     /// Returns a handle to the L1 state cache for seeding precompile data.
     pub(crate) fn l1_state_cache(&self) -> &L1StateCache {
         &self.l1_state_cache
-    }
-
-    /// Returns a handle to the policy cache for TIP-403 authorization.
-    pub(crate) fn policy_cache(&self) -> &zone_l1::PolicyCache {
-        &self.policy_cache
     }
 
     /// Builds the real private RPC API backed by the node's EthHandlers.
@@ -984,9 +961,7 @@ impl ZoneTestNode {
 
         let deposit_queue = zone_node.deposit_queue();
         let l1_state_cache = zone_node.l1_state_cache();
-        let policy_cache = zone_node.policy_cache();
         if is_local_dummy_l1 {
-            seed_local_policy_cache(&policy_cache);
             let mut cache = l1_state_cache.write();
             assert!(
                 seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID),
@@ -1047,7 +1022,6 @@ impl ZoneTestNode {
             deposit_queue,
             http_url,
             l1_state_cache,
-            policy_cache,
             rpc_api_factory,
             node_handle: Box::new(node_handle),
             _tasks: tasks,
@@ -2705,10 +2679,6 @@ pub(crate) async fn start_local_zone_with_fixture(
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
 
-    // Local tests have no real L1, so the RPC fallback in resolve_transfer_policy_id
-    // fails. Seed pathUSD with the default allow-all policy (mirrors L1 default).
-    seed_local_policy_cache(zone.policy_cache());
-
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
         Address::ZERO,
@@ -2848,7 +2818,6 @@ pub(crate) async fn start_local_p2p_pair(
 
     let fixture = L1Fixture::new();
     for zone in [&leader, &follower] {
-        seed_local_policy_cache(zone.policy_cache());
         fixture.seed_l1_cache(
             zone.l1_state_cache(),
             Address::ZERO,
