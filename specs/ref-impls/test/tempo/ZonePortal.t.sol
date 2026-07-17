@@ -1555,6 +1555,28 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount);
     }
 
+    function test_callbackWithdrawal_malformedPayloadBouncesAndAdvancesQueue() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(zoneGateway),
+            amount,
+            bytes32(0),
+            2_000_000,
+            alice,
+            hex"01"
+        );
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        portal.processWithdrawal(withdrawal, bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+    }
+
     function test_plainWithdrawal_revertsAndRetainsQueueForCallbackTarget() public {
         uint128 amount = 500e6;
         _fundCallbackWithdrawal(amount);

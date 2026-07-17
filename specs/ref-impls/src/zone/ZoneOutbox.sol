@@ -267,6 +267,7 @@ contract ZoneOutbox is IZoneOutbox {
             if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
         } else {
             if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            // Reject malformed or unsupported callback ABI before burning or queueing.
             CallbackData memory callback = abi.decode(data, (CallbackData));
             if (!config.isAllowedAccount(callback.tempoRefundRecipient)) {
                 revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);
