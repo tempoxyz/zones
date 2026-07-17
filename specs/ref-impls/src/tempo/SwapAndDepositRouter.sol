@@ -18,7 +18,7 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 ///      Handles both same-token (no swap) and different-token (swap) cross-zone transfers.
 ///      Supports both plaintext and encrypted deposits.
 ///      On any failure (swap or deposit), the entire callback reverts, causing the withdrawal
-///      to bounce back to the fallbackRecipient on the source zone.
+///      to bounce back to the zoneFallbackRecipient on the source zone.
 contract SwapAndDepositRouter is IWithdrawalReceiver {
 
     /*//////////////////////////////////////////////////////////////
@@ -59,8 +59,8 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// @param data ABI-encoded callbackData (see format below)
     /// @return selector The function selector to confirm successful handling
     ///
-    /// Plaintext format: (bool isEncrypted=false, address tokenOut, address targetPortal, address recipient, address bouncebackRecipient, bytes32 memo, uint128 minAmountOut)
-    /// Encrypted format: (bool isEncrypted=true, address tokenOut, address targetPortal, uint256 keyIndex, EncryptedDepositPayload encrypted, address bouncebackRecipient, uint128 minAmountOut)
+    /// Plaintext format: (bool isEncrypted=false, address tokenOut, address targetPortal, address recipient, address tempoRefundRecipient, bytes32 memo, uint128 minAmountOut)
+    /// Encrypted format: (bool isEncrypted=true, address tokenOut, address targetPortal, uint256 keyIndex, EncryptedDepositPayload encrypted, address tempoRefundRecipient, uint128 minAmountOut)
     ///
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
@@ -91,7 +91,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
                 address targetPortal,
                 uint256 keyIndex,
                 EncryptedDepositPayload memory encrypted,
-                address bouncebackRecipient,
+                address tempoRefundRecipient,
                 uint128 minAmountOut
             ) = abi.decode(
                 data, (bool, address, address, uint256, EncryptedDepositPayload, address, uint128)
@@ -103,13 +103,13 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
             ITIP20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal)
-                .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, bouncebackRecipient);
+                .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, tempoRefundRecipient);
         } else {
             (, // skip isEncrypted
                 address tokenOut,
                 address targetPortal,
                 address recipient,
-                address bouncebackRecipient,
+                address tempoRefundRecipient,
                 bytes32 memo,
                 uint128 minAmountOut
             ) = abi.decode(data, (bool, address, address, address, address, bytes32, uint128));
@@ -120,7 +120,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
             ITIP20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal)
-                .deposit(tokenOut, recipient, amountOut, memo, bouncebackRecipient);
+                .deposit(tokenOut, recipient, amountOut, memo, tempoRefundRecipient);
         }
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;

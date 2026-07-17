@@ -40,7 +40,7 @@ impl L1BlockDeposits {
                         sender: d.sender,
                         to: d.to,
                         amount: d.amount,
-                        bouncebackRecipient: d.bounceback_recipient,
+                        tempoRefundRecipient: d.tempo_refund_recipient,
                         memo: d.memo,
                     };
                     queued_deposits.push(abi::QueuedDeposit {
@@ -57,7 +57,7 @@ impl L1BlockDeposits {
                                 token: d.token,
                                 sender: d.sender,
                                 amount: d.amount,
-                                bouncebackRecipient: d.bounceback_recipient,
+                                tempoRefundRecipient: d.tempo_refund_recipient,
                                 keyIndex: d.key_index,
                                 encrypted: abi::EncryptedDepositPayload {
                                     ephemeralPubkeyX: d.ephemeral_pubkey_x,

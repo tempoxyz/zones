@@ -81,7 +81,7 @@ pub(crate) struct DemoSwapAndDeposit {
     /// Defaults to the operator. Use a controlled burner or stealth address when
     /// the zone recipient should stay unlinkable from a later bounce-back.
     #[arg(long, env = "ROUTER_BOUNCEBACK_RECIPIENT")]
-    bounceback_recipient: Option<Address>,
+    tempo_refund_recipient: Option<Address>,
 
     /// Demo swap amount in token base units (6 decimals for the demo tokens).
     #[arg(long, default_value_t = 100_000_000)]
@@ -121,7 +121,7 @@ impl DemoSwapAndDeposit {
 
         let operator_signer = parse_private_key(&self.private_key)?;
         let operator = operator_signer.address();
-        let bounceback_recipient = self.bounceback_recipient.unwrap_or(operator);
+        let tempo_refund_recipient = self.tempo_refund_recipient.unwrap_or(operator);
         let sequencer_signer = parse_private_key(&sequencer_key)?;
         let sequencer = sequencer_signer.address();
         let admin_signer = parse_private_key(&admin_key)?;
@@ -195,7 +195,7 @@ impl DemoSwapAndDeposit {
         println!("  Operator:         {operator}");
         println!("  Sequencer:        {sequencer}");
         println!("  Portal admin:     {portal_admin}");
-        println!("  Refund recipient: {bounceback_recipient}");
+        println!("  Refund recipient: {tempo_refund_recipient}");
         println!("  Portal:           {portal}");
         println!("  Router:           {router}");
         println!("  L1 RPC:           {http_rpc}");
@@ -349,7 +349,7 @@ impl DemoSwapAndDeposit {
                 target_portal: portal,
                 token_out: beta,
                 recipient: operator,
-                bounceback_recipient,
+                tempo_refund_recipient,
                 memo: B256::ZERO,
                 min_amount_out: expected_beta,
                 sequencer_private_key: &sequencer_key,
@@ -591,7 +591,7 @@ struct EncryptedRouterCallbackRequest<'a> {
     target_portal: Address,
     token_out: Address,
     recipient: Address,
-    bounceback_recipient: Address,
+    tempo_refund_recipient: Address,
     memo: B256,
     min_amount_out: u128,
     sequencer_private_key: &'a str,
@@ -635,7 +635,7 @@ async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
             nonce: encrypted.nonce.into(),
             tag: encrypted.tag.into(),
         },
-        bounceback_recipient: request.bounceback_recipient,
+        tempo_refund_recipient: request.tempo_refund_recipient,
         min_amount_out: request.min_amount_out,
     };
 

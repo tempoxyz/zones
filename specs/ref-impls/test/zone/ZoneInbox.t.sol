@@ -136,7 +136,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 1000e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("payment")
         });
 
@@ -161,7 +161,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: alice,
             amount: 100e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d1")
         });
         deposits[1] = Deposit({
@@ -169,7 +169,7 @@ contract ZoneInboxTest is Test {
             sender: bob,
             to: bob,
             amount: 200e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d2")
         });
         deposits[2] = Deposit({
@@ -177,7 +177,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 300e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d3")
         });
 
@@ -209,7 +209,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 1000e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("payment")
         });
 
@@ -236,7 +236,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: alice,
             amount: 100e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d1")
         });
         allDeposits[1] = Deposit({
@@ -244,7 +244,7 @@ contract ZoneInboxTest is Test {
             sender: bob,
             to: bob,
             amount: 200e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d2")
         });
 
@@ -310,7 +310,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: alice,
             amount: 100e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d1")
         });
         batch1[1] = Deposit({
@@ -318,7 +318,7 @@ contract ZoneInboxTest is Test {
             sender: bob,
             to: bob,
             amount: 200e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d2")
         });
 
@@ -340,7 +340,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 500e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d3")
         });
 
@@ -367,7 +367,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 1000e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("payment")
         });
 
@@ -397,7 +397,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 1000e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("payment")
         });
 
@@ -426,7 +426,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 0,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("empty")
         });
 
@@ -468,7 +468,7 @@ contract ZoneInboxTest is Test {
                 sender: alice,
                 to: bob,
                 amount: uint128(i + 1) * 1e6,
-                bouncebackRecipient: bob,
+                tempoRefundRecipient: bob,
                 memo: bytes32(i)
             });
             currentHash = keccak256(abi.encode(DepositType.Regular, deposits[i], currentHash));
@@ -596,7 +596,7 @@ contract ZoneInboxTest is Test {
             token: address(zoneToken),
             sender: sender,
             amount: amount,
-            bouncebackRecipient: sender,
+            tempoRefundRecipient: sender,
             keyIndex: keyIndex,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(0x1234)),
@@ -741,7 +741,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 100e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d1")
         });
         QueuedDeposit memory qdRegular = QueuedDeposit({
@@ -808,7 +808,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: bob,
             amount: 100e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d1")
         });
         QueuedDeposit memory qd = QueuedDeposit({
@@ -1174,7 +1174,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: address(uint160(fallbackNonce)),
             amount: 100e6,
-            bouncebackRecipient: address(0),
+            tempoRefundRecipient: address(0),
             memo: bytes32(0)
         });
         tempoState.setMockStorageValue(
@@ -1223,7 +1223,7 @@ contract ZoneInboxTest is Test {
                 sender: alice,
                 to: bob,
                 amount: uint128((i + 1) * 10e6),
-                bouncebackRecipient: bob,
+                tempoRefundRecipient: bob,
                 memo: bytes32(i)
             });
             deposits[i] = QueuedDeposit({

@@ -94,14 +94,14 @@ crate::sol! {
             uint128 amount,
             bytes32 memo,
             uint64 gasLimit,
-            address fallbackRecipient,
+            address zoneFallbackRecipient,
             bytes calldata data,
             bytes calldata revealTo
         ) external;
         function enqueueDepositBounceBack(
             address token,
             uint128 amount,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         ) external;
         function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders) external returns (bytes32 withdrawalQueueHash);
     }

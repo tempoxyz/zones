@@ -680,7 +680,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     portal_addr: Address,
     token: Address,
     to: Address,
-    bounceback_recipient: Address,
+    tempo_refund_recipient: Address,
     amount: u128,
 ) -> eyre::Result<()> {
     let (key, key_index) = portal
@@ -704,7 +704,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     };
 
     let receipt = portal
-        .depositEncrypted(token, amount, key_index, payload, bounceback_recipient)
+        .depositEncrypted(token, amount, key_index, payload, tempo_refund_recipient)
         .send_sync()
         .await
         .wrap_err("depositEncrypted send failed")?;

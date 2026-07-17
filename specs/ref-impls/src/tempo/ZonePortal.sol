@@ -583,7 +583,7 @@ contract ZonePortal is IZonePortal {
     function _validateDepositPolicy(
         address _token,
         address to,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         internal
         view
@@ -595,7 +595,7 @@ contract ZonePortal is IZonePortal {
         if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
             revert ITIP20.PolicyForbids();
         }
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, tempoRefundRecipient)) {
             revert ITIP20.PolicyForbids();
         }
     }
@@ -640,15 +640,15 @@ contract ZonePortal is IZonePortal {
         address to,
         uint128 amount,
         bytes32 memo,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (bouncebackRecipient == address(0)) revert InvalidBouncebackRecipient();
+        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
 
         _validateDepositsActive(_token);
-        _validateDepositPolicy(_token, to, bouncebackRecipient);
+        _validateDepositPolicy(_token, to, tempoRefundRecipient);
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
         // Build deposit struct with net amount (fee already paid to the admin on Tempo)
@@ -657,7 +657,7 @@ contract ZonePortal is IZonePortal {
             sender: msg.sender,
             to: to,
             amount: netAmount,
-            bouncebackRecipient: bouncebackRecipient,
+            tempoRefundRecipient: tempoRefundRecipient,
             memo: memo
         });
 
@@ -673,7 +673,7 @@ contract ZonePortal is IZonePortal {
             netAmount,
             fee,
             memo,
-            bouncebackRecipient,
+            tempoRefundRecipient,
             thisDeposit
         );
     }
@@ -693,17 +693,17 @@ contract ZonePortal is IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (bouncebackRecipient == address(0)) revert InvalidBouncebackRecipient();
+        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
 
         _validateDepositsActive(_token);
 
         uint64 policyId = ITIP20(_token).transferPolicyId();
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, tempoRefundRecipient)) {
             revert ITIP20.PolicyForbids();
         }
 
@@ -743,7 +743,7 @@ contract ZonePortal is IZonePortal {
             token: _token,
             sender: msg.sender,
             amount: netAmount,
-            bouncebackRecipient: bouncebackRecipient,
+            tempoRefundRecipient: tempoRefundRecipient,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -765,7 +765,7 @@ contract ZonePortal is IZonePortal {
             encrypted.ciphertext,
             encrypted.nonce,
             encrypted.tag,
-            bouncebackRecipient,
+            tempoRefundRecipient,
             thisDeposit
         );
     }
@@ -933,7 +933,7 @@ contract ZonePortal is IZonePortal {
             sender: address(this),
             to: address(uint160(fallbackNonce)),
             amount: amount,
-            bouncebackRecipient: address(0),
+            tempoRefundRecipient: address(0),
             memo: bytes32(0)
         });
 

@@ -14,7 +14,7 @@ crate::sol! {
             address sender;
             address to;
             uint128 amount;
-            address bouncebackRecipient;
+            address tempoRefundRecipient;
             bytes32 memo;
         }
 
@@ -93,7 +93,7 @@ crate::sol! {
             address indexed to,
             address token,
             uint128 amount,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         );
 
         event DepositRejected(
@@ -102,12 +102,12 @@ crate::sol! {
             DepositType depositType,
             address token,
             uint128 amount,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         );
 
-        event WithdrawalBounceBackProcessed(address indexed fallbackRecipient, address token, uint128 amount);
+        event WithdrawalBounceBackProcessed(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
-        event WithdrawalBounceBackPending(address indexed fallbackRecipient, address token, uint128 amount);
+        event WithdrawalBounceBackPending(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
