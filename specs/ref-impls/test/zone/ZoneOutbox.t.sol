@@ -2,15 +2,20 @@
 pragma solidity ^0.8.13;
 
 import {
+    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
     EncryptedDepositPayload,
+    GATEWAY_ALLOWLIST_ENFORCED_FLAG,
     IZoneOutbox,
     IZonePortal,
     LastBatch,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PendingWithdrawal,
     Withdrawal,
     ZONE_INBOX,
-    ZONE_TX_CONTEXT
+    ZONE_TX_CONTEXT,
+    ZoneAccessMode,
+    ZoneGatewayMode
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -70,6 +75,7 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);
         tempoState.setMockZoneGateway(mockPortal, callbackTarget, true);
+        _setModes(ZoneAccessMode.Closed, ZoneGatewayMode.Enforced);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         outbox = new ZoneOutbox(address(config));
 
@@ -86,6 +92,13 @@ contract ZoneOutboxTest is Test {
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
         return keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence)));
+    }
+
+    function _setModes(ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode) internal {
+        uint8 flags;
+        if (accessMode == ZoneAccessMode.Closed) flags |= ACCOUNT_ALLOWLIST_ENFORCED_FLAG;
+        if (gatewayMode == ZoneGatewayMode.Enforced) flags |= GATEWAY_ALLOWLIST_ENFORCED_FLAG;
+        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(flags)));
     }
 
     function _withdrawal(
@@ -320,6 +333,34 @@ contract ZoneOutboxTest is Test {
 
         assertEq(_pendingWithdrawalsCount(), 0);
         assertEq(disabledToken.balanceOf(alice), 1000e6);
+    }
+
+    function test_requestWithdrawal_openAccessStillEnforcesGatewayRegistration() public {
+        address outsider = address(0x999);
+        _setModes(ZoneAccessMode.Open, ZoneGatewayMode.Enforced);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 0, alice, "");
+        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 1, alice, "");
+        vm.stopPrank();
+    }
+
+    function test_requestWithdrawal_openGatewayStillEnforcesAccountAllowlist() public {
+        address outsider = address(0x999);
+        _setModes(ZoneAccessMode.Closed, ZoneGatewayMode.Open);
+        tempoState.setMockAccountAllowed(mockPortal, callbackTarget, true);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1500e6);
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 1, alice, "");
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 0, alice, ""
+        );
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
     }
 
     function test_requestWithdrawal_revertsOnInvalidCurrentTxHash() public {

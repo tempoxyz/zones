@@ -8,6 +8,7 @@ import {
     IZonePortal,
     Role,
     ZONE_FACTORY_ADDRESS,
+    ZoneGatewayMode,
     ZoneInfo
 } from "../interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -48,7 +49,10 @@ contract ZoneMessenger is IZoneMessenger {
         ZoneInfo memory zone = zoneFactory.zones(zoneId);
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
 
-        if (IZonePortal(msg.sender).role(target) != Role.CallbackGateway) {
+        if (
+            IZonePortal(msg.sender).gatewayMode() == ZoneGatewayMode.Enforced
+                && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
+        ) {
             revert InvalidCallbackTarget();
         }
 

@@ -175,8 +175,10 @@ pub struct AuthorizationTokenInfoResponse {
 pub struct ZoneInfoResponse {
     /// The zone's numeric identifier.
     pub zone_id: U64,
-    /// Immutable account authorization mode (`0` closed, `1` open).
+    /// Account allowlist enforcement mode (`0` closed, `1` open).
     pub access_mode: U64,
+    /// Callback gateway enforcement mode (`0` enforced, `1` open).
+    pub gateway_mode: U64,
     /// The enabled zone token contract addresses.
     pub zone_tokens: Vec<Address>,
     /// The active sequencer addresses.

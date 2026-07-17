@@ -5,7 +5,8 @@ import {
     IZonePortal,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
-    ZoneAccessMode
+    ZoneAccessMode,
+    ZoneGatewayMode
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
@@ -83,6 +84,7 @@ contract ZonePortalGasLimitTest is Test {
             1,
             address(token),
             ZoneAccessMode.Closed,
+            ZoneGatewayMode.Enforced,
             allowedAccounts,
             noGateways,
             address(0x400),

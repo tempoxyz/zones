@@ -150,16 +150,17 @@ export PRIVATE_KEY="$SEQUENCER_KEY"
 just create-zone my-zone
 ```
 
-The default is a closed zone whose exact initial membership is the admin and
-sequencer. To deploy an open zone with no account allowlist or gateways:
+The default is an open zone with no account allowlist, gateway list, or enforcement:
 
 ```bash
-just create-zone my-open-zone "" open
+just create-zone my-open-zone
 ```
 
-For a custom closed membership set, provide a comma-separated
-`ZONE_ALLOWED_ACCOUNTS`. Optional callback implementations are supplied separately
-through `ZONE_GATEWAYS`; neither mode requires a gateway at creation.
+For a closed zone, explicitly set a comma-separated `ZONE_ALLOWED_ACCOUNTS` and pass
+`closed` as the third argument. Admin and sequencer are not added implicitly. Optional
+callback implementations are supplied separately through `ZONE_GATEWAYS`; neither
+access mode requires a gateway at creation. Gateway registration is also open by default
+and can be configured independently.
 
 To choose the initial TIP-20 enabled on the portal, pass it as the second positional argument:
 
@@ -185,12 +186,12 @@ cargo run -p tempo-xtask -- create-zone \
   --private-key "$SEQUENCER_KEY"
 ```
 
-`create-zone` requires the admin address explicitly. `--access-mode closed` also
-requires at least one `--allowed-account`; `--access-mode open` rejects account
-entries so the configuration is unambiguous. `--zone-gateway` is repeatable but
-optional in both modes. Keep the matching `ADMIN_KEY` available for admin-only
-portal calls such as `setZoneGateway`, `enable-token`, `pause-deposits`, and
-`resume-deposits`.
+`create-zone` requires the admin address explicitly. Account access defaults to open;
+`--access-mode closed` requires at least one explicit `--allowed-account`. Open mode
+may retain staged membership for a later close. `--gateway-mode` independently defaults
+to `open`; `--zone-gateway` is repeatable but optional. Keep the matching `ADMIN_KEY`
+available for admin-only portal calls such as `setRole`, `enable-token`,
+`pause-deposits`, and `resume-deposits`.
 
 Cross-zone routing uses open zones. A callback withdrawal still requires its
 callback implementation to be registered as a zone gateway, but an open source
@@ -643,7 +644,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `WITHDRAWAL_MAX_BATCH_GAS` | No | Override the per-transaction withdrawal gas budget (maximum 20000000) |
 | `WITHDRAWAL_MAX_IN_FLIGHT_BATCHES` | No | Override the maximum number of ordered withdrawal transactions in flight |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
-| `ZONE_ALLOWED_ACCOUNTS` | Closed zones | Comma-separated exact initial membership; defaults to admin + sequencer in the Just recipes |
+| `ZONE_ALLOWED_ACCOUNTS` | Closed zones | Comma-separated exact initial membership; no accounts are added implicitly |
 | `ZONE_GATEWAYS` | No | Comma-separated initial callback gateways; empty is valid in either mode |
 | `ZONE_FACTORY` | No | Optional ZoneFactory override; xtasks default to the current Moderato shared deployment |
 
@@ -651,8 +652,8 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-zone <name> [<tip20>] [open\|closed]` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name> [<tip20>] [open\|closed]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
+| `just deploy-zone <name> [<tip20>] [open\|closed] [enforced\|open]` | One-shot: keygen → fund → create → genesis → start node |
+| `just create-zone <name> [<tip20>] [open\|closed] [enforced\|open]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |

@@ -15,12 +15,13 @@ use alloy::{
     sol_types::SolCall,
 };
 use alloy_consensus::Transaction;
+use eyre::WrapErr as _;
 use futures::future::try_join_all;
 use std::{collections::HashMap, time::Duration};
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
     IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
-    ZoneAccessMode, ZonePortal, ZonePortal::Role as PortalRole,
+    ZoneAccessMode, ZoneGatewayMode, ZonePortal, ZonePortal::Role as PortalRole,
 };
 use zone_node::dev::{ProvisionConfig, provision_zone};
 
@@ -179,6 +180,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
         factory: None,
         initial_token,
         access_mode: ZoneAccessMode::Closed,
+        gateway_mode: ZoneGatewayMode::Enforced,
         zone_gateways: vec![Address::repeat_byte(0x42)],
         allowed_accounts: vec![dev_address],
         rpc_url: String::new(),
@@ -516,7 +518,7 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
             factory,
             l1.admin_address(),
             l1.dev_address(),
-            ZoneCreationConfig::open(),
+            ZoneCreationConfig::open_with_enforced_gateways(),
         )
         .await?;
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
@@ -737,6 +739,109 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
     Ok(())
 }
 
+/// Account and gateway enforcement can be changed independently without rewriting either set.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let factory = l1.deploy_zone_factory().await?;
+    let portal_address = l1.create_zone(factory).await?;
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+    zone.assert_access_mode(ZoneAccessMode::Closed as u8)
+        .await?;
+    zone.assert_gateway_mode(ZoneGatewayMode::Enforced as u8)
+        .await?;
+
+    let outsider_signer = l1.signer_at(3);
+    let outsider = outsider_signer.address();
+    let mut outsider_account =
+        ZoneAccount::with_signer(outsider_signer, &l1, &zone, portal_address);
+    l1.fund_user(outsider, 10_000_000).await?;
+    assert!(
+        outsider_account
+            .simulate_deposit(5_000_000, outsider, outsider)
+            .await
+            .is_err(),
+        "closed access accepted an unlisted depositor"
+    );
+
+    let open_access_block = l1
+        .set_access_mode_on_portal(portal_address, ZoneAccessMode::Open)
+        .await?;
+    zone.wait_for_l2_tempo_finalized(open_access_block, L1_TIMEOUT)
+        .await?;
+    zone.assert_access_mode(ZoneAccessMode::Open as u8).await?;
+    zone.assert_allowed_account(outsider, true).await?;
+    outsider_account
+        .deposit(5_000_000, L1_TIMEOUT, &zone)
+        .await?;
+
+    let router = l1.deploy_router(factory).await?;
+    let callback = WithdrawalArgs::cross_zone_via_router(
+        100_000,
+        router,
+        portal_address,
+        PATH_USD_ADDRESS,
+        outsider,
+        outsider,
+    );
+    assert!(
+        outsider_account
+            .simulate_withdraw_with(callback.clone())
+            .await
+            .is_err(),
+        "open account access disabled gateway registration enforcement"
+    );
+
+    let open_gateway_block = l1
+        .set_gateway_mode_on_portal(portal_address, ZoneGatewayMode::Open)
+        .await?;
+    zone.wait_for_l2_tempo_finalized(open_gateway_block, L1_TIMEOUT)
+        .await?;
+    zone.assert_gateway_mode(ZoneGatewayMode::Open as u8)
+        .await?;
+    outsider_account
+        .withdraw_with(callback.clone())
+        .await
+        .wrap_err("callback should pass after opening gateway mode")?;
+
+    let closed_access_block = l1
+        .set_access_mode_on_portal(portal_address, ZoneAccessMode::Closed)
+        .await?;
+    zone.wait_for_l2_tempo_finalized(closed_access_block, L1_TIMEOUT)
+        .await?;
+    zone.assert_access_mode(ZoneAccessMode::Closed as u8)
+        .await?;
+    assert!(
+        outsider_account
+            .simulate_deposit(100_000, outsider, outsider)
+            .await
+            .is_err(),
+        "re-closed access did not restore account allowlist enforcement"
+    );
+    outsider_account
+        .withdraw_with(callback.clone())
+        .await
+        .wrap_err("callback should still pass after reclosing account access")?;
+
+    let enforced_gateway_block = l1
+        .set_gateway_mode_on_portal(portal_address, ZoneGatewayMode::Enforced)
+        .await?;
+    zone.wait_for_l2_tempo_finalized(enforced_gateway_block, L1_TIMEOUT)
+        .await?;
+    assert!(
+        outsider_account
+            .simulate_withdraw_with(callback)
+            .await
+            .is_err(),
+        "re-enabled gateway enforcement accepted an unregistered callback target"
+    );
+
+    Ok(())
+}
+
 /// A plain withdrawal accepted while its recipient is allowed must still drain after
 /// that recipient is revoked. It bounces to the private fallback recipient and does
 /// not block the next valid withdrawal in the FIFO.
@@ -937,21 +1042,12 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     zone_b
         .assert_access_mode(ZoneAccessMode::Open as u8)
         .await?;
-
-    let gateway_block_a = l1
-        .set_zone_gateway_on_portal_with_signer(portal_a, router, true, l1.dev_signer())
-        .await?;
-    let gateway_block_b = l1
-        .set_zone_gateway_on_portal_with_signer(portal_b, router, true, l1.dev_signer())
-        .await?;
     zone_a
-        .wait_for_l2_tempo_finalized(gateway_block_a, L1_TIMEOUT)
+        .assert_gateway_mode(ZoneGatewayMode::Open as u8)
         .await?;
     zone_b
-        .wait_for_l2_tempo_finalized(gateway_block_b, L1_TIMEOUT)
+        .assert_gateway_mode(ZoneGatewayMode::Open as u8)
         .await?;
-    zone_a.assert_zone_gateway(router, true).await?;
-    zone_b.assert_zone_gateway(router, true).await?;
 
     // --- Step 4: Deposit into zone_a ---
     let mut account_a = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
@@ -1091,21 +1187,12 @@ async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Resu
     zone_b
         .assert_access_mode(ZoneAccessMode::Open as u8)
         .await?;
-
-    let gateway_block_a = l1
-        .set_zone_gateway_on_portal_with_signer(portal_a, router, true, l1.dev_signer())
-        .await?;
-    let gateway_block_b = l1
-        .set_zone_gateway_on_portal_with_signer(portal_b, router, true, l1.dev_signer())
-        .await?;
     zone_a
-        .wait_for_l2_tempo_finalized(gateway_block_a, L1_TIMEOUT)
+        .assert_gateway_mode(ZoneGatewayMode::Open as u8)
         .await?;
     zone_b
-        .wait_for_l2_tempo_finalized(gateway_block_b, L1_TIMEOUT)
+        .assert_gateway_mode(ZoneGatewayMode::Open as u8)
         .await?;
-    zone_a.assert_zone_gateway(router, true).await?;
-    zone_b.assert_zone_gateway(router, true).await?;
 
     let encryption_key = k256::SecretKey::from(seq_b_signer.credential());
     l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())

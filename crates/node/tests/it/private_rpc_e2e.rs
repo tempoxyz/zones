@@ -1125,6 +1125,7 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         format!("0x{:x}", ctx.config.zone_id),
     );
     assert_eq!(zone_info["result"]["accessMode"], "0x0");
+    assert_eq!(zone_info["result"]["gatewayMode"], "0x0");
     assert_eq!(
         zone_info["result"]["zoneTokens"]
             .as_array()

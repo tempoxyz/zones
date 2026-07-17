@@ -19,6 +19,7 @@ import {
     ZONE_MESSENGER_ADDRESS,
     ZONE_VERIFIER_ADDRESS,
     ZoneAccessMode,
+    ZoneGatewayMode,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
@@ -155,6 +156,7 @@ contract ZoneIntegrationTest is BaseTest {
             1,
             address(l2ZoneToken),
             ZoneAccessMode.Closed,
+            ZoneGatewayMode.Enforced,
             _closedLoopAccounts(),
             _zoneGateways(),
             address(messengerContract),
@@ -172,6 +174,9 @@ contract ZoneIntegrationTest is BaseTest {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(l1Portal),
+                    initialToken: address(pathUSD),
+                    accessMode: ZoneAccessMode.Closed,
+                    gatewayMode: ZoneGatewayMode.Enforced,
                     admin: admin,
                     sequencers: sequencers,
                     threshold: 1,

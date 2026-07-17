@@ -21,6 +21,7 @@ import {
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_ENFORCEMENT_FLAGS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_ROLE_SLOT,
@@ -30,7 +31,8 @@ import {
     ZONE_MESSENGER_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS,
     ZONE_VERIFIER_ADDRESS,
-    ZoneAccessMode
+    ZoneAccessMode,
+    ZoneGatewayMode
 } from "../../src/interfaces/IZone.sol";
 import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
@@ -267,6 +269,7 @@ contract ZonePortalProxyStorageTest is Test {
                 1,
                 initialToken,
                 ZoneAccessMode.Closed,
+                ZoneGatewayMode.Enforced,
                 _emptyAddresses(),
                 _emptyAddresses(),
                 messengerA,
@@ -368,6 +371,7 @@ contract ZonePortalProxyStorageTest is Test {
                 id,
                 initialToken,
                 ZoneAccessMode.Closed,
+                ZoneGatewayMode.Enforced,
                 _proxyAccounts(id),
                 _proxyGateways(portalMessenger),
                 portalMessenger,
@@ -1057,6 +1061,71 @@ contract ZonePortalTest is BaseTest {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setRole(makeAddr("replacement gateway"), Role.CallbackGateway);
+    }
+
+    function test_setAccessMode_opensAndReclosesWithoutDiscardingMembership() public {
+        address outsider = makeAddr("mutable mode outsider");
+        address stagedAccount = makeAddr("staged account");
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.EnforcementModesUpdated(ZoneAccessMode.Open, ZoneGatewayMode.Enforced);
+        vm.prank(admin);
+        portal.setAccessMode(ZoneAccessMode.Open);
+
+        vm.prank(admin);
+        portal.setRole(stagedAccount, Role.Account);
+
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(outsider, 2);
+        vm.startPrank(outsider);
+        pathUSD.approve(address(portal), 2);
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        portal.setAccessMode(ZoneAccessMode.Closed);
+
+        assertEq(uint8(portal.accessMode()), uint8(ZoneAccessMode.Closed));
+        assertEq(uint8(portal.role(stagedAccount)), uint8(Role.Account));
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+    }
+
+    function test_setGatewayMode_makesGatewayMembershipInertWhileOpen() public {
+        address gateway = makeAddr("mutable mode gateway");
+
+        vm.prank(admin);
+        portal.setRole(gateway, Role.CallbackGateway);
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(gateway, 2);
+        vm.startPrank(gateway);
+        pathUSD.approve(address(portal), 2);
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+        vm.stopPrank();
+
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.EnforcementModesUpdated(ZoneAccessMode.Closed, ZoneGatewayMode.Open);
+        vm.prank(admin);
+        portal.setGatewayMode(ZoneGatewayMode.Open);
+
+        assertEq(uint8(portal.role(gateway)), uint8(Role.CallbackGateway));
+        vm.prank(gateway);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, gateway));
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+    }
+
+    function test_setModes_revertIfNotAdmin() public {
+        vm.startPrank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setAccessMode(ZoneAccessMode.Open);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setGatewayMode(ZoneGatewayMode.Open);
+        vm.stopPrank();
     }
 
     function test_setAllowedAccount_enablesAndDisablesMembership() public {
@@ -3677,11 +3746,12 @@ contract ZonePortalTest is BaseTest {
     ///        slot 4: deposit counters + bouncebackGas (uint64) [packed]
     ///        slot 5: _encryptionKeys.length (EncryptionKeyEntry[])
     ///        slot 15: zoneId (uint32) + messenger (address) [packed]
-    ///        slot 16: verifier + _initialized + sequencerSetVersion + threshold + accessMode [packed]
+    ///        slot 16: verifier + _initialized + sequencerSetVersion + threshold [packed]
     ///        slot 17: zoneHeight
     ///        slot 18: _sequencers.length
     ///        slot 19: isSequencer mapping
     ///        slot 20: role mapping
+    ///        slot 21: account/gateway enforcement flags [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -3756,11 +3826,6 @@ contract ZonePortalTest is BaseTest {
             portal.sequencerThreshold(),
             "slot 16: threshold mismatch"
         );
-        assertEq(
-            uint8(uint256(slot16) >> 240),
-            uint8(ZoneAccessMode.Closed),
-            "slot 16: accessMode mismatch"
-        );
 
         // --- Slot 17: zoneHeight ---
         bytes32 slot17 = vm.load(address(portal), bytes32(uint256(17)));
@@ -3789,6 +3854,9 @@ contract ZonePortalTest is BaseTest {
             uint256(Role.CallbackGateway),
             "slot 20: gateway role mismatch"
         );
+
+        bytes32 modeSlot = vm.load(address(portal), PORTAL_ENFORCEMENT_FLAGS_SLOT);
+        assertEq(uint8(uint256(modeSlot)), 3, "slot 21: enforcement flags mismatch");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

@@ -15,9 +15,15 @@ enum Role {
     CallbackGateway
 }
 
-/// @notice Immutable account-authorization mode selected when a zone is created.
+/// @notice Account-authorization mode enforced by a zone.
 enum ZoneAccessMode {
     Closed,
+    Open
+}
+
+/// @notice Callback-gateway registration mode enforced by a zone.
+enum ZoneGatewayMode {
+    Enforced,
     Open
 }
 
@@ -42,7 +48,8 @@ struct ZoneInfo {
     uint32 zoneId;
     address portal;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
-    ZoneAccessMode accessMode;
+    ZoneAccessMode accessMode; // creation-time snapshot; query the portal for the current mode
+    ZoneGatewayMode gatewayMode; // creation-time snapshot; query the portal for the current mode
     address admin;
     address[] sequencers;
     uint8 threshold;
@@ -358,11 +365,12 @@ interface IZoneTxContext {
 //   slot 14: _withdrawalReentrancyStatus (uint256)
 //   slot 15: zoneId (uint32) + messenger (address) [packed]
 //   slot 16: verifier (address) + _initialized (bool) + sequencerSetVersion (uint64)
-//            + sequencerThreshold (uint8) + accessMode (ZoneAccessMode) [packed]
+//            + sequencerThreshold (uint8) [packed]
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
 //   slot 19: isSequencer (mapping(address => bool))
 //   slot 20: role (mapping(address => Role))
+//   slot 21: _enforcementFlags (uint8; bit 0 accounts, bit 1 gateways)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -375,8 +383,12 @@ bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
-bytes32 constant PORTAL_ACCESS_MODE_SLOT = bytes32(uint256(16));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
+bytes32 constant PORTAL_ENFORCEMENT_FLAGS_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
+bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_FLAGS_SLOT;
+bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_FLAGS_SLOT;
+uint8 constant ACCOUNT_ALLOWLIST_ENFORCED_FLAG = 1 << 0;
+uint8 constant GATEWAY_ALLOWLIST_ENFORCED_FLAG = 1 << 1;
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -427,8 +439,9 @@ interface IZoneFactory {
 
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (admin can enable more later)
-        ZoneAccessMode accessMode; // immutable open/closed account authorization mode
-        address[] allowedAccounts; // initial closed-loop account allowlist
+        ZoneAccessMode accessMode; // initial account allowlist enforcement mode
+        ZoneGatewayMode gatewayMode; // initial callback gateway enforcement mode
+        address[] allowedAccounts; // initial account allowlist (retained while access is open)
         address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
         address[] sequencers;
@@ -447,6 +460,7 @@ interface IZoneFactory {
         address indexed portal,
         address initialToken,
         ZoneAccessMode accessMode,
+        ZoneGatewayMode gatewayMode,
         address admin,
         address[] sequencers,
         uint8 threshold,
@@ -462,7 +476,6 @@ interface IZoneFactory {
     error InvalidVerifierImplementation();
     error ImplementationUpdatesLocked();
     error InvalidClosedLoopConfig();
-    error InvalidOpenLoopConfig();
     error DuplicateAllowedAccount();
     error DuplicateZoneGateway();
 
@@ -622,6 +635,9 @@ interface IZonePortal {
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
+    /// @notice Emitted after either independently mutable enforcement mode changes.
+    event EnforcementModesUpdated(ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode);
+
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
@@ -663,6 +679,7 @@ interface IZonePortal {
         uint32 zoneId,
         address initialToken,
         ZoneAccessMode accessMode,
+        ZoneGatewayMode gatewayMode,
         address[] calldata allowedAccounts,
         address[] calldata zoneGateways,
         address messenger,
@@ -688,8 +705,17 @@ interface IZonePortal {
     /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
 
-    /// @notice Immutable account-authorization mode selected at zone creation.
+    /// @notice Current account allowlist enforcement mode.
     function accessMode() external view returns (ZoneAccessMode);
+
+    /// @notice Change account allowlist enforcement. Only callable by the admin.
+    function setAccessMode(ZoneAccessMode newMode) external;
+
+    /// @notice Current callback gateway enforcement mode.
+    function gatewayMode() external view returns (ZoneGatewayMode);
+
+    /// @notice Change callback gateway enforcement. Only callable by the admin.
+    function setGatewayMode(ZoneGatewayMode newMode) external;
 
     function role(address account) external view returns (Role);
 
@@ -1282,8 +1308,11 @@ interface IZoneConfig {
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
 
-    /// @notice Read the immutable account-authorization mode from L1 ZonePortal.
+    /// @notice Read the account allowlist enforcement mode from L1 ZonePortal.
     function accessMode() external view returns (ZoneAccessMode);
+
+    /// @notice Read the callback gateway enforcement mode from L1 ZonePortal.
+    function gatewayMode() external view returns (ZoneGatewayMode);
 
     /// @notice Check whether an account is authorized under the zone's access mode.
     /// @dev Returns true for every account in open mode and checks membership in closed mode.

@@ -70,13 +70,26 @@ pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
-/// ZonePortal packed metadata slot containing the immutable access mode at byte offset 29.
-pub const PORTAL_ACCESS_MODE_SLOT: B256 = B256::new(zone_portal_slots::VERIFIER.to_be_bytes());
-
 /// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
 /// `role` (mapping(address => Role)).
 pub const PORTAL_ROLE_SLOT: B256 =
     B256::new((zone_portal_slots::IS_SEQUENCER + U256::ONE).to_be_bytes());
+
+/// ZonePortal slot following `role`: dedicated packed account and gateway enforcement flags.
+pub const PORTAL_ENFORCEMENT_FLAGS_SLOT: B256 =
+    B256::new((zone_portal_slots::IS_SEQUENCER + U256::from_limbs([2, 0, 0, 0])).to_be_bytes());
+
+/// Alias used by consumers reading account allowlist enforcement.
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_FLAGS_SLOT;
+
+/// Alias used by consumers reading callback gateway enforcement.
+pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_FLAGS_SLOT;
+
+/// Bit set when account allowlist enforcement is closed.
+pub const ACCOUNT_ALLOWLIST_ENFORCED_FLAG: u8 = 1 << 0;
+
+/// Bit set when callback gateway registration is enforced.
+pub const GATEWAY_ALLOWLIST_ENFORCED_FLAG: u8 = 1 << 1;
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system

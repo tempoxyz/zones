@@ -66,7 +66,10 @@ use zone_l1::{
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::{PORTAL_ACCESS_MODE_SLOT, PORTAL_ROLE_SLOT};
+use zone_primitives::constants::{
+    ACCOUNT_ALLOWLIST_ENFORCED_FLAG, GATEWAY_ALLOWLIST_ENFORCED_FLAG, PORTAL_ACCESS_MODE_SLOT,
+    PORTAL_ROLE_SLOT,
+};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -490,7 +493,7 @@ impl ZoneTestNode {
         Ok(())
     }
 
-    /// Assert the immutable mode exposed by the L2 ZoneConfig predeploy.
+    /// Assert the current account mode exposed by the L2 ZoneConfig predeploy.
     pub(crate) async fn assert_access_mode(&self, expected: u8) -> eyre::Result<()> {
         use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
         let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
@@ -498,6 +501,18 @@ impl ZoneTestNode {
         eyre::ensure!(
             actual == expected,
             "ZoneConfig access mode {actual} did not equal {expected}"
+        );
+        Ok(())
+    }
+
+    /// Assert the gateway mode exposed by the L2 ZoneConfig predeploy.
+    pub(crate) async fn assert_gateway_mode(&self, expected: u8) -> eyre::Result<()> {
+        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
+        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        let actual = config.gatewayMode().call().await?;
+        eyre::ensure!(
+            actual == expected,
+            "ZoneConfig gateway mode {actual} did not equal {expected}"
         );
         Ok(())
     }
@@ -1049,6 +1064,7 @@ pub(crate) struct L1TestNode {
 #[derive(Clone, Debug)]
 pub(crate) struct ZoneCreationConfig {
     pub(crate) access_mode: tempo_zone_contracts::ZoneAccessMode,
+    pub(crate) gateway_mode: tempo_zone_contracts::ZoneGatewayMode,
     pub(crate) allowed_accounts: Vec<Address>,
     pub(crate) zone_gateways: Vec<Address>,
 }
@@ -1059,6 +1075,7 @@ impl ZoneCreationConfig {
         allowed_accounts.dedup();
         Self {
             access_mode: tempo_zone_contracts::ZoneAccessMode::Closed,
+            gateway_mode: tempo_zone_contracts::ZoneGatewayMode::Enforced,
             allowed_accounts,
             zone_gateways: Vec::new(),
         }
@@ -1067,8 +1084,16 @@ impl ZoneCreationConfig {
     pub(crate) fn open() -> Self {
         Self {
             access_mode: tempo_zone_contracts::ZoneAccessMode::Open,
+            gateway_mode: tempo_zone_contracts::ZoneGatewayMode::Open,
             allowed_accounts: Vec::new(),
             zone_gateways: Vec::new(),
+        }
+    }
+
+    pub(crate) fn open_with_enforced_gateways() -> Self {
+        Self {
+            gateway_mode: tempo_zone_contracts::ZoneGatewayMode::Enforced,
+            ..Self::open()
         }
     }
 }
@@ -1596,6 +1621,7 @@ impl L1TestNode {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
                 accessMode: config.access_mode,
+                gatewayMode: config.gateway_mode,
                 allowedAccounts: config.allowed_accounts,
                 zoneGateways: config.zone_gateways,
                 sequencers: vec![sequencer],
@@ -1802,6 +1828,52 @@ impl L1TestNode {
             self.admin_signer(),
         )
         .await
+    }
+
+    /// Update account allowlist enforcement with the default portal admin.
+    pub(crate) async fn set_access_mode_on_portal(
+        &self,
+        portal_address: Address,
+        mode: tempo_zone_contracts::ZoneAccessMode,
+    ) -> eyre::Result<u64> {
+        use tempo_zone_contracts::ZonePortal;
+        let provider = self.admin_provider();
+        let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .setAccessMode(mode as u8)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setAccessMode failed");
+        eyre::ensure!(
+            portal.accessMode().call().await? == mode as u8,
+            "L1 ZonePortal access mode did not update"
+        );
+        Ok(provider.get_block_number().await?)
+    }
+
+    /// Update callback gateway registration enforcement with the default portal admin.
+    pub(crate) async fn set_gateway_mode_on_portal(
+        &self,
+        portal_address: Address,
+        mode: tempo_zone_contracts::ZoneGatewayMode,
+    ) -> eyre::Result<u64> {
+        use tempo_zone_contracts::ZonePortal;
+        let provider = self.admin_provider();
+        let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .setGatewayMode(mode as u8)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setGatewayMode failed");
+        eyre::ensure!(
+            portal.gatewayMode().call().await? == mode as u8,
+            "L1 ZonePortal gateway mode did not update"
+        );
+        Ok(provider.get_block_number().await?)
     }
 
     /// Update a portal callback gateway with the signer that owns that portal's admin role.
@@ -2381,6 +2453,7 @@ where
 ///
 /// Use [`WithdrawalArgs::new`] for the common case (amount only, self-withdrawal),
 /// then override individual fields as needed.
+#[derive(Clone)]
 pub(crate) struct WithdrawalArgs {
     pub amount: u128,
     pub to: Option<Address>,
@@ -2922,17 +2995,9 @@ impl ZoneAccount {
         token: Address,
         args: WithdrawalArgs,
     ) -> eyre::Result<()> {
-        use tempo_contracts::precompiles::ITIP20;
         use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
-        // Approve outbox for this token
-        ITIP20::new(token, &self.l2_provider)
-            .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-            .gas(TIP20_TX_GAS)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        self.approve_outbox(token).await?;
 
         let to = args.to.unwrap_or(self.address);
         let zone_fallback_recipient = args.zone_fallback_recipient.unwrap_or(self.address);
@@ -2960,6 +3025,22 @@ impl ZoneAccount {
             receipt.gas_used
         );
 
+        Ok(())
+    }
+
+    /// Approve the ZoneOutbox for a token without submitting a withdrawal.
+    pub(crate) async fn approve_outbox(&self, token: Address) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+        use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+
+        let receipt = ITIP20::new(token, &self.l2_provider)
+            .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+            .gas(TIP20_TX_GAS)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L2 outbox approval failed");
         Ok(())
     }
 }
@@ -4029,7 +4110,14 @@ impl L1Fixture {
             // Synthetic fixtures use a closed portal. Cache every authorization
             // read performed by ZoneConfig so a missing slot cannot fall through
             // to the deliberately unreachable dummy L1 RPC endpoint.
-            cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            cache.set(
+                portal_address,
+                PORTAL_ACCESS_MODE_SLOT,
+                block,
+                B256::with_last_byte(
+                    ACCOUNT_ALLOWLIST_ENFORCED_FLAG | GATEWAY_ALLOWLIST_ENFORCED_FLAG,
+                ),
+            );
             for account in allowed_accounts {
                 cache.set(
                     portal_address,

@@ -2,6 +2,8 @@
 pragma solidity ^0.8.13;
 
 import {
+    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
+    GATEWAY_ALLOWLIST_ENFORCED_FLAG,
     IZoneConfig,
     IZonePortal,
     PORTAL_ACCESS_MODE_SLOT,
@@ -9,7 +11,8 @@ import {
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
-    ZoneAccessMode
+    ZoneAccessMode,
+    ZoneGatewayMode
 } from "../../src/interfaces/IZone.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -117,6 +120,7 @@ contract ZoneConfigTest is BaseTest {
 
     function test_closedLoopMembershipAndGatewayAreIndependent() public view {
         assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Closed));
+        assertEq(uint8(config.gatewayMode()), uint8(ZoneGatewayMode.Enforced));
         assertTrue(config.isAllowedAccount(alice));
         assertFalse(config.isZoneGateway(alice));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
@@ -127,7 +131,7 @@ contract ZoneConfigTest is BaseTest {
         tempoState.setMockStorageValue(
             address(portal),
             PORTAL_ACCESS_MODE_SLOT,
-            bytes32(uint256(uint8(ZoneAccessMode.Open)) << 240)
+            bytes32(uint256(GATEWAY_ALLOWLIST_ENFORCED_FLAG))
         );
 
         address outsider = makeAddr("open mode outsider");
@@ -136,6 +140,18 @@ contract ZoneConfigTest is BaseTest {
         assertTrue(config.isAllowedAccount(address(zoneGateway)));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
         assertFalse(config.isZoneGateway(outsider));
+    }
+
+    function test_gatewayModeIsIndependentFromAccessMode() public {
+        tempoState.setMockStorageValue(
+            address(portal),
+            PORTAL_ACCESS_MODE_SLOT,
+            bytes32(uint256(ACCOUNT_ALLOWLIST_ENFORCED_FLAG))
+        );
+
+        assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Closed));
+        assertEq(uint8(config.gatewayMode()), uint8(ZoneGatewayMode.Open));
+        assertTrue(config.isZoneGateway(address(zoneGateway)));
     }
 
     /// @notice Verifies reading the sequencer encryption key reverts before any key is set.
