@@ -1,11 +1,11 @@
 //! Zone-side TIP20 factory precompile.
 //!
-//! Deployed at the same address as the L1 [`TIP20Factory`] (`0x20FC…0000`), this
+//! Deployed at the same address as the L1 `TIP20Factory` (`0x20FC…0000`), this
 //! precompile replaces the standard factory on the zone with a single
 //! `enableToken(address, string, string, string)` entrypoint.
 //!
 //! When the sequencer bridges a new TIP-20 token to the zone, the
-//! [`ZoneInbox`] contract calls `enableToken` during `advanceTempo` to:
+//! `ZoneInbox` contract calls `enableToken` during `advanceTempo` to:
 //!
 //! 1. Initialize the TIP-20 storage at the given address (name, symbol, currency).
 //! 2. Grant [`ISSUER_ROLE`] to both [`ZONE_INBOX_ADDRESS`] (for minting on

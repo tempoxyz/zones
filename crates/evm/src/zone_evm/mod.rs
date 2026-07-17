@@ -25,7 +25,8 @@ type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 /// Zone runtime EVM.
 ///
 /// Execution uses an anchored database adapter internally while the public [`Evm::DB`] remains the
-/// exact database supplied by the caller.
+/// exact database supplied by the caller. Successful results are validated and sanitized before
+/// their state transitions can be committed through that public database.
 pub struct ZoneEvm<DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
 }

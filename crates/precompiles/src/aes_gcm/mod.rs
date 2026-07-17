@@ -3,9 +3,9 @@
 //! Registered at [`AES_GCM_DECRYPT_ADDRESS`] (`0x1C00...0101`).
 //!
 //! Decrypts ECIES ciphertext and verifies the GCM authentication tag,
-//! enabling the [`ZoneInbox`] contract to process encrypted deposits.
+//! enabling the `ZoneInbox` contract to process encrypted deposits.
 //!
-//! Uses the NCC-audited [`aes-gcm`] crate (v0.10.3).
+//! Uses the NCC-audited `aes-gcm` crate (v0.10.3).
 
 use alloc::vec::Vec;
 

@@ -1,7 +1,8 @@
 //! Zone-specific EVM configuration.
 //!
-//! Wraps [`TempoEvmConfig`] with a custom [`ZoneEvmFactory`] that registers
-//! zone-specific native precompiles.
+//! Wraps [`TempoEvmConfig`] with a [`ZoneEvmFactory`] that installs the L1-anchored database,
+//! registers Zone-native precompiles, and preserves the original database at the [`Evm`] boundary.
+//! Block assembly also validates that the `advanceTempo` system tx happens once at index zero.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -59,7 +60,7 @@ use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
-/// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the zone-native precompiles.
+/// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
     l1_reader: L1,
@@ -133,7 +134,8 @@ where
     }
 }
 
-/// Assembler for Zone blocks — delegates to [`TempoBlockAssembler`] after converting input types.
+/// Assembler for Zone blocks — delegates to [`TempoBlockAssembler`] after validating system tx
+/// ordering and converting input types.
 #[derive(Debug, Clone)]
 pub struct ZoneBlockAssembler {
     inner: TempoBlockAssembler,

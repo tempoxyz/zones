@@ -1,4 +1,5 @@
-//! Execution-local database adapter for Tempo-owned state mirrored into a Zone.
+//! Execution-local database adapter that overlays finalized Tempo L1 reads while preserving
+//! the caller-provided Zone database as the sole canonical state backend.
 
 use std::{collections::HashMap, fmt};
 
@@ -66,7 +67,8 @@ struct PackedPolicySlot {
     l1: U256,
 }
 
-/// Database adapter that resolves Tempo-owned policy storage at the Zone's finalized L1 anchor.
+/// Resolves mirrored L1 reads at the active Tempo anchor and forwards all other database
+/// operations to the caller-provided Zone database.
 pub struct AnchoredZoneDb<DB, L1> {
     inner: DB,
     l1: L1,
@@ -148,7 +150,7 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
             })
     }
 
-    /// Rejects registry writes and removes the mirrored field from packed TIP-20 transitions.
+    /// Rejects writes to the L1-mirrored slots and removes the mirrored field from packed TIP-20 transitions.
     pub fn sanitize_state(
         &self,
         state: &mut AddressMap<Account>,

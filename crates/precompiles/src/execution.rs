@@ -1,18 +1,19 @@
 //! Shared execution for Zone-native and upstream Tempo precompiles.
 //!
-//! Both helpers install an EVM-backed [`StorageCtx`], apply Zone-specific [`CallRules`], and
-//! forward admitted calls without changing their calldata or caller. Protocol storage reaches the
-//! execution-local anchored database through the ordinary revm journal.
+//! Every Zone wrapper installs the same EVM-backed [`StorageCtx`], applies Zone-specific
+//! [`CallRules`], and forwards admitted calls without changing their calldata or caller.
+//! The EVM database decides whether each storage read is local or resolved from L1-anchored state.
 //!
 //! # Call ordering
 //!
-//! 1. Protocol execution rejects delegate calls before storage access.
+//! 1. Direct-call-only rules reject delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
 //! 3. Apply [`CallRules`], which may inspect local or anchored state through ordinary EVM storage.
 //! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
-//! Rule-level rejections include calldata input gas. Calls without a fixed charge retain normal
-//! provider metering, while successful fixed-price calls report exactly the configured charge.
+//! Admission-rule rejections include calldata input gas, while early delegate-call rejection is
+//! unmetered. Calls without a fixed charge retain normal provider metering, and successful
+//! fixed-price calls report exactly the configured charge.
 
 use alloc::rc::Rc;
 use core::cell::RefCell;
@@ -29,7 +30,7 @@ use tempo_precompiles::{
     storage_credits::NonCreditableSlots,
 };
 
-/// Shared inputs for protocol precompiles whose storage is provided by the EVM context.
+/// Shared EVM configuration and accounting state installed for every Zone precompile wrapper.
 #[derive(Clone)]
 pub struct ZonePrecompileEnv {
     cfg: revm::context::CfgEnv<TempoHardfork>,
@@ -38,6 +39,7 @@ pub struct ZonePrecompileEnv {
 }
 
 impl ZonePrecompileEnv {
+    /// Captures the active EVM configuration and transaction-local storage accounting state.
     pub fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
         actions: StorageActions,
@@ -52,9 +54,8 @@ impl ZonePrecompileEnv {
 }
 
 /// Call metadata, independent of EVM internals, for [`CallRules`] running in a [`StorageCtx`].
-/// Provider-free precompiles can inspect `PrecompileInput` directly.
 ///
-/// **MOTIVATION:** Execution helpers move `PrecompileInput::internals` into the
+/// **MOTIVATION:** The execution wrapper moves `PrecompileInput::internals` into the
 /// [`EvmPrecompileStorageProvider`] before calling [`CallRules`]'s checks. The full input
 /// cannot be borrowed after that partial move, so [`ZoneCall`] carries only the metadata
 /// needed by [`CallRules`].
@@ -86,7 +87,7 @@ impl<'a> ZoneCall<'a> {
 pub(crate) enum CallCheck {
     /// Allow the call and invoke the supplied precompile implementation.
     ///
-    /// Protocol precompiles observe finalized L1 policy state through the EVM database adapter.
+    /// Mirrored reads performed by the implementation resolve through the EVM database adapter.
     Continue,
     /// Reject the call without invoking the supplied implementation.
     ///

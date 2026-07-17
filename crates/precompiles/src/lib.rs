@@ -78,12 +78,12 @@ use tempo_precompiles::{
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
-/// Register zone-native and currently supported Tempo precompiles.
+/// Registers Zone-native and supported Tempo precompiles.
 ///
-/// - **Local execution:** AES-GCM, Chaum-Pedersen, `TempoState`, and the zone token factory use
-///   shared local execution; nonce and account-keychain retain Tempo's ordinary environment.
-/// - **Anchored L1 execution:** TIP-20, TIP-403, and `TipFeeManager` use ordinary EVM storage;
-///   the Zone EVM context resolves mirrored reads through its anchored database adapter.
+/// Every Zone wrapper receives the same [`ZonePrecompileEnv`]. Storage remains ordinary EVM
+/// storage: the Zone database adapter transparently resolves mirrored TIP-20/TIP-403 reads at the
+/// active Tempo anchor, while all other slots remain Zone-local. `TempoState` keeps its explicit L1
+/// reader for the system-only arbitrary-storage read ABI.
 pub fn extend_zone_precompiles<L1: L1StorageReader>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
@@ -122,11 +122,7 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
     // zone privacy, bridge-authorization, fixed-gas, and anchored policy-storage rules.
     precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
         if is_tip20_prefix(*address) {
-            Some(create_tip20_precompile(
-                *address,
-                &env,
-                sequencer.clone(),
-            ))
+            Some(create_tip20_precompile(*address, &env, sequencer.clone()))
         } else if *address == TIP_FEE_MANAGER_ADDRESS {
             Some(execution::create_precompile(
                 "TipFeeManager",
@@ -147,7 +143,7 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
 }
 
 impl AesGcmDecrypt {
-    /// Create the AES-GCM precompile with ordinary zone-local execution.
+    /// Creates the AES-GCM precompile with the shared zone execution environment.
     pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
         execution::create_precompile(
             "AesGcmDecrypt",
@@ -159,7 +155,7 @@ impl AesGcmDecrypt {
 }
 
 impl ChaumPedersenVerify {
-    /// Create the Chaum-Pedersen precompile with ordinary zone-local execution.
+    /// Creates the Chaum-Pedersen precompile with the shared zone execution environment.
     pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
         execution::create_precompile(
             "ChaumPedersenVerify",
@@ -171,9 +167,9 @@ impl ChaumPedersenVerify {
 }
 
 impl TempoState {
-    /// Create the `TempoState` precompile with local storage and direct-call-only execution.
+    /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
     ///
-    /// Storage-slot RPC reads are delegated to `reader` at the checkpoint recorded in local state.
+    /// System-only arbitrary L1 storage reads are delegated to `reader` at the stored checkpoint.
     pub fn create<P: L1StorageReader>(
         reader: P,
         controller: L1AnchorController,
@@ -189,7 +185,7 @@ impl TempoState {
 }
 
 impl ZoneTokenFactory {
-    /// Create the zone token factory with local storage and direct-call-only execution.
+    /// Creates the direct-call-only token factory with zone-local storage and execution.
     pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
         execution::create_precompile(
             "ZoneTokenFactory",
@@ -200,7 +196,7 @@ impl ZoneTokenFactory {
     }
 }
 
-/// Create upstream TIP-403 execution with zone read-only rules and finalized L1 state.
+/// Creates upstream TIP-403 execution with zone read-only rules and adapter-backed L1 reads.
 pub(crate) fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
         "ZoneTip403Registry",
@@ -210,7 +206,7 @@ pub(crate) fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile
     )
 }
 
-/// Create upstream TIP-20 execution with zone rules and finalized L1 policy reads.
+/// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
 pub(crate) fn create_tip20_precompile(
     address: alloy_primitives::Address,
     env: &ZonePrecompileEnv,

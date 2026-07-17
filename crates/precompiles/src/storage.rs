@@ -1,4 +1,5 @@
-//! Shared state for the Zone EVM's anchored Tempo database adapter.
+//! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
+//! and the native `TempoState` precompile.
 
 use alloc::rc::Rc;
 use core::{cell::RefCell, fmt};
@@ -150,7 +151,7 @@ impl L1AnchorController {
         self.phase().current()
     }
 
-    /// Records a successful external Tempo state read at `anchor`.
+    /// Validates the active anchor and records an external Tempo state read.
     pub fn observe_read(&self, anchor: u64) -> Result<(), L1AnchorError> {
         self.apply(L1AnchorOperation::Read { anchor })?;
         Ok(())

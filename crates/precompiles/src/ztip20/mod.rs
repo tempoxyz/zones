@@ -1,7 +1,7 @@
 //! Zone pre-execution rules for the upstream Tempo TIP20 precompile.
 //!
-//! [`TIP20Token`] remains the source of truth for token and TIP403 policy behavior.
-//! Before forwarding a call to Tempo, [`TIP20Rules`] applies only zone-specific checks:
+//! `TIP20Token` remains the source of truth for token and TIP403 policy behavior.
+//! Before forwarding a call to Tempo, `TIP20Rules` applies only zone-specific checks:
 //! privacy-gated reads, fixed gas for selected selectors, and bridge mint/burn callers.
 //!
 //! Accepted calldata and callers are forwarded unchanged to Tempo. Ordinary token state remains
@@ -47,14 +47,14 @@ fn decode_and_check<C: SolCall>(
 
 /// Capability trait for resolving the active zone sequencer.
 ///
-/// The zone runtime implements this for its L1-backed state provider so the precompile
-/// can enforce sequencer-visible reads without knowing about the concrete provider type.
+/// The zone runtime implements this for its L1 state provider so rules can authorize
+/// sequencer-visible reads without depending on the concrete provider type.
 pub trait SequencerExt: Send + Sync {
     /// Return the latest known active sequencer.
     fn latest_sequencer(&self) -> Option<Address>;
 }
 
-/// Zone-specific rules applied before forwarding to upstream [`TIP20Token`].
+/// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
 pub(crate) struct TIP20Rules {
     /// Sequencer-capable backend used to authorize private reads for the active sequencer.

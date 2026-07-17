@@ -1,7 +1,7 @@
 //! Zone block executor.
 //!
 //! A simplified block executor for zone nodes that wraps [`EthBlockExecutor`] directly.
-//! Unlike the Tempo L1 [`TempoBlockExecutor`], this executor does **not** enforce subblock
+//! Unlike the Tempo L1 `TempoBlockExecutor`, this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
 use alloy_consensus::transaction::TxHashRef;
