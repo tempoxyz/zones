@@ -47,7 +47,9 @@ use tokio::{
 };
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneConfig, ZonePortal,
+};
 use zone_rpc::{
     auth::AuthContext,
     types::{
@@ -265,6 +267,18 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             );
         }
         Ok(sequencers)
+    }
+
+    async fn zone_access_mode(&self) -> Result<u8, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Ok(0);
+        }
+
+        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
+            .accessMode()
+            .call()
+            .await
+            .map_err(internal)
     }
 
     async fn enforce_authorized(
@@ -794,6 +808,7 @@ where
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
             let sequencers = self.zone_sequencers().await?;
+            let access_mode = self.zone_access_mode().await?;
             let tempo_block_number = self
                 .tempo_state
                 .tempoBlockNumber()
@@ -802,6 +817,7 @@ where
                 .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
+                access_mode: U64::from(access_mode),
                 zone_tokens,
                 sequencers,
                 chain_id: U64::from(self.config.chain_id),

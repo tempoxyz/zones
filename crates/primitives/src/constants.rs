@@ -70,8 +70,13 @@ pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
-/// ZonePortal storage slot 20: `role` (mapping(address => Role)).
-pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
+/// ZonePortal packed metadata slot containing the immutable access mode at byte offset 29.
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = B256::new(zone_portal_slots::VERIFIER.to_be_bytes());
+
+/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
+/// `role` (mapping(address => Role)).
+pub const PORTAL_ROLE_SLOT: B256 =
+    B256::new((zone_portal_slots::IS_SEQUENCER + U256::ONE).to_be_bytes());
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system

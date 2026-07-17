@@ -15,6 +15,12 @@ enum Role {
     CallbackGateway
 }
 
+/// @notice Immutable account-authorization mode selected when a zone is created.
+enum ZoneAccessMode {
+    Closed,
+    Open
+}
+
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
@@ -35,6 +41,8 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
+    address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
+    ZoneAccessMode accessMode;
     address admin;
     address[] sequencers;
     uint8 threshold;
@@ -350,10 +358,11 @@ interface IZoneTxContext {
 //   slot 14: _withdrawalReentrancyStatus (uint256)
 //   slot 15: zoneId (uint32) + messenger (address) [packed]
 //   slot 16: verifier (address) + _initialized (bool) + sequencerSetVersion (uint64)
-//            + sequencerThreshold (uint8) [packed]
+//            + sequencerThreshold (uint8) + accessMode (ZoneAccessMode) [packed]
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
 //   slot 19: isSequencer (mapping(address => bool))
+//   slot 20: role (mapping(address => Role))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -366,6 +375,7 @@ bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
+bytes32 constant PORTAL_ACCESS_MODE_SLOT = bytes32(uint256(16));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
 
 /// @title IVerifier
@@ -417,6 +427,7 @@ interface IZoneFactory {
 
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (admin can enable more later)
+        ZoneAccessMode accessMode; // immutable open/closed account authorization mode
         address[] allowedAccounts; // initial closed-loop account allowlist
         address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
@@ -435,6 +446,7 @@ interface IZoneFactory {
         uint32 indexed zoneId,
         address indexed portal,
         address initialToken,
+        ZoneAccessMode accessMode,
         address admin,
         address[] sequencers,
         uint8 threshold,
@@ -449,6 +461,10 @@ interface IZoneFactory {
     error InvalidZoneMessengerImplementation();
     error InvalidVerifierImplementation();
     error ImplementationUpdatesLocked();
+    error InvalidClosedLoopConfig();
+    error InvalidOpenLoopConfig();
+    error DuplicateAllowedAccount();
+    error DuplicateZoneGateway();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
@@ -646,6 +662,7 @@ interface IZonePortal {
     function initialize(
         uint32 zoneId,
         address initialToken,
+        ZoneAccessMode accessMode,
         address[] calldata allowedAccounts,
         address[] calldata zoneGateways,
         address messenger,
@@ -671,6 +688,13 @@ interface IZonePortal {
     /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
 
+    /// @notice Immutable account-authorization mode selected at zone creation.
+    function accessMode() external view returns (ZoneAccessMode);
+
+    function role(address account) external view returns (Role);
+
+    /// @notice Assign an account's portal role. Only callable by the admin.
+    function setRole(address account, Role role) external;
     function admin() external view returns (address);
 
     function pendingAdmin() external view returns (address);
@@ -1258,7 +1282,11 @@ interface IZoneConfig {
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
 
-    /// @notice Check closed-loop account membership by reading from L1 ZonePortal.
+    /// @notice Read the immutable account-authorization mode from L1 ZonePortal.
+    function accessMode() external view returns (ZoneAccessMode);
+
+    /// @notice Check whether an account is authorized under the zone's access mode.
+    /// @dev Returns true for every account in open mode and checks membership in closed mode.
     function isAllowedAccount(address account) external view returns (bool);
 
     /// @notice Check whether an address is a registered callback-only ZoneGateway.

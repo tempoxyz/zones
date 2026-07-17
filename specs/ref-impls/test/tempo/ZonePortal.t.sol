@@ -23,12 +23,14 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
+    PORTAL_ROLE_SLOT,
     Role,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS,
-    ZONE_VERIFIER_ADDRESS
+    ZONE_VERIFIER_ADDRESS,
+    ZoneAccessMode
 } from "../../src/interfaces/IZone.sol";
 import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
@@ -264,6 +266,7 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 1,
                 initialToken,
+                ZoneAccessMode.Closed,
                 _emptyAddresses(),
                 _emptyAddresses(),
                 messengerA,
@@ -364,6 +367,7 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 id,
                 initialToken,
+                ZoneAccessMode.Closed,
                 _proxyAccounts(id),
                 _proxyGateways(portalMessenger),
                 portalMessenger,
@@ -1016,6 +1020,93 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.pendingAdmin(), address(0));
     }
 
+    function test_setZoneGateway_supportsLegacyAndReplacementTogether() public {
+        address replacement = makeAddr("replacement gateway");
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(replacement, Role.None, Role.CallbackGateway);
+        vm.prank(admin);
+        portal.setRole(replacement, Role.CallbackGateway);
+
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
+
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.None);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.None));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
+    }
+
+    function test_setPortalRole_changesAccountToCallbackGatewayAtomically() public {
+        vm.prank(admin);
+        portal.setRole(alice, Role.CallbackGateway);
+        assertEq(uint8(portal.role(alice)), uint8(Role.CallbackGateway));
+    }
+
+    function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setRole(address(0), Role.CallbackGateway);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.CallbackGateway));
+        portal.setRole(address(0), Role.None);
+        vm.stopPrank();
+
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
+    }
+
+    function test_setZoneGateway_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setRole(makeAddr("replacement gateway"), Role.CallbackGateway);
+    }
+
+    function test_setAllowedAccount_enablesAndDisablesMembership() public {
+        address account = makeAddr("managed account");
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(account, Role.None, Role.Account);
+        vm.prank(admin);
+        portal.setRole(account, Role.Account);
+        assertEq(uint8(portal.role(account)), uint8(Role.Account));
+
+        vm.prank(admin);
+        portal.setRole(account, Role.None);
+        assertEq(uint8(portal.role(account)), uint8(Role.None));
+    }
+
+    function test_setPortalRole_changesCallbackGatewayToAccountAtomically() public {
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.Account));
+    }
+
+    function test_setAllowedAccount_revertsForMessenger() public {
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
+        portal.setRole(address(messenger), Role.Account);
+    }
+
+    function test_setPortalRole_eventIncludesold() public {
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(address(zoneGateway), Role.CallbackGateway, Role.Account);
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
+    }
+
+    function test_setAllowedAccount_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setRole(address(0), Role.Account);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.Account));
+        portal.setRole(address(0), Role.None);
+        vm.stopPrank();
+
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
+    }
+
+    function test_setAllowedAccount_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setRole(makeAddr("managed account"), Role.Account);
+    }
     /*//////////////////////////////////////////////////////////////
                          DEPOSIT TESTS (L1 -> ZONE)
     //////////////////////////////////////////////////////////////*/
@@ -3586,10 +3677,11 @@ contract ZonePortalTest is BaseTest {
     ///        slot 4: deposit counters + bouncebackGas (uint64) [packed]
     ///        slot 5: _encryptionKeys.length (EncryptionKeyEntry[])
     ///        slot 15: zoneId (uint32) + messenger (address) [packed]
-    ///        slot 16: verifier + _initialized + sequencerSetVersion + threshold [packed]
+    ///        slot 16: verifier + _initialized + sequencerSetVersion + threshold + accessMode [packed]
     ///        slot 17: zoneHeight
     ///        slot 18: _sequencers.length
     ///        slot 19: isSequencer mapping
+    ///        slot 20: role mapping
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -3664,6 +3756,11 @@ contract ZonePortalTest is BaseTest {
             portal.sequencerThreshold(),
             "slot 16: threshold mismatch"
         );
+        assertEq(
+            uint8(uint256(slot16) >> 240),
+            uint8(ZoneAccessMode.Closed),
+            "slot 16: accessMode mismatch"
+        );
 
         // --- Slot 17: zoneHeight ---
         bytes32 slot17 = vm.load(address(portal), bytes32(uint256(17)));
@@ -3683,6 +3780,14 @@ contract ZonePortalTest is BaseTest {
         bytes32 isSequencerSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
             uint256(vm.load(address(portal), isSequencerSlot)), 1, "slot 19: membership mismatch"
+        );
+
+        // --- Slot 20: role mapping ---
+        bytes32 gatewaySlot = keccak256(abi.encode(address(zoneGateway), uint256(PORTAL_ROLE_SLOT)));
+        assertEq(
+            uint256(vm.load(address(portal), gatewaySlot)),
+            uint256(Role.CallbackGateway),
+            "slot 20: gateway role mismatch"
         );
     }
 

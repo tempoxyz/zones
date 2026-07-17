@@ -170,6 +170,10 @@ crate::sol! {
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
+        function messenger() external view returns (address);
+        function accessMode() external view returns (uint8);
+        function role(address account) external view returns (Role);
+        function setRole(address account, Role role) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
         function sequencerThreshold() external view returns (uint8);

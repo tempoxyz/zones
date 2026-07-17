@@ -4,10 +4,12 @@ pragma solidity ^0.8.13;
 import {
     IZoneConfig,
     IZonePortal,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_ROLE_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT
+    PORTAL_TOKEN_CONFIGS_SLOT,
+    ZoneAccessMode
 } from "../../src/interfaces/IZone.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -40,6 +42,7 @@ contract ZoneConfigTest is BaseTest {
         config = new ZoneConfig(address(portal), address(tempoState));
 
         _syncSequencer(sequencer);
+        _syncPortalSlot(PORTAL_ACCESS_MODE_SLOT);
         _syncTokenConfig(address(pathUSD));
         _syncAllowedAccount(alice);
         _syncZoneGateway(address(zoneGateway));
@@ -113,10 +116,26 @@ contract ZoneConfigTest is BaseTest {
     }
 
     function test_closedLoopMembershipAndGatewayAreIndependent() public view {
+        assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Closed));
         assertTrue(config.isAllowedAccount(alice));
         assertFalse(config.isZoneGateway(alice));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
         assertFalse(config.isAllowedAccount(address(zoneGateway)));
+    }
+
+    function test_openModeBypassesAccountMembershipButNotGatewayState() public {
+        tempoState.setMockStorageValue(
+            address(portal),
+            PORTAL_ACCESS_MODE_SLOT,
+            bytes32(uint256(uint8(ZoneAccessMode.Open)) << 240)
+        );
+
+        address outsider = makeAddr("open mode outsider");
+        assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Open));
+        assertTrue(config.isAllowedAccount(outsider));
+        assertTrue(config.isAllowedAccount(address(zoneGateway)));
+        assertTrue(config.isZoneGateway(address(zoneGateway)));
+        assertFalse(config.isZoneGateway(outsider));
     }
 
     /// @notice Verifies reading the sequencer encryption key reverts before any key is set.

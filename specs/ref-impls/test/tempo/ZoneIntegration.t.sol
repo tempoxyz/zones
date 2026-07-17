@@ -18,6 +18,7 @@ import {
     Withdrawal,
     ZONE_MESSENGER_ADDRESS,
     ZONE_VERIFIER_ADDRESS,
+    ZoneAccessMode,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
@@ -153,6 +154,7 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.initialize(
             1,
             address(l2ZoneToken),
+            ZoneAccessMode.Closed,
             _closedLoopAccounts(),
             _zoneGateways(),
             address(messengerContract),

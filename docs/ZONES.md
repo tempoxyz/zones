@@ -150,6 +150,17 @@ export PRIVATE_KEY="$SEQUENCER_KEY"
 just create-zone my-zone
 ```
 
+The default is a closed zone whose exact initial membership is the admin and
+sequencer. To deploy an open zone with no account allowlist or gateways:
+
+```bash
+just create-zone my-open-zone "" open
+```
+
+For a custom closed membership set, provide a comma-separated
+`ZONE_ALLOWED_ACCOUNTS`. Optional callback implementations are supplied separately
+through `ZONE_GATEWAYS`; neither mode requires a gateway at creation.
+
 To choose the initial TIP-20 enabled on the portal, pass it as the second positional argument:
 
 ```bash
@@ -168,12 +179,26 @@ You can also run the xtask directly for more control:
 cargo run -p tempo-xtask -- create-zone \
   --output generated/my-zone \
   --initial-token 0x20c0000000000000000000000000000000000001 \
+  --access-mode open \
   --admin "$ADMIN_ADDR" \
   --sequencer "$SEQUENCER_ADDR" \
   --private-key "$SEQUENCER_KEY"
 ```
 
-`create-zone` requires the admin address explicitly. Keep the matching `ADMIN_KEY` available for admin-only portal calls such as `enable-token`, `pause-deposits`, and `resume-deposits`.
+`create-zone` requires the admin address explicitly. `--access-mode closed` also
+requires at least one `--allowed-account`; `--access-mode open` rejects account
+entries so the configuration is unambiguous. `--zone-gateway` is repeatable but
+optional in both modes. Keep the matching `ADMIN_KEY` available for admin-only
+portal calls such as `setZoneGateway`, `enable-token`, `pause-deposits`, and
+`resume-deposits`.
+
+Cross-zone routing uses open zones. A callback withdrawal still requires its
+callback implementation to be registered as a zone gateway, but an open source
+zone does not require the callback to append a deposit back to that source
+portal. The gateway may route the value into another open zone instead. Closed
+zones retain the stricter callback invariant: a successful callback must append
+a return deposit to the source portal, while a reverting callback is bounced
+back into the source zone.
 
 ### 5. Start the Zone Node
 
@@ -618,14 +643,16 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `WITHDRAWAL_MAX_BATCH_GAS` | No | Override the per-transaction withdrawal gas budget (maximum 20000000) |
 | `WITHDRAWAL_MAX_IN_FLIGHT_BATCHES` | No | Override the maximum number of ordered withdrawal transactions in flight |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
+| `ZONE_ALLOWED_ACCOUNTS` | Closed zones | Comma-separated exact initial membership; defaults to admin + sequencer in the Just recipes |
+| `ZONE_GATEWAYS` | No | Comma-separated initial callback gateways; empty is valid in either mode |
 | `ZONE_FACTORY` | No | Optional ZoneFactory override; xtasks default to the current Moderato shared deployment |
 
 ## Justfile Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-zone <name> [<tip20>]` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
+| `just deploy-zone <name> [<tip20>] [open\|closed]` | One-shot: keygen → fund → create → genesis → start node |
+| `just create-zone <name> [<tip20>] [open\|closed]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |
