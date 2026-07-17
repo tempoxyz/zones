@@ -35,8 +35,6 @@ pub struct L1AnchorError {
 /// Operation applied to the execution-local anchor state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum L1AnchorOperation {
-    /// Initialize from the checkpoint stored in selected Zone state.
-    Initialize { anchor: u64 },
     /// Observe external Tempo state at an anchor.
     Read { anchor: u64 },
     /// Advance from a parent Tempo block to its direct child.
@@ -62,8 +60,6 @@ pub enum L1AnchorPhase {
         from: u64,
         /// Child Tempo block number.
         to: u64,
-        /// Whether external Tempo state was observed after advancement.
-        has_read_l1: bool,
     },
 }
 
@@ -77,39 +73,8 @@ impl L1AnchorPhase {
         }
     }
 
-    /// Returns whether this phase has completed the required advancement.
-    pub const fn is_advanced(self) -> bool {
-        matches!(self, Self::Advanced { .. })
-    }
-
-    const fn parent(anchor: u64) -> Self {
-        Self::Parent {
-            anchor,
-            has_read_l1: false,
-        }
-    }
-
     const fn advanced(from: u64, to: u64) -> Self {
-        Self::Advanced {
-            from,
-            to,
-            has_read_l1: false,
-        }
-    }
-
-    const fn with_l1_read(self) -> Self {
-        match self {
-            Self::Parent { anchor, .. } => Self::Parent {
-                anchor,
-                has_read_l1: true,
-            },
-            Self::Advanced { from, to, .. } => Self::Advanced {
-                from,
-                to,
-                has_read_l1: true,
-            },
-            Self::Uninitialized => Self::Uninitialized,
-        }
+        Self::Advanced { from, to }
     }
 
     fn apply(self, operation: L1AnchorOperation) -> Result<Self, L1AnchorError> {
@@ -119,16 +84,16 @@ impl L1AnchorPhase {
         };
 
         match operation {
-            L1AnchorOperation::Initialize { anchor: new } => match self {
-                Self::Uninitialized => Ok(Self::parent(new)),
-                Self::Parent { anchor: prev, .. } if prev == new => Ok(self),
-                Self::Advanced { to, .. } if to == new => Ok(self),
-                _ => Err(invalid()),
-            },
             L1AnchorOperation::Read { anchor: new } => match self {
-                Self::Uninitialized => Ok(Self::parent(new).with_l1_read()),
-                Self::Parent { anchor: prev, .. } if prev == new => Ok(self.with_l1_read()),
-                Self::Advanced { to, .. } if to == new => Ok(self.with_l1_read()),
+                Self::Uninitialized => Ok(Self::Parent {
+                    anchor: new,
+                    has_read_l1: true,
+                }),
+                Self::Parent { anchor: prev, .. } if prev == new => Ok(Self::Parent {
+                    anchor: prev,
+                    has_read_l1: true,
+                }),
+                Self::Advanced { to, .. } if to == new => Ok(self),
                 _ => Err(invalid()),
             },
             L1AnchorOperation::Advance { from, to } => {
@@ -185,12 +150,6 @@ impl L1AnchorController {
         self.phase().current()
     }
 
-    /// Initializes the controller from the selected Zone state.
-    pub fn initialize(&self, anchor: u64) -> Result<u64, L1AnchorError> {
-        let phase = self.apply(L1AnchorOperation::Initialize { anchor })?;
-        Ok(phase.current().expect("initialization produces an anchor"))
-    }
-
     /// Records a successful external Tempo state read at `anchor`.
     pub fn observe_read(&self, anchor: u64) -> Result<(), L1AnchorError> {
         self.apply(L1AnchorOperation::Read { anchor })?;
@@ -202,12 +161,6 @@ impl L1AnchorController {
         self.apply(L1AnchorOperation::Advance { from, to })?;
         Ok(())
     }
-}
-
-/// Returns whether a slot is mirrored from Tempo L1.
-pub fn is_mirrored_slot(address: Address, key: U256) -> bool {
-    address == tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS
-        || is_tip20_policy_id_slot(address, key)
 }
 
 /// Returns whether this is the packed TIP-20 transfer-policy slot.
@@ -241,18 +194,17 @@ mod tests {
         controller.observe_read(11).unwrap();
         assert_eq!(
             controller.phase(),
-            L1AnchorPhase::Advanced {
-                from: 10,
-                to: 11,
-                has_read_l1: true
-            }
+            L1AnchorPhase::Advanced { from: 10, to: 11 }
         );
     }
 
     #[test]
     fn controller_rejects_reads_at_wrong_anchor() {
         let controller = L1AnchorController::default();
-        controller.initialize(10).unwrap();
+        controller.restore(L1AnchorPhase::Parent {
+            anchor: 10,
+            has_read_l1: false,
+        });
         assert!(controller.observe_read(11).is_err());
     }
 
@@ -266,7 +218,10 @@ mod tests {
     #[test]
     fn controller_snapshot_restores_phase() {
         let controller = L1AnchorController::default();
-        controller.initialize(10).unwrap();
+        controller.restore(L1AnchorPhase::Parent {
+            anchor: 10,
+            has_read_l1: false,
+        });
         let snapshot = controller.phase();
         controller.begin_advance(10, 11).unwrap();
         controller.restore(snapshot);

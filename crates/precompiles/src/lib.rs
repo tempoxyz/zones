@@ -43,6 +43,7 @@ pub mod dispatch {
 }
 
 mod execution;
+pub use execution::ZonePrecompileEnv;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
@@ -92,28 +93,27 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     controller: L1AnchorController,
 ) {
-    let protocol_env =
-        execution::ProtocolPrecompileEnv::new(cfg, actions.clone(), non_creditable_slots.clone());
+    let env = ZonePrecompileEnv::new(cfg, actions.clone(), non_creditable_slots.clone());
     let tempo_env = PrecompileEnv::new(cfg, actions, non_creditable_slots);
 
     precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
         Some(TempoState::create(
             l1_reader.clone(),
             controller.clone(),
-            cfg,
+            &env,
         ))
     });
     precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
-        Some(ChaumPedersenVerify::create(cfg))
+        Some(ChaumPedersenVerify::create(&env))
     });
     precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
-        Some(AesGcmDecrypt::create(cfg))
+        Some(AesGcmDecrypt::create(&env))
     });
     precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
-        Some(ZoneTokenFactory::create(cfg))
+        Some(ZoneTokenFactory::create(&env))
     });
 
-    let tip403_env = protocol_env.clone();
+    let tip403_env = env.clone();
     precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, move |_| {
         Some(create_tip403_precompile(&tip403_env))
     });
@@ -124,14 +124,14 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
         if is_tip20_prefix(*address) {
             Some(create_tip20_precompile(
                 *address,
-                &protocol_env,
+                &env,
                 sequencer.clone(),
             ))
         } else if *address == TIP_FEE_MANAGER_ADDRESS {
-            Some(execution::create_protocol_precompile(
+            Some(execution::create_precompile(
                 "TipFeeManager",
-                protocol_env.clone(),
-                execution::NoCallRules,
+                &env,
+                execution::DirectCallOnly,
                 |data, caller| TipFeeManager::new().call(data, caller),
             ))
         } else if *address == STABLECOIN_DEX_ADDRESS {
@@ -148,10 +148,10 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
 
 impl AesGcmDecrypt {
     /// Create the AES-GCM precompile with ordinary zone-local execution.
-    pub fn create(cfg: &CfgEnv<TempoHardfork>) -> DynPrecompile {
-        execution::create_local_precompile(
+    pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
+        execution::create_precompile(
             "AesGcmDecrypt",
-            cfg,
+            env,
             execution::NoCallRules,
             |data, caller| Self.call(data, caller),
         )
@@ -160,10 +160,10 @@ impl AesGcmDecrypt {
 
 impl ChaumPedersenVerify {
     /// Create the Chaum-Pedersen precompile with ordinary zone-local execution.
-    pub fn create(cfg: &CfgEnv<TempoHardfork>) -> DynPrecompile {
-        execution::create_local_precompile(
+    pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
+        execution::create_precompile(
             "ChaumPedersenVerify",
-            cfg,
+            env,
             execution::NoCallRules,
             |data, caller| Self.call(data, caller),
         )
@@ -177,11 +177,11 @@ impl TempoState {
     pub fn create<P: L1StorageReader>(
         reader: P,
         controller: L1AnchorController,
-        cfg: &CfgEnv<TempoHardfork>,
+        env: &ZonePrecompileEnv,
     ) -> DynPrecompile {
-        execution::create_local_precompile(
+        execution::create_precompile(
             "TempoState",
-            cfg,
+            env,
             execution::DirectCallOnly,
             move |data, caller| Self::new().call_with_provider(&reader, &controller, data, caller),
         )
@@ -190,10 +190,10 @@ impl TempoState {
 
 impl ZoneTokenFactory {
     /// Create the zone token factory with local storage and direct-call-only execution.
-    pub fn create(cfg: &CfgEnv<TempoHardfork>) -> DynPrecompile {
-        execution::create_local_precompile(
+    pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
+        execution::create_precompile(
             "ZoneTokenFactory",
-            cfg,
+            env,
             execution::DirectCallOnly,
             |data, caller| Self::new().call(data, caller),
         )
@@ -201,10 +201,10 @@ impl ZoneTokenFactory {
 }
 
 /// Create upstream TIP-403 execution with zone read-only rules and finalized L1 state.
-pub(crate) fn create_tip403_precompile(env: &execution::ProtocolPrecompileEnv) -> DynPrecompile {
-    execution::create_protocol_precompile(
+pub(crate) fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
+    execution::create_precompile(
         "ZoneTip403Registry",
-        env.clone(),
+        env,
         tip403_proxy::Tip403Rules,
         |data, caller| TIP403Registry::new().call(data, caller),
     )
@@ -213,12 +213,12 @@ pub(crate) fn create_tip403_precompile(env: &execution::ProtocolPrecompileEnv) -
 /// Create upstream TIP-20 execution with zone rules and finalized L1 policy reads.
 pub(crate) fn create_tip20_precompile(
     address: alloy_primitives::Address,
-    env: &execution::ProtocolPrecompileEnv,
+    env: &ZonePrecompileEnv,
     sequencer: Arc<dyn SequencerExt>,
 ) -> DynPrecompile {
-    execution::create_protocol_precompile(
+    execution::create_precompile(
         "TIP20Token",
-        env.clone(),
+        env,
         ztip20::TIP20Rules::new(sequencer),
         move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
     )

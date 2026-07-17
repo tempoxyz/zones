@@ -8,9 +8,8 @@
 //!
 //! 1. Protocol execution rejects delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply the local phase of [`CallRules`].
-//! 4. Apply rules that may inspect anchored state through ordinary EVM storage.
-//! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
+//! 3. Apply [`CallRules`], which may inspect local or anchored state through ordinary EVM storage.
+//! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Rule-level rejections include calldata input gas. Calls without a fixed charge retain normal
 //! provider metering, while successful fixed-price calls report exactly the configured charge.
@@ -32,14 +31,14 @@ use tempo_precompiles::{
 
 /// Shared inputs for protocol precompiles whose storage is provided by the EVM context.
 #[derive(Clone)]
-pub(crate) struct ProtocolPrecompileEnv {
+pub struct ZonePrecompileEnv {
     cfg: revm::context::CfgEnv<TempoHardfork>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 }
 
-impl ProtocolPrecompileEnv {
-    pub(crate) fn new(
+impl ZonePrecompileEnv {
+    pub fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
@@ -60,10 +59,6 @@ impl ProtocolPrecompileEnv {
 /// cannot be borrowed after that partial move, so [`ZoneCall`] carries only the metadata
 /// needed by [`CallRules`].
 #[derive(Debug, Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "consumed by call rules in the stacked policy cutover"
-)]
 pub(crate) struct ZoneCall<'a> {
     /// Input calldata.
     pub(crate) data: &'a [u8],
@@ -102,26 +97,22 @@ pub(crate) enum CallCheck {
 /// Selector-, caller-, and call-context-dependent rules evaluated by centralized precompile
 /// execution before invoking the implementation.
 ///
-/// The local phase runs before rules that may inspect finalized L1 state. Anchored reads in either
-/// phase are resolved by the EVM database adapter. Rules may
-/// enforce admission policy and duplicate cheap business checks as fail-fast preflight, but the
+/// Anchored reads are resolved by the EVM database adapter. Rules may enforce admission policy
+/// and duplicate cheap business checks as fail-fast preflight, but the
 /// precompile implementation remains responsible for its canonical business invariants.
 pub(crate) trait CallRules: 'static {
+    /// Returns whether this precompile accepts delegate calls.
+    fn is_delegate_call_allowed(&self) -> bool {
+        true
+    }
+
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
         None
     }
 
-    /// Apply rules using only calldata, caller, call context, and ordinary zone-local state.
-    ///
-    /// This phase always runs before optional L1 anchor resolution. It may reject invalid calls
-    /// early so they do not depend on L1 or RPC availability.
-    fn check_with_local_state(&self, _call: ZoneCall<'_>) -> CallCheck {
-        CallCheck::Continue
-    }
-
-    /// Apply rules whose answer must come from finalized Tempo L1-backed storage.
-    fn check_with_l1_backed_state(&self, _call: ZoneCall<'_>) -> CallCheck {
+    /// Applies Zone-specific admission rules before invoking the upstream implementation.
+    fn check(&self, _call: ZoneCall<'_>) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -133,83 +124,21 @@ impl CallRules for NoCallRules {}
 /// Rules for precompiles whose semantics require execution at their registered address.
 pub(crate) struct DirectCallOnly;
 impl CallRules for DirectCallOnly {
-    fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
-        if call.is_direct {
-            CallCheck::Continue
-        } else {
-            CallCheck::Return(Ok(StorageCtx::default()
-                .revert_output(SolError::abi_encode(&DelegateCallNotAllowed {}).into())))
-        }
+    fn is_delegate_call_allowed(&self) -> bool {
+        false
     }
 }
 
-/// Create a precompile with zone call rules and ordinary local EVM storage.
-///
-/// This helper neither reads a Tempo anchor nor installs an L1 overlay. Calls admitted by `rules`
-/// are forwarded to `execute` with their original calldata and caller.
-pub(crate) fn create_local_precompile(
+pub(crate) fn create_precompile(
     id: &'static str,
-    cfg: &revm::context::CfgEnv<TempoHardfork>,
+    env: &ZonePrecompileEnv,
     rules: impl CallRules,
     execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
 ) -> DynPrecompile {
-    let spec = cfg.spec;
-    let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-    let gas_params = cfg.gas_params.clone();
-
+    let env = env.clone();
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
         let call = ZoneCall::new(&input);
-        let fixed_gas = rules.fixed_gas(call.selector());
-        if fixed_gas.is_some_and(|gas| input.gas < gas) {
-            return Ok(PrecompileOutput::halt(
-                PrecompileHalt::OutOfGas,
-                input.reservoir,
-            ));
-        }
-
-        let mut storage = EvmPrecompileStorageProvider::new(
-            input.internals,
-            fixed_gas.map_or(input.gas, |_| u64::MAX),
-            input.reservoir,
-            spec,
-            amsterdam_eip8037_enabled,
-            input.is_static,
-            gas_params.clone(),
-        );
-
-        if let Some(check_result) =
-            StorageCtx::enter(&mut storage, || match rules.check_with_local_state(call) {
-                CallCheck::Continue => None,
-                CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
-            })
-        {
-            return apply_fixed_gas(check_result, fixed_gas);
-        }
-
-        let exec_result = StorageCtx::enter(&mut storage, || execute(call.data, call.caller));
-        apply_fixed_gas(exec_result, fixed_gas)
-    })
-}
-
-/// Create a direct-call-only protocol precompile using ordinary EVM storage.
-///
-/// The Zone EVM's database adapter supplies anchored policy values below the revm journal, so this
-/// helper does not install a per-precompile storage wrapper.
-pub(crate) fn create_protocol_precompile(
-    id: &'static str,
-    env: ProtocolPrecompileEnv,
-    rules: impl CallRules,
-    execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
-) -> DynPrecompile {
-    let zone_spec = env.cfg.spec;
-    let amsterdam_eip8037_enabled = env.cfg.enable_amsterdam_eip8037;
-    let gas_params = env.cfg.gas_params;
-    let actions = env.actions;
-    let non_creditable_slots = env.non_creditable_slots;
-
-    DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
-        let call = ZoneCall::new(&input);
-        if !call.is_direct {
+        if !rules.is_delegate_call_allowed() && !call.is_direct {
             return Ok(PrecompileOutput::revert(
                 0,
                 SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
@@ -229,15 +158,15 @@ pub(crate) fn create_protocol_precompile(
             input.internals,
             fixed_gas.map_or(input.gas, |_| u64::MAX),
             input.reservoir,
-            zone_spec,
-            amsterdam_eip8037_enabled,
+            env.cfg.spec,
+            env.cfg.enable_amsterdam_eip8037,
             input.is_static,
-            gas_params.clone(),
+            env.cfg.gas_params.clone(),
         )
-        .with_actions(actions.clone())
-        .with_non_creditable_slots(non_creditable_slots.clone());
+        .with_actions(env.actions.clone())
+        .with_non_creditable_slots(env.non_creditable_slots.clone());
 
-        match StorageCtx::enter(&mut storage, || rules.check_with_local_state(call)) {
+        match StorageCtx::enter(&mut storage, || rules.check(call)) {
             CallCheck::Continue => {}
             CallCheck::Return(result) => {
                 let result = StorageCtx::enter(&mut storage, || add_input_cost(call.data, result));
@@ -245,17 +174,8 @@ pub(crate) fn create_protocol_precompile(
             }
         }
 
-        if let Some(check_result) = StorageCtx::enter(&mut storage, || {
-            match rules.check_with_l1_backed_state(call) {
-                CallCheck::Continue => None,
-                CallCheck::Return(result) => Some(add_input_cost(call.data, result)),
-            }
-        }) {
-            return apply_fixed_gas(check_result, fixed_gas);
-        }
-
-        let exec_result = StorageCtx::enter(&mut storage, || execute(call.data, call.caller));
-        apply_fixed_gas(exec_result, fixed_gas)
+        let result = StorageCtx::enter(&mut storage, || execute(call.data, call.caller));
+        apply_fixed_gas(result, fixed_gas)
     })
 }
 
@@ -303,7 +223,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
+        fn check(&self, call: ZoneCall<'_>) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(call.data),
                 call.selector(),
@@ -339,9 +259,14 @@ mod tests {
         let recorded_execute = Rc::new(RefCell::new(None));
         let execute_record = recorded_execute.clone();
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let precompile = create_local_precompile(
-            "ForwardingTest",
+        let env = ZonePrecompileEnv::new(
             &cfg,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let precompile = create_precompile(
+            "ForwardingTest",
+            &env,
             RecordingRules(recorded_rule.clone()),
             move |data, caller| {
                 *execute_record.borrow_mut() = Some((Bytes::copy_from_slice(data), caller));
@@ -376,15 +301,15 @@ mod tests {
         let execute_spec = observed_spec.clone();
         let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         cfg.spec = TempoHardfork::T8;
-        let env = ProtocolPrecompileEnv::new(
+        let env = ZonePrecompileEnv::new(
             &cfg,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
         let checked = Rc::new(Cell::new(false));
-        let rejected = create_protocol_precompile(
+        let rejected = create_precompile(
             "L1AdmissionTest",
-            env.clone(),
+            &env,
             RejectRules(checked.clone()),
             |_, _| panic!("rejected call must not execute"),
         );
@@ -397,11 +322,10 @@ mod tests {
         );
         assert!(checked.get());
 
-        let precompile =
-            create_protocol_precompile("ProtocolTest", env, NoCallRules, move |_, _| {
-                execute_spec.set(Some(StorageCtx::default().spec()));
-                Ok(StorageCtx::default().success_output(Bytes::new()))
-            });
+        let precompile = create_precompile("ProtocolTest", &env, NoCallRules, move |_, _| {
+            execute_spec.set(Some(StorageCtx::default().spec()));
+            Ok(StorageCtx::default().success_output(Bytes::new()))
+        });
 
         precompile
             .call(input(&mut ctx, &[], Address::ZERO, u64::MAX))
@@ -417,7 +341,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn check_with_local_state(&self, _call: ZoneCall<'_>) -> CallCheck {
+        fn check(&self, _call: ZoneCall<'_>) -> CallCheck {
             self.0.set(true);
             CallCheck::Return(Ok(
                 StorageCtx::default().revert_output(Bytes::from_static(b"denied"))
@@ -431,9 +355,14 @@ mod tests {
         let executed = Rc::new(Cell::new(false));
         let execute_flag = executed.clone();
         let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let precompile = create_local_precompile(
-            "AdmissionTest",
+        let env = ZonePrecompileEnv::new(
             &cfg,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let precompile = create_precompile(
+            "AdmissionTest",
+            &env,
             RejectRules(checked.clone()),
             move |_, _| {
                 execute_flag.set(true);

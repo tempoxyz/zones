@@ -86,11 +86,11 @@ impl<DB: fmt::Debug, L1> fmt::Debug for AnchoredZoneDb<DB, L1> {
 
 impl<DB, L1> AnchoredZoneDb<DB, L1> {
     /// Creates an adapter around the caller-provided database.
-    pub fn new(inner: DB, l1: L1, controller: L1AnchorController) -> Self {
+    pub fn new(inner: DB, l1: L1) -> Self {
         Self {
             inner,
             l1,
-            controller,
+            controller: L1AnchorController::default(),
             packed_policy_slots: HashMap::new(),
         }
     }
@@ -128,9 +128,7 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
             .map_err(AnchoredZoneDbError::Inner)?;
         let anchor =
             u64::try_from(value).map_err(|_| AnchoredZoneDbError::AnchorOverflow(value))?;
-        self.controller
-            .initialize(anchor)
-            .map_err(AnchoredZoneDbError::AnchorTransition)
+        Ok(anchor)
     }
 
     fn l1_storage(
@@ -263,7 +261,7 @@ mod tests {
         let expected = U256::from(99);
         let l1 = TestL1::default();
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
-        let mut db = AnchoredZoneDb::new(test_db(anchor), l1, L1AnchorController::default());
+        let mut db = AnchoredZoneDb::new(test_db(anchor), l1);
 
         assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
         assert_eq!(db.controller().current(), Some(anchor));
@@ -273,11 +271,7 @@ mod tests {
     fn l1_failures_and_read_before_advance_fail_closed() {
         let anchor = 42;
         let slot = U256::from(7);
-        let mut failing = AnchoredZoneDb::new(
-            test_db(anchor),
-            TestL1::failing_storage(),
-            L1AnchorController::default(),
-        );
+        let mut failing = AnchoredZoneDb::new(test_db(anchor), TestL1::failing_storage());
         assert!(matches!(
             failing.storage(TIP403_REGISTRY_ADDRESS, slot),
             Err(AnchoredZoneDbError::L1Read { anchor: 42, .. })
@@ -285,8 +279,8 @@ mod tests {
 
         let reader = TestL1::default();
         reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
-        let controller = L1AnchorController::default();
-        let mut db = AnchoredZoneDb::new(test_db(anchor), reader.clone(), controller.clone());
+        let mut db = AnchoredZoneDb::new(test_db(anchor), reader.clone());
+        let controller = db.controller().clone();
         assert_eq!(
             db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(),
             U256::ONE
@@ -307,7 +301,7 @@ mod tests {
         l1.insert(token, slot, anchor, l1_value);
         let mut inner = test_db(anchor);
         inner.insert_account_storage(token, slot, local).unwrap();
-        let mut db = AnchoredZoneDb::new(inner, l1, L1AnchorController::default());
+        let mut db = AnchoredZoneDb::new(inner, l1);
         let observed = db.storage(token, slot).unwrap();
 
         let mut state = AddressMap::default();
@@ -338,7 +332,7 @@ mod tests {
         let value = U256::from(5);
         let mut inner = test_db(1);
         inner.insert_account_storage(address, slot, value).unwrap();
-        let mut db = AnchoredZoneDb::new(inner, TestL1::default(), L1AnchorController::default());
+        let mut db = AnchoredZoneDb::new(inner, TestL1::default());
 
         assert_eq!(db.storage(address, slot).unwrap(), value);
         let mut inner: CacheDB<EmptyDB> = db.into_inner();

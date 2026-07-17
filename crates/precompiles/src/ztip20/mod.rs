@@ -68,6 +68,10 @@ impl TIP20Rules {
 }
 
 impl CallRules for TIP20Rules {
+    fn is_delegate_call_allowed(&self) -> bool {
+        false
+    }
+
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
         selector
             .is_some_and(|selector| TIP20_FIXED_GAS_SELECTORS.contains(&selector))
@@ -75,7 +79,7 @@ impl CallRules for TIP20Rules {
     }
 
     /// Apply zone privacy and bridge-path checks before upstream execution.
-    fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
+    fn check(&self, call: ZoneCall<'_>) -> CallCheck {
         let Some(selector) = call.selector() else {
             return CallCheck::Continue;
         };
@@ -179,7 +183,7 @@ mod tests {
     use tempo_zone_contracts::Unauthorized;
 
     use crate::test_utils::{
-        TestContext, call_precompile, test_context, test_protocol_env, test_storage_provider,
+        TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
 
     #[derive(Clone, Copy)]
@@ -261,7 +265,7 @@ mod tests {
                 })?;
             }
 
-            let env = test_protocol_env(&ctx);
+            let env = test_env(&ctx);
             let precompile = crate::create_tip20_precompile(
                 token,
                 &env,
@@ -424,7 +428,7 @@ mod tests {
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let to = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
-        let env = test_protocol_env(&ctx);
+        let env = test_env(&ctx);
         let precompile =
             crate::create_tip20_precompile(token, &env, Arc::new(MockSequencer { address: None }));
         let calldata: Bytes = ITIP20::transferCall {

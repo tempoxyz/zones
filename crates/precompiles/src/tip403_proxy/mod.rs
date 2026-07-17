@@ -35,7 +35,11 @@ alloy_sol_types::sol! {
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn check_with_local_state(&self, call: ZoneCall<'_>) -> CallCheck {
+    fn is_delegate_call_allowed(&self) -> bool {
+        false
+    }
+
+    fn check(&self, call: ZoneCall<'_>) -> CallCheck {
         if call
             .selector()
             .is_some_and(|selector| TIP403_MUTATING_SELECTORS.contains(&selector))
@@ -62,9 +66,7 @@ mod tests {
     use crate::{
         create_tip403_precompile,
         tempo_state::slots::TEMPO_BLOCK_NUMBER,
-        test_utils::{
-            TestContext, call_precompile, test_context, test_protocol_env, test_storage_provider,
-        },
+        test_utils::{TestContext, call_precompile, test_context, test_env, test_storage_provider},
     };
 
     const ANCHOR: u64 = 77;
@@ -88,7 +90,7 @@ mod tests {
                     U256::from(ANCHOR),
                 )
                 .unwrap();
-            let env = test_protocol_env(&ctx);
+            let env = test_env(&ctx);
             Self {
                 ctx,
                 precompile: create_tip403_precompile(&env),

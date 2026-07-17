@@ -80,6 +80,17 @@ impl TempoState {
             .revert_output(Error(message.into()).abi_encode().into()))
     }
 
+    fn observed_l1_anchor(
+        &mut self,
+        controller: &L1AnchorController,
+    ) -> tempo_precompiles::Result<u64> {
+        let anchor = self.tempo_block_number.read()?;
+        controller
+            .observe_read(anchor)
+            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))?;
+        Ok(anchor)
+    }
+
     fn apply_checkpoint(
         &mut self,
         controller: &L1AnchorController,
@@ -114,7 +125,7 @@ impl TempoState {
         if header.parent_hash() != prev_block_hash {
             return self.revert_error(TempoStateAbi::InvalidParentHash {});
         }
-        if header.number() != prev_block_number.saturating_add(1) {
+        if prev_block_number.checked_add(1) != Some(header.number()) {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
@@ -151,15 +162,10 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
+        let block_number = match self.observed_l1_anchor(controller) {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
-        if let Err(err) = controller.observe_read(block_number) {
-            return self
-                .storage
-                .error_result(TempoPrecompileError::Fatal(err.to_string()));
-        }
         let value = provider.read_l1_storage(call.account, call.slot, block_number)?;
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
@@ -178,15 +184,10 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
+        let block_number = match self.observed_l1_anchor(controller) {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
-        if let Err(err) = controller.observe_read(block_number) {
-            return self
-                .storage
-                .error_result(TempoPrecompileError::Fatal(err.to_string()));
-        }
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
             values.push(provider.read_l1_storage(call.account, slot, block_number)?);
@@ -234,7 +235,8 @@ mod tests {
     use crate::{
         storage::L1AnchorPhase,
         test_utils::{
-            MockL1Reader, TestContext, call_precompile, test_context, test_storage_provider,
+            MockL1Reader, TestContext, call_precompile, test_context, test_env,
+            test_storage_provider,
         },
     };
     use alloy_evm::precompiles::DynPrecompile;
@@ -354,7 +356,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::returning(B256::repeat_byte(0x11)),
             controller.clone(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
 
         let read = TempoStateAbi::readTempoStorageSlotCall {
@@ -399,7 +401,7 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
         let controller = L1AnchorController::default();
         let reader = MockL1Reader::returning(B256::repeat_byte(0x11));
-        let precompile = TempoState::create(reader.clone(), controller.clone(), &ctx.cfg.clone());
+        let precompile = TempoState::create(reader.clone(), controller.clone(), &test_env(&ctx));
 
         let child = encode_header(&child_header(genesis_hash, 11));
         call(
@@ -422,11 +424,7 @@ mod tests {
         )?;
         assert_eq!(
             controller.phase(),
-            L1AnchorPhase::Advanced {
-                from: 10,
-                to: 11,
-                has_read_l1: true,
-            }
+            L1AnchorPhase::Advanced { from: 10, to: 11 }
         );
         assert!(
             reader
@@ -447,7 +445,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         assert_checkpoint(&mut ctx, &precompile, keccak256(&header_rlp), 42)?;
 
@@ -468,7 +466,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
 
         let output = call(
@@ -496,7 +494,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,
@@ -521,7 +519,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let calldata = TempoStateAbi::tempoBlockHashCall {}.abi_encode();
         let output = call_precompile(
@@ -536,10 +534,8 @@ mod tests {
         )?;
 
         assert!(output.is_revert());
-        assert_eq!(
-            output.gas_used,
-            tempo_precompiles::input_cost(calldata.len())
-        );
+        // Direct-call-only precompiles reject delegate calls before metering or storage setup.
+        assert_eq!(output.gas_used, 0);
 
         Ok(())
     }
@@ -556,7 +552,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,
@@ -583,7 +579,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,
@@ -613,7 +609,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,
@@ -641,7 +637,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,
@@ -669,7 +665,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::default(),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,
@@ -695,7 +691,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::returning(expected),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let calldata: Bytes = TempoStateAbi::readTempoStorageSlotCall {
             account: address!("0x0000000000000000000000000000000000009999"),
@@ -732,7 +728,7 @@ mod tests {
         let precompile = TempoState::create(
             MockL1Reader::returning(expected),
             L1AnchorController::default(),
-            &ctx.cfg.clone(),
+            &test_env(&ctx),
         );
         let output = call(
             &mut ctx,

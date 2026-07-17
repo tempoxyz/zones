@@ -114,13 +114,10 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let controller = L1AnchorController::default();
-        let db = AnchoredZoneDb::new(db, self.l1_reader.clone(), controller.clone());
+        let db = AnchoredZoneDb::new(db, self.l1_reader.clone());
+        let controller = db.controller().clone();
         let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(
-            self.register_precompiles(evm, controller.clone()),
-            controller,
-        )
+        ZoneEvm::new(self.register_precompiles(evm, controller))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -129,13 +126,10 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let controller = L1AnchorController::default();
-        let db = AnchoredZoneDb::new(db, self.l1_reader.clone(), controller.clone());
+        let db = AnchoredZoneDb::new(db, self.l1_reader.clone());
+        let controller = db.controller().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(
-            self.register_precompiles(evm, controller.clone()),
-            controller,
-        )
+        ZoneEvm::new(self.register_precompiles(evm, controller))
     }
 }
 
@@ -173,6 +167,10 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
             block_access_list_hash,
             ..
         } = input;
+
+        if let Err(error) = validate_advance_tempo_transactions(&transactions) {
+            return Err(alloy_evm::block::BlockValidationError::other(error).into());
+        }
 
         self.inner.assemble_block(
             BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(

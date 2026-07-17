@@ -82,7 +82,7 @@ pub fn decrypt_aes_gcm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::{test_context, test_storage_provider};
+    use crate::test_utils::{test_context, test_env, test_storage_provider};
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
     use revm::precompile::PrecompileOutput;
@@ -116,7 +116,7 @@ mod tests {
 
     fn call_precompile(calldata: Bytes) -> PrecompileOutput {
         let mut ctx = test_context();
-        let precompile = AesGcmDecrypt::create(&ctx.cfg.clone());
+        let precompile = AesGcmDecrypt::create(&test_env(&ctx));
         crate::test_utils::call_precompile(
             &mut ctx,
             &precompile,

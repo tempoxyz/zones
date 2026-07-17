@@ -13625,7 +13625,6 @@ dependencies = [
  "tempo-zone-contracts",
  "tracing",
  "zone-chainspec",
- "zone-evm",
  "zone-l1",
  "zone-precompiles",
 ]

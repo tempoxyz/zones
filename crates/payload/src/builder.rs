@@ -274,9 +274,6 @@ where
             block_access_list: _,
         } = builder.finish(&*state_provider, None)?;
 
-        zone_evm::validate_advance_tempo_transactions(&block.sealed_block().body().transactions)
-            .map_err(PayloadBuilderError::other)?;
-
         let requests = chain_spec
             .is_prague_active_at_timestamp(attributes.timestamp())
             .then_some(execution_result.requests.clone());

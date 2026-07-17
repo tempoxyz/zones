@@ -89,7 +89,6 @@ mod tests {
     use tempo_evm::{TempoBlockEnv, TempoHaltReason};
     use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
-    use zone_precompiles::L1AnchorController;
 
     type TestDb = CacheDB<EmptyDB>;
     type TestAdaptedDb = AnchoredZoneDb<TestDb, TestL1>;
@@ -128,9 +127,8 @@ mod tests {
         db: TestDb,
         input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv>,
     ) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
-        let controller = L1AnchorController::default();
-        let db = AnchoredZoneDb::new(db, TestL1::default(), controller.clone());
-        ZoneEvm::new(TempoEvm::new(db, input), controller)
+        let db = AnchoredZoneDb::new(db, TestL1::default());
+        ZoneEvm::new(TempoEvm::new(db, input))
     }
 
     fn evm_with_contract(addr: Address, code: &[u8]) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {

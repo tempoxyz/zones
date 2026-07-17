@@ -18,26 +18,23 @@ use zone_l1::state::L1StateProvider;
 use zone_precompiles::{L1AnchorController, L1StorageReader};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
+type TempoResult = ResultAndState<TempoHaltReason>;
+type AdaptedEvmError<E> = EVMError<AnchoredZoneDbError<E>, TempoInvalidTransaction>;
+type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
+
 /// Zone runtime EVM.
 ///
 /// Execution uses an anchored database adapter internally while the public [`Evm::DB`] remains the
 /// exact database supplied by the caller.
 pub struct ZoneEvm<DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
-    controller: L1AnchorController,
 }
 
 impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
     /// Creates a new `ZoneEvm` with guarded `CREATE` and `CREATE2` opcodes.
-    pub(super) fn new(
-        mut evm: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
-        controller: L1AnchorController,
-    ) -> Self {
+    pub(super) fn new(mut evm: TempoEvm<AnchoredZoneDb<DB, L1>, I>) -> Self {
         contract_creation::configure_runtime(&mut evm);
-        Self {
-            inner: evm,
-            controller,
-        }
+        Self { inner: evm }
     }
 
     /// Provides a reference to the EVM context.
@@ -51,8 +48,40 @@ impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
     }
 
     /// Returns the execution-local anchor controller.
-    pub const fn anchor_controller(&self) -> &L1AnchorController {
-        &self.controller
+    pub fn anchor_controller(&self) -> &L1AnchorController {
+        self.inner.ctx().journaled_state.database.controller()
+    }
+}
+
+impl<DB, I, L1> ZoneEvm<DB, I, L1>
+where
+    DB: Database,
+    L1: L1StorageReader,
+    I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>,
+{
+    fn execute_inner(
+        &mut self,
+        execute: impl FnOnce(
+            &mut TempoEvm<AnchoredZoneDb<DB, L1>, I>,
+        ) -> Result<TempoResult, AdaptedEvmError<DB::Error>>,
+    ) -> Result<TempoResult, ZoneEvmError<DB::Error>> {
+        let snapshot = self.anchor_controller().phase();
+        let mut result = match execute(&mut self.inner) {
+            Ok(result) => result,
+            Err(error) => {
+                self.anchor_controller().restore(snapshot);
+                return Err(map_adapter_error(error));
+            }
+        };
+        if !result.result.is_success() {
+            self.anchor_controller().restore(snapshot);
+            return Ok(result);
+        }
+        if let Err(error) = self.inner.db().sanitize_state(&mut result.state) {
+            self.anchor_controller().restore(snapshot);
+            return Err(error.into_evm_error());
+        }
+        Ok(result)
     }
 }
 
@@ -64,7 +93,7 @@ where
 {
     type DB = DB;
     type Tx = TempoTxEnv;
-    type Error = EVMError<DB::Error, TempoInvalidTransaction>;
+    type Error = ZoneEvmError<DB::Error>;
     type HaltReason = TempoHaltReason;
     type Spec = tempo_chainspec::hardfork::TempoHardfork;
     type BlockEnv = TempoBlockEnv;
@@ -88,23 +117,7 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
-        let snapshot = self.controller.phase();
-        let mut result = match self.inner.transact_raw(tx) {
-            Ok(result) => result,
-            Err(err) => {
-                self.controller.restore(snapshot);
-                return Err(map_adapter_error(err));
-            }
-        };
-        if !result.result.is_success() {
-            self.controller.restore(snapshot);
-            return Ok(result);
-        }
-        if let Err(err) = self.inner.db().sanitize_state(&mut result.state) {
-            self.controller.restore(snapshot);
-            return Err(err.into_evm_error());
-        }
-        Ok(result)
+        self.execute_inner(|evm| evm.transact_raw(tx))
     }
 
     fn transact_system_call(
@@ -113,23 +126,7 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        let snapshot = self.controller.phase();
-        let mut result = match self.inner.transact_system_call(caller, contract, data) {
-            Ok(result) => result,
-            Err(err) => {
-                self.controller.restore(snapshot);
-                return Err(map_adapter_error(err));
-            }
-        };
-        if !result.result.is_success() {
-            self.controller.restore(snapshot);
-            return Ok(result);
-        }
-        if let Err(err) = self.inner.db().sanitize_state(&mut result.state) {
-            self.controller.restore(snapshot);
-            return Err(err.into_evm_error());
-        }
-        Ok(result)
+        self.execute_inner(|evm| evm.transact_system_call(caller, contract, data))
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
@@ -153,8 +150,8 @@ where
 }
 
 fn map_adapter_error<E: core::error::Error + DBErrorMarker>(
-    error: EVMError<AnchoredZoneDbError<E>, TempoInvalidTransaction>,
-) -> EVMError<E, TempoInvalidTransaction> {
+    error: AdaptedEvmError<E>,
+) -> ZoneEvmError<E> {
     match error {
         EVMError::Transaction(error) => EVMError::Transaction(error),
         EVMError::Header(error) => EVMError::Header(error),

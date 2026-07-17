@@ -21,9 +21,9 @@ use tempo_precompiles::{
 };
 
 use crate::{
+    ZonePrecompileEnv,
     chaum_pedersen::{challenge_hash, recover_point},
     ecies::DecryptedDeposit,
-    execution::ProtocolPrecompileEnv,
 };
 
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
@@ -54,9 +54,9 @@ pub(crate) fn test_storage_provider(
     )
 }
 
-/// Create the ordinary protocol precompile environment for a local unit test.
-pub(crate) fn test_protocol_env(ctx: &TestContext) -> ProtocolPrecompileEnv {
-    ProtocolPrecompileEnv::new(
+/// Create the ordinary precompile environment for a local unit test.
+pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
+    ZonePrecompileEnv::new(
         &ctx.cfg,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
