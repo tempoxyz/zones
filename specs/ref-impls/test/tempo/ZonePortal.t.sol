@@ -1529,7 +1529,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount);
     }
 
-    function test_callbackWithdrawal_revertsAndRetainsQueueWhenNoReturnDeposit() public {
+    function test_callbackWithdrawal_failureBouncesAndAdvancesQueue() public {
         uint128 amount = 500e6;
         _fundCallbackWithdrawal(amount);
         zoneGateway.setReturnToZone(false);
@@ -1545,12 +1545,12 @@ contract ZonePortalTest is BaseTest {
             _callbackData(Flow.Redeem)
         );
         _enqueueWithdrawal(withdrawal);
-        bytes32 queuedHash = portal.withdrawalQueueSlot(portal.withdrawalQueueHead());
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
 
-        vm.expectRevert(IZonePortal.CallbackDidNotReturnToZone.selector);
         portal.processWithdrawal(withdrawal, bytes32(0));
 
-        assertEq(portal.withdrawalQueueSlot(portal.withdrawalQueueHead()), queuedHash);
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
         assertEq(pathUSD.balanceOf(address(zoneGateway)), 0);
         assertEq(pathUSD.balanceOf(address(portal)), amount);
     }

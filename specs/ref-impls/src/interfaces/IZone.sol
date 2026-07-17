@@ -647,6 +647,7 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
+    error NotSelf();
     error AlreadyInitialized();
     error NotPendingSequencer();
     error NotPendingAdmin();
@@ -895,6 +896,16 @@ interface IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash);
 
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+
+    function deliverWithdrawal(
+        address token,
+        address target,
+        uint128 amount,
+        bytes32 senderTag,
+        uint64 gasLimit,
+        bytes calldata data
+    )
+        external;
 
     function refunds(address token, address owner) external view returns (uint128);
 

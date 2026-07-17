@@ -96,7 +96,7 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(portal.calculateBouncebackFee(), 300_000);
     }
 
-    function test_processWithdrawal_overMaxGasLimit_revertsAndRetainsQueue() public {
+    function test_processWithdrawal_overMaxGasLimit_bouncesBackAndClearsQueue() public {
         Withdrawal memory w = Withdrawal({
             token: address(token),
             senderTag: keccak256("sender"),
@@ -114,12 +114,15 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), bytes32(WITHDRAWAL_QUEUE_TAIL_SLOT), bytes32(uint256(1)));
         vm.store(address(portal), _withdrawalQueueSlot(0), wHash);
 
-        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
+        vm.expectEmit(false, true, false, true, address(portal));
+        emit IZonePortal.WithdrawalBounceBack(bytes32(0), 1, address(token), 500e6, 1);
+        vm.expectEmit(true, true, false, true, address(portal));
+        emit IZonePortal.WithdrawalProcessed(recipient, w.senderTag, address(token), 500e6, false);
         portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(portal.withdrawalQueueHead(), 0);
-        assertEq(portal.withdrawalQueueSlot(0), wHash);
-        assertEq(portal.currentDepositQueueHash(), bytes32(0));
+        assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertTrue(portal.currentDepositQueueHash() != bytes32(0));
     }
 
     function test_processWithdrawal_depositBounceBack_paysFeeAndRefundsNetAmount() public {

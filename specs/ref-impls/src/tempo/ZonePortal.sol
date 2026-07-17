@@ -200,6 +200,11 @@ contract ZonePortal is IZonePortal {
         _;
     }
 
+    modifier onlySelf() {
+        if (msg.sender != address(this)) revert NotSelf();
+        _;
+    }
+
     modifier nonReentrantWithdrawal() {
         if (_withdrawalReentrancyStatus != 0) revert ReentrantWithdrawal();
         _withdrawalReentrancyStatus = 1;
@@ -790,43 +795,44 @@ contract ZonePortal is IZonePortal {
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
-            revert InvalidCallbackTarget();
-        }
-
-        if (withdrawal.gasLimit == 0) {
-            if (zoneGateway[withdrawal.to]) revert InvalidCallbackTarget();
-            _requireAllowed(withdrawal.to);
-            bool success = _tryTransfer(_token, withdrawal.to, withdrawal.amount);
-            if (!success) {
-                _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
-            }
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
             emit WithdrawalProcessed(
-                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success
+                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
             );
             return;
         }
 
-        if (!zoneGateway[withdrawal.to]) revert InvalidCallbackTarget();
-        bytes32 depositQueueHashBefore = currentDepositQueueHash;
-        _deliverWithdrawal(
-            _token,
-            withdrawal.to,
-            withdrawal.amount,
-            withdrawal.senderTag,
-            withdrawal.gasLimit,
-            withdrawal.callbackData
-        );
-        // This proves only that some deposit was appended. Token and amount conservation rests
-        // on the correctness of the admin-configured ZoneGateway implementation.
-        if (currentDepositQueueHash == depositQueueHashBefore) revert CallbackDidNotReturnToZone();
+        bool success;
+        if (withdrawal.gasLimit == 0) {
+            if (zoneGateway[withdrawal.to]) revert InvalidCallbackTarget();
+            _requireAllowed(withdrawal.to);
+            success = _tryTransfer(_token, withdrawal.to, withdrawal.amount);
+        } else {
+            if (!zoneGateway[withdrawal.to]) revert InvalidCallbackTarget();
+            // Keep this self-call so callback failure cannot revert the dequeue and block the FIFO.
+            try this.deliverWithdrawal(
+                _token,
+                withdrawal.to,
+                withdrawal.amount,
+                withdrawal.senderTag,
+                withdrawal.gasLimit,
+                withdrawal.callbackData
+            ) {
+                success = true;
+            } catch { }
+        }
+
+        if (!success) {
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
+        }
         emit WithdrawalProcessed(
-            withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, true
+            withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success
         );
     }
 
-    /// @dev Transfers only the current withdrawal amount to the configured messenger, then
-    ///      asks it to call the target. Any failure reverts withdrawal processing atomically.
-    function _deliverWithdrawal(
+    /// @notice Deliver a callback withdrawal in a revertable self-call frame.
+    /// @dev Only callable by this portal. processWithdrawal catches failures and bounces back.
+    function deliverWithdrawal(
         address token,
         address target,
         uint128 amount,
@@ -834,14 +840,21 @@ contract ZonePortal is IZonePortal {
         uint64 gasLimit,
         bytes calldata data
     )
-        internal
+        external
+        onlySelf
     {
+        bytes32 depositQueueHashBefore = currentDepositQueueHash;
+
         if (!ITIP20(token).transfer(messenger, amount)) {
             revert TransferFailed();
         }
 
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
+
+        // This proves only that some deposit was appended. Token and amount conservation rests
+        // on the correctness of the admin-configured ZoneGateway implementation.
+        if (currentDepositQueueHash == depositQueueHashBefore) revert CallbackDidNotReturnToZone();
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {

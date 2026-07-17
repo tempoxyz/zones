@@ -636,7 +636,7 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l2ZoneToken.balanceOf(address(zoneGateway)), 0);
     }
 
-    function test_fullFlow_callbackFailureRetainsWithdrawalWithoutBounceBack() public {
+    function test_fullFlow_callbackFailureBouncesAndAdvancesQueue() public {
         // Setup: deposit to zone
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 1000e6);
@@ -676,12 +676,10 @@ contract ZoneBridgeTest is BaseTest {
         Withdrawal memory w = _withdrawal(
             1, alice, address(zoneGateway), 500e6, bytes32(0), 5_000_000, alice, callbackData
         );
-        bytes32 queuedHash = l1Portal.withdrawalQueueSlot(l1Portal.withdrawalQueueHead());
-        vm.expectRevert(IZonePortal.CallbackDidNotReturnToZone.selector);
         l1Portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(l1Portal.currentDepositQueueHash(), depositHashBefore);
-        assertEq(l1Portal.withdrawalQueueSlot(l1Portal.withdrawalQueueHead()), queuedHash);
+        assertNotEq(l1Portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(l1Portal.withdrawalQueueHead(), l1Portal.withdrawalQueueTail());
         assertEq(l2ZoneToken.balanceOf(address(zoneGateway)), 0);
     }
 
