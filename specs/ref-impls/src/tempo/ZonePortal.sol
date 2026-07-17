@@ -194,6 +194,7 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         _enforcementFlags = _encodeEnforcementFlags(_accessMode, _gatewayMode);
         rpcUrl = _rpcUrl;
+        emit EnforcementModesUpdated(_accessMode, _gatewayMode);
 
         _replaceSequencerSet(initialSequencers, _threshold, false);
 
@@ -995,6 +996,7 @@ contract ZonePortal is IZonePortal {
         // opaque, so an enforced gateway is trusted to constrain the operation and return the
         // intended result. Open access imposes no source-deposit invariant: callback value may go
         // to another zone or leave the zone system entirely.
+        // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
         if (
             accessMode() == ZoneAccessMode.Closed
                 && currentDepositQueueHash == depositQueueHashBefore

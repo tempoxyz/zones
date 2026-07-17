@@ -635,7 +635,7 @@ interface IZonePortal {
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
-    /// @notice Emitted after either independently mutable enforcement mode changes.
+    /// @notice Emitted when the independently mutable enforcement modes are initialized or updated.
     event EnforcementModesUpdated(ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode);
 
     error NotSequencer();
@@ -673,6 +673,7 @@ interface IZonePortal {
     error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
 
+    /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);
 
     function initialize(
