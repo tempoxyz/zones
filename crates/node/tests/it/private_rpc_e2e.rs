@@ -1308,12 +1308,12 @@ async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `zone_getDepositStatus` returns encrypted deposits to the bounceback
+/// `zone_getDepositStatus` returns encrypted deposits to the Tempo refund
 /// recipient, even when that caller is neither the L1 sender nor the revealed
 /// zone recipient. This matches SwapAndDepositRouter deposits, where the L1
 /// sender is the router and the refund owner is carried separately.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::Result<()> {
+async fn test_zone_get_deposit_status_encrypted_tempo_refund_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let ctx = start_zone_with_private_rpc_l1_with_encryption().await?;
@@ -1322,8 +1322,8 @@ async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::
 
     let depositor_signer = l1.user_signer();
     let recipient = l1.signer_at(2).address();
-    let bounceback_signer = l1.signer_at(3);
-    let bounceback_recipient = bounceback_signer.address();
+    let tempo_refund_signer = l1.signer_at(3);
+    let tempo_refund_recipient = tempo_refund_signer.address();
 
     let depositor =
         ZoneAccount::with_signer(depositor_signer.clone(), l1, &ctx.zone, portal_address);
@@ -1367,7 +1367,7 @@ async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::
                 nonce: alloy::primitives::FixedBytes(encrypted.nonce),
                 tag: alloy::primitives::FixedBytes(encrypted.tag),
             },
-            bounceback_recipient,
+            tempo_refund_recipient,
         )
         .send()
         .await?
@@ -1388,11 +1388,11 @@ async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::
         .block_number
         .ok_or_else(|| eyre::eyre!("depositEncrypted receipt missing block number"))?;
     let status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &bounceback_signer)
+        .get_deposit_status_as_user(tempo_block_number, &tempo_refund_signer)
         .await?;
     let deposits = status["result"]["deposits"]
         .as_array()
-        .expect("bounceback recipient deposits should be an array");
+        .expect("Tempo refund recipient deposits should be an array");
 
     assert_eq!(status["result"]["processed"], true);
     assert_eq!(deposits.len(), 1);
@@ -1406,8 +1406,8 @@ async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::
         deposits[0]["recipient"].as_str().unwrap(),
         format!("{recipient:#x}"),
     );
-    assert_ne!(depositor.address(), bounceback_recipient);
-    assert_ne!(recipient, bounceback_recipient);
+    assert_ne!(depositor.address(), tempo_refund_recipient);
+    assert_ne!(recipient, tempo_refund_recipient);
 
     Ok(())
 }

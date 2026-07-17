@@ -2010,7 +2010,7 @@ pub(crate) struct PlaintextRouterCallbackArgs {
     pub token_out: Address,
     pub target_portal: Address,
     pub recipient: Address,
-    pub bounceback_recipient: Address,
+    pub tempo_refund_recipient: Address,
     pub memo: B256,
     pub min_amount_out: u128,
 }
@@ -2022,7 +2022,7 @@ pub(crate) struct EncryptedRouterCallbackArgs {
     pub target_portal: Address,
     pub key_index: U256,
     pub encrypted: tempo_zone_contracts::EncryptedDepositPayload,
-    pub bounceback_recipient: Address,
+    pub tempo_refund_recipient: Address,
     pub min_amount_out: u128,
 }
 
@@ -2048,7 +2048,7 @@ impl WithdrawalArgs {
             token_out: args.token_out,
             target_portal: args.target_portal,
             recipient: args.recipient,
-            bounceback_recipient: args.bounceback_recipient,
+            tempo_refund_recipient: args.tempo_refund_recipient,
             memo: args.memo,
             min_amount_out: args.min_amount_out,
         }
@@ -2072,7 +2072,7 @@ impl WithdrawalArgs {
             target_portal: args.target_portal,
             key_index: args.key_index,
             encrypted: args.encrypted,
-            bounceback_recipient: args.bounceback_recipient,
+            tempo_refund_recipient: args.tempo_refund_recipient,
             min_amount_out: args.min_amount_out,
         }
         .abi_encode();
@@ -2099,7 +2099,7 @@ impl WithdrawalArgs {
         target_portal: Address,
         token: Address,
         recipient: Address,
-        bounceback_recipient: Address,
+        tempo_refund_recipient: Address,
     ) -> Self {
         Self::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
             amount,
@@ -2107,7 +2107,7 @@ impl WithdrawalArgs {
             token_out: token,
             target_portal,
             recipient,
-            bounceback_recipient,
+            tempo_refund_recipient,
             memo: B256::ZERO,
             min_amount_out: 0,
         })
@@ -3643,7 +3643,7 @@ impl L1Fixture {
             to,
             amount,
             fee: 0,
-            bounceback_recipient: sender,
+            tempo_refund_recipient: sender,
             memo: B256::ZERO,
         }
     }
@@ -3705,7 +3705,7 @@ impl L1Fixture {
             sender,
             amount,
             fee: 0,
-            bounceback_recipient: sender,
+            tempo_refund_recipient: sender,
             key_index: alloy_primitives::U256::ZERO,
             ephemeral_pubkey_x: B256::ZERO,
             ephemeral_pubkey_y_parity: 0x02,
@@ -3729,7 +3729,7 @@ impl L1Fixture {
             to,
             amount,
             fee: 0,
-            bounceback_recipient: sender,
+            tempo_refund_recipient: sender,
             memo: B256::ZERO,
         }
     }
@@ -3786,7 +3786,7 @@ impl L1Fixture {
             sender,
             amount,
             fee: 0,
-            bounceback_recipient: sender,
+            tempo_refund_recipient: sender,
             key_index,
             ephemeral_pubkey_x: eph_pub_x,
             ephemeral_pubkey_y_parity: eph_pub_y_parity,
