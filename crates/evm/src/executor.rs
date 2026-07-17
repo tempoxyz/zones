@@ -7,7 +7,10 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, CommitChanges, ExecutableTx,
+        GasOutput,
+    },
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
@@ -20,8 +23,9 @@ use tempo_precompiles::{
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
+use zone_l1::state::L1StateProvider;
 
-use crate::{ZoneEvm, tx_context};
+use crate::{AnchoredZoneDb, ZoneEvm, tx_context};
 
 /// Simplified block executor for zone nodes.
 ///
@@ -34,7 +38,7 @@ pub struct ZoneBlockExecutor<'a, DB: Database, I> {
 impl<'a, DB, I> ZoneBlockExecutor<'a, DB, I>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<DB>>,
+    I: Inspector<TempoContext<AnchoredZoneDb<DB, L1StateProvider>>>,
 {
     /// Create a zone block executor for `evm` and the current block context.
     pub fn new(
@@ -82,7 +86,7 @@ where
 impl<'a, DB, I> BlockExecutor for ZoneBlockExecutor<'a, DB, I>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<DB>>,
+    I: Inspector<TempoContext<AnchoredZoneDb<DB, L1StateProvider>>>,
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
@@ -99,13 +103,31 @@ where
     ) -> Result<Self::Result, BlockExecutionError> {
         let (tx_env, recovered) = tx.into_parts();
 
-        // Override the validator's fee token preference to match this
-        // transaction's resolved fee token, so the handler skips FeeAMM.
-        self.override_validator_token();
+        // System txs do not pay protocol fees. Resolving their validator token here could read L1
+        // policy state at N before `advanceTempo` moves the controller to N+1, causing the anchor
+        // advancement to fail. Thus, FeeAMM override is restricted to regular fee-paying txs.
+        if !tx_env.is_system_tx {
+            self.override_validator_token();
+        }
 
         let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
         self.inner
             .execute_transaction_without_commit((tx_env, recovered))
+    }
+
+    /// Restores execution-local L1 anchor state when a simulated transaction is not committed.
+    fn execute_transaction_with_commit_condition(
+        &mut self,
+        tx: impl ExecutableTx<Self>,
+        f: impl FnOnce(&Self::Result) -> CommitChanges,
+    ) -> Result<Option<GasOutput>, BlockExecutionError> {
+        let snapshot = self.evm().anchor_controller().phase();
+        let output = self.execute_transaction_without_commit(tx)?;
+        if !f(&output).should_commit() {
+            self.evm().anchor_controller().restore(snapshot);
+            return Ok(None);
+        }
+        Ok(Some(self.commit_transaction(output)))
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {

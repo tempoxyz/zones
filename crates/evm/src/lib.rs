@@ -7,18 +7,22 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
 
+mod database;
 mod executor;
-mod fee_manager;
 pub mod precompiles;
+#[cfg(test)]
+mod test_utils;
 mod tx_context;
+mod validation;
 mod zone_evm;
 
+pub use database::{AnchoredZoneDb, AnchoredZoneDbError};
 pub use executor::ZoneBlockExecutor;
+pub use validation::{AdvanceTempoValidationError, validate_advance_tempo_transactions};
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
-    fee_manager::ZoneFeeManager,
-    precompiles::{L1StorageReader, SequencerExt, extend_zone_precompiles},
+    precompiles::{L1AnchorController, L1StorageReader, SequencerExt, extend_zone_precompiles},
     tx_context::ZoneTxContext,
 };
 use alloy_evm::{
@@ -70,12 +74,12 @@ where
         Self { l1_reader }
     }
 
-    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
+    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>>(
         &self,
-        evm: TempoEvm<DB, I>,
-    ) -> TempoEvm<DB, I> {
+        mut evm: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
+        controller: L1AnchorController,
+    ) -> TempoEvm<AnchoredZoneDb<DB, L1>, I> {
         let cfg = evm.ctx().cfg.clone();
-        let mut evm = evm.with_fee_manager(ZoneFeeManager::new(self.l1_reader.clone()));
         let (_, _, precompiles) = evm.components_mut();
         let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_reader.clone());
         extend_zone_precompiles(
@@ -85,6 +89,7 @@ where
             sequencer,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
+            controller,
         );
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         evm
@@ -95,8 +100,8 @@ impl<L1> EvmFactory for ZoneEvmFactory<L1>
 where
     L1: L1StorageReader + SequencerExt,
 {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I>;
-    type Context<DB: Database> = TempoCtx<DB>;
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I, L1>;
+    type Context<DB: Database> = TempoCtx<AnchoredZoneDb<DB, L1>>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
     type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
     type HaltReason = TempoHaltReason;
@@ -109,8 +114,13 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
+        let controller = L1AnchorController::default();
+        let db = AnchoredZoneDb::new(db, self.l1_reader.clone(), controller.clone());
         let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(self.register_precompiles(evm))
+        ZoneEvm::new(
+            self.register_precompiles(evm, controller.clone()),
+            controller,
+        )
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -119,8 +129,13 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
+        let controller = L1AnchorController::default();
+        let db = AnchoredZoneDb::new(db, self.l1_reader.clone(), controller.clone());
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(self.register_precompiles(evm))
+        ZoneEvm::new(
+            self.register_precompiles(evm, controller.clone()),
+            controller,
+        )
     }
 }
 
@@ -253,7 +268,8 @@ impl BlockExecutorFactory for ZoneEvmConfig {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
     type TxExecutionResult = EthTxResult<TempoHaltReason, TempoTxType>;
-    type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<DB>>> = ZoneBlockExecutor<'a, DB, I>;
+    type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1StateProvider>>>> =
+        ZoneBlockExecutor<'a, DB, I>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         &self.zone_factory
@@ -266,7 +282,7 @@ impl BlockExecutorFactory for ZoneEvmConfig {
     ) -> Self::Executor<'a, DB, I>
     where
         DB: StateDB,
-        I: Inspector<TempoCtx<DB>>,
+        I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1StateProvider>>>,
     {
         ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
     }
@@ -313,6 +329,9 @@ impl ConfigureEvm for ZoneEvmConfig {
         use alloy_consensus::BlockHeader;
         use alloy_evm::eth::EthBlockExecutionCtx;
         use std::borrow::Cow;
+
+        validate_advance_tempo_transactions(&block.body().transactions)
+            .map_err(|err| TempoEvmError::InvalidEvmConfig(err.to_string()))?;
 
         Ok(TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
@@ -373,11 +392,23 @@ impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestL1;
+    use alloy_evm::revm::database::EmptyDB;
     use reth_chainspec::{EthChainSpec, ForkCondition};
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{DEV, MODERATO, TempoHardforks},
     };
+
+    #[test]
+    fn factory_context_adapts_and_recovers_original_database() {
+        let factory = ZoneEvmFactory::new(TestL1::default());
+        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv::default());
+        let _: &EmptyDB = evm.db();
+        let _: &mut EmptyDB = evm.db_mut();
+        let (db, _) = evm.finish();
+        let _: EmptyDB = db;
+    }
 
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {

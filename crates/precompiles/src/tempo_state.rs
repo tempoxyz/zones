@@ -3,9 +3,9 @@
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
 //! preserving the zone-facing checkpoint and Tempo storage read ABI.
 
-use alloc::{format, vec::Vec};
+use alloc::{format, string::ToString, vec::Vec};
 
-use crate::storage::L1StorageReader;
+use crate::storage::{L1AnchorController, L1StorageReader};
 use alloy_consensus::BlockHeader;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
@@ -31,6 +31,9 @@ pub struct TempoState {
     tempo_block_hash: B256,
     tempo_block_number: u64,
 }
+
+/// Storage slot containing the finalized Tempo block number in Zone state.
+pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
 
 impl TempoState {
     /// Initializes the predeploy account code and checkpoint from the genesis Tempo header.
@@ -79,6 +82,7 @@ impl TempoState {
 
     fn apply_checkpoint(
         &mut self,
+        controller: &L1AnchorController,
         sender: Address,
         call: TempoStateAbi::finalizeTempoCall,
     ) -> PrecompileResult {
@@ -114,6 +118,12 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
+        if let Err(err) = controller.begin_advance(prev_block_number, header.number()) {
+            return self
+                .storage
+                .error_result(TempoPrecompileError::Fatal(err.to_string()));
+        }
+
         let tempo_block_hash = match self.write_checkpoint(&call.header, header.number()) {
             Ok(hash) => hash,
             Err(err) => return self.storage.error_result(err),
@@ -132,6 +142,7 @@ impl TempoState {
     fn read_tempo_storage_slot<P: L1StorageReader>(
         &mut self,
         provider: &P,
+        controller: &L1AnchorController,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotCall,
     ) -> PrecompileResult {
@@ -144,6 +155,11 @@ impl TempoState {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
+        if let Err(err) = controller.observe_read(block_number) {
+            return self
+                .storage
+                .error_result(TempoPrecompileError::Fatal(err.to_string()));
+        }
         let value = provider.read_l1_storage(call.account, call.slot, block_number)?;
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
@@ -153,6 +169,7 @@ impl TempoState {
     fn read_tempo_storage_slots<P: L1StorageReader>(
         &mut self,
         provider: &P,
+        controller: &L1AnchorController,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotsCall,
     ) -> PrecompileResult {
@@ -165,6 +182,11 @@ impl TempoState {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
+        if let Err(err) = controller.observe_read(block_number) {
+            return self
+                .storage
+                .error_result(TempoPrecompileError::Fatal(err.to_string()));
+        }
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
             values.push(provider.read_l1_storage(call.account, slot, block_number)?);
@@ -178,6 +200,7 @@ impl TempoState {
     pub(crate) fn call_with_provider<P: L1StorageReader>(
         &mut self,
         provider: &P,
+        controller: &L1AnchorController,
         calldata: &[u8],
         msg_sender: Address,
     ) -> PrecompileResult {
@@ -191,12 +214,12 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
-                    finalizeTempo(call) => self.apply_checkpoint(msg_sender, call),
+                    finalizeTempo(call) => self.apply_checkpoint(controller, msg_sender, call),
                     readTempoStorageSlot(call) => {
-                        self.read_tempo_storage_slot(provider, msg_sender, call)
+                        self.read_tempo_storage_slot(provider, controller, msg_sender, call)
                     },
                     readTempoStorageSlots(call) => {
-                        self.read_tempo_storage_slots(provider, msg_sender, call)
+                        self.read_tempo_storage_slots(provider, controller, msg_sender, call)
                     },
                 }
             },
@@ -208,8 +231,11 @@ impl TempoState {
 mod tests {
     use super::*;
 
-    use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_storage_provider,
+    use crate::{
+        storage::L1AnchorPhase,
+        test_utils::{
+            MockL1Reader, TestContext, call_precompile, test_context, test_storage_provider,
+        },
     };
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
@@ -318,13 +344,111 @@ mod tests {
     }
 
     #[test]
+    fn explicit_read_before_finalize_blocks_advancement() -> eyre::Result<()> {
+        let genesis = child_header(B256::repeat_byte(0xaa), 10);
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+        let controller = L1AnchorController::default();
+        let precompile = TempoState::create(
+            MockL1Reader::returning(B256::repeat_byte(0x11)),
+            controller.clone(),
+            &ctx.cfg.clone(),
+        );
+
+        let read = TempoStateAbi::readTempoStorageSlotCall {
+            account: Address::repeat_byte(0x44),
+            slot: B256::ZERO,
+        };
+        call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            read.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            controller.phase(),
+            L1AnchorPhase::Parent {
+                anchor: 10,
+                has_read_l1: true
+            }
+        );
+
+        let child = encode_header(&child_header(genesis_hash, 11));
+        assert!(
+            call(
+                &mut ctx,
+                &precompile,
+                ZONE_INBOX_ADDRESS,
+                finalize_calldata(child),
+                false,
+            )
+            .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_read_after_finalize_uses_advanced_anchor() -> eyre::Result<()> {
+        let genesis = child_header(B256::repeat_byte(0xaa), 10);
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+        let controller = L1AnchorController::default();
+        let reader = MockL1Reader::returning(B256::repeat_byte(0x11));
+        let precompile = TempoState::create(reader.clone(), controller.clone(), &ctx.cfg.clone());
+
+        let child = encode_header(&child_header(genesis_hash, 11));
+        call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            finalize_calldata(child),
+            false,
+        )?;
+        let read = TempoStateAbi::readTempoStorageSlotCall {
+            account: Address::repeat_byte(0x44),
+            slot: B256::ZERO,
+        };
+        call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            read.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            controller.phase(),
+            L1AnchorPhase::Advanced {
+                from: 10,
+                to: 11,
+                has_read_l1: true,
+            }
+        );
+        assert!(
+            reader
+                .storage_requests()
+                .iter()
+                .all(|request| request.2 == 11)
+        );
+        Ok(())
+    }
+
+    #[test]
     fn initialize_sets_checkpoint() -> eyre::Result<()> {
         let header = child_header(B256::repeat_byte(0xaa), 42);
         let header_rlp = encode_header(&header);
         let mut ctx = test_context();
         initialize(&mut ctx, &header_rlp)?;
 
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         assert_checkpoint(&mut ctx, &precompile, keccak256(&header_rlp), 42)?;
 
         Ok(())
@@ -341,7 +465,11 @@ mod tests {
         let child = child_header(genesis_hash, 1);
         let child_rlp = encode_header(&child);
         let child_hash = keccak256(&child_rlp);
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
 
         let output = call(
             &mut ctx,
@@ -365,7 +493,11 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,
@@ -386,7 +518,11 @@ mod tests {
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
 
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let calldata = TempoStateAbi::tempoBlockHashCall {}.abi_encode();
         let output = call_precompile(
             &mut ctx,
@@ -417,7 +553,11 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,
@@ -440,7 +580,11 @@ mod tests {
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
 
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,
@@ -466,7 +610,11 @@ mod tests {
         let child_rlp = encode_header(&child_header(genesis_hash, 1));
         let mut malformed = child_rlp.to_vec();
         malformed.push(0);
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,
@@ -490,7 +638,11 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(B256::ZERO, 1));
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,
@@ -514,7 +666,11 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let child_rlp = encode_header(&child_header(genesis_hash, 2));
-        let precompile = TempoState::create(MockL1Reader::default(), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::default(),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,
@@ -536,7 +692,11 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let expected = b256!("0xabababababababababababababababababababababababababababababababab");
-        let precompile = TempoState::create(MockL1Reader::returning(expected), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::returning(expected),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let calldata: Bytes = TempoStateAbi::readTempoStorageSlotCall {
             account: address!("0x0000000000000000000000000000000000009999"),
             slot: B256::ZERO,
@@ -569,7 +729,11 @@ mod tests {
         initialize(&mut ctx, &genesis_rlp)?;
 
         let expected = b256!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
-        let precompile = TempoState::create(MockL1Reader::returning(expected), &ctx.cfg.clone());
+        let precompile = TempoState::create(
+            MockL1Reader::returning(expected),
+            L1AnchorController::default(),
+            &ctx.cfg.clone(),
+        );
         let output = call(
             &mut ctx,
             &precompile,

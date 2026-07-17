@@ -4,9 +4,9 @@
 //! Before forwarding a call to Tempo, [`TIP20Rules`] applies only zone-specific checks:
 //! privacy-gated reads, fixed gas for selected selectors, and bridge mint/burn callers.
 //!
-//! Accepted calldata and callers are forwarded unchanged to Tempo against the zone's
-//! L1-backed storage provider. The provider preserves ordinary zone-local token state
-//! while exposing selected policy values from finalized Tempo L1 state.
+//! Accepted calldata and callers are forwarded unchanged to Tempo. Ordinary token state remains
+//! Zone-local while the EVM context's database adapter exposes selected policy values from the
+//! finalized Tempo L1 state.
 
 use alloc::sync::Arc;
 
@@ -179,8 +179,7 @@ mod tests {
     use tempo_zone_contracts::Unauthorized;
 
     use crate::test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_l1_env,
-        test_storage_provider,
+        TestContext, call_precompile, test_context, test_protocol_env, test_storage_provider,
     };
 
     #[derive(Clone, Copy)]
@@ -205,11 +204,7 @@ mod tests {
     }
 
     impl PrecompileHarness {
-        fn new(l1_reader: MockL1Reader) -> eyre::Result<Self> {
-            Self::new_with_l1(l1_reader)
-        }
-
-        fn new_with_l1(l1_reader: MockL1Reader) -> eyre::Result<Self> {
+        fn new() -> eyre::Result<Self> {
             let token = PATH_USD_ADDRESS;
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
@@ -266,9 +261,7 @@ mod tests {
                 })?;
             }
 
-            l1_reader.seed_transfer_policy_id(token, 7);
-
-            let env = test_l1_env(&ctx, l1_reader);
+            let env = test_protocol_env(&ctx);
             let precompile = crate::create_tip20_precompile(
                 token,
                 &env,
@@ -326,7 +319,7 @@ mod tests {
 
     #[test]
     fn balance_of_enforces_account_or_sequencer_access() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
         let calldata: Bytes = ITIP20::balanceOfCall {
             account: harness.alice,
         }
@@ -354,7 +347,7 @@ mod tests {
 
     #[test]
     fn allowance_enforces_owner_spender_or_sequencer_access() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
         let calldata: Bytes = ITIP20::allowanceCall {
             owner: harness.alice,
             spender: harness.spender,
@@ -389,7 +382,7 @@ mod tests {
 
     #[test]
     fn wrapper_still_enforces_privacy_and_fixed_gas() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
 
         let private_balance = harness.call(
             harness.bob,
@@ -431,7 +424,7 @@ mod tests {
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let to = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
-        let env = test_l1_env(&ctx, MockL1Reader::failing());
+        let env = test_protocol_env(&ctx);
         let precompile =
             crate::create_tip20_precompile(token, &env, Arc::new(MockSequencer { address: None }));
         let calldata: Bytes = ITIP20::transferCall {
@@ -463,7 +456,7 @@ mod tests {
 
     #[test]
     fn malformed_calldata_uses_upstream_dispatch() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
 
         let balance_of = harness.call(
             harness.alice,
@@ -489,7 +482,7 @@ mod tests {
 
     #[test]
     fn bridge_auth_rejects_crossed_system_calls_and_keeps_allowed_paths() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
 
         let inbox_mint = harness.call(
             ZONE_INBOX_ADDRESS,
@@ -556,7 +549,7 @@ mod tests {
 
     #[test]
     fn fixed_gas_selectors_charge_exactly_one_hundred_thousand_gas() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
 
         let approve = harness.call(
             harness.alice,
@@ -665,7 +658,7 @@ mod tests {
 
     #[test]
     fn fixed_gas_selectors_fail_out_of_gas_below_threshold() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
 
         for calldata in [
             ITIP20::transferCall {
@@ -715,7 +708,7 @@ mod tests {
 
     #[test]
     fn fixed_gas_keeps_allowance_and_balance_state_changes_intact() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
 
         let approve = harness.call(
             harness.alice,
@@ -752,140 +745,8 @@ mod tests {
     }
 
     #[test]
-    fn l1_blacklist_denies_transfer_sender_and_recipient() -> eyre::Result<()> {
-        let sender_l1 = MockL1Reader::with_policy_id(42);
-        let mut sender_harness = PrecompileHarness::new(sender_l1.clone())?;
-        sender_l1.seed_blacklist_policy(42, &[sender_harness.alice])?;
-        let sender_result = sender_harness.call(
-            sender_harness.alice,
-            ITIP20::transferCall {
-                to: sender_harness.bob,
-                amount: U256::from(100u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert!(sender_result.is_revert());
-        assert_eq!(
-            sender_result.bytes,
-            Bytes::from(TIP20Error::policy_forbids().selector().to_vec())
-        );
-        assert_eq!(sender_result.gas_used, TIP20_FIXED_TRANSFER_GAS);
-
-        let recipient_l1 = MockL1Reader::with_policy_id(42);
-        let mut recipient_harness = PrecompileHarness::new(recipient_l1.clone())?;
-        recipient_l1.seed_blacklist_policy(42, &[recipient_harness.bob])?;
-        let recipient_result = recipient_harness.call(
-            recipient_harness.alice,
-            ITIP20::transferCall {
-                to: recipient_harness.bob,
-                amount: U256::from(100u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert!(recipient_result.is_revert());
-        assert_eq!(
-            recipient_result.bytes,
-            Bytes::from(TIP20Error::policy_forbids().selector().to_vec())
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn l1_policy_denies_mint_recipient() -> eyre::Result<()> {
-        let l1 = MockL1Reader::with_policy_id(43);
-        let mut harness = PrecompileHarness::new(l1.clone())?;
-        l1.seed_blacklist_policy(43, &[harness.bob])?;
-
-        let result = harness.call(
-            ZONE_INBOX_ADDRESS,
-            ITIP20::mintCall {
-                to: harness.bob,
-                amount: U256::from(100u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(result.is_revert());
-        assert_eq!(
-            result.bytes,
-            Bytes::from(TIP20Error::policy_forbids().selector().to_vec())
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn transfer_policy_id_reflects_l1_policy_storage_not_local_default() -> eyre::Result<()> {
-        let l1_policy_id = 99;
-        let mut harness = PrecompileHarness::new(MockL1Reader::with_policy_id(l1_policy_id))?;
-
-        let result = harness.call(
-            harness.alice,
-            ITIP20::transferPolicyIdCall {}.abi_encode().into(),
-            100_000,
-            true,
-        )?;
-        assert!(result.is_success());
-        assert_eq!(
-            ITIP20::transferPolicyIdCall::abi_decode_returns(&result.bytes)?,
-            l1_policy_id
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn transfer_fails_closed_on_policy_resolution_error() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::failing())?;
-
-        let calldata: Bytes = ITIP20::transferCall {
-            to: harness.bob,
-            amount: U256::from(100u64),
-        }
-        .abi_encode()
-        .into();
-
-        let result = harness.call(harness.alice, calldata, 100_000, false);
-        assert!(
-            result.is_err(),
-            "transfer must fail when policy resolution errors"
-        );
-
-        Ok(())
-    }
-
-    #[test]
-    fn mint_fails_on_l1_storage_error() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::failing())?;
-
-        let calldata: Bytes = ITIP20::mintCall {
-            to: harness.alice,
-            amount: U256::from(100u64),
-        }
-        .abi_encode()
-        .into();
-
-        let result = harness.call(ZONE_INBOX_ADDRESS, calldata, 100_000, false);
-        assert!(
-            result.is_err(),
-            "mint must fail when upstream TIP-20 cannot read L1 policy storage"
-        );
-
-        Ok(())
-    }
-
-    #[test]
     fn has_role_enforces_account_or_sequencer_access() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new(MockL1Reader::allow_all())?;
+        let mut harness = PrecompileHarness::new()?;
         let calldata: Bytes = IRolesAuth::hasRoleCall {
             account: harness.alice,
             role: *ISSUER_ROLE,

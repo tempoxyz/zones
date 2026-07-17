@@ -327,8 +327,7 @@ dependencies = [
 [[package]]
 name = "alloy-evm"
 version = "0.37.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "acde665074b478c97047dc2a461b4916cac77922d690e5b7415d1941ae7ff7bf"
+source = "git+https://github.com/alloy-rs/evm?rev=ce6b773ab958548e37fe195b21412a2a1638706e#ce6b773ab958548e37fe195b21412a2a1638706e"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
@@ -13435,6 +13434,7 @@ dependencies = [
  "tempo-primitives",
  "tempo-revm",
  "tempo-zone-contracts",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "zone-chainspec",
@@ -13625,6 +13625,7 @@ dependencies = [
  "tempo-zone-contracts",
  "tracing",
  "zone-chainspec",
+ "zone-evm",
  "zone-l1",
  "zone-precompiles",
 ]

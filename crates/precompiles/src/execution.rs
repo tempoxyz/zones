@@ -1,22 +1,15 @@
-//! Shared execution for zone-native and L1-backed Tempo precompiles.
+//! Shared execution for Zone-native and upstream Tempo precompiles.
 //!
-//! Both helpers install an EVM-backed [`StorageCtx`], apply zone-specific [`CallRules`], and
-//! forward admitted calls without changing their calldata or caller.
-//!
-//! # Execution modes
-//!
-//! - [`create_local_precompile`] executes against ordinary zone-local EVM state.
-//! - [`create_l1_backed_precompile`] reads the finalized Tempo block recorded in `TempoState` and
-//!   overlays selected policy storage from that exact L1 block. Execution uses the active Tempo
-//!   hardfork already selected by the composed Zone EVM configuration.
+//! Both helpers install an EVM-backed [`StorageCtx`], apply Zone-specific [`CallRules`], and
+//! forward admitted calls without changing their calldata or caller. Protocol storage reaches the
+//! execution-local anchored database through the ordinary revm journal.
 //!
 //! # Call ordering
 //!
-//! 1. L1-backed execution rejects delegate calls before storage access.
+//! 1. Protocol execution rejects delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply the local phase of [`CallRules`]. Rejected calls return without touching L1.
-//! 4. For admitted L1-backed calls, resolve the anchor and install the storage overlay, then apply
-//!    the L1-backed rules phase.
+//! 3. Apply the local phase of [`CallRules`].
+//! 4. Apply rules that may inspect anchored state through ordinary EVM storage.
 //! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Rule-level rejections include calldata input gas. Calls without a fixed charge retain normal
@@ -37,32 +30,22 @@ use tempo_precompiles::{
     storage_credits::NonCreditableSlots,
 };
 
-use crate::storage::{L1StorageReader, ZonePrecompileStorageProvider};
-
-/// Shared inputs for precompiles executing over finalized Tempo state.
-///
-/// Each call combines zone EVM configuration and accounting state with an L1 reader. The exact
-/// L1 block is resolved from the local `TempoState` anchor during execution, while the active
-/// hardfork comes from the configuration already resolved by the composed Zone EVM.
+/// Shared inputs for protocol precompiles whose storage is provided by the EVM context.
 #[derive(Clone)]
-pub(crate) struct L1BackedPrecompileEnv<P> {
+pub(crate) struct ProtocolPrecompileEnv {
     cfg: revm::context::CfgEnv<TempoHardfork>,
-    l1_reader: P,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
 }
 
-impl<P> L1BackedPrecompileEnv<P> {
-    /// Capture the configuration and providers shared by L1-backed calls.
+impl ProtocolPrecompileEnv {
     pub(crate) fn new(
         cfg: &revm::context::CfgEnv<TempoHardfork>,
-        l1_reader: P,
         actions: StorageActions,
         non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> Self {
         Self {
             cfg: cfg.clone(),
-            l1_reader,
             actions,
             non_creditable_slots,
         }
@@ -108,8 +91,7 @@ impl<'a> ZoneCall<'a> {
 pub(crate) enum CallCheck {
     /// Allow the call and invoke the supplied precompile implementation.
     ///
-    /// For L1-backed precompiles, this forwards to upstream Tempo with the zone's finalized L1
-    /// storage overlay active.
+    /// Protocol precompiles observe finalized L1 policy state through the EVM database adapter.
     Continue,
     /// Reject the call without invoking the supplied implementation.
     ///
@@ -120,8 +102,8 @@ pub(crate) enum CallCheck {
 /// Selector-, caller-, and call-context-dependent rules evaluated by centralized precompile
 /// execution before invoking the implementation.
 ///
-/// The local phase runs against ordinary zone state before any optional finalized-L1 resolution.
-/// L1-backed execution then runs a second phase against the exact anchored overlay. Rules may
+/// The local phase runs before rules that may inspect finalized L1 state. Anchored reads in either
+/// phase are resolved by the EVM database adapter. Rules may
 /// enforce admission policy and duplicate cheap business checks as fail-fast preflight, but the
 /// precompile implementation remains responsible for its canonical business invariants.
 pub(crate) trait CallRules: 'static {
@@ -138,10 +120,7 @@ pub(crate) trait CallRules: 'static {
         CallCheck::Continue
     }
 
-    /// Apply rules whose answer must come from the finalized Tempo L1-backed storage overlay.
-    ///
-    /// This phase runs only for L1-backed execution, after the anchor and overlay have been
-    /// resolved.
+    /// Apply rules whose answer must come from finalized Tempo L1-backed storage.
     fn check_with_l1_backed_state(&self, _call: ZoneCall<'_>) -> CallCheck {
         CallCheck::Continue
     }
@@ -212,18 +191,13 @@ pub(crate) fn create_local_precompile(
     })
 }
 
-/// Create a direct-call-only precompile backed by the finalized Tempo L1 anchor.
+/// Create a direct-call-only protocol precompile using ordinary EVM storage.
 ///
-/// The helper rejects delegate calls before any storage access, reads the `TempoState` anchor once,
-/// and constructs [`ZonePrecompileStorageProvider`] with that exact block. The active hardfork
-/// comes from the composed Zone EVM configuration rather than the anchor. Any anchor or L1 storage
-/// failure is returned as a precompile error rather than falling back to local or latest state.
-///
-/// Calls admitted by `rules` are forwarded to `execute` with their original calldata and caller
-/// while the L1 overlay is active.
-pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
+/// The Zone EVM's database adapter supplies anchored policy values below the revm journal, so this
+/// helper does not install a per-precompile storage wrapper.
+pub(crate) fn create_protocol_precompile(
     id: &'static str,
-    env: L1BackedPrecompileEnv<P>,
+    env: ProtocolPrecompileEnv,
     rules: impl CallRules,
     execute: impl Fn(&[u8], Address) -> PrecompileResult + 'static,
 ) -> DynPrecompile {
@@ -232,7 +206,6 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
     let gas_params = env.cfg.gas_params;
     let actions = env.actions;
     let non_creditable_slots = env.non_creditable_slots;
-    let l1_reader = env.l1_reader;
 
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
         let call = ZoneCall::new(&input);
@@ -252,7 +225,7 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
             ));
         }
 
-        let mut inner = EvmPrecompileStorageProvider::new(
+        let mut storage = EvmPrecompileStorageProvider::new(
             input.internals,
             fixed_gas.map_or(input.gas, |_| u64::MAX),
             input.reservoir,
@@ -264,18 +237,13 @@ pub(crate) fn create_l1_backed_precompile<P: L1StorageReader>(
         .with_actions(actions.clone())
         .with_non_creditable_slots(non_creditable_slots.clone());
 
-        match StorageCtx::enter(&mut inner, || rules.check_with_local_state(call)) {
+        match StorageCtx::enter(&mut storage, || rules.check_with_local_state(call)) {
             CallCheck::Continue => {}
             CallCheck::Return(result) => {
-                let result = StorageCtx::enter(&mut inner, || add_input_cost(call.data, result));
+                let result = StorageCtx::enter(&mut storage, || add_input_cost(call.data, result));
                 return apply_fixed_gas(result, fixed_gas);
             }
         }
-
-        let mut storage = match ZonePrecompileStorageProvider::try_new(inner, l1_reader.clone()) {
-            Ok(storage) => storage,
-            Err(err) => return err.into_precompile_result(),
-        };
 
         if let Some(check_result) = StorageCtx::enter(&mut storage, || {
             match rules.check_with_l1_backed_state(call) {
@@ -314,10 +282,7 @@ fn add_input_cost(calldata: &[u8], mut result: PrecompileResult) -> PrecompileRe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        tempo_state::slots as tempo_state_slots,
-        test_utils::{MockL1Reader, test_context, test_storage_provider},
-    };
+    use crate::test_utils::{test_context, test_storage_provider};
     use alloy_evm::{
         EvmInternals,
         precompiles::{Precompile as _, PrecompileInput},
@@ -327,7 +292,6 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
-    use tempo_precompiles::storage::PrecompileStorageProvider;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
@@ -407,21 +371,18 @@ mod tests {
     }
 
     #[test]
-    fn l1_backed_admission_precedes_anchored_provider() {
-        let anchor = 42;
-        let reader = MockL1Reader::default();
+    fn protocol_precompile_applies_admission_and_evm_spec() {
         let observed_spec = Rc::new(Cell::new(None));
         let execute_spec = observed_spec.clone();
         let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
         cfg.spec = TempoHardfork::T8;
-        let env = L1BackedPrecompileEnv::new(
+        let env = ProtocolPrecompileEnv::new(
             &cfg,
-            reader,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
         let checked = Rc::new(Cell::new(false));
-        let rejected = create_l1_backed_precompile(
+        let rejected = create_protocol_precompile(
             "L1AdmissionTest",
             env.clone(),
             RejectRules(checked.clone()),
@@ -437,17 +398,10 @@ mod tests {
         assert!(checked.get());
 
         let precompile =
-            create_l1_backed_precompile("L1BackedTest", env, NoCallRules, move |_, _| {
+            create_protocol_precompile("ProtocolTest", env, NoCallRules, move |_, _| {
                 execute_spec.set(Some(StorageCtx::default().spec()));
                 Ok(StorageCtx::default().success_output(Bytes::new()))
             });
-        test_storage_provider(&mut ctx, u64::MAX, false)
-            .sstore(
-                tempo_zone_contracts::TEMPO_STATE_ADDRESS,
-                tempo_state_slots::TEMPO_BLOCK_NUMBER,
-                U256::from(anchor),
-            )
-            .unwrap();
 
         precompile
             .call(input(&mut ctx, &[], Address::ZERO, u64::MAX))

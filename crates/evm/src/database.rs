@@ -1,0 +1,347 @@
+//! Execution-local database adapter for Tempo-owned state mirrored into a Zone.
+
+use std::{collections::HashMap, fmt};
+
+use alloy_evm::Database;
+use alloy_primitives::{Address, B256, U256};
+use revm::{
+    context::{
+        DBErrorMarker,
+        result::{AnyError, EVMError},
+    },
+    database_interface::Database as RevmDatabase,
+    precompile::PrecompileError,
+    primitives::{AddressMap, StorageKey, StorageValue},
+    state::{Account, AccountInfo, Bytecode},
+};
+use thiserror::Error;
+use zone_precompiles::{
+    TIP403_REGISTRY_ADDRESS,
+    storage::{self, L1AnchorController, L1AnchorError, L1StorageReader},
+    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
+};
+use zone_primitives::constants::TEMPO_STATE_ADDRESS;
+
+/// Database error produced by [`AnchoredZoneDb`].
+#[derive(Debug, Error)]
+pub enum AnchoredZoneDbError<E> {
+    /// Error from the caller-provided database.
+    #[error("inner database error: {0}")]
+    Inner(#[source] E),
+    /// The selected Zone state contains an invalid Tempo anchor.
+    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
+    AnchorOverflow(U256),
+    /// The execution-local anchor transition is inconsistent.
+    #[error(transparent)]
+    AnchorTransition(#[from] L1AnchorError),
+    /// Exact anchored L1 storage was unavailable.
+    #[error("Tempo L1 storage unavailable address={address} slot={slot} block={anchor}: {source}")]
+    L1Read {
+        address: Address,
+        slot: B256,
+        anchor: u64,
+        #[source]
+        source: PrecompileError,
+    },
+    /// A transaction attempted to persist mirrored Tempo-owned state.
+    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
+    L1Write { address: Address, slot: U256 },
+}
+
+impl<E: DBErrorMarker> DBErrorMarker for AnchoredZoneDbError<E> {}
+
+impl<E: DBErrorMarker> AnchoredZoneDbError<E> {
+    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
+        match self {
+            Self::Inner(error) => EVMError::Database(error),
+            error => EVMError::CustomAny(AnyError::new(error)),
+        }
+    }
+}
+
+// TODO(rusowsky): remove once TIP-1092 is implemented
+#[derive(Debug, Clone, Copy)]
+struct PackedPolicySlot {
+    local: U256,
+    l1: U256,
+}
+
+/// Database adapter that resolves Tempo-owned policy storage at the Zone's finalized L1 anchor.
+pub struct AnchoredZoneDb<DB, L1> {
+    inner: DB,
+    l1: L1,
+    controller: L1AnchorController,
+    // TODO(rusowsky): remove once TIP-1092 is implemented
+    packed_policy_slots: HashMap<(Address, U256), PackedPolicySlot>,
+}
+
+impl<DB: fmt::Debug, L1> fmt::Debug for AnchoredZoneDb<DB, L1> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnchoredZoneDb")
+            .field("inner", &self.inner)
+            .field("controller", &self.controller)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<DB, L1> AnchoredZoneDb<DB, L1> {
+    /// Creates an adapter around the caller-provided database.
+    pub fn new(inner: DB, l1: L1, controller: L1AnchorController) -> Self {
+        Self {
+            inner,
+            l1,
+            controller,
+            packed_policy_slots: HashMap::new(),
+        }
+    }
+
+    /// Returns the original caller-provided database.
+    pub const fn inner(&self) -> &DB {
+        &self.inner
+    }
+
+    /// Returns the original caller-provided database mutably.
+    pub const fn inner_mut(&mut self) -> &mut DB {
+        &mut self.inner
+    }
+
+    /// Recovers the original caller-provided database.
+    pub fn into_inner(self) -> DB {
+        self.inner
+    }
+
+    /// Returns the execution-local anchor controller.
+    pub const fn controller(&self) -> &L1AnchorController {
+        &self.controller
+    }
+}
+
+impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
+    fn anchor(&mut self) -> Result<u64, AnchoredZoneDbError<DB::Error>> {
+        if let Some(anchor) = self.controller.current() {
+            return Ok(anchor);
+        }
+
+        let value = self
+            .inner
+            .storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)
+            .map_err(AnchoredZoneDbError::Inner)?;
+        let anchor =
+            u64::try_from(value).map_err(|_| AnchoredZoneDbError::AnchorOverflow(value))?;
+        self.controller
+            .initialize(anchor)
+            .map_err(AnchoredZoneDbError::AnchorTransition)
+    }
+
+    fn l1_storage(
+        &self,
+        address: Address,
+        slot: U256,
+        anchor: u64,
+    ) -> Result<U256, AnchoredZoneDbError<DB::Error>> {
+        self.l1
+            .read_l1_storage(address, B256::from(slot), anchor)
+            .map(|value| value.into())
+            .map_err(|source| AnchoredZoneDbError::L1Read {
+                address,
+                slot: slot.into(),
+                anchor,
+                source,
+            })
+    }
+
+    /// Rejects registry writes and removes the mirrored field from packed TIP-20 transitions.
+    pub fn sanitize_state(
+        &self,
+        state: &mut AddressMap<Account>,
+    ) -> Result<(), AnchoredZoneDbError<DB::Error>> {
+        let l1_write = |address, slot| Err(AnchoredZoneDbError::L1Write { address, slot });
+
+        if let Some(account) = state.get(&TIP403_REGISTRY_ADDRESS) {
+            if account.info != account.original_info() {
+                return l1_write(TIP403_REGISTRY_ADDRESS, U256::ZERO);
+            }
+            for (slot, value) in &account.storage {
+                if value.is_changed() {
+                    return l1_write(TIP403_REGISTRY_ADDRESS, *slot);
+                }
+            }
+        }
+
+        // TODO(rusowsky): remove once TIP-1092 is implemented
+        for ((address, slot), observed) in &self.packed_policy_slots {
+            let Some(value) = state
+                .get_mut(address)
+                .and_then(|account| account.storage.get_mut(slot))
+            else {
+                continue;
+            };
+            if storage::merge_transfer_policy_id(U256::ZERO, value.present_value)
+                != storage::merge_transfer_policy_id(U256::ZERO, observed.l1)
+            {
+                return l1_write(*address, *slot);
+            }
+
+            value.original_value =
+                storage::merge_transfer_policy_id(value.original_value, observed.local);
+            value.present_value =
+                storage::merge_transfer_policy_id(value.present_value, observed.local);
+        }
+        Ok(())
+    }
+}
+
+impl<DB: Database, L1: L1StorageReader> RevmDatabase for AnchoredZoneDb<DB, L1> {
+    type Error = AnchoredZoneDbError<DB::Error>;
+
+    fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
+        self.inner
+            .basic(address)
+            .map_err(AnchoredZoneDbError::Inner)
+    }
+
+    fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        self.inner
+            .code_by_hash(code_hash)
+            .map_err(AnchoredZoneDbError::Inner)
+    }
+
+    fn storage(&mut self, address: Address, slot: StorageKey) -> Result<StorageValue, Self::Error> {
+        let local = self
+            .inner
+            .storage(address, slot)
+            .map_err(AnchoredZoneDbError::Inner)?;
+        if address != TIP403_REGISTRY_ADDRESS && !storage::is_tip20_policy_id_slot(address, slot) {
+            return Ok(local);
+        }
+
+        let anchor = self.anchor()?;
+        let l1 = self.l1_storage(address, slot, anchor)?;
+        self.controller
+            .observe_read(anchor)
+            .map_err(AnchoredZoneDbError::AnchorTransition)?;
+
+        if storage::is_tip20_policy_id_slot(address, slot) {
+            self.packed_policy_slots
+                .insert((address, slot), PackedPolicySlot { local, l1 });
+            Ok(storage::merge_transfer_policy_id(local, l1))
+        } else {
+            Ok(l1)
+        }
+    }
+
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        self.inner
+            .block_hash(number)
+            .map_err(AnchoredZoneDbError::Inner)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_utils::TestL1;
+    use revm::{
+        database::{CacheDB, EmptyDB},
+        state::EvmStorageSlot,
+    };
+    fn test_db(anchor: u64) -> CacheDB<EmptyDB> {
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_storage(
+            TEMPO_STATE_ADDRESS,
+            TEMPO_BLOCK_NUMBER_SLOT,
+            U256::from(anchor),
+        )
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn overlays_registry_at_selected_state_anchor() {
+        let anchor = 42;
+        let slot = U256::from(7);
+        let expected = U256::from(99);
+        let l1 = TestL1::default();
+        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
+        let mut db = AnchoredZoneDb::new(test_db(anchor), l1, L1AnchorController::default());
+
+        assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
+        assert_eq!(db.controller().current(), Some(anchor));
+    }
+
+    #[test]
+    fn l1_failures_and_read_before_advance_fail_closed() {
+        let anchor = 42;
+        let slot = U256::from(7);
+        let mut failing = AnchoredZoneDb::new(
+            test_db(anchor),
+            TestL1::failing_storage(),
+            L1AnchorController::default(),
+        );
+        assert!(matches!(
+            failing.storage(TIP403_REGISTRY_ADDRESS, slot),
+            Err(AnchoredZoneDbError::L1Read { anchor: 42, .. })
+        ));
+
+        let reader = TestL1::default();
+        reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
+        let controller = L1AnchorController::default();
+        let mut db = AnchoredZoneDb::new(test_db(anchor), reader.clone(), controller.clone());
+        assert_eq!(
+            db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(),
+            U256::ONE
+        );
+        assert!(controller.begin_advance(anchor, anchor + 1).is_err());
+        assert_eq!(reader.storage_requests().len(), 1);
+    }
+
+    #[test]
+    fn packed_policy_field_is_removed_from_canonical_transition() {
+        let anchor = 42;
+        let token = tempo_precompiles::PATH_USD_ADDRESS;
+        let slot = tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID;
+        let offset = tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
+        let local = storage::merge_transfer_policy_id(U256::from(10), U256::from(2) << offset);
+        let l1_value = U256::from(99) << offset;
+        let l1 = TestL1::default();
+        l1.insert(token, slot, anchor, l1_value);
+        let mut inner = test_db(anchor);
+        inner.insert_account_storage(token, slot, local).unwrap();
+        let mut db = AnchoredZoneDb::new(inner, l1, L1AnchorController::default());
+        let observed = db.storage(token, slot).unwrap();
+
+        let mut state = AddressMap::default();
+        let mut account = Account::default();
+        account.storage.insert(
+            slot,
+            EvmStorageSlot {
+                original_value: observed,
+                present_value: observed + U256::ONE,
+                ..Default::default()
+            },
+        );
+        state.insert(token, account);
+        db.sanitize_state(&mut state).unwrap();
+
+        let sanitized = state[&token].storage[&slot].present_value;
+        assert_eq!(
+            storage::merge_transfer_policy_id(U256::ZERO, sanitized),
+            storage::merge_transfer_policy_id(U256::ZERO, local)
+        );
+        assert_eq!(sanitized & U256::from(u64::MAX), U256::from(11));
+    }
+
+    #[test]
+    fn ordinary_storage_is_local_and_inner_database_is_recoverable() {
+        let address = Address::repeat_byte(0x11);
+        let slot = U256::from(3);
+        let value = U256::from(5);
+        let mut inner = test_db(1);
+        inner.insert_account_storage(address, slot, value).unwrap();
+        let mut db = AnchoredZoneDb::new(inner, TestL1::default(), L1AnchorController::default());
+
+        assert_eq!(db.storage(address, slot).unwrap(), value);
+        let mut inner: CacheDB<EmptyDB> = db.into_inner();
+        assert_eq!(inner.storage(address, slot).unwrap(), value);
+    }
+}

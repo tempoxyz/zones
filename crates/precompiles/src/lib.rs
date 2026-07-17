@@ -1,12 +1,9 @@
-//! Zone-native precompiles and shared execution for Tempo precompiles on a zone.
+//! Zone-native precompiles and shared execution for Tempo precompiles on a Zone.
 //!
-//! Zone-native implementations execute against ordinary local EVM storage. Tempo implementations
-//! that require finalized L1 state execute through a storage overlay anchored at the block recorded
-//! in `TempoState`. Zone admission, delegate-call, fixed-gas, and privacy rules remain outside the
-//! forwarded business logic.
-//!
-//! [`extend_zone_precompiles`] centralizes registration. TIP-20, TIP-403, and `TipFeeManager` use
-//! anchored upstream execution while the zone retains only its admission and gas rules.
+//! All implementations use ordinary EVM storage. The Zone EVM installs an anchored database below
+//! the revm journal, so upstream TIP-20, TIP-403, and fee-manager code transparently observe
+//! finalized Tempo policy state. Zone admission, delegate-call, fixed-gas, and privacy rules remain
+//! outside the forwarded business logic.
 //!
 //! This crate is `no_std` compatible so these precompiles can run inside the
 //! SP1 prover guest (RISC-V) as well as in the zone node.
@@ -54,7 +51,8 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
-pub use storage::L1StorageReader;
+pub use storage::{L1AnchorController, L1StorageReader};
+pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use tip403_proxy::ZONE_TIP403_PROXY_ADDRESS;
@@ -83,8 +81,8 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 ///
 /// - **Local execution:** AES-GCM, Chaum-Pedersen, `TempoState`, and the zone token factory use
 ///   shared local execution; nonce and account-keychain retain Tempo's ordinary environment.
-/// - **Anchored L1 execution:** TIP-20, TIP-403, and `TipFeeManager` use the exact finalized Tempo
-///   anchor through [`storage::ZonePrecompileStorageProvider`].
+/// - **Anchored L1 execution:** TIP-20, TIP-403, and `TipFeeManager` use ordinary EVM storage;
+///   the Zone EVM context resolves mirrored reads through its anchored database adapter.
 pub fn extend_zone_precompiles<L1: L1StorageReader>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
@@ -92,17 +90,18 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
     sequencer: Arc<dyn SequencerExt>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
+    controller: L1AnchorController,
 ) {
-    let l1_env = execution::L1BackedPrecompileEnv::new(
-        cfg,
-        l1_reader.clone(),
-        actions.clone(),
-        non_creditable_slots.clone(),
-    );
+    let protocol_env =
+        execution::ProtocolPrecompileEnv::new(cfg, actions.clone(), non_creditable_slots.clone());
     let tempo_env = PrecompileEnv::new(cfg, actions, non_creditable_slots);
 
     precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
-        Some(TempoState::create(l1_reader.clone(), cfg))
+        Some(TempoState::create(
+            l1_reader.clone(),
+            controller.clone(),
+            cfg,
+        ))
     });
     precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
         Some(ChaumPedersenVerify::create(cfg))
@@ -114,7 +113,7 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
         Some(ZoneTokenFactory::create(cfg))
     });
 
-    let tip403_env = l1_env.clone();
+    let tip403_env = protocol_env.clone();
     precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, move |_| {
         Some(create_tip403_precompile(&tip403_env))
     });
@@ -125,13 +124,13 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
         if is_tip20_prefix(*address) {
             Some(create_tip20_precompile(
                 *address,
-                &l1_env,
+                &protocol_env,
                 sequencer.clone(),
             ))
         } else if *address == TIP_FEE_MANAGER_ADDRESS {
-            Some(execution::create_l1_backed_precompile(
+            Some(execution::create_protocol_precompile(
                 "TipFeeManager",
-                l1_env.clone(),
+                protocol_env.clone(),
                 execution::NoCallRules,
                 |data, caller| TipFeeManager::new().call(data, caller),
             ))
@@ -175,12 +174,16 @@ impl TempoState {
     /// Create the `TempoState` precompile with local storage and direct-call-only execution.
     ///
     /// Storage-slot RPC reads are delegated to `reader` at the checkpoint recorded in local state.
-    pub fn create<P: L1StorageReader>(reader: P, cfg: &CfgEnv<TempoHardfork>) -> DynPrecompile {
+    pub fn create<P: L1StorageReader>(
+        reader: P,
+        controller: L1AnchorController,
+        cfg: &CfgEnv<TempoHardfork>,
+    ) -> DynPrecompile {
         execution::create_local_precompile(
             "TempoState",
             cfg,
             execution::DirectCallOnly,
-            move |data, caller| Self::new().call_with_provider(&reader, data, caller),
+            move |data, caller| Self::new().call_with_provider(&reader, &controller, data, caller),
         )
     }
 }
@@ -198,10 +201,8 @@ impl ZoneTokenFactory {
 }
 
 /// Create upstream TIP-403 execution with zone read-only rules and finalized L1 state.
-pub(crate) fn create_tip403_precompile<P: L1StorageReader>(
-    env: &execution::L1BackedPrecompileEnv<P>,
-) -> DynPrecompile {
-    execution::create_l1_backed_precompile(
+pub(crate) fn create_tip403_precompile(env: &execution::ProtocolPrecompileEnv) -> DynPrecompile {
+    execution::create_protocol_precompile(
         "ZoneTip403Registry",
         env.clone(),
         tip403_proxy::Tip403Rules,
@@ -210,12 +211,12 @@ pub(crate) fn create_tip403_precompile<P: L1StorageReader>(
 }
 
 /// Create upstream TIP-20 execution with zone rules and finalized L1 policy reads.
-pub(crate) fn create_tip20_precompile<P: L1StorageReader>(
+pub(crate) fn create_tip20_precompile(
     address: alloy_primitives::Address,
-    env: &execution::L1BackedPrecompileEnv<P>,
+    env: &execution::ProtocolPrecompileEnv,
     sequencer: Arc<dyn SequencerExt>,
 ) -> DynPrecompile {
-    execution::create_l1_backed_precompile(
+    execution::create_protocol_precompile(
         "TIP20Token",
         env.clone(),
         ztip20::TIP20Rules::new(sequencer),
@@ -233,10 +234,11 @@ pub fn zone_rpc_error(msg: impl core::fmt::Display) -> PrecompileError {
     PrecompileError::Fatal(alloc::format!("{ZONE_RPC_ERROR_PREFIX} {msg}"))
 }
 
-/// Returns `true` if the error string was produced by [`zone_rpc_error`].
+/// Returns `true` if the error chain contains a failure produced by [`zone_rpc_error`].
 pub fn is_zone_rpc_error(err: &str) -> bool {
-    err.starts_with(ZONE_RPC_ERROR_PREFIX)
+    err.contains(ZONE_RPC_ERROR_PREFIX)
 }
 
-#[cfg(test)]
-mod test_utils;
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub mod test_utils;
