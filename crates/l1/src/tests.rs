@@ -645,6 +645,33 @@ fn test_apply_sequencer_events_to_cache_sets_pending_sequencer() {
 }
 
 #[test]
+fn test_apply_enabled_tokens_to_cache_supersedes_an_older_disabled_value() {
+    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+    let token = address!("0x20C00000000000000000000000000000000000A1");
+    let slot = keccak256((token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode());
+    let mut cache = L1StateCacheInner::new(HashSet::from([portal_address]));
+    cache.set(portal_address, slot, 41, B256::ZERO);
+
+    apply_enabled_tokens_to_cache(
+        &mut cache,
+        portal_address,
+        42,
+        &[EnabledToken {
+            token,
+            name: "Alpha USD".into(),
+            symbol: "aUSD".into(),
+            currency: "USD".into(),
+        }],
+    );
+
+    assert_eq!(cache.get(portal_address, slot, 41), Some(B256::ZERO));
+    assert_eq!(
+        cache.get(portal_address, slot, 42),
+        Some(B256::from(U256::from(0x0101).to_be_bytes()))
+    );
+}
+
+#[test]
 fn test_apply_sequencer_events_to_cache_accept_clears_pending_sequencer() {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
     let previous_sequencer = address!("0x00000000000000000000000000000000000000A1");

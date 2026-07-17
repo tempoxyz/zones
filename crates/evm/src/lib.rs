@@ -21,7 +21,8 @@ use crate::{
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
-        ZoneConfigReader, ZoneFeeManager, ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
+        ZoneConfigReader, ZoneFeeManager, ZoneTip20Token, ZoneTip403ProxyRegistry,
+        ZoneTokenFactory,
     },
     tx_context::ZoneTxContext,
 };
@@ -96,14 +97,25 @@ where
         evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
         let cfg = evm.ctx().cfg.clone();
-        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new(self.l1_reader.clone()));
+        let registry = self
+            .policy_provider
+            .clone()
+            .map(ZoneTip403ProxyRegistry::new);
+        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new(
+            self.l1_reader.clone(),
+            registry.clone(),
+        ));
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
             Some(TempoState::create(self.l1_reader.clone(), &cfg))
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, |_| {
-            Some(ZoneFeeManager::create(self.l1_reader.clone(), &cfg))
+            Some(ZoneFeeManager::create(
+                self.l1_reader.clone(),
+                registry.clone(),
+                &cfg,
+            ))
         });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
             Some(ChaumPedersenVerify::create(&cfg))
@@ -114,10 +126,6 @@ where
         precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
             Some(ZoneTokenFactory::create(&cfg))
         });
-        let registry = self
-            .policy_provider
-            .clone()
-            .map(ZoneTip403ProxyRegistry::new);
         let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_reader.clone());
 
         if let Some(provider) = self.policy_provider.clone() {

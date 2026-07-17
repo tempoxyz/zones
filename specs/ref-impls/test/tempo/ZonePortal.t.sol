@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { StdTokens } from "tempo-std/StdTokens.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
@@ -188,6 +189,21 @@ contract ZonePortalProxyStorageTest is Test {
 
     function test_proxyMetadataIsReadFromPortalStorage() public {
         address initialToken = makeAddr("initial token");
+        vm.mockCall(
+            StdTokens.PATH_USD_ADDRESS,
+            abi.encodeWithSelector(ITIP20.name.selector),
+            abi.encode("pathUSD")
+        );
+        vm.mockCall(
+            StdTokens.PATH_USD_ADDRESS,
+            abi.encodeWithSelector(ITIP20.symbol.selector),
+            abi.encode("pathUSD")
+        );
+        vm.mockCall(
+            StdTokens.PATH_USD_ADDRESS,
+            abi.encodeWithSelector(ITIP20.currency.selector),
+            abi.encode("USD")
+        );
         vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
         );

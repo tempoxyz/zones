@@ -11,23 +11,29 @@ use tempo_precompiles::{
 };
 use tempo_revm::{ProtocolFeeManager, TempoStateAccess, TempoTx, TempoTxEnv};
 use tempo_zone_contracts::{IZoneFeeManager, ZONE_FEE_MANAGER_ADDRESS};
-use zone_precompiles::{ZoneConfigReader, ZoneFeeManager};
+use zone_l1::state::PolicyProvider;
+use zone_precompiles::{ZoneConfigReader, ZoneFeeManager, ZoneTip403ProxyRegistry};
 
 /// Zone implementation of Tempo's internal protocol fee hooks.
 #[derive(Clone)]
 pub(crate) struct ZoneProtocolFeeManager<P> {
     provider: P,
+    registry: Option<ZoneTip403ProxyRegistry<PolicyProvider>>,
 }
 
 impl<P> core::fmt::Debug for ZoneProtocolFeeManager<P> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("ZoneProtocolFeeManager").finish_non_exhaustive()
+        f.debug_struct("ZoneProtocolFeeManager")
+            .finish_non_exhaustive()
     }
 }
 
 impl<P> ZoneProtocolFeeManager<P> {
-    pub(crate) const fn new(provider: P) -> Self {
-        Self { provider }
+    pub(crate) const fn new(
+        provider: P,
+        registry: Option<ZoneTip403ProxyRegistry<PolicyProvider>>,
+    ) -> Self {
+        Self { provider, registry }
     }
 }
 
@@ -90,7 +96,13 @@ where
         _beneficiary: Address,
         _skip_liquidity_check: bool,
     ) -> Result<Address> {
-        ZoneFeeManager::new().collect_fee_pre_tx(&self.provider, fee_payer, user_token, max_amount)
+        ZoneFeeManager::new().collect_fee_pre_tx(
+            &self.provider,
+            self.registry.as_ref(),
+            fee_payer,
+            user_token,
+            max_amount,
+        )
     }
 
     fn collect_fee_post_tx(

@@ -664,11 +664,17 @@ impl L1Subscriber {
     /// Write decoded portal state changes into the shared L1 cache at the
     /// confirmed block height.
     fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
+        if portal_events.sequencer_events.is_empty() && portal_events.enabled_tokens.is_empty() {
             return;
         }
 
         let mut cache = self.config.l1_state_cache.write();
+        apply_enabled_tokens_to_cache(
+            &mut cache,
+            self.config.portal_address,
+            block_number,
+            &portal_events.enabled_tokens,
+        );
         apply_sequencer_events_to_cache(
             &mut cache,
             self.config.portal_address,
@@ -754,6 +760,20 @@ pub(crate) fn verify_receipts(
         );
     }
     Ok(())
+}
+
+pub(crate) fn apply_enabled_tokens_to_cache(
+    cache: &mut L1StateCacheInner,
+    portal_address: Address,
+    block_number: u64,
+    enabled_tokens: &[EnabledToken],
+) {
+    // TokenEnabled sets both packed booleans in TokenConfig to true.
+    let enabled_config = B256::from(U256::from(0x0101).to_be_bytes());
+    for enabled in enabled_tokens {
+        let slot = keccak256((enabled.token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode());
+        cache.set(portal_address, slot, block_number, enabled_config);
+    }
 }
 
 pub(crate) fn apply_sequencer_events_to_cache(
