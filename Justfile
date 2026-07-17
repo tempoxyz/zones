@@ -133,7 +133,7 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Defaults to open account access and open callback targets. Closed mode requires explicit ZONE_ALLOWED_ACCOUNTS; gateways are optional via ZONE_GATEWAYS.')]
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Defaults to open account access and open callback targets. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
 create-zone name token="" mode="open" gateway_mode="open":
     #!/bin/bash
     set -euo pipefail
@@ -174,16 +174,14 @@ create-zone name token="" mode="open" gateway_mode="open":
     ACCESS_MODE="{{mode}}"
     GATEWAY_MODE="{{gateway_mode}}"
     CREATE_ARGS=(--access-mode "$ACCESS_MODE" --gateway-mode "$GATEWAY_MODE")
-    if [[ "$ACCESS_MODE" == "closed" ]]; then
-        ALLOWED_CSV="${ZONE_ALLOWED_ACCOUNTS:?Set ZONE_ALLOWED_ACCOUNTS for closed mode}"
-        IFS=',' read -ra ALLOWED <<< "$ALLOWED_CSV"
-        for account in "${ALLOWED[@]}"; do
-            [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
-        done
-    elif [[ "$ACCESS_MODE" != "open" ]]; then
+    if [[ "$ACCESS_MODE" != "closed" && "$ACCESS_MODE" != "open" ]]; then
         echo "Error: mode must be 'open' or 'closed'" >&2
         exit 1
     fi
+    IFS=',' read -ra ALLOWED <<< "${ZONE_ALLOWED_ACCOUNTS:-}"
+    for account in "${ALLOWED[@]}"; do
+        [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
+    done
     if [[ "$GATEWAY_MODE" != "enforced" && "$GATEWAY_MODE" != "open" ]]; then
         echo "Error: gateway_mode must be 'enforced' or 'open'" >&2
         exit 1
@@ -753,7 +751,7 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end zone deployment. Defaults to open account access and open callback targets. Closed mode requires explicit ZONE_ALLOWED_ACCOUNTS; gateways are optional via ZONE_GATEWAYS.')]
+[doc('End-to-end zone deployment. Defaults to open account access and open callback targets. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
 deploy-zone name token="" mode="open" gateway_mode="open":
     #!/bin/bash
     set -euo pipefail
@@ -821,16 +819,14 @@ deploy-zone name token="" mode="open" gateway_mode="open":
     ACCESS_MODE="{{mode}}"
     GATEWAY_MODE="{{gateway_mode}}"
     CREATE_ARGS=(--access-mode "$ACCESS_MODE" --gateway-mode "$GATEWAY_MODE")
-    if [[ "$ACCESS_MODE" == "closed" ]]; then
-        ALLOWED_CSV="${ZONE_ALLOWED_ACCOUNTS:?Set ZONE_ALLOWED_ACCOUNTS for closed mode}"
-        IFS=',' read -ra ALLOWED <<< "$ALLOWED_CSV"
-        for account in "${ALLOWED[@]}"; do
-            [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
-        done
-    elif [[ "$ACCESS_MODE" != "open" ]]; then
+    if [[ "$ACCESS_MODE" != "closed" && "$ACCESS_MODE" != "open" ]]; then
         echo "Error: mode must be 'open' or 'closed'" >&2
         exit 1
     fi
+    IFS=',' read -ra ALLOWED <<< "${ZONE_ALLOWED_ACCOUNTS:-}"
+    for account in "${ALLOWED[@]}"; do
+        [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
+    done
     if [[ "$GATEWAY_MODE" != "enforced" && "$GATEWAY_MODE" != "open" ]]; then
         echo "Error: gateway_mode must be 'enforced' or 'open'" >&2
         exit 1

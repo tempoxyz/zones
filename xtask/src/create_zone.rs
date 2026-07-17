@@ -131,13 +131,6 @@ pub(crate) struct CreateZone {
 
 impl CreateZone {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        match self.access_mode {
-            ZoneAccessModeArg::Closed if self.allowed_accounts.is_empty() => {
-                return Err(eyre!("closed mode requires at least one --allowed-account"));
-            }
-            _ => {}
-        }
-
         let key_str = self
             .private_key
             .strip_prefix("0x")

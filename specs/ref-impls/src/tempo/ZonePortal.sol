@@ -990,8 +990,11 @@ contract ZonePortal is IZonePortal {
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
 
-        // Closed loops require the gateway to return value to this portal. Open-loop gateways may
-        // route atomically to a different zone, so their source queue is not expected to change.
+        // In closed access, this proves only that some deposit was appended to this portal; it does
+        // not bind that deposit to the callback's token, amount, or recipient. Callback data is
+        // opaque, so an enforced gateway is trusted to constrain the operation and return the
+        // intended result. Open access imposes no source-deposit invariant: callback value may go
+        // to another zone or leave the zone system entirely.
         if (
             accessMode() == ZoneAccessMode.Closed
                 && currentDepositQueueHash == depositQueueHashBefore

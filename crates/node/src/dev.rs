@@ -78,11 +78,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         rpc_url,
     } = config;
     match access_mode {
-        ZoneAccessMode::Closed => eyre::ensure!(
-            !allowed_accounts.is_empty(),
-            "closed mode requires at least one allowed account"
-        ),
-        ZoneAccessMode::Open => {}
+        ZoneAccessMode::Closed | ZoneAccessMode::Open => {}
         _ => return Err(eyre::eyre!("invalid zone access mode")),
     }
     match gateway_mode {
