@@ -69,11 +69,12 @@ pub(crate) mod rpc {
 use crate::{
     abi::{
         EncryptedDeposit as AbiEncryptedDeposit,
-        EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
-        PORTAL_SEQUENCER_SLOT,
+        EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_ALLOWED_ACCOUNT_SLOT,
+        PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, PORTAL_ZONE_GATEWAY_SLOT,
         ZonePortal::{
-            self, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
-            SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+            self, AllowedAccountUpdated, DepositMade, EncryptedDepositMade,
+            SequencerTransferStarted, SequencerTransferred, TokenEnabled, WithdrawalBounceBack,
+            ZoneGatewayUpdated, ZonePortalEvents,
         },
     },
     state::{cache::L1StateCacheInner, tip403::PolicyEvent},
@@ -90,7 +91,7 @@ mod tests;
 
 pub use block::{L1BlockDeposits, PreparedL1Block};
 pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
-pub use event::{EnabledToken, L1PortalEvents, L1SequencerEvent};
+pub use event::{EnabledToken, L1MembershipEvent, L1PortalEvents, L1SequencerEvent};
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::{L1StateCache, PolicyCache, PolicyProvider};
@@ -103,5 +104,5 @@ pub(crate) use queue::PendingDeposits;
 #[cfg(test)]
 pub(crate) use subscriber::{
     LocalTempoCheckpointReader, address_to_storage_value, apply_sequencer_events_to_cache,
-    verify_receipts,
+    mapping_storage_slot, verify_receipts,
 };

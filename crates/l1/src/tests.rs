@@ -1,5 +1,8 @@
 use super::*;
-use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
+use crate::abi::{
+    DepositType, PORTAL_ALLOWED_ACCOUNT_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
+    PORTAL_ZONE_GATEWAY_SLOT,
+};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, FixedBytes, address};
 use alloy_rpc_types_eth::TransactionReceipt;
@@ -618,6 +621,53 @@ fn test_push_log_decodes_sequencer_transferred() {
 }
 
 #[test]
+fn test_push_log_decodes_membership_updates() {
+    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+    let gateway = address!("0x00000000000000000000000000000000000000A1");
+    let account = address!("0x00000000000000000000000000000000000000B2");
+    let mut events = L1PortalEvents::default();
+
+    events
+        .push_log(
+            &make_portal_log(
+                portal_address,
+                ZoneGatewayUpdated {
+                    gateway,
+                    enabled: false,
+                },
+            ),
+            123,
+        )
+        .expect("gateway update should decode");
+    events
+        .push_log(
+            &make_portal_log(
+                portal_address,
+                AllowedAccountUpdated {
+                    account,
+                    enabled: true,
+                },
+            ),
+            123,
+        )
+        .expect("account update should decode");
+
+    assert_eq!(
+        events.membership_events,
+        vec![
+            L1MembershipEvent::ZoneGatewayUpdated {
+                gateway,
+                enabled: false,
+            },
+            L1MembershipEvent::AllowedAccountUpdated {
+                account,
+                enabled: true,
+            },
+        ]
+    );
+}
+
+#[test]
 fn test_apply_sequencer_events_to_cache_sets_pending_sequencer() {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
     let current_sequencer = address!("0x00000000000000000000000000000000000000A1");
@@ -706,6 +756,62 @@ fn test_apply_sequencer_events_to_cache_preserves_in_block_event_order() {
     assert_eq!(
         cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 44),
         Some(address_to_storage_value(sequencer_c))
+    );
+}
+
+#[test]
+fn test_apply_portal_state_events_overrides_cached_membership() {
+    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+    let gateway = address!("0x00000000000000000000000000000000000000A1");
+    let account = address!("0x00000000000000000000000000000000000000B2");
+    let gateway_slot = mapping_storage_slot(gateway, PORTAL_ZONE_GATEWAY_SLOT);
+    let account_slot = mapping_storage_slot(account, PORTAL_ALLOWED_ACCOUNT_SLOT);
+    let enabled = B256::with_last_byte(1);
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::new())),
+        None,
+    );
+
+    {
+        let mut cache = subscriber.config.l1_state_cache.write();
+        cache.set(portal_address, gateway_slot, 41, enabled);
+        cache.set(portal_address, account_slot, 41, enabled);
+    }
+    subscriber.apply_portal_state_events(
+        42,
+        &L1PortalEvents {
+            membership_events: vec![
+                L1MembershipEvent::ZoneGatewayUpdated {
+                    gateway,
+                    enabled: false,
+                },
+                L1MembershipEvent::AllowedAccountUpdated {
+                    account,
+                    enabled: false,
+                },
+            ],
+            ..Default::default()
+        },
+    );
+
+    let cache = subscriber.config.l1_state_cache.read();
+    assert_eq!(cache.get(portal_address, gateway_slot, 41), Some(enabled));
+    assert_eq!(cache.get(portal_address, account_slot, 41), Some(enabled));
+    assert_eq!(
+        cache.get(portal_address, gateway_slot, 42),
+        Some(B256::ZERO)
+    );
+    assert_eq!(
+        cache.get(portal_address, account_slot, 42),
+        Some(B256::ZERO)
+    );
+    assert_eq!(
+        cache.get(portal_address, gateway_slot, 43),
+        Some(B256::ZERO)
+    );
+    assert_eq!(
+        cache.get(portal_address, account_slot, 43),
+        Some(B256::ZERO)
     );
 }
 

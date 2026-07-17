@@ -66,6 +66,20 @@ pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
     B256::new(bytes)
 };
 
+/// ZonePortal storage slot 19: `zoneGateway` (mapping(address => bool)).
+pub const PORTAL_ZONE_GATEWAY_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 19;
+    B256::new(bytes)
+};
+
+/// ZonePortal storage slot 20: `allowedAccount` (mapping(address => bool)).
+pub const PORTAL_ALLOWED_ACCOUNT_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 20;
+    B256::new(bytes)
+};
+
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
 // ---------------------------------------------------------------------------

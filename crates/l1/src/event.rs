@@ -15,6 +15,13 @@ pub enum L1SequencerEvent {
     },
 }
 
+/// A closed-loop membership update emitted by the L1 portal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum L1MembershipEvent {
+    ZoneGatewayUpdated { gateway: Address, enabled: bool },
+    AllowedAccountUpdated { account: Address, enabled: bool },
+}
+
 /// Result of attempting to enqueue an L1 block into the deposit queue.
 #[derive(Debug)]
 pub(crate) enum EnqueueOutcome {
@@ -36,6 +43,8 @@ pub struct L1PortalEvents {
     pub enabled_tokens: Vec<EnabledToken>,
     /// Sequencer transfer events in the order they appeared in the block.
     pub sequencer_events: Vec<L1SequencerEvent>,
+    /// Closed-loop membership updates in the order they appeared in the block.
+    pub membership_events: Vec<L1MembershipEvent>,
 }
 
 /// A token newly enabled for bridging, with metadata for L2 creation.
@@ -65,13 +74,15 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 6] = [
+    const SIGNATURE_HASHES: [B256; 8] = [
         DepositMade::SIGNATURE_HASH,
         EncryptedDepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerTransferStarted::SIGNATURE_HASH,
         SequencerTransferred::SIGNATURE_HASH,
+        ZoneGatewayUpdated::SIGNATURE_HASH,
+        AllowedAccountUpdated::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -173,6 +184,32 @@ impl L1PortalEvents {
                     previous_sequencer: event.previousSequencer,
                     new_sequencer: event.newSequencer,
                 });
+            }
+            ZonePortalEvents::ZoneGatewayUpdated(event) => {
+                info!(
+                    l1_block = block_number,
+                    gateway = %event.gateway,
+                    enabled = event.enabled,
+                    "Zone gateway membership updated on L1"
+                );
+                self.membership_events
+                    .push(L1MembershipEvent::ZoneGatewayUpdated {
+                        gateway: event.gateway,
+                        enabled: event.enabled,
+                    });
+            }
+            ZonePortalEvents::AllowedAccountUpdated(event) => {
+                info!(
+                    l1_block = block_number,
+                    account = %event.account,
+                    enabled = event.enabled,
+                    "Allowed account membership updated on L1"
+                );
+                self.membership_events
+                    .push(L1MembershipEvent::AllowedAccountUpdated {
+                        account: event.account,
+                        enabled: event.enabled,
+                    });
             }
             _ => {}
         }

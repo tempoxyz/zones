@@ -663,8 +663,12 @@ impl L1Subscriber {
 
     /// Write decoded portal state changes into the shared L1 cache at the
     /// confirmed block height.
-    fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
+    pub(crate) fn apply_portal_state_events(
+        &self,
+        block_number: u64,
+        portal_events: &L1PortalEvents,
+    ) {
+        if portal_events.sequencer_events.is_empty() && portal_events.membership_events.is_empty() {
             return;
         }
 
@@ -674,6 +678,12 @@ impl L1Subscriber {
             self.config.portal_address,
             block_number,
             &portal_events.sequencer_events,
+        );
+        apply_membership_events_to_cache(
+            &mut cache,
+            self.config.portal_address,
+            block_number,
+            &portal_events.membership_events,
         );
     }
 
@@ -800,6 +810,34 @@ pub(crate) fn apply_sequencer_events_to_cache(
             }
         }
     }
+}
+
+pub(crate) fn apply_membership_events_to_cache(
+    cache: &mut L1StateCacheInner,
+    portal_address: Address,
+    block_number: u64,
+    membership_events: &[L1MembershipEvent],
+) {
+    for event in membership_events {
+        let (member, base_slot, enabled) = match *event {
+            L1MembershipEvent::ZoneGatewayUpdated { gateway, enabled } => {
+                (gateway, PORTAL_ZONE_GATEWAY_SLOT, enabled)
+            }
+            L1MembershipEvent::AllowedAccountUpdated { account, enabled } => {
+                (account, PORTAL_ALLOWED_ACCOUNT_SLOT, enabled)
+            }
+        };
+        cache.set(
+            portal_address,
+            mapping_storage_slot(member, base_slot),
+            block_number,
+            B256::with_last_byte(u8::from(enabled)),
+        );
+    }
+}
+
+pub(crate) fn mapping_storage_slot(key: Address, base_slot: B256) -> B256 {
+    keccak256((key, U256::from_be_bytes(base_slot.0)).abi_encode())
 }
 
 pub(crate) fn address_to_storage_value(address: Address) -> B256 {
