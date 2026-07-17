@@ -1096,8 +1096,10 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
     }
 
-    function test_advanceTempo_encryptedDeposit_unallowedRecipientBounces() public {
+    function test_advanceTempo_encryptedDeposit_allowsUnlistedRecipient() public {
         address outsider = address(0x600);
+        assertFalse(config.isAllowedAccount(outsider));
+
         bytes memory plaintext =
             EncryptedDepositLib.encodePlaintext(outsider, bytes32("secret memo"));
         (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
@@ -1106,7 +1108,7 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
-        assertEq(zoneToken.balanceOf(outsider), 0);
+        assertEq(zoneToken.balanceOf(outsider), 1000e6);
         assertEq(zoneToken.balanceOf(alice), 0);
     }
 

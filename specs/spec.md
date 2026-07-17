@@ -129,7 +129,7 @@ Each zone is operated by a **sequencer** that collects transactions, produces bl
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
-On Tempo, each zone has a **portal** that locks deposited tokens. Only allowed accounts may initiate deposits, and deposit recipients and refund recipients must also be allowed. The portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
+On Tempo, each zone has a **portal** that locks deposited tokens. Only allowed accounts may initiate deposits, and plaintext deposit recipients and refund recipients must also be allowed. Encrypted deposit recipients are private zone addresses and need not be allowed accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
 Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data, and data availability is entrusted to the sequencer. The sequencer has full visibility into zone activity. Privacy protects against public observers on Tempo, not against the sequencer.
 
@@ -425,7 +425,7 @@ The encryption scheme is ECIES with secp256k1:
 1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
 2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
-4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, tempoRefundRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `tempoRefundRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). The caller and bounce-back recipient MUST be allowed accounts. A registered ZoneGateway is the sole exception to the caller rule: it may call `depositEncrypted` to complete an atomic callback withdrawal, but it still must supply an allowed bounce-back recipient. The decrypted `to` address is checked against the same allowed-account mapping by `ZoneInbox` before minting. `depositEncrypted` also enforces its fee, encryption-key, payload-shape, and TIP-403 checks.
+4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, tempoRefundRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `tempoRefundRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). The caller and bounce-back recipient MUST be allowed accounts. A registered ZoneGateway is the sole exception to the caller rule: it may call `depositEncrypted` to complete an atomic callback withdrawal, but it still must supply an allowed bounce-back recipient. The decrypted `to` address is not checked against Tempo closed-loop membership. `depositEncrypted` also enforces its fee, encryption-key, payload-shape, and TIP-403 checks.
 
 Before queue insertion, the portal also validates encrypted-payload shape. `depositEncrypted` reverts `InvalidEphemeralPubkey` if the ephemeral public key parity is not `0x02` or `0x03`, or if the X coordinate is not a valid secp256k1 X coordinate. It reverts `InvalidCiphertextLength(actual, expected)` unless `ciphertext.length == 64`, the fixed plaintext size for `(to, memo, padding)`. These are Tempo-side deposit-time reverts: no queue entry is created and no zone-side bounce-back is needed.
 
@@ -1798,7 +1798,7 @@ interface IZonePortal {
     ) external returns (bytes32 newCurrentDepositQueueHash);
     /// @dev Caller and `tempoRefundRecipient` must be allowed accounts, except that a
     ///      registered ZoneGateway may call this function for a synchronous callback return.
-    ///      The decrypted recipient is checked by ZoneInbox before minting.
+    ///      The encrypted zone recipient need not be an allowed Tempo account.
     function depositEncrypted(
         address token, uint128 amount, uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted, address tempoRefundRecipient

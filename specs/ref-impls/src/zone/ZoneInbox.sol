@@ -323,11 +323,6 @@ contract ZoneInbox is IZoneInbox {
                 (address decryptedTo, bytes32 decryptedMemo) =
                     EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
 
-                if (!config.isAllowedAccount(decryptedTo)) {
-                    _failEncryptedDeposit(currentHash, ed);
-                    continue;
-                }
-
                 try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
                     emit EncryptedDepositProcessed(
                         currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
