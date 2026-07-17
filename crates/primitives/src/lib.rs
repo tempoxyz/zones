@@ -9,5 +9,4 @@ extern crate alloc;
 
 pub mod constants;
 mod header;
-pub mod policy;
 pub use header::ZoneHeader;

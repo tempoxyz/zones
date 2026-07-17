@@ -22,8 +22,7 @@ use crate::utils::{
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
 ///
-/// TIP-20 transfers use the default `transferPolicyId` of 1 (allow all),
-/// so they always succeed regardless of the policy cache state.
+/// TIP-20 transfers use the default anchored `transferPolicyId` of 1 (allow all).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

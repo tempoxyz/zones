@@ -1162,8 +1162,7 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
 ///  3. Make an encrypted deposit targeting the blacklisted recipient.
 ///  4. Verify upstream TIP-20 mint enforcement fails and refunds the sender on L1.
 ///
-/// No semantic policy cache is seeded: `AnchoredZoneDb` exposes the finalized
-/// L1 policy state to upstream Tempo TIP-20/TIP-403 execution.
+/// `AnchoredZoneDb` exposes finalized L1 policy state directly to upstream Tempo execution.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

@@ -18,12 +18,13 @@ graph TD
 
     L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
     DQ["DepositQueue"]
-    Cache["L1StateCache"]
-    PolicyCache["PolicyCache<br/><i>encrypted deposits only</i>"]
+    Cache["L1StateCache<br/><i>raw slots + mutation barriers</i>"]
+    L1Provider["L1StateProvider<br/><i>exact-block reads</i>"]
 
     Engine["ZoneEngine"]
     Builder["PayloadBuilder<br/><i>advanceTempo + pool txs</i>"]
-    PolicyPrefetch["PolicyResolutionTask<br/><i>legacy cache pre-warm</i>"]
+    AnchoredDb["AnchoredZoneDb"]
+    TempoPolicy["Upstream TIP-20 / TIP-403"]
 
     Monitor["ZoneMonitor"]
     Batch["BatchSubmitter"]
@@ -31,13 +32,15 @@ graph TD
     Portal["ZonePortal (L1)"]
 
     L1 --> L1Sub
+    L1 --> L1Provider
     L1Sub --> DQ
-    L1Sub --> PolicyCache
-    L1Sub --> Cache
-    PolicyCache --> Builder
-    PolicyPrefetch --> PolicyCache
+    L1Sub -- mutation barriers --> Cache
+    Cache <--> L1Provider
     DQ --> Engine
     Engine --> Builder
+    Builder --> AnchoredDb
+    L1Provider --> AnchoredDb
+    AnchoredDb --> TempoPolicy
     Builder --> Monitor
     Monitor --> Batch
     Batch --> Portal
@@ -68,7 +71,7 @@ same block.
 
 ## State Derivation
 
-Zone state is fully derived from L1 events. The `advanceTempo` system
+Zone state is derived from anchored L1 state and events. The `advanceTempo` system
 transaction atomically:
 
 - Advances `tempoBlockNumber` and `tempoBlockHash` in the `TempoState`
@@ -86,7 +89,9 @@ Chain continuity is enforced: the L1 block number must equal
 Deposits can be encrypted using ECIES with the sequencer's public key. The
 sequencer decrypts them off-chain and provides `DecryptionData` (ECDH shared
 secret + Chaum-Pedersen proof) that the contract verifies on-chain via two
-precompiles before minting.
+precompiles before minting. Mint-recipient authorization is enforced by upstream
+Tempo TIP-20/TIP-403 against the finalized L1 anchor. A forbidden mint follows
+`ZoneInbox`'s `EncryptedDepositFailed` bounce-back path.
 
 ## Token Enablement
 
@@ -134,19 +139,17 @@ using Tempo's upstream policy implementation over anchored raw L1 state:
    the block-versioned `L1StateCache`, falling back to an exact-block L1 RPC
    read and caching the result. Mutation barriers and reorg resets prevent
    stale values from being inherited across state changes.
-3. **ZonePrecompileStorageProvider** — composes ordinary zone EVM storage with
-   the raw L1 reader at the exact finalized block recorded in `TempoState`.
+3. **AnchoredZoneDb** — composes ordinary zone EVM storage with the raw L1
+   reader at the exact finalized block recorded in `TempoState`.
    TIP-403 registry state and each token's L1-owned transfer-policy field come
    from L1; balances and all other TIP-20 state remain zone-local. Mirrored
    reads retain normal EVM gas, warming, and storage accounting, while
    persistent writes to L1-owned slots are rejected.
 4. **Tempo TIP-20 and TIP-403 precompiles** — execute the upstream business
-   logic against that composed storage view, replacing the zone's duplicated
-   policy dispatch. Missing or invalid anchored state fails closed, and zone
+   logic against that composed storage view, without a separate zone policy
+   path. Missing or invalid anchored state fails closed, and zone
    privacy, bridge authorization, admission, and fixed-gas rules remain in the
    surrounding execution layer.
-
-> NOTE: encrypted-deposit checks temporarily retain the legacy `PolicyProvider` and `PolicyCache`; they will move to the same anchored raw-state path before that pipeline is removed. Encrypted deposits that fail policy checks are included with a zeroed-out amount so the deposit hash chain still matches L1.
 
 ## Demo: Token Creation with Transfer Policy
 

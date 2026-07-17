@@ -323,8 +323,8 @@ impl L1Subscriber {
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
     ///
     /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
-    /// parallel, then processes them sequentially (event extraction, policy
-    /// application, enqueue). Receipts are fetched by the corresponding block
+    /// parallel, then processes them sequentially (event extraction, raw-cache
+    /// invalidation, enqueue). Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(

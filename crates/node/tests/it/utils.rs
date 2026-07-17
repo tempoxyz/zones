@@ -720,9 +720,8 @@ impl ZoneTestNode {
         .await
     }
 
-    /// Start a zone node connected to a real L1, anchoring genesis to a specific
-    /// L1 block and optionally overriding the initial token list used for
-    /// startup policy cache seeding.
+    /// Start a zone node connected to a real L1, anchoring genesis to a specific L1 block
+    /// and optionally overriding the initial token list used for raw-cache mutation tracking.
     pub(crate) async fn start_from_l1_at_block_with_initial_tokens(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,

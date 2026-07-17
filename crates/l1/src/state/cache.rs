@@ -13,16 +13,17 @@
 //!
 //! ## Write path
 //!
-//! - The [`L1Subscriber`](crate::l1::L1Subscriber) writes storage diffs for tracked contracts
-//!   as they arrive, tagged with the L1 tip block number.
+//! - The [`L1Subscriber`](crate::l1::L1Subscriber) records address-level mutation barriers from
+//!   verified logs and materializes the explicitly decoded ZonePortal sequencer slots.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes eligible forward RPC
 //!   misses, tagged with the requested block number. Misses below the canonical Zone anchor
 //!   floor are returned without being inserted.
 //!
 //! ## Reorg handling
 //!
-//! On reorgs the caller is expected to [`L1StateCacheInner::clear`] the entire cache and
-//! re-populate from the new canonical chain segment. There is no per-block rollback.
+//! On reorgs the caller clears subscriber-derived values and barriers with
+//! [`L1StateCacheInner::clear`]; subsequent exact-block reads repopulate slots lazily. There is no
+//! per-block rollback.
 
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
@@ -66,6 +67,8 @@ impl L1StateCache {
 /// and drives lazy history compaction without scanning the cache on the import path.
 #[derive(Debug, Default)]
 pub struct L1StateCacheInner {
+    /// Contracts whose relevant logs install mutation barriers. The portal is seeded at startup;
+    /// enabled TIP-20 tokens are added dynamically and retained across cache clears.
     tracked_contracts: HashSet<Address>,
     /// Per-slot value history: `(address, slot) → { block_number → value }`.
     /// The `BTreeMap` enables efficient range lookups for "latest value at or before block N".

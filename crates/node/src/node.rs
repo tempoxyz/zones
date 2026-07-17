@@ -62,11 +62,8 @@ use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    ChainTempoStateExt, DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
-    state::{
-        L1StateCache, L1StateProvider, L1StateProviderConfig, spawn_policy_resolution_task,
-        spawn_pool_prefetch_task,
-    },
+    ChainTempoStateExt, DepositQueue, L1Subscriber, L1SubscriberConfig, TempoStateExt,
+    state::{L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
@@ -175,9 +172,6 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: L1StateCache,
-    /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](zone_l1::L1Subscriber)
-    /// and read by the precompile during block building.
-    policy_cache: PolicyCache,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
     /// Optional pre-configured list of enabled token addresses. When set, the
@@ -206,7 +200,6 @@ impl ZoneNode {
     ) -> Self {
         let deposit_queue = DepositQueue::default();
 
-        let policy_cache = PolicyCache::default();
         let l1_state_cache = L1StateCache::new(HashSet::from([portal_address]));
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
@@ -229,7 +222,6 @@ impl ZoneNode {
             l1_config,
             l1_state_provider_config,
             l1_state_cache,
-            policy_cache,
             portal_address,
             initial_tokens: None,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
@@ -318,11 +310,6 @@ impl ZoneNode {
         self.l1_state_cache.clone()
     }
 
-    /// Returns the current TIP-403 policy cache
-    pub fn policy_cache(&self) -> PolicyCache {
-        self.policy_cache.clone()
-    }
-
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
@@ -389,8 +376,6 @@ where
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
-    /// TIP-403 policy cache
-    policy_cache: PolicyCache,
     /// Block-versioned L1 storage cache shared with the subscriber and precompiles.
     l1_state_cache: L1StateCache,
     /// ZonePortal address on L1.
@@ -423,7 +408,6 @@ where
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
-        policy_cache: PolicyCache,
         l1_state_cache: L1StateCache,
         portal_address: Address,
         initial_tokens: Option<Vec<Address>>,
@@ -442,7 +426,6 @@ where
             ),
             deposit_queue,
             l1_config,
-            policy_cache,
             l1_state_cache,
             portal_address,
             initial_tokens,
@@ -473,7 +456,6 @@ where
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
-        self.policy_cache.set_last_l1_block(tempo_block_number);
         self.l1_state_cache
             .write()
             .advance_floor(tempo_block_number);
@@ -501,7 +483,6 @@ where
         } else {
             self.spawn_l1_subscriber(&ctx);
         }
-        self.spawn_policy_tasks(&l1_provider, &ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         if let Some(config) = self.p2p_config.take() {
@@ -750,27 +731,6 @@ where
         info!(target: "reth::cli", "Unified L1 subscriber started");
     }
 
-    /// Spawn TIP-403 policy resolution and pool prefetch tasks.
-    fn spawn_policy_tasks(
-        &self,
-        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
-        ctx: &AddOnsContext<'_, N>,
-    ) {
-        let policy_task_handle = spawn_policy_resolution_task(
-            self.policy_cache.clone(),
-            l1_provider.clone(),
-            16,
-            256,
-            ctx.node.task_executor().clone(),
-        );
-        spawn_pool_prefetch_task(
-            ctx.node.pool().clone(),
-            policy_task_handle,
-            ctx.node.task_executor().clone(),
-        );
-        info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
-    }
-
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
     fn spawn_zone_engine(
         &self,
@@ -981,7 +941,6 @@ where
         ZoneAddOns::new(
             self.deposit_queue.clone(),
             self.l1_config.clone(),
-            self.policy_cache.clone(),
             self.l1_state_cache.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
