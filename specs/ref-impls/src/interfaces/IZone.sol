@@ -1162,7 +1162,9 @@ interface IZoneOutbox {
     function lastFallbackNonce() external view returns (uint64);
 
     /// @notice Resolve and delete a fallback recipient. Only callable by ZoneInbox.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient);
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory);

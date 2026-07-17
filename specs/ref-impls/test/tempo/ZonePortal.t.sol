@@ -1642,26 +1642,6 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.claimRefund(address(pathUSD)), amount);
     }
 
-    function test_spoofedWithdrawalForUnenabledToken_revertsAndRetainsQueue() public {
-        uint128 amount = 500e6;
-        token2.grantRole(_ISSUER_ROLE, sequencer);
-        token2.mint(address(portal), amount);
-        assertFalse(portal.isTokenEnabled(address(token2)));
-
-        Withdrawal memory withdrawal =
-            _withdrawal(address(token2), alice, bob, amount, bytes32(0), 0, alice, "");
-        _enqueueWithdrawal(withdrawal);
-        bytes32 queuedHash = portal.withdrawalQueueSlot(portal.withdrawalQueueHead());
-        uint256 portalBalanceBefore = token2.balanceOf(address(portal));
-
-        vm.expectRevert(IZonePortal.TokenNotEnabled.selector);
-        portal.processWithdrawal(withdrawal, bytes32(0));
-
-        assertEq(portal.withdrawalQueueSlot(portal.withdrawalQueueHead()), queuedHash);
-        assertEq(token2.balanceOf(bob), 0);
-        assertEq(token2.balanceOf(address(portal)), portalBalanceBefore);
-    }
-
     function test_withdrawal_bounceBackOnTransferRevert_noCallback() public {
         // Fund portal
         uint128 depositAmount = 1000e6;

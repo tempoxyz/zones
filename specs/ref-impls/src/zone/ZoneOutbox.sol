@@ -95,7 +95,7 @@ contract ZoneOutbox is IZoneOutbox {
     uint64 public lastFallbackNonce;
 
     /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
-    mapping(uint64 fallbackNonce => address recipient) internal _zoneFallbackRecipients;
+    mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -361,10 +361,13 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
     /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
     ///      in zone state. Only ZoneInbox may consume a mapping entry.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient)
+    {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
-        recipient = _zoneFallbackRecipients[fallbackNonce];
-        if (recipient == address(0)) revert InvalidFallbackRecipient();
+        zoneFallbackRecipient = _zoneFallbackRecipients[fallbackNonce];
+        if (zoneFallbackRecipient == address(0)) revert InvalidFallbackRecipient();
         delete _zoneFallbackRecipients[fallbackNonce];
     }
 

@@ -679,7 +679,7 @@ contract ZoneInboxTest is Test {
             sender: alice,
             to: outsider,
             amount: 1000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("payment")
         });
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));

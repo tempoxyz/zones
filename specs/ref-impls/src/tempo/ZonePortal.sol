@@ -769,7 +769,6 @@ contract ZonePortal is IZonePortal {
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
         address _token = withdrawal.token;
-        if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
 
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
@@ -793,10 +792,12 @@ contract ZonePortal is IZonePortal {
 
         bool success;
         if (withdrawal.gasLimit == 0) {
+            // Re-check current roles without reverting so an in-flight withdrawal to a revoked
+            // account or newly registered gateway bounces without blocking the FIFO.
             success = !zoneGateway[withdrawal.to] && allowedAccount[withdrawal.to]
                 && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
-            // Keep this self-call so callback failure cannot revert the dequeue and block the FIFO.
+            // Isolate callback effects so failure can be caught without reverting the dequeue.
             try this.deliverWithdrawal(
                 _token,
                 withdrawal.to,

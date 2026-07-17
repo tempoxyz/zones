@@ -385,7 +385,14 @@ contract ZoneBridgeTest is BaseTest {
             ObservedWithdrawal({
                 index: index,
                 withdrawal: _withdrawal(
-                    uint256(index) + 1, sender, to, amount, memo, gasLimit, zoneFallbackRecipient, data
+                    uint256(index) + 1,
+                    sender,
+                    to,
+                    amount,
+                    memo,
+                    gasLimit,
+                    zoneFallbackRecipient,
+                    data
                 )
             })
         );
