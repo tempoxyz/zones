@@ -131,6 +131,7 @@ contract ZonePortal is IZonePortal {
     /// @dev These values must remain in account storage so each delegatecall proxy observes its
     ///      own metadata. Keep them after the established slots read directly by zone contracts.
     uint32 public zoneId;
+    /// @notice Fixed callback messenger assigned during initialization.
     address public messenger;
     address public verifier;
     uint64 public genesisTempoBlockNumber;
@@ -280,18 +281,6 @@ contract ZonePortal is IZonePortal {
         emit AdminTransferred(previousAdmin, admin);
     }
 
-    /// @notice Select a newly deployed messenger implementation for callback withdrawals.
-    /// @dev Operation policy belongs to messenger code, so changing the supported callback
-    ///      ABI is an implementation-address upgrade rather than per-zone operation config.
-    function setMessenger(address newMessenger) external onlyAdmin {
-        if (newMessenger == address(0) || allowedAccount[newMessenger]) {
-            revert InvalidMessenger();
-        }
-        address previousMessenger = messenger;
-        messenger = newMessenger;
-        emit MessengerUpdated(previousMessenger, newMessenger);
-    }
-
     /// @notice Enable or disable a callback-only gateway implementation.
     /// @dev Gateways are deliberately separate from allowed accounts: they may receive only
     ///      withdrawal callbacks and may return funds through depositEncrypted.
@@ -304,8 +293,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Enable or disable an account across deposits, refunds, and plain withdrawals.
-    /// @dev Accounts cannot be an active gateway or messenger. The admin must first replace
-    ///      or disable the infrastructure role before allowing the address.
+    /// @dev Accounts cannot be an active gateway or the fixed messenger.
     function setAllowedAccount(address account, bool enabled) external onlyAdmin {
         if (account == address(0) || (enabled && (zoneGateway[account] || account == messenger))) {
             revert InvalidAllowedAccount();

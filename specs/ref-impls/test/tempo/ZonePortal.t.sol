@@ -604,35 +604,6 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.pendingAdmin(), address(0));
     }
 
-    function test_setMessenger_updatesImplementationAddress() public {
-        address newMessenger = makeAddr("new messenger");
-
-        vm.expectEmit(true, true, false, true);
-        emit IZonePortal.MessengerUpdated(address(messenger), newMessenger);
-        vm.prank(admin);
-        portal.setMessenger(newMessenger);
-
-        assertEq(portal.messenger(), newMessenger);
-    }
-
-    function test_setMessenger_revertsIfNotAdmin() public {
-        vm.prank(alice);
-        vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setMessenger(makeAddr("new messenger"));
-    }
-
-    function test_setMessenger_revertsForZeroAddress() public {
-        vm.prank(admin);
-        vm.expectRevert(IZonePortal.InvalidMessenger.selector);
-        portal.setMessenger(address(0));
-    }
-
-    function test_setMessenger_revertsForAllowedAccount() public {
-        vm.prank(admin);
-        vm.expectRevert(IZonePortal.InvalidMessenger.selector);
-        portal.setMessenger(alice);
-    }
-
     function test_setZoneGateway_supportsLegacyAndReplacementTogether() public {
         address replacement = makeAddr("replacement gateway");
 

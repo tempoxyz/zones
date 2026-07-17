@@ -510,7 +510,7 @@ interface IZoneFactory {
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
 
-    /// @notice Returns the default messenger assigned to newly created portals.
+    /// @notice Returns the fixed shared messenger assigned to newly created portals.
     /// @return messenger The default messenger contract address.
     function messenger() external view returns (address);
 
@@ -635,9 +635,6 @@ interface IZonePortal {
     /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
-    /// @notice Emitted when the admin selects a new callback messenger implementation.
-    event MessengerUpdated(address indexed previousMessenger, address indexed newMessenger);
-
     /// @notice Emitted when the admin enables or disables a callback-only ZoneGateway.
     event ZoneGatewayUpdated(address indexed gateway, bool enabled);
 
@@ -673,7 +670,6 @@ interface IZonePortal {
     error AccountNotAllowed(address account);
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
-    error InvalidMessenger();
     error InvalidAllowedAccount();
 
     function initialize(
@@ -702,10 +698,8 @@ interface IZonePortal {
 
     function zoneId() external view returns (uint32);
 
+    /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
-
-    /// @notice Select a new messenger implementation. Only callable by the admin.
-    function setMessenger(address newMessenger) external;
 
     function zoneGateway(address gateway) external view returns (bool);
 

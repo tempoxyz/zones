@@ -241,20 +241,25 @@ contract ZoneMessengerTest is BaseTest {
         assertEq(zoneToken.balanceOf(address(receiver)), amount);
     }
 
-    function test_relayMessage_revertsUnsupportedFlowBeforeTransfer() public {
+    function test_relayMessage_forwardsUnsupportedFlow() public {
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         bytes memory data = _unsupportedFlowCallback();
         zoneToken.mint(address(messenger), 1);
         _allowGateway(address(receiver));
 
         vm.prank(portal);
-        vm.expectRevert();
         messenger.relayMessage(
-            ZONE_ID, address(zoneToken), bytes32("sender"), address(receiver), 1, 50_000, data
+            ZONE_ID,
+            address(zoneToken),
+            bytes32("sender"),
+            address(receiver),
+            1,
+            CALLBACK_GAS_LIMIT,
+            data
         );
 
-        assertEq(zoneToken.balanceOf(address(messenger)), 1);
-        assertEq(zoneToken.balanceOf(address(receiver)), 0);
+        assertEq(zoneToken.balanceOf(address(receiver)), 1);
+        assertEq(receiver.lastData(), data);
     }
 
     function test_relayMessage_revertsForUnregisteredGateway() public {
