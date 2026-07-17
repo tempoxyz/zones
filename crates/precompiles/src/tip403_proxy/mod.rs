@@ -119,17 +119,19 @@ mod tests {
     }
 
     #[test]
-    fn mutations_revert_while_receive_policy_reads_use_upstream_dispatch() -> eyre::Result<()> {
-        let mut harness = RegistryHarness::new();
-        let mutation = ITIP403Registry::createPolicyCall {
-            admin: CALLER,
-            policyType: ITIP403Registry::PolicyType::BLACKLIST,
+    fn mutating_selectors_are_rejected_by_admission() {
+        let rules = Tip403Rules;
+        for selector in TIP403_MUTATING_SELECTORS {
+            assert!(matches!(
+                rules.admit(selector, CALLER),
+                CallCheck::Revert(data) if data == ReadOnlyRegistry {}.abi_encode()
+            ));
         }
-        .abi_encode();
-        let output = harness.call(&mutation, u64::MAX)?;
-        assert!(output.is_revert());
-        assert_eq!(output.bytes, Bytes::from(ReadOnlyRegistry {}.abi_encode()));
+    }
 
+    #[test]
+    fn receive_policy_reads_use_upstream_dispatch() -> eyre::Result<()> {
+        let mut harness = RegistryHarness::new();
         let receive = harness.call(
             &ITIP403Registry::receivePolicyCall { account: CALLER }.abi_encode(),
             u64::MAX,
@@ -155,16 +157,6 @@ mod tests {
             validation.blockedReason,
             ITIP403Registry::BlockedReason::NONE
         );
-
-        let set_receive = ITIP403Registry::setReceivePolicyCall {
-            senderPolicyId: 1,
-            tokenFilterId: 1,
-            recoveryAuthority: Address::ZERO,
-        }
-        .abi_encode();
-        let output = harness.call(&set_receive, u64::MAX)?;
-        assert!(output.is_revert());
-        assert_eq!(output.bytes, Bytes::from(ReadOnlyRegistry {}.abi_encode()));
         Ok(())
     }
 

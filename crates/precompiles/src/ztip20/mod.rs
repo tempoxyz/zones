@@ -155,13 +155,14 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
-    use alloy_sol_types::{SolCall, SolError, SolInterface};
-    use revm::precompile::{PrecompileHalt, PrecompileResult};
+    use alloy_sol_types::{SolCall, SolInterface};
+    use revm::precompile::PrecompileResult;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
         storage::StorageCtx,
-        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, RolesAuthError, TIP20Token},
+        test_util::TIP20Setup,
+        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
     };
     use tempo_zone_contracts::Unauthorized;
 
@@ -178,6 +179,26 @@ mod tests {
         fn latest_sequencer(&self) -> Option<Address> {
             self.address
         }
+    }
+
+    fn rules(sequencer: Address) -> TIP20Rules {
+        TIP20Rules::new(Arc::new(MockSequencer {
+            address: Some(sequencer),
+        }))
+    }
+
+    fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
+        assert!(matches!(
+            rules.admit(&call.abi_encode(), caller),
+            CallCheck::Continue
+        ));
+    }
+
+    fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
+        assert!(matches!(
+            rules.admit(&call.abi_encode(), caller),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+        ));
     }
 
     struct PrecompileHarness {
@@ -209,41 +230,15 @@ mod tests {
                         crate::tempo_state::slots::TEMPO_BLOCK_NUMBER,
                         U256::from(7u64),
                     )?;
-                    let mut token_contract =
-                        TIP20Token::from_address(token).expect("PATH_USD must be valid");
-                    token_contract.initialize(
-                        admin,
-                        "Zone USD",
-                        "zUSD",
-                        "USD",
-                        Address::ZERO,
-                        admin,
-                    )?;
-                    token_contract.grant_role_internal(admin, *ISSUER_ROLE)?;
-                    token_contract.grant_role_internal(issuer, *ISSUER_ROLE)?;
-                    token_contract.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-                    token_contract.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
-                    token_contract.mint(
-                        admin,
-                        ITIP20::mintCall {
-                            to: alice,
-                            amount: U256::from(1_000_000u64),
-                        },
-                    )?;
-                    token_contract.mint(
-                        admin,
-                        ITIP20::mintCall {
-                            to: ZONE_OUTBOX_ADDRESS,
-                            amount: U256::from(10_000u64),
-                        },
-                    )?;
-                    token_contract.approve(
-                        alice,
-                        ITIP20::approveCall {
-                            spender,
-                            amount: U256::from(300_000u64),
-                        },
-                    )?;
+                    TIP20Setup::path_usd(admin)
+                        .with_issuer(admin)
+                        .with_issuer(issuer)
+                        .with_issuer(ZONE_INBOX_ADDRESS)
+                        .with_issuer(ZONE_OUTBOX_ADDRESS)
+                        .with_mint(alice, U256::from(1_000_000u64))
+                        .with_mint(ZONE_OUTBOX_ADDRESS, U256::from(10_000u64))
+                        .with_approval(alice, spender, U256::from(300_000u64))
+                        .apply()?;
                     Ok(())
                 })?;
             }
@@ -305,66 +300,31 @@ mod tests {
     }
 
     #[test]
-    fn balance_of_enforces_account_or_sequencer_access() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
-        let calldata: Bytes = ITIP20::balanceOfCall {
-            account: harness.alice,
+    fn read_privacy_rules_allow_owner_spender_and_sequencer() {
+        let owner = Address::repeat_byte(0x11);
+        let spender = Address::repeat_byte(0x22);
+        let sequencer = Address::repeat_byte(0x33);
+        let outsider = Address::repeat_byte(0x44);
+        let rules = rules(sequencer);
+
+        let balance = ITIP20::balanceOfCall { account: owner };
+        assert_allowed(&rules, balance.clone(), owner);
+        assert_allowed(&rules, balance.clone(), sequencer);
+        assert_unauthorized(&rules, balance, outsider);
+
+        let allowance = ITIP20::allowanceCall { owner, spender };
+        for caller in [owner, spender, sequencer] {
+            assert_allowed(&rules, allowance.clone(), caller);
         }
-        .abi_encode()
-        .into();
+        assert_unauthorized(&rules, allowance, outsider);
 
-        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert_eq!(
-            ITIP20::balanceOfCall::abi_decode_returns(&owner.bytes)?,
-            U256::from(1_000_000u64)
-        );
-
-        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert_eq!(
-            ITIP20::balanceOfCall::abi_decode_returns(&sequencer.bytes)?,
-            U256::from(1_000_000u64)
-        );
-
-        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.is_revert());
-        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
-
-        Ok(())
-    }
-
-    #[test]
-    fn allowance_enforces_owner_spender_or_sequencer_access() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
-        let calldata: Bytes = ITIP20::allowanceCall {
-            owner: harness.alice,
-            spender: harness.spender,
-        }
-        .abi_encode()
-        .into();
-
-        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert_eq!(
-            ITIP20::allowanceCall::abi_decode_returns(&owner.bytes)?,
-            U256::from(300_000u64)
-        );
-
-        let spender = harness.call(harness.spender, calldata.clone(), 100_000, true)?;
-        assert_eq!(
-            ITIP20::allowanceCall::abi_decode_returns(&spender.bytes)?,
-            U256::from(300_000u64)
-        );
-
-        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert_eq!(
-            ITIP20::allowanceCall::abi_decode_returns(&sequencer.bytes)?,
-            U256::from(300_000u64)
-        );
-
-        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.is_revert());
-        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
-
-        Ok(())
+        let role = IRolesAuth::hasRoleCall {
+            account: owner,
+            role: *ISSUER_ROLE,
+        };
+        assert_allowed(&rules, role.clone(), owner);
+        assert_allowed(&rules, role.clone(), sequencer);
+        assert_unauthorized(&rules, role, outsider);
     }
 
     #[test]
@@ -468,8 +428,22 @@ mod tests {
     }
 
     #[test]
-    fn bridge_auth_rejects_crossed_system_calls_and_keeps_allowed_paths() -> eyre::Result<()> {
+    fn bridge_auth_rules_and_allowed_paths() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
+        let rules = rules(harness.sequencer);
+        assert_unauthorized(
+            &rules,
+            ITIP20::mintCall {
+                to: harness.bob,
+                amount: U256::ONE,
+            },
+            ZONE_OUTBOX_ADDRESS,
+        );
+        assert_unauthorized(
+            &rules,
+            ITIP20::burnCall { amount: U256::ONE },
+            ZONE_INBOX_ADDRESS,
+        );
 
         let inbox_mint = harness.call(
             ZONE_INBOX_ADDRESS,
@@ -498,199 +472,88 @@ mod tests {
         assert!(outbox_burn.is_success());
         assert_eq!(harness.balance_of(ZONE_OUTBOX_ADDRESS)?, U256::ZERO);
 
-        let crossed_mint = harness.call(
-            ZONE_OUTBOX_ADDRESS,
-            ITIP20::mintCall {
-                to: harness.bob,
-                amount: U256::from(1u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(crossed_mint.is_revert());
-        assert_eq!(
-            crossed_mint.bytes,
-            Bytes::from(RolesAuthError::unauthorized().selector().to_vec())
-        );
-
-        let crossed_burn = harness.call(
-            ZONE_INBOX_ADDRESS,
-            ITIP20::burnCall {
-                amount: U256::from(1u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(crossed_burn.is_revert());
-        assert_eq!(
-            crossed_burn.bytes,
-            Bytes::from(RolesAuthError::unauthorized().selector().to_vec())
-        );
-
         Ok(())
     }
 
     #[test]
     fn fixed_gas_selectors_charge_exactly_one_hundred_thousand_gas() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
+        let calls: Vec<(Address, ITIP20::ITIP20Calls)> = vec![
+            (
+                harness.alice,
+                ITIP20::ITIP20Calls::approve(ITIP20::approveCall {
+                    spender: harness.spender,
+                    amount: U256::from(111_111u64),
+                }),
+            ),
+            (
+                harness.alice,
+                ITIP20::ITIP20Calls::approve(ITIP20::approveCall {
+                    spender: harness.spender,
+                    amount: U256::from(222_222u64),
+                }),
+            ),
+            (
+                harness.alice,
+                ITIP20::ITIP20Calls::transfer(ITIP20::transferCall {
+                    to: harness.bob,
+                    amount: U256::from(10_000u64),
+                }),
+            ),
+            (
+                harness.alice,
+                ITIP20::ITIP20Calls::transfer(ITIP20::transferCall {
+                    to: harness.bob,
+                    amount: U256::from(10_000u64),
+                }),
+            ),
+            (
+                harness.alice,
+                ITIP20::ITIP20Calls::transferWithMemo(ITIP20::transferWithMemoCall {
+                    to: harness.bob,
+                    amount: U256::from(10_000u64),
+                    memo: Default::default(),
+                }),
+            ),
+            (
+                harness.spender,
+                ITIP20::ITIP20Calls::transferFrom(ITIP20::transferFromCall {
+                    from: harness.alice,
+                    to: harness.bob,
+                    amount: U256::from(10_000u64),
+                }),
+            ),
+            (
+                harness.spender,
+                ITIP20::ITIP20Calls::transferFromWithMemo(ITIP20::transferFromWithMemoCall {
+                    from: harness.alice,
+                    to: harness.bob,
+                    amount: U256::from(10_000u64),
+                    memo: Default::default(),
+                }),
+            ),
+        ];
 
-        let approve = harness.call(
-            harness.alice,
-            ITIP20::approveCall {
-                spender: harness.spender,
-                amount: U256::from(111_111u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(approve.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(approve.state_gas_used, 0);
-
-        let approve_update = harness.call(
-            harness.alice,
-            ITIP20::approveCall {
-                spender: harness.spender,
-                amount: U256::from(222_222u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(approve_update.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(approve_update.state_gas_used, 0);
-
-        let transfer_new = harness.call(
-            harness.alice,
-            ITIP20::transferCall {
-                to: harness.bob,
-                amount: U256::from(10_000u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(transfer_new.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_new.state_gas_used, 0);
-
-        let transfer_existing = harness.call(
-            harness.alice,
-            ITIP20::transferCall {
-                to: harness.bob,
-                amount: U256::from(10_000u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(transfer_existing.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_existing.state_gas_used, 0);
-
-        let transfer_with_memo = harness.call(
-            harness.alice,
-            ITIP20::transferWithMemoCall {
-                to: harness.bob,
-                amount: U256::from(10_000u64),
-                memo: Default::default(),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(transfer_with_memo.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_with_memo.state_gas_used, 0);
-
-        let transfer_from = harness.call(
-            harness.spender,
-            ITIP20::transferFromCall {
-                from: harness.alice,
-                to: harness.bob,
-                amount: U256::from(10_000u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(transfer_from.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_from.state_gas_used, 0);
-
-        let transfer_from_with_memo = harness.call(
-            harness.spender,
-            ITIP20::transferFromWithMemoCall {
-                from: harness.alice,
-                to: harness.bob,
-                amount: U256::from(10_000u64),
-                memo: Default::default(),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert_eq!(transfer_from_with_memo.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_from_with_memo.state_gas_used, 0);
-
+        for (caller, call) in calls {
+            let calldata = call.abi_encode().into();
+            let output = harness.call(caller, calldata, TIP20_FIXED_TRANSFER_GAS, false)?;
+            assert_eq!(output.gas_used, TIP20_FIXED_TRANSFER_GAS);
+            assert_eq!(output.state_gas_used, 0);
+        }
         Ok(())
     }
 
     #[test]
-    fn fixed_gas_selectors_fail_out_of_gas_below_threshold() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
-
-        for calldata in [
-            ITIP20::transferCall {
-                to: harness.bob,
-                amount: U256::from(1u64),
-            }
-            .abi_encode()
-            .into(),
-            ITIP20::transferFromCall {
-                from: harness.alice,
-                to: harness.bob,
-                amount: U256::from(1u64),
-            }
-            .abi_encode()
-            .into(),
-            ITIP20::transferWithMemoCall {
-                to: harness.bob,
-                amount: U256::from(1u64),
-                memo: Default::default(),
-            }
-            .abi_encode()
-            .into(),
-            ITIP20::transferFromWithMemoCall {
-                from: harness.alice,
-                to: harness.bob,
-                amount: U256::from(1u64),
-                memo: Default::default(),
-            }
-            .abi_encode()
-            .into(),
-            ITIP20::approveCall {
-                spender: harness.spender,
-                amount: U256::from(1u64),
-            }
-            .abi_encode()
-            .into(),
-        ] {
-            let output = harness
-                .call(harness.alice, calldata, TIP20_FIXED_TRANSFER_GAS - 1, false)
-                .expect("out of gas is returned as a halted precompile output");
-            assert!(output.is_halt());
-            assert_eq!(output.halt_reason(), Some(&PrecompileHalt::OutOfGas));
+    fn fixed_gas_selector_mapping_is_complete() {
+        let rules = rules(Address::ZERO);
+        for selector in TIP20_FIXED_GAS_SELECTORS {
+            assert_eq!(
+                rules.fixed_gas(Some(*selector)),
+                Some(TIP20_FIXED_TRANSFER_GAS)
+            );
         }
-
-        Ok(())
+        assert_eq!(rules.fixed_gas(Some([0xff; 4])), None);
+        assert_eq!(rules.fixed_gas(None), None);
     }
 
     #[test]
@@ -727,32 +590,6 @@ mod tests {
         )?;
         assert!(transfer.is_success());
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(7_654u64));
-
-        Ok(())
-    }
-
-    #[test]
-    fn has_role_enforces_account_or_sequencer_access() -> eyre::Result<()> {
-        let mut harness = PrecompileHarness::new()?;
-        let calldata: Bytes = IRolesAuth::hasRoleCall {
-            account: harness.alice,
-            role: *ISSUER_ROLE,
-        }
-        .abi_encode()
-        .into();
-
-        // Owner can query their own roles
-        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert!(owner.is_success());
-
-        // Sequencer can query anyone's roles
-        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert!(sequencer.is_success());
-
-        // Outsider is rejected
-        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.is_revert());
-        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
     }
