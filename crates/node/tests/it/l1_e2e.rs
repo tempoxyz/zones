@@ -1415,10 +1415,9 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     )
     .await?;
 
-    // --- Step 5: Alice attempts a transfer → should be rejected ---
-    // The transfer may be rejected at the pool level (send() returns Err) or
-    // accepted into a block but reverted (receipt.status() == false). Either
-    // outcome proves the blacklist is enforced.
+    // --- Step 5: Alice simulates a transfer → should be rejected ---
+    // Use an exact stateful call instead of waiting on pool inclusion: policy-invalid
+    // transactions are allowed to remain pending, so absence of a receipt is not proof.
     let bob = Address::with_last_byte(0xBB);
 
     let alice_provider = alloy::providers::ProviderBuilder::new()
@@ -1426,28 +1425,15 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
         .connect_http(zone.http_url().clone());
 
     let tip20 = tempo_contracts::precompiles::ITIP20::new(ZONE_TOKEN_ADDRESS, &alice_provider);
-    let send_result = tip20
+    let transfer = tip20
         .transfer(bob, U256::from(200_000u128))
-        .gas_price(tempo_chainspec::spec::TEMPO_T1_BASE_FEE as u128)
-        .gas(500_000)
-        .send()
+        .from(alice)
+        .call()
         .await;
-
-    match send_result {
-        Err(_) => {
-            // Pool-level rejection — blacklist enforced before inclusion.
-        }
-        Ok(pending) => {
-            // Tx was accepted into the pool — wait for it to be included and
-            // verify it reverted.
-            tokio::time::sleep(Duration::from_secs(3)).await;
-            let receipt = pending.get_receipt().await?;
-            assert!(
-                !receipt.status(),
-                "transfer from blacklisted sender should revert, but succeeded"
-            );
-        }
-    }
+    assert!(
+        transfer.is_err(),
+        "transfer simulation from blacklisted sender should revert"
+    );
 
     // Bob should have zero balance
     let bob_balance = zone.balance_of(ZONE_TOKEN_ADDRESS, bob).await?;
