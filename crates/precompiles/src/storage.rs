@@ -48,12 +48,10 @@ pub enum L1AnchorPhase {
     /// The selected Zone state's checkpoint has not been loaded yet.
     #[default]
     Uninitialized,
-    /// Execution is still at the parent anchor.
+    /// External Tempo state was read at the parent anchor.
     Parent {
         /// Parent Tempo block number.
         anchor: u64,
-        /// Whether external Tempo state was observed at this anchor.
-        has_read_l1: bool,
     },
     /// The required system transaction advanced this execution to the child anchor.
     Advanced {
@@ -69,13 +67,9 @@ impl L1AnchorPhase {
     pub const fn current(self) -> Option<u64> {
         match self {
             Self::Uninitialized => None,
-            Self::Parent { anchor, .. } => Some(anchor),
+            Self::Parent { anchor } => Some(anchor),
             Self::Advanced { to, .. } => Some(to),
         }
-    }
-
-    const fn advanced(from: u64, to: u64) -> Self {
-        Self::Advanced { from, to }
     }
 
     fn apply(self, operation: L1AnchorOperation) -> Result<Self, L1AnchorError> {
@@ -86,28 +80,16 @@ impl L1AnchorPhase {
 
         match operation {
             L1AnchorOperation::Read { anchor: new } => match self {
-                Self::Uninitialized => Ok(Self::Parent {
-                    anchor: new,
-                    has_read_l1: true,
-                }),
-                Self::Parent { anchor: prev, .. } if prev == new => Ok(Self::Parent {
-                    anchor: prev,
-                    has_read_l1: true,
-                }),
+                Self::Uninitialized => Ok(Self::Parent { anchor: new }),
+                Self::Parent { anchor } if anchor == new => Ok(self),
                 Self::Advanced { to, .. } if to == new => Ok(self),
                 _ => Err(invalid()),
             },
             L1AnchorOperation::Advance { from, to } => {
-                if from.checked_add(1) != Some(to) {
-                    return Err(invalid());
-                }
-                match self {
-                    Self::Uninitialized => Ok(Self::advanced(from, to)),
-                    Self::Parent {
-                        anchor,
-                        has_read_l1: false,
-                    } if anchor == from => Ok(Self::advanced(from, to)),
-                    _ => Err(invalid()),
+                if from.checked_add(1) == Some(to) && matches!(self, Self::Uninitialized) {
+                    Ok(Self::Advanced { from, to })
+                } else {
+                    Err(invalid())
                 }
             }
         }
@@ -140,9 +122,9 @@ impl L1AnchorController {
         self.state.get()
     }
 
-    /// Restores a previous controller snapshot.
-    pub fn restore(&self, snapshot: L1AnchorPhase) {
-        self.state.set(snapshot);
+    /// Resets the controller for the next transaction attempt.
+    pub fn reset(&self) {
+        self.state.set(L1AnchorPhase::Uninitialized);
     }
 
     /// Returns the anchor used by reads in the current phase, if initialized.
@@ -201,10 +183,7 @@ mod tests {
     #[test]
     fn controller_rejects_reads_at_wrong_anchor() {
         let controller = L1AnchorController::default();
-        controller.restore(L1AnchorPhase::Parent {
-            anchor: 10,
-            has_read_l1: false,
-        });
+        controller.observe_read(10).unwrap();
         assert!(controller.observe_read(11).is_err());
     }
 
@@ -213,24 +192,5 @@ mod tests {
         let controller = L1AnchorController::default();
         controller.begin_advance(10, 11).unwrap();
         assert!(controller.begin_advance(11, 12).is_err());
-    }
-
-    #[test]
-    fn controller_snapshot_restores_phase() {
-        let controller = L1AnchorController::default();
-        controller.restore(L1AnchorPhase::Parent {
-            anchor: 10,
-            has_read_l1: false,
-        });
-        let snapshot = controller.phase();
-        controller.begin_advance(10, 11).unwrap();
-        controller.restore(snapshot);
-        assert_eq!(
-            controller.phase(),
-            L1AnchorPhase::Parent {
-                anchor: 10,
-                has_read_l1: false
-            }
-        );
     }
 }

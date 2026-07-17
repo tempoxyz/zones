@@ -1,7 +1,7 @@
 use super::*;
 use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
 use alloy_consensus::{Header, ReceiptWithBloom};
-use alloy_primitives::{Bloom, Bytes, FixedBytes, LogData, address};
+use alloy_primitives::{Bloom, FixedBytes, address};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
@@ -223,12 +223,6 @@ fn make_test_receipt(
     }
 }
 
-fn make_test_receipt_with_logs(logs: Vec<Log>) -> TempoTransactionReceipt {
-    let mut receipt = make_test_receipt(1, B256::ZERO, B256::ZERO, 0, 21_000, Bloom::ZERO);
-    receipt.inner.inner.receipt.logs = logs;
-    receipt
-}
-
 fn calculate_test_receipts_root(receipts: &[TempoTransactionReceipt]) -> B256 {
     let receipts = receipts
         .iter()
@@ -402,28 +396,25 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
-fn update_l1_state_anchor_reorg_clears_raw_state_and_preserves_tracking() {
+fn update_l1_state_anchor_reorg_clears_raw_state() {
     let subscriber = test_subscriber(
         Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
         Some(0),
     );
     let token = address!("0x0000000000000000000000000000000000000011");
-    subscriber.config.l1_state_cache.write().track(token);
 
-    let old_header = seal(make_test_header(10));
-    subscriber.update_l1_state_anchor(&old_header, &HashSet::new());
-    {
-        let mut cache = subscriber.config.l1_state_cache.write();
-        assert!(cache.set(
-            token,
-            B256::with_last_byte(1),
-            10,
-            B256::with_last_byte(0xaa),
-        ));
-    }
+    let old_header = make_test_header(10);
+    subscriber.update_l1_state_anchor(10, header_hash(&old_header), old_header.inner.parent_hash);
+    subscriber.config.l1_state_cache.write().set(
+        token,
+        B256::with_last_byte(1),
+        10,
+        B256::with_last_byte(0xaa),
+    );
+
     let replacement_parent = B256::with_last_byte(0x44);
-    let replacement_header = seal(make_chained_header(11, replacement_parent));
-    subscriber.update_l1_state_anchor(&replacement_header, &HashSet::new());
+    let replacement_header = make_chained_header(11, replacement_parent);
+    subscriber.update_l1_state_anchor(11, header_hash(&replacement_header), replacement_parent);
     assert_eq!(
         subscriber
             .config
@@ -432,10 +423,6 @@ fn update_l1_state_anchor_reorg_clears_raw_state_and_preserves_tracking() {
             .get(token, B256::with_last_byte(1), 10),
         None,
         "reorg must clear raw L1 state"
-    );
-    assert!(
-        subscriber.config.l1_state_cache.read().is_tracked(&token),
-        "reorgs must preserve conservative token tracking"
     );
 }
 
@@ -451,9 +438,12 @@ fn confirm_shared(queue: &DepositQueue) -> L1BlockDeposits {
     queue.confirm(num_hash).expect("confirm mismatch")
 }
 
-fn make_log(address: Address, data: LogData) -> Log {
+fn make_portal_log<E: SolEvent>(portal_address: Address, event: E) -> Log {
     Log {
-        inner: alloy_primitives::Log { address, data },
+        inner: alloy_primitives::Log {
+            address: portal_address,
+            data: event.encode_log_data(),
+        },
         block_hash: None,
         block_number: None,
         block_timestamp: None,
@@ -462,99 +452,6 @@ fn make_log(address: Address, data: LogData) -> Log {
         log_index: None,
         removed: false,
     }
-}
-
-fn make_portal_log<E: SolEvent>(portal_address: Address, event: E) -> Log {
-    make_log(portal_address, event.encode_log_data())
-}
-
-#[test]
-fn extract_events_tracks_portal_mutations() {
-    let mut subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
-        Some(0),
-    );
-    let portal = subscriber.config.portal_address;
-    let log = make_log(
-        portal,
-        LogData::new_unchecked(vec![B256::repeat_byte(0xff)], Bytes::new()),
-    );
-
-    let (_, mutated_accounts) =
-        subscriber.extract_events(1, &[make_test_receipt_with_logs(vec![log])]);
-
-    assert_eq!(mutated_accounts, HashSet::from([portal]));
-}
-
-#[test]
-fn extract_events_conservatively_tracks_policy_mutations() {
-    use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-
-    let tracked_token = Address::with_last_byte(0x11);
-    let untracked_token = Address::with_last_byte(0x22);
-    let mut subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
-        Some(0),
-    );
-    subscriber
-        .config
-        .l1_state_cache
-        .write()
-        .track(tracked_token);
-
-    let unknown_registry_log = make_log(
-        TIP403_REGISTRY_ADDRESS,
-        LogData::new_unchecked(vec![B256::repeat_byte(0xff)], Bytes::new()),
-    );
-    let policy_update = TransferPolicyUpdate {
-        updater: Address::ZERO,
-        newPolicyId: 7,
-    };
-    let tracked_update = make_log(tracked_token, policy_update.encode_log_data());
-    let untracked_update = make_log(untracked_token, policy_update.encode_log_data());
-    let receipt =
-        make_test_receipt_with_logs(vec![unknown_registry_log, tracked_update, untracked_update]);
-
-    let (_, mutated_accounts) = subscriber.extract_events(1, &[receipt]);
-
-    assert!(mutated_accounts.contains(&TIP403_REGISTRY_ADDRESS));
-    assert!(mutated_accounts.contains(&tracked_token));
-    assert!(!mutated_accounts.contains(&untracked_token));
-}
-
-#[test]
-fn token_enabled_discovery_persists_for_later_policy_barriers() {
-    use tempo_contracts::precompiles::ITIP20::TransferPolicyUpdate;
-
-    let mut subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
-        Some(0),
-    );
-    let token = Address::with_last_byte(0x33);
-    let enabled = TokenEnabled {
-        token,
-        name: "Tracked USD".to_owned(),
-        symbol: "tUSD".to_owned(),
-        currency: "USD".to_owned(),
-    };
-    let enabled_receipt = make_test_receipt_with_logs(vec![make_portal_log(
-        subscriber.config.portal_address,
-        enabled,
-    )]);
-
-    let _ = subscriber.extract_events(1, &[enabled_receipt]);
-    assert!(subscriber.config.l1_state_cache.read().is_tracked(&token));
-
-    // A later extraction (including after the subscriber reconnect loop restarts `run`)
-    // uses the same cache-owned tracking set and installs the token mutation barrier.
-    let update = TransferPolicyUpdate {
-        updater: Address::ZERO,
-        newPolicyId: 7,
-    };
-    let update_receipt =
-        make_test_receipt_with_logs(vec![make_log(token, update.encode_log_data())]);
-    let (_, mutated_accounts) = subscriber.extract_events(2, &[update_receipt]);
-    assert!(mutated_accounts.contains(&token));
 }
 
 #[tokio::test]

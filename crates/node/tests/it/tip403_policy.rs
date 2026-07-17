@@ -119,13 +119,12 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     let anchor = zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
 
     const BLACKLIST_POLICY_ID: u64 = 42;
-    {
-        let mut cache = zone.l1_state_cache().write();
-        eyre::ensure!(
-            seed_raw_tip20_policy_id(&mut cache, anchor, PATH_USD_ADDRESS, BLACKLIST_POLICY_ID,),
-            "fee-token policy seed must be admitted at the current anchor"
-        );
-    }
+    seed_raw_tip20_policy_id(
+        &mut zone.l1_state_cache().write(),
+        anchor,
+        PATH_USD_ADDRESS,
+        BLACKLIST_POLICY_ID,
+    );
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         anchor,
@@ -185,7 +184,7 @@ async fn test_policy_proxy_whitelist_authorization() -> eyre::Result<()> {
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
-    // Populate raw L1 state before block 1 advances the cache floor.
+    // Populate raw L1 state at block 1.
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -236,7 +235,7 @@ async fn test_policy_proxy_blacklist_authorization() -> eyre::Result<()> {
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
-    // Populate raw L1 state before block 1 advances the cache floor.
+    // Populate raw L1 state at block 1.
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -275,7 +274,7 @@ async fn test_policy_proxy_compound_policy() -> eyre::Result<()> {
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
-    // Seed the compound policy graph before block 1 advances the cache floor.
+    // Seed the compound policy graph at block 1.
     // Policy 5 = sender whitelist, policy 6 = recipient blacklist; compound policy 10
     // references them.
     seed_raw_tip403_policy(
@@ -389,7 +388,7 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
     let bob = address!("0x0000000000000000000000000000000000000B0B");
     let carol = address!("0x000000000000000000000000000000000000CA01");
 
-    // Seed the complete policy membership before block 1 advances the cache floor.
+    // Seed the complete policy membership at block 1.
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,

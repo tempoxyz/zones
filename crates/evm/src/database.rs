@@ -116,6 +116,12 @@ impl<DB, L1> AnchoredZoneDb<DB, L1> {
     pub const fn controller(&self) -> &L1AnchorController {
         &self.controller
     }
+
+    /// Clears bookkeeping that is valid only for the current transaction attempt.
+    pub(crate) fn reset_transaction_state(&mut self) {
+        self.controller.reset();
+        self.packed_policy_slots.clear();
+    }
 }
 
 impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
@@ -245,6 +251,8 @@ mod tests {
         database::{CacheDB, EmptyDB},
         state::EvmStorageSlot,
     };
+    use tempo_precompiles::{PATH_USD_ADDRESS, tip20::tip20_slots};
+
     fn test_db(anchor: u64) -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::default());
         db.insert_account_storage(
@@ -294,9 +302,7 @@ mod tests {
 
     #[test]
     fn packed_policy_field_is_removed_from_canonical_transition() {
-        let anchor = 42;
-        let token = tempo_precompiles::PATH_USD_ADDRESS;
-        let slot = tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID;
+        let (anchor, token, slot) = (42, PATH_USD_ADDRESS, tip20_slots::TRANSFER_POLICY_ID);
         let offset = tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
         let local = storage::merge_transfer_policy_id(U256::from(10), U256::from(2) << offset);
         let l1_value = U256::from(99) << offset;
@@ -326,6 +332,23 @@ mod tests {
             storage::merge_transfer_policy_id(U256::ZERO, local)
         );
         assert_eq!(sanitized & U256::from(u64::MAX), U256::from(11));
+    }
+
+    #[test]
+    fn transaction_reset_clears_anchor_and_packed_slot_observations() {
+        let (anchor, token, slot) = (42, PATH_USD_ADDRESS, tip20_slots::TRANSFER_POLICY_ID);
+        let l1 = TestL1::default();
+        l1.insert(token, slot, anchor, U256::from(7));
+        let mut db = AnchoredZoneDb::new(test_db(anchor), l1);
+
+        db.storage(token, slot).unwrap();
+        assert_eq!(db.controller().current(), Some(anchor));
+        assert_eq!(db.packed_policy_slots.len(), 1);
+
+        db.reset_transaction_state();
+
+        assert_eq!(db.controller().current(), None);
+        assert!(db.packed_policy_slots.is_empty());
     }
 
     #[test]

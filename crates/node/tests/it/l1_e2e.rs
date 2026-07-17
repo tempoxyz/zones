@@ -168,12 +168,11 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
     let latest_l1_block = l1.provider().get_block_number().await?;
     assert!(latest_l1_block > provisioned.anchor_block_number);
 
-    let zone = ZoneTestNode::start_from_l1_at_block_with_initial_tokens(
+    let zone = ZoneTestNode::start_from_l1_at_block(
         l1.http_url(),
         l1.ws_url(),
         provisioned.portal,
         provisioned.anchor_block_number,
-        None,
     )
     .await?;
     zone.wait_for_l2_tempo_finalized(latest_l1_block, L1_TIMEOUT)

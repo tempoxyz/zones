@@ -15,7 +15,7 @@ use revm::context::{
 use tempo_evm::{TempoBlockEnv, TempoHaltReason, evm::TempoEvm};
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::{L1AnchorController, L1StorageReader};
+use zone_precompiles::L1StorageReader;
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type TempoResult = ResultAndState<TempoHaltReason>;
@@ -48,9 +48,13 @@ impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
         self.inner.ctx_mut()
     }
 
-    /// Returns the execution-local anchor controller.
-    pub fn anchor_controller(&self) -> &L1AnchorController {
-        self.inner.ctx().journaled_state.database.controller()
+    /// Clears database-adapter bookkeeping left by the current transaction attempt.
+    pub(crate) fn reset_transaction_state(&mut self) {
+        self.inner
+            .ctx_mut()
+            .journaled_state
+            .database
+            .reset_transaction_state();
     }
 }
 
@@ -66,23 +70,21 @@ where
             &mut TempoEvm<AnchoredZoneDb<DB, L1>, I>,
         ) -> Result<TempoResult, AdaptedEvmError<DB::Error>>,
     ) -> Result<TempoResult, ZoneEvmError<DB::Error>> {
-        let snapshot = self.anchor_controller().phase();
-        let mut result = match execute(&mut self.inner) {
-            Ok(result) => result,
-            Err(error) => {
-                self.anchor_controller().restore(snapshot);
-                return Err(map_adapter_error(error));
+        let result = match execute(&mut self.inner) {
+            Ok(mut result) => {
+                if result.result.is_success()
+                    && let Err(error) = self.inner.db().sanitize_state(&mut result.state)
+                {
+                    Err(error.into_evm_error())
+                } else {
+                    Ok(result)
+                }
             }
+            Err(error) => Err(map_adapter_error(error)),
         };
-        if !result.result.is_success() {
-            self.anchor_controller().restore(snapshot);
-            return Ok(result);
-        }
-        if let Err(error) = self.inner.db().sanitize_state(&mut result.state) {
-            self.anchor_controller().restore(snapshot);
-            return Err(error.into_evm_error());
-        }
-        Ok(result)
+
+        self.reset_transaction_state();
+        result
     }
 }
 

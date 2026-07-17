@@ -417,10 +417,7 @@ mod tests {
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
         assert_eq!(
             harness.controller.phase(),
-            L1AnchorPhase::Parent {
-                anchor: 10,
-                has_read_l1: true
-            }
+            L1AnchorPhase::Parent { anchor: 10 }
         );
 
         let child = child_header(genesis_hash, 11);

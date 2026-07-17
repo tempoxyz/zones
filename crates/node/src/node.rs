@@ -30,7 +30,7 @@ use reth_node_builder::{
     },
 };
 use reth_primitives_traits::SealedHeader;
-use reth_provider::{CanonStateSubscriptions, ChainSpecProvider};
+use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
@@ -55,14 +55,12 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
-use tracing::{debug, info, warn};
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tracing::{debug, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    ChainTempoStateExt, DepositQueue, L1Subscriber, L1SubscriberConfig, TempoStateExt,
+    DepositQueue, L1Subscriber, L1SubscriberConfig, TempoStateExt,
     state::{L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
@@ -174,9 +172,6 @@ pub struct ZoneNode {
     l1_state_cache: L1StateCache,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
-    /// Optional pre-configured list of enabled token addresses. When set, the
-    /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
-    initial_tokens: Option<Vec<Address>>,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
@@ -223,7 +218,6 @@ impl ZoneNode {
             l1_state_provider_config,
             l1_state_cache,
             portal_address,
-            initial_tokens: None,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
             private_rpc_config: ZonePrivateRpcConfig::default(),
@@ -262,13 +256,6 @@ impl ZoneNode {
         encryptor: Arc<dyn WithdrawalRevealEncryptor>,
     ) -> Self {
         self.withdrawal_reveal_encryptor = Some(encryptor);
-        self
-    }
-
-    /// Set the initial list of enabled token addresses.
-    /// When set, the startup L1 RPC query for enabled tokens is skipped.
-    pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
-        self.initial_tokens = Some(tokens);
         self
     }
 
@@ -376,12 +363,8 @@ where
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
-    /// Block-versioned L1 storage cache shared with the subscriber and precompiles.
-    l1_state_cache: L1StateCache,
     /// ZonePortal address on L1.
     portal_address: Address,
-    /// Pre-configured list of initial tokens.
-    initial_tokens: Option<Vec<Address>>,
     /// Private RPC configuration.
     private_rpc_config: ZonePrivateRpcConfig,
     /// Sequencer configuration.
@@ -408,9 +391,7 @@ where
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
-        l1_state_cache: L1StateCache,
         portal_address: Address,
-        initial_tokens: Option<Vec<Address>>,
         private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
@@ -426,9 +407,7 @@ where
             ),
             deposit_queue,
             l1_config,
-            l1_state_cache,
             portal_address,
-            initial_tokens,
             private_rpc_config,
             sequencer_config,
             p2p_config,
@@ -456,11 +435,7 @@ where
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
-        self.l1_state_cache
-            .write()
-            .advance_floor(tempo_block_number);
-        self.spawn_l1_state_cache_floor_task(&ctx);
-        info!(target: "reth::cli", tempo_block_number, "Initialized L1 cache progress from local TempoState");
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -470,8 +445,6 @@ where
             .await?
             .erased();
 
-        self.initialize_tracked_tokens(tempo_block_number, &l1_provider)
-            .await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
         if p2p_role == Some(Role::Follower) {
             // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
@@ -616,132 +589,6 @@ where
             },
         );
         Ok(())
-    }
-
-    /// Initialize subscriber token tracking at the canonical Zone L1 anchor.
-    async fn initialize_tracked_tokens(
-        &mut self,
-        block_number: u64,
-        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
-    ) -> eyre::Result<()> {
-        let tokens = if let Some(tokens) = self.initial_tokens.take() {
-            info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
-            tokens
-        } else {
-            let portal = self.portal_address;
-            let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
-            let portal_code = l1_provider
-                .get_code_at(portal)
-                .block_id(block_id)
-                .await
-                .map_err(|err| {
-                    eyre::eyre!(
-                        "failed to read code for portal {portal} at canonical L1 block {block_number}: {err}"
-                    )
-                })?;
-
-            if portal_code.is_empty() {
-                // A zone may intentionally anchor immediately before its portal is deployed. The
-                // subscriber will replay the creation block and dynamically track tokens from its
-                // TokenEnabled events.
-                info!(
-                    target: "reth::cli",
-                    %portal,
-                    block_number,
-                    "Portal is not deployed at canonical L1 anchor; starting without tracked tokens"
-                );
-                Vec::new()
-            } else {
-                let tokens = ZonePortal::new(portal, l1_provider)
-                    .enabled_tokens_at(block_id)
-                    .await
-                    .map_err(|err| {
-                        eyre::eyre!(
-                            "failed to discover enabled tokens for portal {portal} at canonical L1 block {block_number}: {err}"
-                        )
-                    })?;
-                info!(
-                    target: "reth::cli",
-                    count = tokens.len(),
-                    ?tokens,
-                    block_number,
-                    "Discovered enabled tokens from canonical L1 state"
-                );
-                tokens
-            }
-        };
-
-        let mut cache = self.l1_state_cache.write();
-        for token in tokens {
-            cache.track(token);
-        }
-        Ok(())
-    }
-
-    /// Track the canonical Zone anchor and advance the raw L1 cache floor for every node role.
-    fn spawn_l1_state_cache_floor_task(&self, ctx: &AddOnsContext<'_, N>) {
-        let provider = ctx.node.provider().clone();
-        let mut notifications = provider.subscribe_to_canonical_state();
-        let cache = self.l1_state_cache.clone();
-
-        ctx.node.task_executor().spawn_critical_task(
-            "l1-state-cache-floor",
-            async move {
-                loop {
-                    let block_number = match notifications.recv().await {
-                        Ok(notification) => {
-                            let committed = notification.committed();
-                            if committed.is_empty() {
-                                // A pure revert has no new execution outcome. The floor is
-                                // monotonic, but read the new canonical head for completeness.
-                                match provider
-                                    .latest()
-                                    .and_then(|state| state.tempo_block_number())
-                                {
-                                    Ok(block_number) => block_number,
-                                    Err(err) => {
-                                        warn!(target: "zone::l1_cache", %err, "Failed to resync L1 cache floor after canonical revert");
-                                        continue;
-                                    }
-                                }
-                            } else {
-                                committed.tempo_block_number()
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            // A later notification normally catches the floor up, but resync now
-                            // so an idle follower cannot remain behind after notification loss.
-                            warn!(target: "zone::l1_cache", skipped, "Canonical notifications lagged; resyncing L1 cache floor");
-                            match provider
-                                .latest()
-                                .and_then(|state| state.tempo_block_number())
-                            {
-                                Ok(block_number) => block_number,
-                                Err(err) => {
-                                    warn!(target: "zone::l1_cache", %err, "Failed to resync lagged L1 cache floor");
-                                    continue;
-                                }
-                            }
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                            panic!("canonical state notifications closed unexpectedly")
-                        }
-                    };
-
-                    let mut cache = cache.write();
-                    let previous_floor = cache.block_floor();
-                    cache.advance_floor(block_number);
-                    if block_number > previous_floor {
-                        debug!(
-                            target: "zone::l1_cache",
-                            previous_floor,
-                            block_number,
-                            "Advanced L1 cache floor from canonical Zone state"
-                        );
-                    }
-                }
-            },
-        );
     }
 
     /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
@@ -965,9 +812,7 @@ where
         ZoneAddOns::new(
             self.deposit_queue.clone(),
             self.l1_config.clone(),
-            self.l1_state_cache.clone(),
             self.portal_address,
-            self.initial_tokens.clone(),
             self.private_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),

@@ -1,5 +1,4 @@
 use super::*;
-use std::collections::HashSet;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -43,9 +42,6 @@ where
     }
 }
 
-/// Portal events and addresses whose raw L1 state may have mutated in a block.
-type SubscriberEventsOutput = (L1PortalEvents, HashSet<Address>);
-
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
 pub struct L1Subscriber {
@@ -70,7 +66,7 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        let mut subscriber = Self {
+        let subscriber = Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
@@ -272,10 +268,7 @@ impl L1Subscriber {
 
     /// Backfill deposit events from the starting block to the current L1 tip.
     #[instrument(skip(self, l1_provider))]
-    async fn sync_to_l1_tip(
-        &mut self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<()> {
+    async fn sync_to_l1_tip(&self, l1_provider: &impl Provider<TempoNetwork>) -> eyre::Result<()> {
         let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
@@ -323,12 +316,12 @@ impl L1Subscriber {
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
     ///
     /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
-    /// parallel, then processes them sequentially (event extraction, raw-cache
-    /// invalidation, enqueue). Receipts are fetched by the corresponding block
+    /// parallel, then processes them sequentially (event extraction and enqueue).
+    /// Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(
-        &mut self,
+        &self,
         l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
@@ -390,11 +383,11 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (portal_events, mutated_accounts) = self.extract_events(block_number, &receipts);
+            let portal_events = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(&sealed, &mutated_accounts);
+            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
             self.apply_portal_state_events(block_number, &portal_events);
             self.deposit_queue.enqueue_sealed(sealed, portal_events);
             enqueued += 1;
@@ -438,7 +431,7 @@ impl L1Subscriber {
     /// prevents the zone from committing to an L1 tip that gets reorged away.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
-    pub async fn run(&mut self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
 
         // Backfill to the current tip before subscribing.
@@ -452,7 +445,7 @@ impl L1Subscriber {
         // A block is only flushed to the deposit queue once the NEXT block
         // arrives with a matching parent hash, proving the buffered block
         // is on the canonical chain.
-        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, SubscriberEventsOutput)> = None;
+        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, L1PortalEvents)> = None;
 
         loop {
             let stream_wait_start = std::time::Instant::now();
@@ -469,12 +462,16 @@ impl L1Subscriber {
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, (portal_events, mutated_accounts))) = unconfirmed_tip.take() {
+            if let Some((tip_header, portal_events)) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
                     // Confirmed — update the L1 state anchor, apply events, and
                     // flush to the queue.
                     let tip_number = tip_header.number();
-                    self.update_l1_state_anchor(&tip_header, &mutated_accounts);
+                    self.update_l1_state_anchor(
+                        tip_number,
+                        tip_header.hash(),
+                        tip_header.parent_hash(),
+                    );
                     self.apply_portal_state_events(tip_number, &portal_events);
                     match self.deposit_queue.try_enqueue(tip_header, portal_events) {
                         EnqueueOutcome::Accepted => {
@@ -516,48 +513,27 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Extract portal events and conservative raw-state mutation barriers from receipts.
-    pub(crate) fn extract_events(
-        &mut self,
+    /// Extract portal events from pre-fetched receipts (no RPC).
+    fn extract_events(
+        &self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> SubscriberEventsOutput {
-        use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-
+    ) -> L1PortalEvents {
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
-        let mut mutated_accounts = HashSet::new();
 
         for receipt in receipts {
             for log in receipt.logs() {
-                let addr = log.address();
-
-                if addr == portal_address {
-                    mutated_accounts.insert(addr);
-                    let prev_len = portal_events.enabled_tokens.len();
-                    if let Err(e) = portal_events.push_log(log, block_number) {
-                        warn!(block_number, %e, "Failed to decode portal event from receipt");
-                    }
-                    if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
-                        let token = enabled.token;
-                        if self.config.l1_state_cache.write().track(token) {
-                            info!(%token, "New token enabled, adding to tracked contracts");
-                        }
-                    }
-                } else if addr == TIP403_REGISTRY_ADDRESS {
-                    // Registry logs conservatively invalidate all inherited registry slots.
-                    mutated_accounts.insert(addr);
-                } else if self.config.l1_state_cache.read().is_tracked(&addr)
-                    && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
+                if log.address() == portal_address
+                    && let Err(e) = portal_events.push_log(log, block_number)
                 {
-                    // TODO: Remove once Tempo has migrated policy IDs to the TIP-403 registry.
-                    mutated_accounts.insert(addr);
+                    warn!(block_number, %e, "Failed to decode portal event from receipt");
                 }
             }
         }
 
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, mutated_accounts)
+        portal_events
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -629,29 +605,23 @@ impl L1Subscriber {
         );
     }
 
-    /// Update the L1 state cache anchor. Detects reorgs by comparing `parent_hash`
-    /// against the current anchor and clears the cache when they diverge.
-    pub(crate) fn update_l1_state_anchor(
-        &self,
-        header: &SealedHeader<TempoHeader>,
-        mutated_accounts: &HashSet<Address>,
-    ) {
+    /// Update the L1 state cache anchor. Detects reorgs by comparing
+    /// `parent_hash` against the current anchor and clears the cache when they
+    /// diverge.
+    pub(crate) fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
-        if anchor.hash != B256::ZERO && header.parent_hash() != anchor.hash {
+        if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
             self.subscriber_metrics.reorgs_detected.increment(1);
             warn!(
                 old_anchor = %anchor.hash,
-                new_parent = %header.parent_hash(),
-                block_number = header.number(),
+                new_parent = %parent_hash,
+                block_number = number,
                 "Reorg detected, clearing L1 state cache"
             );
             guard.clear();
         }
-        for &address in mutated_accounts {
-            guard.invalidate(address, header.number());
-        }
-        guard.update_anchor(header.num_hash());
+        guard.update_anchor(NumHash::new(number, hash));
     }
 }
 
@@ -719,21 +689,9 @@ pub(crate) fn apply_sequencer_events_to_cache(
     block_number: u64,
     sequencer_events: &[L1SequencerEvent],
 ) {
-    let mut set_cache_slot = |slot, value| {
-        if !cache.set(portal_address, slot, block_number, value) {
-            let floor = cache.block_floor();
-            debug!(
-                %portal_address,
-                %slot,
-                block_number,
-                floor,
-                "discarding sequencer cache update below canonical floor"
-            );
-        }
-    };
+    let mut set_cache_slot = |slot, value| cache.set(portal_address, slot, block_number, value);
 
     for event in sequencer_events {
-        // Reorg/backfill may replay events below the monotonic floor; those writes stay rejected.
         match *event {
             L1SequencerEvent::TransferStarted {
                 current_sequencer,

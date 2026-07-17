@@ -2,8 +2,8 @@
 //!
 //! [`L1StateProvider`] wraps a [`L1StateCache`] and a [`DynProvider<TempoNetwork>`] backed by an
 //! HTTP transport. Reads are served from the in-memory cache when possible. On cache miss the
-//! provider falls back to `eth_getStorageAt` via the shared HTTP provider, and forward reads are
-//! written back. Misses below the canonical Zone anchor floor are returned without caching.
+//! provider falls back to `eth_getStorageAt` via the shared HTTP provider and writes the result
+//! back into the cache.
 //!
 //! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
 //! ([`L1StateProvider::get_storage_async`]) entry point are provided. The synchronous variant is
@@ -198,8 +198,7 @@ impl L1StateProvider {
 
             match result {
                 Ok(value) => {
-                    // Historical reads below the canonical floor are deliberately not readmitted.
-                    let _ = self.cache.write().set(address, slot, block_number, value);
+                    self.cache.write().set(address, slot, block_number, value);
                     if attempt > 1 {
                         info!(%address, %slot, block_number, %value, ?elapsed, attempt, "L1 storage RPC fetch succeeded after retries");
                     } else {
@@ -270,8 +269,7 @@ impl L1StateProvider {
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
         let value = self.fetch_slot(address, slot, block_number).await?;
-        // Historical reads below the canonical floor are deliberately not readmitted.
-        let _ = self.cache.write().set(address, slot, block_number, value);
+        self.cache.write().set(address, slot, block_number, value);
         Ok(value)
     }
 
