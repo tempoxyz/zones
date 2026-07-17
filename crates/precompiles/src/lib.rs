@@ -148,7 +148,7 @@ impl AesGcmDecrypt {
         execution::create_precompile(
             "AesGcmDecrypt",
             env,
-            execution::NoCallRules,
+            execution::DelegateCallAllowed,
             |data, caller| Self.call(data, caller),
         )
     }
@@ -160,7 +160,7 @@ impl ChaumPedersenVerify {
         execution::create_precompile(
             "ChaumPedersenVerify",
             env,
-            execution::NoCallRules,
+            execution::DelegateCallAllowed,
             |data, caller| Self.call(data, caller),
         )
     }

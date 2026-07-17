@@ -2,7 +2,6 @@
 //!
 //! Wraps [`TempoEvmConfig`] with a [`ZoneEvmFactory`] that installs the L1-anchored database,
 //! registers Zone-native precompiles, and preserves the original database at the [`Evm`] boundary.
-//! Block assembly also validates that the `advanceTempo` system tx happens once at index zero.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -14,12 +13,10 @@ pub mod precompiles;
 #[cfg(test)]
 mod test_utils;
 mod tx_context;
-mod validation;
 mod zone_evm;
 
 pub use database::{AnchoredZoneDb, AnchoredZoneDbError};
 pub use executor::ZoneBlockExecutor;
-pub use validation::{AdvanceTempoValidationError, validate_advance_tempo_transactions};
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
@@ -134,8 +131,7 @@ where
     }
 }
 
-/// Assembler for Zone blocks — delegates to [`TempoBlockAssembler`] after validating system tx
-/// ordering and converting input types.
+/// Assembler for Zone blocks - delegates to [`TempoBlockAssembler`] after converting input types.
 #[derive(Debug, Clone)]
 pub struct ZoneBlockAssembler {
     inner: TempoBlockAssembler,
@@ -169,10 +165,6 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
             block_access_list_hash,
             ..
         } = input;
-
-        if let Err(error) = validate_advance_tempo_transactions(&transactions) {
-            return Err(alloy_evm::block::BlockValidationError::other(error).into());
-        }
 
         self.inner.assemble_block(
             BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(
@@ -330,9 +322,6 @@ impl ConfigureEvm for ZoneEvmConfig {
         use alloy_evm::eth::EthBlockExecutionCtx;
         use std::borrow::Cow;
 
-        validate_advance_tempo_transactions(&block.body().transactions)
-            .map_err(|err| TempoEvmError::InvalidEvmConfig(err.to_string()))?;
-
         Ok(TempoBlockExecutionCtx {
             inner: EthBlockExecutionCtx {
                 parent_hash: block.header().parent_hash(),
@@ -392,23 +381,11 @@ impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TestL1;
-    use alloy_evm::revm::database::EmptyDB;
     use reth_chainspec::{EthChainSpec, ForkCondition};
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{DEV, MODERATO, TempoHardforks},
     };
-
-    #[test]
-    fn factory_context_adapts_and_recovers_original_database() {
-        let factory = ZoneEvmFactory::new(TestL1::default());
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv::default());
-        let _: &EmptyDB = evm.db();
-        let _: &mut EmptyDB = evm.db_mut();
-        let (db, _) = evm.finish();
-        let _: EmptyDB = db;
-    }
 
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {

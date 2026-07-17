@@ -2,7 +2,7 @@
 //! and the native `TempoState` precompile.
 
 use alloc::rc::Rc;
-use core::{cell::RefCell, fmt};
+use core::{cell::Cell, fmt};
 
 use alloy_primitives::{Address, B256, U256};
 use revm::precompile::PrecompileError;
@@ -117,7 +117,7 @@ impl L1AnchorPhase {
 /// The execution-local Tempo anchor used by the database adapter.
 #[derive(Clone, Default)]
 pub struct L1AnchorController {
-    state: Rc<RefCell<L1AnchorPhase>>,
+    state: Rc<Cell<L1AnchorPhase>>,
 }
 
 impl fmt::Debug for L1AnchorController {
@@ -130,20 +130,19 @@ impl fmt::Debug for L1AnchorController {
 
 impl L1AnchorController {
     fn apply(&self, operation: L1AnchorOperation) -> Result<L1AnchorPhase, L1AnchorError> {
-        let mut phase = self.state.borrow_mut();
-        let next = phase.apply(operation)?;
-        *phase = next;
+        let next = self.state.get().apply(operation)?;
+        self.state.set(next);
         Ok(next)
     }
 
     /// Returns the current phase.
     pub fn phase(&self) -> L1AnchorPhase {
-        *self.state.borrow()
+        self.state.get()
     }
 
     /// Restores a previous controller snapshot.
     pub fn restore(&self, snapshot: L1AnchorPhase) {
-        *self.state.borrow_mut() = snapshot;
+        self.state.set(snapshot);
     }
 
     /// Returns the anchor used by reads in the current phase, if initialized.

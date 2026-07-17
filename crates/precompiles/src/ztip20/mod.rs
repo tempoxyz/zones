@@ -12,15 +12,14 @@ use alloc::sync::Arc;
 
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::PrecompileOutput;
 use tempo_precompiles::{
-    storage::StorageCtx,
+    dispatch::selector_from_calldata,
     tip20::{IRolesAuth, ITIP20},
 };
 use tempo_zone_contracts::Unauthorized;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-use crate::execution::{CallCheck, CallRules, ZoneCall};
+use crate::execution::{CallCheck, CallRules};
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
 pub const TIP20_FIXED_TRANSFER_GAS: u64 = 100_000;
@@ -33,15 +32,10 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
     ITIP20::approveCall::SELECTOR,
 ];
 
-type CallCheckResult = Result<(), PrecompileOutput>;
-
-fn decode_and_check<C: SolCall>(
-    args: &[u8],
-    check: impl FnOnce(C) -> CallCheckResult,
-) -> CallCheckResult {
+fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck) -> CallCheck {
     match C::abi_decode_raw_validate(args) {
         Ok(decoded) => check(decoded),
-        Err(_) => Ok(()),
+        Err(_) => CallCheck::Continue,
     }
 }
 
@@ -68,10 +62,6 @@ impl TIP20Rules {
 }
 
 impl CallRules for TIP20Rules {
-    fn is_delegate_call_allowed(&self) -> bool {
-        false
-    }
-
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
         selector
             .is_some_and(|selector| TIP20_FIXED_GAS_SELECTORS.contains(&selector))
@@ -79,91 +69,84 @@ impl CallRules for TIP20Rules {
     }
 
     /// Apply zone privacy and bridge-path checks before upstream execution.
-    fn check(&self, call: ZoneCall<'_>) -> CallCheck {
-        let Some(selector) = call.selector() else {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        let Some(selector) = selector_from_calldata(data) else {
             return CallCheck::Continue;
         };
-        let args = &call.data[4..];
+        let args = &data[4..];
 
-        let result = match selector {
+        match selector {
             ITIP20::mintCall::SELECTOR | ITIP20::mintWithMemoCall::SELECTOR => {
-                self.check_mint_auth(call.caller)
+                self.check_mint_auth(caller)
             }
             ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
-                self.check_burn_auth(call.caller)
+                self.check_burn_auth(caller)
             }
             ITIP20::balanceOfCall::SELECTOR => {
                 decode_and_check::<ITIP20::balanceOfCall>(args, |decoded| {
-                    self.check_balance_read(decoded.account, call.caller)
+                    self.check_balance_read(decoded.account, caller)
                 })
             }
             ITIP20::allowanceCall::SELECTOR => {
                 decode_and_check::<ITIP20::allowanceCall>(args, |decoded| {
-                    self.check_allowance_read(decoded.owner, decoded.spender, call.caller)
+                    self.check_allowance_read(decoded.owner, decoded.spender, caller)
                 })
             }
             IRolesAuth::hasRoleCall::SELECTOR => {
                 decode_and_check::<IRolesAuth::hasRoleCall>(args, |decoded| {
-                    self.check_balance_read(decoded.account, call.caller)
+                    self.check_balance_read(decoded.account, caller)
                 })
             }
-            _ => Ok(()),
-        };
-
-        match result {
-            Ok(()) => CallCheck::Continue,
-            Err(output) => CallCheck::Return(Ok(output)),
+            _ => CallCheck::Continue,
         }
     }
 }
 
-fn unauthorized_output() -> PrecompileOutput {
-    StorageCtx::default().revert_output(Unauthorized {}.abi_encode().into())
+fn unauthorized() -> CallCheck {
+    CallCheck::Revert(Unauthorized {}.abi_encode().into())
 }
 
 impl TIP20Rules {
-    fn check_balance_read(&self, owner: Address, caller: Address) -> CallCheckResult {
+    fn check_balance_read(&self, owner: Address, caller: Address) -> CallCheck {
         if caller == owner {
-            return Ok(());
+            return CallCheck::Continue;
         }
         self.check_sequencer(caller)
     }
 
-    fn check_allowance_read(
-        &self,
-        owner: Address,
-        spender: Address,
-        caller: Address,
-    ) -> CallCheckResult {
+    fn check_allowance_read(&self, owner: Address, spender: Address, caller: Address) -> CallCheck {
         if caller == spender {
-            return Ok(());
+            return CallCheck::Continue;
         }
         self.check_balance_read(owner, caller)
     }
 
-    fn check_mint_auth(&self, caller: Address) -> CallCheckResult {
-        if caller != ZONE_INBOX_ADDRESS {
-            return Err(unauthorized_output());
+    fn check_mint_auth(&self, caller: Address) -> CallCheck {
+        if caller == ZONE_INBOX_ADDRESS {
+            CallCheck::Continue
+        } else {
+            unauthorized()
         }
-        Ok(())
     }
 
-    fn check_burn_auth(&self, caller: Address) -> CallCheckResult {
-        if caller != ZONE_OUTBOX_ADDRESS {
-            return Err(unauthorized_output());
+    fn check_burn_auth(&self, caller: Address) -> CallCheck {
+        if caller == ZONE_OUTBOX_ADDRESS {
+            CallCheck::Continue
+        } else {
+            unauthorized()
         }
-        Ok(())
     }
 
-    fn check_sequencer(&self, caller: Address) -> CallCheckResult {
+    fn check_sequencer(&self, caller: Address) -> CallCheck {
         if self
             .sequencer
             .latest_sequencer()
-            .is_none_or(|sequencer| caller != sequencer)
+            .is_some_and(|sequencer| caller == sequencer)
         {
-            return Err(unauthorized_output());
+            CallCheck::Continue
+        } else {
+            unauthorized()
         }
-        Ok(())
     }
 }
 
