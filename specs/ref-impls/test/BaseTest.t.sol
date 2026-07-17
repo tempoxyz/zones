@@ -6,6 +6,7 @@ import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/tempo/Verifier.sol";
 import { ZoneFactory } from "../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../src/tempo/ZoneMessenger.sol";
+import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -67,6 +68,7 @@ contract BaseTest is Test {
     ITIP20Token public token1;
     ITIP20Token public token2;
     MockZoneTxContext public zoneTxContext = MockZoneTxContext(_ZONE_TX_CONTEXT);
+    MockZoneGateway public zoneGateway;
 
     error MissingPrecompile(string name, address addr);
     error CallShouldHaveReverted();
@@ -132,6 +134,22 @@ contract BaseTest is Test {
                 "TOKEN2", "T2", "USD", ITIP20(_PATH_USD), sequencer, bytes32("token2")
             )
         );
+
+        zoneGateway = new MockZoneGateway();
+    }
+
+    function _closedLoopAccounts() internal view returns (address[] memory accounts) {
+        accounts = new address[](5);
+        accounts[0] = address(this);
+        accounts[1] = admin;
+        accounts[2] = alice;
+        accounts[3] = bob;
+        accounts[4] = charlie;
+    }
+
+    function _zoneGateways() internal view returns (address[] memory gateways) {
+        gateways = new address[](1);
+        gateways[0] = address(zoneGateway);
     }
 
     /// @notice Installs the deployable reference factory at TIP-1091's fixed precompile address.

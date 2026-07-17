@@ -29,6 +29,8 @@ crate::sol! {
         }
         struct CreateZoneParams {
             address initialToken;
+            address[] allowedAccounts;
+            address[] zoneGateways;
             address admin;
             address sequencer;
             address verifier;

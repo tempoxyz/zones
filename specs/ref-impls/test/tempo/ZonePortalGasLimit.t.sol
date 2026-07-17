@@ -52,10 +52,19 @@ contract ZonePortalGasLimitTest is Test {
     function setUp() public {
         token = new MockPortalToken();
         portal = new ZonePortal();
+        address[] memory allowed = new address[](4);
+        allowed[0] = address(this);
+        allowed[1] = admin;
+        allowed[2] = zoneFallbackRecipient;
+        allowed[3] = recipient;
+        address[] memory gateways = new address[](1);
+        gateways[0] = address(0x301);
         vm.prank(ZONE_FACTORY_ADDRESS);
         portal.initialize(
             1,
             address(token),
+            allowed,
+            gateways,
             address(0x400),
             admin,
             address(this),
@@ -87,7 +96,7 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(portal.calculateBouncebackFee(), 300_000);
     }
 
-    function test_processWithdrawal_overMaxGasLimit_bouncesBackAndClearsQueue() public {
+    function test_processWithdrawal_overMaxGasLimit_revertsAndRetainsQueue() public {
         Withdrawal memory w = Withdrawal({
             token: address(token),
             senderTag: keccak256("sender"),
@@ -105,15 +114,12 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), bytes32(WITHDRAWAL_QUEUE_TAIL_SLOT), bytes32(uint256(1)));
         vm.store(address(portal), _withdrawalQueueSlot(0), wHash);
 
-        vm.expectEmit(false, true, false, true, address(portal));
-        emit IZonePortal.WithdrawalBounceBack(bytes32(0), 1, address(token), 500e6, 1);
-        vm.expectEmit(true, true, false, true, address(portal));
-        emit IZonePortal.WithdrawalProcessed(recipient, w.senderTag, address(token), 500e6, false);
+        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
         portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(portal.withdrawalQueueHead(), 1);
-        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
-        assertTrue(portal.currentDepositQueueHash() != bytes32(0));
+        assertEq(portal.withdrawalQueueHead(), 0);
+        assertEq(portal.withdrawalQueueSlot(0), wHash);
+        assertEq(portal.currentDepositQueueHash(), bytes32(0));
     }
 
     function test_processWithdrawal_depositBounceBack_paysFeeAndRefundsNetAmount() public {

@@ -2,7 +2,11 @@
 pragma solidity ^0.8.13;
 
 import {
+    CallbackData,
+    EncryptedDepositPayload,
+    Flow,
     IWithdrawalReceiver,
+    IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
@@ -102,11 +106,49 @@ contract ZoneMessengerTest is BaseTest {
     }
 
     function _mockTransfer(address target, uint128 amount, bool result) internal {
+        _allowGateway(target);
         vm.mockCall(
             token,
             abi.encodeWithSelector(ITIP20.transfer.selector, target, amount),
             abi.encode(result)
         );
+    }
+
+    function _allowGateway(address target) internal {
+        vm.mockCall(
+            portal,
+            abi.encodeWithSelector(IZonePortal.zoneGateway.selector, target),
+            abi.encode(true)
+        );
+    }
+
+    function _callback(Flow flow) internal pure returns (bytes memory) {
+        return abi.encode(
+            CallbackData({
+                flow: flow,
+                outputToken: address(0x701),
+                keyIndex: 0,
+                encrypted: EncryptedDepositPayload({
+                    ephemeralPubkeyX: bytes32(0),
+                    ephemeralPubkeyYParity: 0,
+                    ciphertext: "",
+                    nonce: bytes12(0),
+                    tag: bytes16(0)
+                }),
+                minVaultAssets: 0,
+                minVaultShares: 0,
+                minOutputAmount: 0,
+                actionId: bytes32(0),
+                tempoRefundRecipient: address(1)
+            })
+        );
+    }
+
+    function _unsupportedFlowCallback() internal pure returns (bytes memory data) {
+        data = _callback(Flow.Deposit);
+        assembly {
+            mstore(add(data, 0x40), 2)
+        }
     }
 
     function test_zoneFactoryImmutable() public view {
@@ -130,7 +172,9 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         vm.expectRevert(ZoneMessenger.TransferFailed.selector);
-        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, "");
+        messenger.relayMessage(
+            ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, _callback(Flow.Deposit)
+        );
     }
 
     function test_relayMessage_revertsCallbackRejectedForWrongSelector() public {
@@ -139,7 +183,9 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         vm.expectRevert(ZoneMessenger.CallbackRejected.selector);
-        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, "");
+        messenger.relayMessage(
+            ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, _callback(Flow.Redeem)
+        );
     }
 
     function test_relayMessage_revertsForEoaTarget() public {
@@ -147,14 +193,17 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         vm.expectRevert();
-        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), alice, 1, 50_000, "");
+        messenger.relayMessage(
+            ZONE_ID, token, bytes32("sender"), alice, 1, 50_000, _callback(Flow.Deposit)
+        );
     }
 
     function test_relayMessage_success() public {
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         bytes32 senderTag = keccak256("sender");
-        bytes memory data = hex"1234";
+        bytes memory data = _callback(Flow.Deposit);
         zoneToken.mint(address(messenger), 123);
+        _allowGateway(address(receiver));
 
         vm.prank(portal);
         messenger.relayMessage(
@@ -170,11 +219,13 @@ contract ZoneMessengerTest is BaseTest {
         assertEq(receiver.lastData(), data);
     }
 
-    function testFuzz_relayMessage_success(uint128 amount, bytes calldata data) public {
+    function testFuzz_relayMessage_success(uint128 amount, bool redeem) public {
         amount = uint128(bound(amount, 0, 1_000_000_000e6));
+        bytes memory data = _callback(redeem ? Flow.Redeem : Flow.Deposit);
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         bytes32 senderTag = keccak256(abi.encode(amount, data));
         zoneToken.mint(address(messenger), amount);
+        _allowGateway(address(receiver));
 
         vm.prank(portal);
         messenger.relayMessage(
@@ -188,6 +239,43 @@ contract ZoneMessengerTest is BaseTest {
         );
 
         assertEq(zoneToken.balanceOf(address(receiver)), amount);
+    }
+
+    function test_relayMessage_revertsUnsupportedFlowBeforeTransfer() public {
+        AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
+        bytes memory data = _unsupportedFlowCallback();
+        zoneToken.mint(address(messenger), 1);
+        _allowGateway(address(receiver));
+
+        vm.prank(portal);
+        vm.expectRevert();
+        messenger.relayMessage(
+            ZONE_ID, address(zoneToken), bytes32("sender"), address(receiver), 1, 50_000, data
+        );
+
+        assertEq(zoneToken.balanceOf(address(messenger)), 1);
+        assertEq(zoneToken.balanceOf(address(receiver)), 0);
+    }
+
+    function test_relayMessage_revertsForUnregisteredGateway() public {
+        AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
+        vm.mockCall(
+            portal,
+            abi.encodeWithSelector(IZonePortal.zoneGateway.selector, address(receiver)),
+            abi.encode(false)
+        );
+
+        vm.prank(portal);
+        vm.expectRevert(ZoneMessenger.InvalidCallbackTarget.selector);
+        messenger.relayMessage(
+            ZONE_ID,
+            address(zoneToken),
+            bytes32("sender"),
+            address(receiver),
+            1,
+            50_000,
+            _callback(Flow.Deposit)
+        );
     }
 
 }

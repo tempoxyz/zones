@@ -158,6 +158,10 @@ crate::sol! {
             address indexed newAdmin
         );
 
+        event MessengerUpdated(address indexed previousMessenger, address indexed newMessenger);
+        event ZoneGatewayUpdated(address indexed gateway, bool enabled);
+        event AllowedAccountUpdated(address indexed account, bool enabled);
+
         // -- Errors --
 
         error NotSequencer();
@@ -168,11 +172,22 @@ crate::sol! {
         error InvalidTempoBlockNumber();
         error PolicyForbids();
         error InvalidBouncebackRecipient();
+        error AccountNotAllowed(address account);
+        error InvalidCallbackTarget();
+        error CallbackDidNotReturnToZone();
+        error InvalidMessenger();
+        error InvalidAllowedAccount();
 
         // -- View functions --
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
+        function messenger() external view returns (address);
+        function zoneGateway(address gateway) external view returns (bool);
+        function allowedAccount(address account) external view returns (bool);
+        function setMessenger(address newMessenger) external;
+        function setZoneGateway(address gateway, bool enabled) external;
+        function setAllowedAccount(address account, bool enabled) external;
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
@@ -344,6 +359,11 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
+            Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
+            Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
+            Self::CallbackDidNotReturnToZone(_) => f.write_str("CallbackDidNotReturnToZone"),
+            Self::InvalidMessenger(_) => f.write_str("InvalidMessenger"),
+            Self::InvalidAllowedAccount(_) => f.write_str("InvalidAllowedAccount"),
         }
     }
 }

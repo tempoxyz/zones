@@ -5,10 +5,12 @@ import {
     IZoneConfig,
     IZoneFactory,
     IZonePortal,
+    PORTAL_ALLOWED_ACCOUNT_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
     PORTAL_SEQUENCER_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
+    PORTAL_ZONE_GATEWAY_SLOT,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
@@ -37,6 +39,8 @@ contract ZoneConfigTest is BaseTest {
 
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -57,6 +61,8 @@ contract ZoneConfigTest is BaseTest {
         _syncPortalSlot(PORTAL_SEQUENCER_SLOT);
         _syncPortalSlot(PORTAL_PENDING_SEQUENCER_SLOT);
         _syncTokenConfig(address(pathUSD));
+        _syncAllowedAccount(alice);
+        _syncZoneGateway(address(zoneGateway));
     }
 
     function _syncPortalSlot(bytes32 slot) internal {
@@ -65,6 +71,16 @@ contract ZoneConfigTest is BaseTest {
 
     function _syncTokenConfig(address token) internal {
         bytes32 slot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
+        tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
+    }
+
+    function _syncAllowedAccount(address account) internal {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ALLOWED_ACCOUNT_SLOT));
+        tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
+    }
+
+    function _syncZoneGateway(address gateway) internal {
+        bytes32 slot = keccak256(abi.encode(gateway, PORTAL_ZONE_GATEWAY_SLOT));
         tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
     }
 
@@ -114,6 +130,13 @@ contract ZoneConfigTest is BaseTest {
     function test_isEnabledToken_trueAndFalse() public view {
         assertTrue(config.isEnabledToken(address(pathUSD)));
         assertFalse(config.isEnabledToken(address(token1)));
+    }
+
+    function test_closedLoopMembershipAndGatewayAreIndependent() public view {
+        assertTrue(config.isAllowedAccount(alice));
+        assertFalse(config.isZoneGateway(alice));
+        assertTrue(config.isZoneGateway(address(zoneGateway)));
+        assertFalse(config.isAllowedAccount(address(zoneGateway)));
     }
 
     /// @notice Verifies reading the sequencer encryption key reverts before any key is set.

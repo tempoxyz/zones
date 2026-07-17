@@ -28,6 +28,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_success() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -55,11 +57,108 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
+        assertTrue(ZonePortal(portal).zoneGateway(address(zoneGateway)));
+        assertFalse(ZonePortal(portal).allowedAccount(address(zoneGateway)));
+    }
+
+    function test_createZone_supportsMultipleGateways() public {
+        address replacement = makeAddr("replacement gateway");
+        address[] memory gateways = new address[](2);
+        gateways[0] = address(zoneGateway);
+        gateways[1] = replacement;
+        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: gateways,
+            admin: admin,
+            sequencer: sequencer,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+
+        (, address portal) = zoneFactory.createZone(params);
+        assertTrue(ZonePortal(portal).zoneGateway(address(zoneGateway)));
+        assertTrue(ZonePortal(portal).zoneGateway(replacement));
+    }
+
+    function test_createZone_revertsWhenGatewayIsAllowedAccount() public {
+        address[] memory accounts = _closedLoopAccounts();
+        address[] memory gateways = new address[](1);
+        gateways[0] = accounts[0];
+        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            allowedAccounts: accounts,
+            zoneGateways: gateways,
+            admin: admin,
+            sequencer: sequencer,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+
+        vm.expectRevert(IZoneFactory.InvalidClosedLoopConfig.selector);
+        zoneFactory.createZone(params);
+    }
+
+    function test_createZone_revertsWhenMessengerIsAllowedAccount() public {
+        address[] memory accounts = _closedLoopAccounts();
+        accounts[0] = zoneFactory.messenger();
+        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            allowedAccounts: accounts,
+            zoneGateways: _zoneGateways(),
+            admin: admin,
+            sequencer: sequencer,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+
+        vm.expectRevert(IZoneFactory.InvalidClosedLoopConfig.selector);
+        zoneFactory.createZone(params);
+    }
+
+    function test_createZone_revertsForDuplicateGateway() public {
+        address[] memory gateways = new address[](2);
+        gateways[0] = address(zoneGateway);
+        gateways[1] = address(zoneGateway);
+        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: gateways,
+            admin: admin,
+            sequencer: sequencer,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+
+        vm.expectRevert(IZoneFactory.DuplicateZoneGateway.selector);
+        zoneFactory.createZone(params);
     }
 
     function test_createZone_revertsForNonOwner() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -99,6 +198,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_usesSharedMessenger() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -124,6 +225,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_multipleZones() public {
         IZoneFactory.CreateZoneParams memory params1 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -140,6 +243,8 @@ contract ZoneFactoryTest is BaseTest {
         address secondSequencer = alice;
         IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: secondSequencer,
             verifier: zoneFactory.verifier(),
@@ -171,6 +276,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_emitsEvent() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -217,6 +324,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_revertsOnInvalidToken_zeroAddress() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(0),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -238,6 +347,8 @@ contract ZoneFactoryTest is BaseTest {
 
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: notTip20,
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -256,6 +367,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_revertsOnInvalidToken_eoa() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: alice, // EOA, not a contract
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -278,6 +391,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_revertsOnInvalidAdmin_zeroAddress() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: address(0),
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),
@@ -300,6 +415,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_revertsOnInvalidSequencer_zeroAddress() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: address(0),
             verifier: zoneFactory.verifier(),
@@ -322,6 +439,8 @@ contract ZoneFactoryTest is BaseTest {
     function test_createZone_revertsOnInvalidVerifier() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: address(0xdead),
@@ -365,6 +484,8 @@ contract ZoneFactoryTest is BaseTest {
     function _defaultParams() internal view returns (IZoneFactory.CreateZoneParams memory) {
         return IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            allowedAccounts: _closedLoopAccounts(),
+            zoneGateways: _zoneGateways(),
             admin: admin,
             sequencer: sequencer,
             verifier: zoneFactory.verifier(),

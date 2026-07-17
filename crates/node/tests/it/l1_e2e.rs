@@ -155,12 +155,15 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
     let initial_token = l1
         .create_tip20("DevUSD", "dUSD", B256::with_last_byte(0xD0))
         .await?;
+    let dev_address = l1.dev_signer().address();
 
     let provisioned = provision_zone(ProvisionConfig {
         l1_rpc_url: l1.ws_url().to_string(),
         dev_key: l1.dev_signer(),
         factory: None,
         initial_token,
+        zone_gateways: vec![Address::repeat_byte(0x42)],
+        allowed_accounts: vec![dev_address],
         rpc_url: String::new(),
     })
     .await?;

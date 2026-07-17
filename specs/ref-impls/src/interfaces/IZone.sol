@@ -106,6 +106,24 @@ struct EncryptedDeposit {
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 
+enum Flow {
+    Deposit,
+    Redeem
+}
+
+/// @notice Vault-adapter callback payload for an encrypted return to the source zone.
+struct CallbackData {
+    Flow flow;
+    address outputToken;
+    uint256 keyIndex;
+    EncryptedDepositPayload encrypted;
+    uint128 minVaultAssets;
+    uint128 minVaultShares;
+    uint128 minOutputAmount;
+    bytes32 actionId;
+    address tempoRefundRecipient;
+}
+
 /// @notice Historical record of an encryption key with its activation block
 /// @dev Storage layout per entry (2 slots):
 ///      slot 0: x (bytes32) — full slot
@@ -352,6 +370,8 @@ interface IZoneTxContext {
 //   slot 16: _withdrawalReentrancyStatus (uint256)
 //   slot 17: zoneId (uint32) + messenger (address) [packed]
 //   slot 18: verifier (address) + genesisTempoBlockNumber (uint64) + _initialized (bool) [packed]
+//   slot 19: zoneGateway (mapping(address => bool))
+//   slot 20: allowedAccount (mapping(address => bool))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -365,6 +385,8 @@ bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(8));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(9));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(15));
+bytes32 constant PORTAL_ZONE_GATEWAY_SLOT = bytes32(uint256(19));
+bytes32 constant PORTAL_ALLOWED_ACCOUNT_SLOT = bytes32(uint256(20));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -417,7 +439,9 @@ interface IZoneFactory {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     struct CreateZoneParams {
-        address initialToken; // first TIP-20 to enable (sequencer can enable more later)
+        address initialToken; // first TIP-20 to enable (admin can enable more later)
+        address[] allowedAccounts; // initial closed-loop account allowlist
+        address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
         address sequencer;
         address verifier;
@@ -445,6 +469,9 @@ interface IZoneFactory {
     error InvalidVerifier();
     error InsufficientGas();
     error ZoneIdOverflow();
+    error InvalidClosedLoopConfig();
+    error DuplicateAllowedAccount();
+    error DuplicateZoneGateway();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
@@ -483,8 +510,8 @@ interface IZoneFactory {
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
 
-    /// @notice Returns the shared messenger used for withdrawal callbacks.
-    /// @return messenger The shared messenger contract address.
+    /// @notice Returns the default messenger assigned to newly created portals.
+    /// @return messenger The default messenger contract address.
     function messenger() external view returns (address);
 
 }
@@ -608,6 +635,15 @@ interface IZonePortal {
     /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
+    /// @notice Emitted when the admin selects a new callback messenger implementation.
+    event MessengerUpdated(address indexed previousMessenger, address indexed newMessenger);
+
+    /// @notice Emitted when the admin enables or disables a callback-only ZoneGateway.
+    event ZoneGatewayUpdated(address indexed gateway, bool enabled);
+
+    /// @notice Emitted when the admin enables or disables a closed-loop account.
+    event AllowedAccountUpdated(address indexed account, bool enabled);
+
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
@@ -634,10 +670,17 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
+    error AccountNotAllowed(address account);
+    error InvalidCallbackTarget();
+    error CallbackDidNotReturnToZone();
+    error InvalidMessenger();
+    error InvalidAllowedAccount();
 
     function initialize(
         uint32 zoneId,
         address initialToken,
+        address[] calldata allowedAccounts,
+        address[] calldata zoneGateways,
         address messenger,
         address admin,
         address sequencer,
@@ -660,6 +703,19 @@ interface IZonePortal {
     function zoneId() external view returns (uint32);
 
     function messenger() external view returns (address);
+
+    /// @notice Select a new messenger implementation. Only callable by the admin.
+    function setMessenger(address newMessenger) external;
+
+    function zoneGateway(address gateway) external view returns (bool);
+
+    /// @notice Enable or disable a callback-only gateway. Only callable by the admin.
+    function setZoneGateway(address gateway, bool enabled) external;
+
+    function allowedAccount(address account) external view returns (bool);
+
+    /// @notice Enable or disable a closed-loop account. Only callable by the admin.
+    function setAllowedAccount(address account, bool enabled) external;
 
     function sequencer() external view returns (address);
 
@@ -710,9 +766,8 @@ interface IZonePortal {
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
 
-    /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
+    /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
-    ///      Validates the token is a TIP-20.
     function enableToken(address token) external;
 
     /// @notice Pause deposits for a token. Only callable by admin.
@@ -1232,5 +1287,11 @@ interface IZoneConfig {
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
+
+    /// @notice Check closed-loop account membership by reading from L1 ZonePortal.
+    function isAllowedAccount(address account) external view returns (bool);
+
+    /// @notice Check whether an address is a registered callback-only ZoneGateway.
+    function isZoneGateway(address gateway) external view returns (bool);
 
 }

@@ -17,6 +17,7 @@ import {
     IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
+    IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
@@ -73,6 +74,9 @@ contract ZoneInboxTest is Test {
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
+        tempoState.setMockAccountAllowed(mockPortal, alice, true);
+        tempoState.setMockAccountAllowed(mockPortal, bob, true);
+        tempoState.setMockAccountAllowed(mockPortal, address(0x500), true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         vm.etch(ZONE_OUTBOX, hex"00");
 
@@ -1092,6 +1096,20 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
     }
 
+    function test_advanceTempo_encryptedDeposit_unallowedRecipientBounces() public {
+        address outsider = address(0x600);
+        bytes memory plaintext =
+            EncryptedDepositLib.encodePlaintext(outsider, bytes32("secret memo"));
+        (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
+            _setupEncryptedDepositWithPlaintext(plaintext, true);
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+
+        assertEq(zoneToken.balanceOf(outsider), 0);
+        assertEq(zoneToken.balanceOf(alice), 0);
+    }
+
     function _advanceTempoQueued(
         QueuedDeposit[] memory deposits,
         DecryptionData[] memory decryptions,
@@ -1184,6 +1202,38 @@ contract ZoneInboxTest is Test {
         assertEq(amount, 100e6);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
         assertEq(zoneToken.balanceOf(bob), 100e6);
+    }
+
+    function test_withdrawalBounceBack_rejectsRecipientDisabledAfterRequest() public {
+        uint64 fallbackNonce = 1;
+        vm.mockCall(
+            ZONE_OUTBOX,
+            abi.encodeWithSelector(IZoneOutbox.consumeFallbackRecipient.selector, fallbackNonce),
+            abi.encode(bob)
+        );
+        tempoState.setMockAccountAllowed(mockPortal, bob, false);
+
+        Deposit[] memory deposits = new Deposit[](1);
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: address(uint160(fallbackNonce)),
+            amount: 100e6,
+            tempoRefundRecipient: address(0),
+            memo: bytes32(0)
+        });
+        tempoState.setMockStorageValue(
+            mockPortal,
+            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+            keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)))
+        );
+
+        vm.prank(sequencer);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, bob));
+        _advanceTempo(deposits);
+
+        assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+        assertEq(zoneToken.balanceOf(bob), 0);
     }
 
     /// @notice Credited supply plus parked refunds equals processed deposit value.

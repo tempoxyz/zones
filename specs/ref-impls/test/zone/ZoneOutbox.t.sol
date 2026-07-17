@@ -2,6 +2,9 @@
 pragma solidity ^0.8.13;
 
 import {
+    CallbackData,
+    EncryptedDepositPayload,
+    Flow,
     IZoneOutbox,
     IZonePortal,
     LastBatch,
@@ -43,6 +46,7 @@ contract ZoneOutboxTest is Test {
     address public bob = address(0x300);
     address public charlie = address(0x400);
     address public mockPortal = address(0x400);
+    address public callbackTarget = address(0x500);
 
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
     uint64 constant GENESIS_TEMPO_BLOCK_NUMBER = 1;
@@ -59,6 +63,11 @@ contract ZoneOutboxTest is Test {
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
+        tempoState.setMockAccountAllowed(mockPortal, sequencer, true);
+        tempoState.setMockAccountAllowed(mockPortal, alice, true);
+        tempoState.setMockAccountAllowed(mockPortal, bob, true);
+        tempoState.setMockAccountAllowed(mockPortal, charlie, true);
+        tempoState.setMockZoneGateway(mockPortal, callbackTarget, true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         outbox = new ZoneOutbox(address(config));
 
@@ -108,6 +117,43 @@ contract ZoneOutboxTest is Test {
 
     function _validRevealTo() internal pure returns (bytes memory) {
         return hex"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+    }
+
+    function _callbackData(Flow flow, address tempoRefundRecipient)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encode(
+            CallbackData({
+                flow: flow,
+                outputToken: address(zoneToken),
+                keyIndex: 0,
+                encrypted: EncryptedDepositPayload({
+                    ephemeralPubkeyX: bytes32(uint256(1)),
+                    ephemeralPubkeyYParity: 0x02,
+                    ciphertext: new bytes(64),
+                    nonce: bytes12(0),
+                    tag: bytes16(0)
+                }),
+                minVaultAssets: 0,
+                minVaultShares: 0,
+                minOutputAmount: 0,
+                actionId: bytes32(0),
+                tempoRefundRecipient: tempoRefundRecipient
+            })
+        );
+    }
+
+    function _unsupportedFlowCallback(address tempoRefundRecipient)
+        internal
+        view
+        returns (bytes memory data)
+    {
+        data = _callbackData(Flow.Deposit, tempoRefundRecipient);
+        assembly {
+            mstore(add(data, 0x40), 2)
+        }
     }
 
     function _emptyEncryptedSenders(uint256 count)
@@ -487,22 +533,91 @@ contract ZoneOutboxTest is Test {
                     WITHDRAWAL WITH CALLBACK TESTS
     //////////////////////////////////////////////////////////////*/
 
+    function test_requestWithdrawal_plainRejectsZoneGatewayRecipient() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 0, alice, ""
+        );
+    }
+
+    function test_requestWithdrawal_callbackRejectsNonGatewayRecipient() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 1, alice, "");
+    }
+
+    function test_requestWithdrawal_callbackRejectsMalformedPayloadBeforeBurn() public {
+        uint256 balanceBefore = zoneToken.balanceOf(alice);
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+        vm.expectRevert();
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 100_000, alice, hex"01"
+        );
+        vm.stopPrank();
+
+        assertEq(zoneToken.balanceOf(alice), balanceBefore);
+        assertEq(outbox.pendingWithdrawalsCount(), 0);
+    }
+
+    function test_requestWithdrawal_callbackRejectsUnsupportedFlowBeforeBurn() public {
+        bytes memory data = _unsupportedFlowCallback(alice);
+        uint256 balanceBefore = zoneToken.balanceOf(alice);
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+        vm.expectRevert();
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 100_000, alice, data
+        );
+        vm.stopPrank();
+
+        assertEq(zoneToken.balanceOf(alice), balanceBefore);
+        assertEq(outbox.pendingWithdrawalsCount(), 0);
+    }
+
+    function test_requestWithdrawal_callbackRejectsUnallowedPayloadBounceback() public {
+        address outsider = address(0x600);
+        bytes memory data = _callbackData(Flow.Deposit, outsider);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 100_000, alice, data
+        );
+    }
+
+    function test_requestWithdrawal_rejectsUnallowedPlainRecipient() public {
+        address outsider = address(0x600);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 0, alice, "");
+    }
+
+    function test_requestWithdrawal_rejectsUnallowedFallbackRecipient() public {
+        address outsider = address(0x600);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, outsider, "");
+    }
+
     function test_finalizeWithdrawalBatch_withdrawalWithCallback_correctHash() public {
+        bytes memory callbackData = _callbackData(Flow.Deposit, alice);
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(
             address(zoneToken), // token
-            bob, // to
+            callbackTarget, // to
             500e6, // amount
             bytes32("pay"), // memo
             100_000, // gasLimit
             alice, // zoneFallbackRecipient
-            "callback_data"
+            callbackData
         );
         vm.stopPrank();
 
-        Withdrawal memory w =
-            _withdrawal(1, alice, bob, 500e6, bytes32("pay"), 100_000, alice, "callback_data");
+        Withdrawal memory w = _withdrawal(
+            1, alice, callbackTarget, 500e6, bytes32("pay"), 100_000, alice, callbackData
+        );
         bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
@@ -599,7 +714,10 @@ contract ZoneOutboxTest is Test {
 
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), amount + expectedFee);
-        outbox.requestWithdrawal(address(zoneToken), bob, amount, bytes32(0), gasLimit, alice, "");
+        bytes memory callbackData = _callbackData(Flow.Deposit, alice);
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, amount, bytes32(0), gasLimit, alice, callbackData
+        );
         vm.stopPrank();
 
         assertEq(zoneToken.balanceOf(alice), aliceBefore - amount - expectedFee);
@@ -713,12 +831,13 @@ contract ZoneOutboxTest is Test {
     }
 
     function test_requestWithdrawal_callbackWithValidFallback_ok() public {
+        bytes memory callbackData = _callbackData(Flow.Redeem, alice);
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
 
         // gasLimit > 0 with valid fallback
         outbox.requestWithdrawal(
-            address(zoneToken), bob, 500e6, bytes32(0), 100_000, alice, "callback"
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 100_000, alice, callbackData
         );
         vm.stopPrank();
 
@@ -952,22 +1071,23 @@ contract ZoneOutboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_requestWithdrawal_capturesAllFields() public {
+        bytes memory callbackData = _callbackData(Flow.Deposit, charlie);
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 1000e6);
         outbox.requestWithdrawal(
             address(zoneToken), // token
-            bob, // to
+            callbackTarget, // to
             500e6, // amount
             bytes32("payment123"), // memo
             50_000, // gasLimit
             charlie, // zoneFallbackRecipient
-            "callbackData" // data
+            callbackData // data
         );
         vm.stopPrank();
 
         // Finalize and verify hash includes all fields
         Withdrawal memory expected = _withdrawal(
-            1, alice, bob, 500e6, bytes32("payment123"), 50_000, charlie, "callbackData"
+            1, alice, callbackTarget, 500e6, bytes32("payment123"), 50_000, charlie, callbackData
         );
         bytes32 expectedHash = keccak256(abi.encode(expected, EMPTY_SENTINEL));
 
@@ -1002,6 +1122,7 @@ contract ZoneOutboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_requestWithdrawal_emitsEvent() public {
+        bytes memory callbackData = _callbackData(Flow.Deposit, charlie);
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
 
@@ -1011,18 +1132,24 @@ contract ZoneOutboxTest is Test {
             0, // index
             alice, // sender
             address(zoneToken), // token
-            bob, // to
+            callbackTarget, // to
             500e6, // amount
             expectedFee, // fee
             bytes32("memo"),
             50_000, // gasLimit
             1, // fallbackNonce
-            "data",
+            callbackData,
             ""
         );
 
         outbox.requestWithdrawal(
-            address(zoneToken), bob, 500e6, bytes32("memo"), 50_000, charlie, "data"
+            address(zoneToken),
+            callbackTarget,
+            500e6,
+            bytes32("memo"),
+            50_000,
+            charlie,
+            callbackData
         );
         vm.stopPrank();
     }

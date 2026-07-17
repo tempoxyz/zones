@@ -16,6 +16,7 @@ import {
     IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
+    IZonePortal,
     IZoneToken,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -232,6 +233,11 @@ contract ZoneInbox is IZoneInbox {
                         d.amount,
                         d.tempoRefundRecipient
                     );
+                } else if (!config.isAllowedAccount(d.to)) {
+                    _enqueueDepositBounceBack(d.token, d.amount, d.tempoRefundRecipient);
+                    emit DepositFailed(
+                        currentHash, d.sender, d.to, d.token, d.amount, d.tempoRefundRecipient
+                    );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
                         emit DepositProcessed(
@@ -317,6 +323,11 @@ contract ZoneInbox is IZoneInbox {
                 (address decryptedTo, bytes32 decryptedMemo) =
                     EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
 
+                if (!config.isAllowedAccount(decryptedTo)) {
+                    _failEncryptedDeposit(currentHash, ed);
+                    continue;
+                }
+
                 try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
                     emit EncryptedDepositProcessed(
                         currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
@@ -389,8 +400,10 @@ contract ZoneInbox is IZoneInbox {
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
         uint64 fallbackNonce = uint64(uint160(d.to));
-        address zoneFallbackRecipient =
-            IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
+        address zoneFallbackRecipient = IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
+        if (!config.isAllowedAccount(zoneFallbackRecipient)) {
+            revert IZonePortal.AccountNotAllowed(zoneFallbackRecipient);
+        }
         try IZoneToken(d.token).mint(zoneFallbackRecipient, d.amount) {
             emit WithdrawalBounceBackProcessed(zoneFallbackRecipient, d.token, d.amount);
         } catch {
@@ -400,6 +413,9 @@ contract ZoneInbox is IZoneInbox {
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
+        if (!config.isAllowedAccount(msg.sender)) {
+            revert IZonePortal.AccountNotAllowed(msg.sender);
+        }
         amount = refunds[token][msg.sender];
         refunds[token][msg.sender] = 0;
 

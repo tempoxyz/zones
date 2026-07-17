@@ -60,10 +60,36 @@ contract ZoneFactory is IZoneFactory {
     {
         if (msg.sender != owner) revert NotOwner();
 
-        // Validate initial token is a TIP-20
+        // Validate initial token is a TIP-20.
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(params.initialToken)) {
             revert InvalidToken();
         }
+        if (params.zoneGateways.length == 0 || params.allowedAccounts.length == 0) {
+            revert InvalidClosedLoopConfig();
+        }
+
+        for (uint256 i; i < params.allowedAccounts.length; ++i) {
+            address account = params.allowedAccounts[i];
+            if (account == address(0) || account == _messenger) {
+                revert InvalidClosedLoopConfig();
+            }
+            for (uint256 j; j < i; ++j) {
+                if (params.allowedAccounts[j] == account) revert DuplicateAllowedAccount();
+            }
+        }
+
+        for (uint256 i; i < params.zoneGateways.length; ++i) {
+            address gateway = params.zoneGateways[i];
+            if (gateway == address(0)) revert InvalidClosedLoopConfig();
+            for (uint256 j; j < params.allowedAccounts.length; ++j) {
+                // A gateway is a withdrawal-and-call destination, never a plain recipient.
+                if (params.allowedAccounts[j] == gateway) revert InvalidClosedLoopConfig();
+            }
+            for (uint256 j; j < i; ++j) {
+                if (params.zoneGateways[j] == gateway) revert DuplicateZoneGateway();
+            }
+        }
+
         if (params.admin == address(0)) revert InvalidAdmin();
         if (params.sequencer == address(0)) revert InvalidSequencer();
         if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
@@ -84,6 +110,8 @@ contract ZoneFactory is IZoneFactory {
         portalContract.initialize(
             zoneId,
             params.initialToken,
+            params.allowedAccounts,
+            params.zoneGateways,
             _messenger,
             params.admin,
             params.sequencer,

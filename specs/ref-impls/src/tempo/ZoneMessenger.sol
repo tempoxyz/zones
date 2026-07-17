@@ -2,9 +2,11 @@
 pragma solidity ^0.8.13;
 
 import {
+    CallbackData,
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
+    IZonePortal,
     ZoneInfo
 } from "../interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -20,6 +22,7 @@ contract ZoneMessenger is IZoneMessenger {
     error UnauthorizedPortal();
     error TransferFailed();
     error CallbackRejected();
+    error InvalidCallbackTarget();
     error ReentrantRelay();
 
     constructor(address _zoneFactory) {
@@ -47,6 +50,12 @@ contract ZoneMessenger is IZoneMessenger {
     {
         ZoneInfo memory zone = zoneFactory.zones(zoneId);
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
+
+        if (!IZonePortal(msg.sender).zoneGateway(target)) revert InvalidCallbackTarget();
+
+        // Decoding CallbackData rejects any flow other than Deposit or Redeem before
+        // funds are transferred to the configured gateway.
+        abi.decode(data, (CallbackData));
 
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();

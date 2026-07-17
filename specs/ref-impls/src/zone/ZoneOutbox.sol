@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
+    CallbackData,
     IZoneConfig,
     IZoneOutbox,
     IZonePortal,
@@ -251,12 +252,25 @@ contract ZoneOutbox is IZoneOutbox {
         if (!config.isEnabledToken(token)) {
             revert IZonePortal.TokenNotEnabled();
         }
+        if (!config.isAllowedAccount(zoneFallbackRecipient)) {
+            revert IZonePortal.AccountNotAllowed(zoneFallbackRecipient);
+        }
 
-        _validateGasLimit(gasLimit);
-
-        // Limit callback data size to prevent storage bloat and hash computation abuse
+        // Bound raw data before decoding a callback payload.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        _validateGasLimit(gasLimit);
+        if (gasLimit == 0) {
+            if (config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
+        } else {
+            if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            CallbackData memory callback = abi.decode(data, (CallbackData));
+            if (!config.isAllowedAccount(callback.tempoRefundRecipient)) {
+                revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);
+            }
         }
 
         _validateRevealTo(revealTo);
@@ -329,6 +343,9 @@ contract ZoneOutbox is IZoneOutbox {
         external
     {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
+        if (!config.isAllowedAccount(tempoRefundRecipient)) {
+            revert IZonePortal.AccountNotAllowed(tempoRefundRecipient);
+        }
 
         _pendingWithdrawals.push(
             PendingWithdrawal({

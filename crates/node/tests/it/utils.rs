@@ -1351,10 +1351,19 @@ impl L1TestNode {
         let genesis_tempo_block_hash = keccak256(&rlp_buf);
 
         let verifier_address = factory.verifier().call().await?;
+        let zone_gateway = Address::repeat_byte(0xfe);
+        let mut allowed_accounts = vec![admin, sequencer];
+        for index in 0..10 {
+            allowed_accounts.push(self.signer_at(index).address());
+        }
+        allowed_accounts.sort_unstable();
+        allowed_accounts.dedup();
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
+                allowedAccounts: allowed_accounts,
+                zoneGateways: vec![zone_gateway],
                 sequencer,
                 verifier: verifier_address,
                 zoneParams: ZoneFactory::ZoneParams {
