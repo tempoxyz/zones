@@ -74,7 +74,7 @@ struct Deposit {
     address sender;
     address to;
     uint128 amount;
-    address bouncebackRecipient;
+    address tempoRefundRecipient;
     bytes32 memo;
 }
 
@@ -101,7 +101,7 @@ struct EncryptedDeposit {
     address token; // TIP-20 token being deposited (public, for escrow accounting)
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
-    address bouncebackRecipient; // Tempo recipient for a failed-deposit refund
+    address tempoRefundRecipient; // Tempo recipient for a failed-deposit refund
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -509,7 +509,7 @@ interface IZonePortal {
         uint128 netAmount,
         uint128 fee,
         bytes32 memo,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         uint64 depositNumber
     );
 
@@ -570,16 +570,16 @@ interface IZonePortal {
         bytes ciphertext,
         bytes12 nonce,
         bytes16 tag,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         uint64 depositNumber
     );
 
     event DepositBounceBack(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
+        address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
     );
 
     event DepositBounceBackPending(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
+        address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
     );
 
     /// @notice Emitted when a recipient claims a previously-parked bounce-back refund.
@@ -815,7 +815,7 @@ interface IZonePortal {
         address to,
         uint128 amount,
         bytes32 memo,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -835,7 +835,7 @@ interface IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -1006,7 +1006,7 @@ interface IZoneInbox {
         address indexed to,
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     );
 
     event DepositRejected(
@@ -1015,15 +1015,15 @@ interface IZoneInbox {
         DepositType depositType,
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     );
 
     event WithdrawalBounceBackProcessed(
-        address indexed fallbackRecipient, address token, uint128 amount
+        address indexed zoneFallbackRecipient, address token, uint128 amount
     );
 
     event WithdrawalBounceBackPending(
-        address indexed fallbackRecipient, address token, uint128 amount
+        address indexed zoneFallbackRecipient, address token, uint128 amount
     );
 
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
@@ -1172,7 +1172,7 @@ interface IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
     )
@@ -1181,7 +1181,7 @@ interface IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external;
 

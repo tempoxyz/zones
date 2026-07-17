@@ -179,7 +179,7 @@ contract ZoneIntegrationTest is BaseTest {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory callbackData
     )
         internal
@@ -249,7 +249,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 1000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("alice1")
         });
         deposits[1] = Deposit({
@@ -257,7 +257,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 2000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("alice2")
         });
         deposits[2] = Deposit({
@@ -265,7 +265,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: bob,
             to: bob,
             amount: 3000e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("bob1")
         });
         deposits[3] = Deposit({
@@ -273,7 +273,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: charlie,
             to: charlie,
             amount: 500e6,
-            bouncebackRecipient: charlie,
+            tempoRefundRecipient: charlie,
             memo: bytes32("charlie1")
         });
 
@@ -323,7 +323,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 1000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d1")
         });
 
@@ -372,7 +372,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 2000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d2")
         });
         batch2[1] = Deposit({
@@ -380,7 +380,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 3000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d3")
         });
 
@@ -416,7 +416,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 5000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("deposit")
         });
         l2TempoState.setMockStorageValue(
@@ -492,7 +492,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 50_000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("big deposit")
         });
         l2TempoState.setMockStorageValue(
@@ -638,7 +638,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 10_000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d1")
         });
         deposits1[1] = Deposit({
@@ -646,7 +646,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: bob,
             to: bob,
             amount: 5000e6,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             memo: bytes32("d2")
         });
 
@@ -701,7 +701,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: charlie,
             to: charlie,
             amount: 7500e6,
-            bouncebackRecipient: charlie,
+            tempoRefundRecipient: charlie,
             memo: bytes32("d3")
         });
 
@@ -751,7 +751,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 10_000e6,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("d1")
         });
         l2TempoState.setMockStorageValue(

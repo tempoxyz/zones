@@ -418,10 +418,10 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 /// Cross-zone encrypted router deposit where Zone B accepts the L1 deposit but
 /// later bounces it because the decrypted recipient violates policy.
 ///
-/// The refund must go to the bounceback recipient encoded in the router payload,
+/// The refund must go to the Tempo refund recipient encoded in the router payload,
 /// not to the encrypted recipient and not to the router contract.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_cross_zone_encrypted_router_bounceback_recipient() -> eyre::Result<()> {
+async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let l1 = L1TestNode::start().await?;
@@ -489,7 +489,7 @@ async fn test_cross_zone_encrypted_router_bounceback_recipient() -> eyre::Result
         target_portal: portal_b,
         key_index,
         encrypted,
-        bounceback_recipient: refund_burner,
+        tempo_refund_recipient: refund_burner,
         min_amount_out: 0,
     });
     alice.withdraw_with(args).await?;
@@ -575,7 +575,7 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
         token_out: fixture.beta,
         target_portal: fixture.portal_address,
         recipient: fixture.account.address(),
-        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        tempo_refund_recipient: fixture.l1.signer_at(5).address(),
         memo: B256::ZERO,
         min_amount_out: expected_beta,
     });
@@ -673,7 +673,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
         token_out: fixture.beta,
         target_portal: fixture.portal_address,
         recipient: fixture.account.address(),
-        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        tempo_refund_recipient: fixture.l1.signer_at(5).address(),
         memo: B256::ZERO,
         min_amount_out: expected_beta,
     });
@@ -756,7 +756,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
         .await?;
 
     let enc_key_bytes: [u8; 32] =
-        Sha256::digest(b"swap-and-deposit-router-encrypted-bounceback").into();
+        Sha256::digest(b"swap-and-deposit-router-encrypted-tempo-refund").into();
     let encryption_key = k256::SecretKey::from_slice(&enc_key_bytes).expect("valid key");
 
     fixture
@@ -792,7 +792,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
         target_portal: fixture.portal_address,
         key_index,
         encrypted,
-        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        tempo_refund_recipient: fixture.l1.signer_at(5).address(),
         min_amount_out: expected_beta,
     });
     fixture

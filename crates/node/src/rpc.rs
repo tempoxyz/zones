@@ -274,7 +274,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
                         deposit_hash: event.newCurrentDepositQueueHash,
                         sender: event.sender,
                         recipient: event.to,
-                        bounceback_recipient: event.bouncebackRecipient,
+                        tempo_refund_recipient: event.tempoRefundRecipient,
                         token: event.token,
                         amount: event.netAmount,
                         memo: event.memo,
@@ -284,7 +284,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
                     deposits.push(PortalDepositRecord::Encrypted {
                         deposit_hash: event.newCurrentDepositQueueHash,
                         sender: event.sender,
-                        bounceback_recipient: event.bouncebackRecipient,
+                        tempo_refund_recipient: event.tempoRefundRecipient,
                         token: event.token,
                         amount: event.netAmount,
                     });
@@ -927,14 +927,14 @@ where
                         deposit_hash,
                         sender,
                         recipient,
-                        bounceback_recipient,
+                        tempo_refund_recipient,
                         token,
                         amount,
                         memo,
                     } => {
                         if sender != auth.caller
                             && recipient != auth.caller
-                            && bounceback_recipient != auth.caller
+                            && tempo_refund_recipient != auth.caller
                         {
                             continue;
                         }
@@ -956,7 +956,7 @@ where
                     PortalDepositRecord::Encrypted {
                         deposit_hash,
                         sender,
-                        bounceback_recipient,
+                        tempo_refund_recipient,
                         token,
                         amount,
                     } => {
@@ -964,7 +964,7 @@ where
 
                         let include = match (
                             &terminal,
-                            sender == auth.caller || bounceback_recipient == auth.caller,
+                            sender == auth.caller || tempo_refund_recipient == auth.caller,
                         ) {
                             (_, true) => true,
                             (
@@ -1017,7 +1017,7 @@ enum PortalDepositRecord {
         deposit_hash: B256,
         sender: Address,
         recipient: Address,
-        bounceback_recipient: Address,
+        tempo_refund_recipient: Address,
         token: Address,
         amount: u128,
         memo: B256,
@@ -1025,7 +1025,7 @@ enum PortalDepositRecord {
     Encrypted {
         deposit_hash: B256,
         sender: Address,
-        bounceback_recipient: Address,
+        tempo_refund_recipient: Address,
         token: Address,
         amount: u128,
     },
