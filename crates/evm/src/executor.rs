@@ -32,7 +32,8 @@ where
     DB: StateDB,
     I: Inspector<TempoContext<DB>>,
 {
-    pub(crate) fn new(
+    /// Create a zone block executor for `evm` and the current block context.
+    pub fn new(
         evm: ZoneEvm<DB, I>,
         ctx: TempoBlockExecutionCtx<'a>,
         chain_spec: &'a ZoneChainSpec,

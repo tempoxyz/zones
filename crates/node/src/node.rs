@@ -5,6 +5,7 @@
 
 use crate::{
     ZoneEngine,
+    replication::{broadcast_persisted_blocks, import_leader_blocks},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
 use alloy_primitives::Address;
@@ -67,7 +68,7 @@ use zone_l1::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
-use zone_p2p::{P2pConfig, P2pNetworkId, spawn_p2p};
+use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
@@ -466,14 +467,30 @@ where
             .erased();
 
         self.resolve_and_seed_tokens(&l1_provider).await?;
-        self.spawn_l1_subscriber(&ctx);
+        let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
+        if p2p_role == Some(Role::Follower) {
+            // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
+            // enqueueing. Followers import complete blocks from the leader and do not consume
+            // DepositQueue; starting the unified subscriber here would grow that queue forever.
+            // On promotion/restart the subscriber resumes from the tempoBlockNumber persisted in
+            // the follower's imported zone state.
+            info!(target: "reth::cli", "Skipping L1 deposit subscriber on follower");
+        } else {
+            self.spawn_l1_subscriber(&ctx);
+        }
         self.spawn_policy_tasks(&l1_provider, &ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         if let Some(config) = self.p2p_config.take() {
             let network_id =
                 P2pNetworkId::new(l1_provider.get_chain_id().await?, self.portal_address);
-            Self::launch_p2p(config, network_id, &task_executor)?;
+            Self::launch_p2p(
+                config,
+                network_id,
+                &task_executor,
+                ctx.node.provider().clone(),
+                ctx.beacon_engine_handle.clone(),
+            )?;
         }
 
         if let Some(ref config) = self.sequencer_config {
@@ -527,20 +544,43 @@ where
         config: P2pConfig,
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
+        provider: N::Provider,
+        engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
+        let role = config.role();
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
             mut stopped,
             thread,
-            commands: _commands,
-            events: _events,
+            commands,
+            events,
         } = handle.into_parts();
+
+        match role {
+            Role::Leader => {
+                task_executor.spawn_critical_task(
+                    "zone-p2p-block-broadcast",
+                    broadcast_persisted_blocks(provider, commands),
+                );
+                // Leaders do not receive block messages. Dropping this receiver is harmless: the
+                // runtime only emits BlockReceived on followers.
+                drop(events);
+            }
+            Role::Follower => {
+                // Keep the command sender alive so the runtime's command loop remains available
+                // for later ACK/backfill commands even though followers send nothing in this PR.
+                task_executor.spawn_critical_task(
+                    "zone-p2p-block-import",
+                    import_leader_blocks(provider, engine, events, commands),
+                );
+            }
+        }
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
             |shutdown| async move {
-                tokio::select! {
+                let unexpected_exit = tokio::select! {
                     guard = shutdown => {
                         let _guard = guard;
                         shutdown_token.cancel();
@@ -549,24 +589,25 @@ where
                             Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed during shutdown"),
                             Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed during shutdown"),
                         }
+                        None
                     }
                     result = &mut stopped => {
-                        match result {
-                            Ok(Ok(())) => tracing::error!(target: "reth::cli", "P2P runtime stopped unexpectedly"),
-                            Ok(Err(err)) => tracing::error!(target: "reth::cli", %err, "P2P runtime failed"),
-                            Err(err) => tracing::error!(target: "reth::cli", %err, "P2P runtime completion channel closed unexpectedly"),
-                        }
+                        Some(match result {
+                            Ok(Ok(())) => "P2P runtime stopped unexpectedly".to_string(),
+                            Ok(Err(err)) => format!("P2P runtime failed: {err}"),
+                            Err(err) => format!("P2P runtime completion channel closed unexpectedly: {err}"),
+                        })
                     }
-                }
+                };
 
                 match tokio::task::spawn_blocking(move || thread.join()).await {
                     Ok(Ok(())) => {}
-                    Ok(Err(_)) => {
-                        tracing::error!(target: "reth::cli", "P2P runtime thread panicked")
-                    }
-                    Err(err) => {
-                        tracing::error!(target: "reth::cli", %err, "Failed joining P2P runtime thread")
-                    }
+                    Ok(Err(_)) => panic!("P2P runtime thread panicked"),
+                    Err(err) => panic!("Failed joining P2P runtime thread: {err}"),
+                }
+
+                if let Some(reason) = unexpected_exit {
+                    panic!("{reason}");
                 }
             },
         );
@@ -1017,7 +1058,8 @@ where
         ctx: &BuilderContext<Node>,
         evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::Pool> {
-        let mut pool_config = ctx.pool_config();
+        // Zone blocks have no protocol base fee, so allow zero-fee transactions into the pool.
+        let mut pool_config = ctx.pool_config().with_disabled_protocol_base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         // this store is effectively a noop

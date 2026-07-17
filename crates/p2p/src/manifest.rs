@@ -9,36 +9,18 @@ use commonware_codec::DecodeExt as _;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Address, Ingress};
 use commonware_utils::Hostname;
+use derive_more::{Display, FromStr};
 use serde::Deserialize;
 
 /// The role assigned to a node by the manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
+#[display(rename_all = "lowercase")]
+#[from_str(rename_all = "lowercase")]
 pub enum Role {
     /// Builds blocks and runs the existing sequencer settlement tasks.
     Leader,
     /// Runs without block production, follows `Leader`s blocks
     Follower,
-}
-
-impl fmt::Display for Role {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Leader => f.write_str("leader"),
-            Self::Follower => f.write_str("follower"),
-        }
-    }
-}
-
-impl std::str::FromStr for Role {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "leader" => Ok(Self::Leader),
-            "follower" => Ok(Self::Follower),
-            _ => Err(format!("expected `leader` or `follower`, got `{value}`")),
-        }
-    }
 }
 
 /// A validated P2P address from the manifest.

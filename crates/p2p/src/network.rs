@@ -9,10 +9,12 @@ use eyre::WrapErr as _;
 
 use crate::ZoneManifest;
 
-/// The final block/ack/tx/backfill protocol reserves channel IDs 0 through 3.
-pub(crate) const CONTROL_CHANNEL: u64 = 4;
-pub(crate) const CONTROL_BACKLOG: usize = 128;
-pub(crate) const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
+/// Leader-to-follower sealed block replication channel.
+pub(crate) const BLOCK_CHANNEL: u64 = 0;
+pub(crate) const BLOCK_BACKLOG: usize = 128;
+
+// At 30M gas, calldata is bounded below 7.5 MiB; leave headroom for block overhead.
+pub(crate) const MAX_MESSAGE_SIZE: u32 = 20 * 1024 * 1024;
 
 /// Version of the Tempo Zone P2P wire protocol.
 pub(crate) const WIRE_PROTOCOL_VERSION: u8 = 0;
@@ -90,8 +92,8 @@ fn namespace(zone_id: u32, network_id: P2pNetworkId) -> Vec<u8> {
     namespace
 }
 
-pub(crate) fn control_quota() -> Quota {
-    Quota::per_second(NZU32!(4))
+pub(crate) fn block_quota() -> Quota {
+    Quota::per_second(NZU32!(128))
 }
 
 #[cfg(test)]

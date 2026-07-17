@@ -11,22 +11,31 @@ use tempo_precompiles::{
 };
 use tempo_revm::{ProtocolFeeManager, TempoStateAccess, TempoTx, TempoTxEnv};
 use tempo_zone_contracts::{IZoneFeeManager, ZONE_FEE_MANAGER_ADDRESS};
-use zone_l1::state::L1StateProvider;
-use zone_precompiles::ZoneFeeManager;
+use zone_precompiles::{ZoneConfigReader, ZoneFeeManager};
 
 /// Zone implementation of Tempo's internal protocol fee hooks.
-#[derive(Debug, Clone)]
-pub(crate) struct ZoneProtocolFeeManager {
-    provider: L1StateProvider,
+#[derive(Clone)]
+pub(crate) struct ZoneProtocolFeeManager<P> {
+    provider: P,
 }
 
-impl ZoneProtocolFeeManager {
-    pub(crate) const fn new(provider: L1StateProvider) -> Self {
+impl<P> core::fmt::Debug for ZoneProtocolFeeManager<P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ZoneProtocolFeeManager").finish_non_exhaustive()
+    }
+}
+
+impl<P> ZoneProtocolFeeManager<P> {
+    pub(crate) const fn new(provider: P) -> Self {
         Self { provider }
     }
 }
 
-impl<DB: Database> ProtocolFeeManager<DB> for ZoneProtocolFeeManager {
+impl<DB, P> ProtocolFeeManager<DB> for ZoneProtocolFeeManager<P>
+where
+    DB: Database,
+    P: ZoneConfigReader,
+{
     fn get_fee_token(
         &self,
         journal: &mut Journal<DB>,
