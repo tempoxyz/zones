@@ -7,10 +7,7 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, CommitChanges, ExecutableTx,
-        GasOutput,
-    },
+    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
@@ -111,23 +108,12 @@ where
         }
 
         let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
-        self.inner
-            .execute_transaction_without_commit((tx_env, recovered))
-    }
+        let result = self
+            .inner
+            .execute_transaction_without_commit((tx_env, recovered));
 
-    /// Restores execution-local L1 anchor state when a simulated transaction is not committed.
-    fn execute_transaction_with_commit_condition(
-        &mut self,
-        tx: impl ExecutableTx<Self>,
-        f: impl FnOnce(&Self::Result) -> CommitChanges,
-    ) -> Result<Option<GasOutput>, BlockExecutionError> {
-        let snapshot = self.evm().anchor_controller().phase();
-        let output = self.execute_transaction_without_commit(tx)?;
-        if !f(&output).should_commit() {
-            self.evm().anchor_controller().restore(snapshot);
-            return Ok(None);
-        }
-        Ok(Some(self.commit_transaction(output)))
+        self.evm_mut().reset_transaction_state();
+        result
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
