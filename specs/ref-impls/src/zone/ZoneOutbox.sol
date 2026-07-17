@@ -252,9 +252,6 @@ contract ZoneOutbox is IZoneOutbox {
         if (!config.isEnabledToken(token)) {
             revert IZonePortal.TokenNotEnabled();
         }
-        if (!config.isAllowedAccount(zoneFallbackRecipient)) {
-            revert IZonePortal.AccountNotAllowed(zoneFallbackRecipient);
-        }
 
         // Bound raw data before decoding a callback payload.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
@@ -344,9 +341,6 @@ contract ZoneOutbox is IZoneOutbox {
         external
     {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
-        if (!config.isAllowedAccount(tempoRefundRecipient)) {
-            revert IZonePortal.AccountNotAllowed(tempoRefundRecipient);
-        }
 
         _pendingWithdrawals.push(
             PendingWithdrawal({

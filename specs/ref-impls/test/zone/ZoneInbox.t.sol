@@ -1223,6 +1223,7 @@ contract ZoneInboxTest is Test {
         assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
 
         zoneToken.setMinter(address(inbox), true);
+        tempoState.setMockAccountAllowed(mockPortal, bob, false);
         vm.prank(bob);
         uint128 amount = inbox.claimRefund(address(zoneToken));
 
@@ -1231,7 +1232,7 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(bob), 100e6);
     }
 
-    function test_withdrawalBounceBack_parksRefundWhenRecipientDisabledAfterRequest() public {
+    function test_withdrawalBounceBack_mintsToUnlistedZoneFallbackRecipient() public {
         uint64 fallbackNonce = 1;
         vm.mockCall(
             ZONE_OUTBOX,
@@ -1262,16 +1263,8 @@ contract ZoneInboxTest is Test {
             inbox.processedDepositQueueHash(),
             keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)))
         );
-        assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
-        assertEq(zoneToken.balanceOf(bob), 0);
-
-        vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, bob));
-        inbox.claimRefund(address(zoneToken));
-
-        tempoState.setMockAccountAllowed(mockPortal, bob, true);
-        vm.prank(bob);
-        assertEq(inbox.claimRefund(address(zoneToken)), 100e6);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+        assertEq(zoneToken.balanceOf(bob), 100e6);
     }
 
     /// @notice Credited supply plus parked refunds equals processed deposit value.

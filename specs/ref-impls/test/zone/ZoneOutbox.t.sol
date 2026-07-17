@@ -168,8 +168,10 @@ contract ZoneOutboxTest is Test {
         return _finalizeWithdrawalBatchAs(sequencer, count);
     }
 
-    function test_enqueueDepositBounceBack_finalizesZeroFeeWithdrawal() public {
+    function test_enqueueDepositBounceBack_queuesRevokedTempoRefundRecipient() public {
         uint128 amount = 1000e6;
+        tempoState.setMockAccountAllowed(mockPortal, bob, false);
+        assertFalse(config.isAllowedAccount(bob));
 
         vm.expectEmit(true, true, false, true);
         emit IZoneOutbox.WithdrawalRequested(
@@ -593,11 +595,16 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 0, alice, "");
     }
 
-    function test_requestWithdrawal_rejectsUnallowedFallbackRecipient() public {
+    function test_requestWithdrawal_allowsUnlistedZoneFallbackRecipient() public {
         address outsider = address(0x600);
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        assertFalse(config.isAllowedAccount(outsider));
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, outsider, "");
+        vm.stopPrank();
+
+        vm.prank(ZONE_INBOX);
+        assertEq(outbox.consumeFallbackRecipient(1), outsider);
     }
 
     function test_finalizeWithdrawalBatch_withdrawalWithCallback_correctHash() public {

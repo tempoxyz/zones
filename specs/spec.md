@@ -509,9 +509,9 @@ Deposits can fail for three main reasons: a recipient blocked by the TIP-403 pol
 
 Because both deposit entry points require a non-zero `tempoRefundRecipient`, every user-initiated deposit has a refund target and the deposit queue never stalls on a failed mint, invalid encryption, or sequencer rejection.
 
-The portal's internal withdrawal-bounce-back deposits are the only entries with `tempoRefundRecipient == address(0)`. They are introduced after a failed plain transfer or callback. The sequencer cannot reject these entries; their zone-side recipient was already required to be an allowed fallback recipient.
+The portal's internal withdrawal-bounce-back deposits are the only entries with `tempoRefundRecipient == address(0)`. They are introduced after a failed plain transfer or callback. The sequencer cannot reject these entries; their Zone fallback recipient may be any non-zero Zone address.
 
-**Zone-side handling.** When an encrypted deposit fails (either branch), when a regular deposit's mint reverts, or when the sequencer rejects a deposit, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. For a regular deposit whose mint reverted the revert is caught in a `try/catch`; for an encrypted deposit with invalid encryption no mint is attempted and the inbox enqueues the bounce-back directly; for a sequencer-rejected deposit the inbox skips processing entirely and enqueues the bounce-back without ever calling the token contract (and, for encrypted deposits, without performing onchain decryption verification). `enqueueDepositBounceBack` records a zero-fee, zero-callback, zero-`fallbackNonce` withdrawal in the outbox's pending list with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits one of three events so off-chain observers can distinguish the failure mode: `DepositFailed` (regular deposit whose mint reverted), `EncryptedDepositFailed` (encrypted deposit, either invalid encryption or mint revert), or `DepositRejected` (sequencer-initiated rejection, regardless of deposit type). The deposit queue hash chain advances normally; no retries are performed on the zone.
+**Zone-side handling.** When an encrypted deposit fails (either branch), when a regular deposit's mint reverts, or when the sequencer rejects a deposit, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. The inbox-only call queues the original Tempo refund recipient without a live membership check; the portal enforces membership when it processes the refund. The deposit queue hash chain advances normally.
 
 **Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside user-initiated withdrawals. When `ZonePortal.processWithdrawal` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fee == 0`, `fallbackNonce == 0`), it computes `bouncebackFee = min(ceil(bouncebackGas * block.basefee / 1e12), amount)`, attempts to pay it to the sequencer, and attempts `ITIP20.transfer(tempoRefundRecipient, amount - bouncebackFee)` from the portal's escrow if the recipient remains allowed.
 
@@ -578,9 +578,41 @@ sequenceDiagram
 
 Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawal on the zone, tokens are burned, and the sequencer eventually processes the withdrawal on Tempo, releasing tokens from the portal.
 
+The spec uses `zoneFallbackRecipient` for the Zone-side `fallbackRecipient` ABI parameter and `tempoRefundRecipient` for a Tempo-side `bouncebackRecipient` or callback `refundRecipient`.
+
+```mermaid
+flowchart LR
+    subgraph Tempo
+        P["ZonePortal<br/>escrow"]
+        TD["Tempo destination<br/>allowed account or gateway"]
+        TR["tempoRefundRecipient<br/>allowed Tempo account"]
+        PR["Portal refund ledger<br/>parked while revoked"]
+    end
+
+    subgraph Zone
+        O["ZoneOutbox"]
+        I["ZoneInbox"]
+        ZD["Zone deposit recipient<br/>no closed-loop check"]
+        ZF["zoneFallbackRecipient<br/>any non-zero Zone address"]
+    end
+
+    O -->|withdrawal request| P
+    P -->|successful withdrawal| TD
+    P -. failed withdrawal .-> I
+    I -->|mint bounce-back| ZF
+
+    P -->|deposit| I
+    I -->|successful deposit| ZD
+    I -. failed deposit .-> O
+    O -. queue refund .-> P
+    P -->|allowed refund| TR
+    P -. revoked recipient .-> PR
+    PR -->|claim after membership restored| TR
+```
+
 ### Withdrawal Request
 
-A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The token must be enabled, and `zoneFallbackRecipient` must be a non-zero allowed account. For a plain withdrawal (`gasLimit == 0`), `to` must be an allowed account and MUST NOT be a registered ZoneGateway. For a callback withdrawal (`gasLimit > 0`), `to` must be a registered ZoneGateway; it need not and MUST NOT be an allowed account.
+A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The token must be enabled, and the `zoneFallbackRecipient` must be non-zero but need not be a Tempo allowed account. For a plain withdrawal (`gasLimit == 0`), `to` must be an allowed account and MUST NOT be a registered ZoneGateway. For a callback withdrawal (`gasLimit > 0`), `to` must be a registered ZoneGateway; it need not and MUST NOT be an allowed account.
 
 Withdrawal requests are bounded before they enter the pending queue. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` or the request reverts with `GasLimitTooHigh`; `data.length` must be less than or equal to `MAX_CALLBACK_DATA_SIZE` (1,024 bytes) or the request reverts with `CallbackDataTooLarge`; and `revealTo`, when non-empty, must be a valid 33-byte compressed secp256k1 public key or the request reverts with `InvalidRevealTo`. The outbox reads the current zone transaction hash from `ZoneTxContext`; if it is zero, the request reverts with `InvalidCurrentTxHash`, because the transaction hash is part of the authenticated-withdrawal sender tag.
 
@@ -589,33 +621,6 @@ The sequencer can additionally configure `maxWithdrawalsPerBlock` on the outbox.
 The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
 
 Keeping the recipient in zone state prevents the L1-visible withdrawal and any later bounce-back from revealing the user's private zone address. A monotonic nonce is deterministic under the zone's canonical transaction ordering, including multi-sequencer execution, while remaining collision-free; it reveals only relative withdrawal order and count, not the mapped recipient.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant Z as Zone
-    participant T as Tempo
-
-    U->>Z: ZoneOutbox.requestWithdrawal()
-    Z->>Z: burn tokens, store pending withdrawal
-
-    Z->>Z: ZoneOutbox.finalizeWithdrawalBatch()
-    Z->>T: ZonePortal.submitBatch()
-    T->>T: IVerifier.verify()
-    T->>T: enqueue withdrawalQueueHash
-
-    Z->>T: ZonePortal.processWithdrawal()
-    T->>U: TIP20.transfer(to, amount)
-
-    Note over T: if withdrawal callback
-    T->>T: ZoneMessenger.relayMessage()
-
-    alt plain transfer failure
-        T->>T: bounceBack with fallbackNonce via deposit queue
-    else callback failure or no synchronous return deposit
-        T-->>Z: revert processing; retain withdrawal queue item
-    end
-```
 
 ### Withdrawal Fees
 
@@ -658,7 +663,7 @@ The sequencer processes withdrawals on Tempo by calling `processWithdrawal(withd
 
 The portal dequeues before executing the withdrawal, then independently requires `withdrawal.token` to be enabled. Failed callbacks roll back in an external self-call and become bounce-backs, so the dequeue remains committed and cannot block the FIFO. If `remainingQueue` is zero (last item in the slot), processing sets the slot to `EMPTY_SENTINEL` and advances `head`; otherwise it updates the slot to `remainingQueue`.
 
-For a plain withdrawal (`gasLimit == 0`), the portal requires `to` to be an allowed account and not a registered ZoneGateway, then transfers directly. A failed transfer creates the existing withdrawal bounce-back deposit for the already-validated allowed fallback recipient.
+For a plain withdrawal (`gasLimit == 0`), the portal requires `to` to be an allowed account and not a registered ZoneGateway, then transfers directly. A failed transfer creates a withdrawal bounce-back deposit for the Zone-local `zoneFallbackRecipient`.
 
 ### Withdrawal Callbacks
 
@@ -703,7 +708,7 @@ Plain withdrawals can fail on the Tempo side for reasons such as:
 
 To make sure that all of these cases can be handled without loss of user funds, every user withdrawal carries a nonzero `fallbackNonce`. `ZoneOutbox` privately maps that nonce to the zone address that receives a refund mint if Tempo-side processing fails.
 
-**Validation at withdrawal request time.** `requestWithdrawal(...)` requires `zoneFallbackRecipient` to be a non-zero allowed account. A plain `to` must also be allowed and must not be a registered gateway. A callback `to` must be registered as a gateway. If a later zone-side refund mint is rejected by TIP-403 policy, the funds are parked in the `ZoneInbox` refund registry for the same allowed recipient.
+**Validation at withdrawal request time.** `requestWithdrawal(...)` requires a non-zero `zoneFallbackRecipient`; it does not apply Tempo closed-loop membership to that Zone address. A plain `to` must be allowed and must not be a registered gateway. A callback `to` must be registered as a gateway.
 
 **Triggering conditions.** A failed plain transfer or callback causes `ZonePortal` to enqueue a bounce-back. This constructs an internal `Deposit` with `to = address(uint160(fallbackNonce))`, `tempoRefundRecipient = address(0)`, and appends it to the deposit queue:
 
@@ -711,9 +716,9 @@ To make sure that all of these cases can be handled without loss of user funds, 
 currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDeposit, currentDepositQueueHash))
 ```
 
-**Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `Regular` deposit with `tempoRefundRecipient == address(0)`, decodes `fallbackNonce` from `to`, and calls `ZoneOutbox.consumeFallbackRecipient(fallbackNonce)`. The outbox returns and deletes the mapped recipient. If the zone fallback recipient is no longer allowed, the inbox parks the refund and advances the queue; otherwise it attempts `IZoneToken.mint(zoneFallbackRecipient, amount)` wrapped in `try/catch`. The `rejected` flag has no effect on this path (see [Sequencer rejection](#sequencer-rejection)).
+**Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `Regular` deposit with `tempoRefundRecipient == address(0)`, resolves and deletes the `fallbackNonce -> zoneFallbackRecipient` mapping, and attempts `IZoneToken.mint(zoneFallbackRecipient, amount)` wrapped in `try/catch`. The `rejected` flag has no effect on this path (see [Sequencer rejection](#sequencer-rejection)).
 
-If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(zoneFallbackRecipient, token, amount)`. If it reverts (e.g. the zone-side TIP-403 policy forbids `zoneFallbackRecipient`, or the token is paused), the inbox credits `_refunds[token][zoneFallbackRecipient] += amount` and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
+If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(zoneFallbackRecipient, token, amount)`. If it reverts, the inbox credits the Zone-local refund registry and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
 
 The recipient claims the parked funds by calling `ZoneInbox.claimRefund(token)`. The inbox zeroes `_refunds[token][msg.sender]` and calls `IZoneToken.mint(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
@@ -854,7 +859,7 @@ Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorize
 
 Issuers manage policies exclusively on Tempo. When an issuer freezes an address, updates a blacklist, or modifies a whitelist on Tempo, the zone inherits the change the next time `advanceTempo` imports a Tempo block containing the update.
 
-If a TIP-403 policy causes a withdrawal transfer to fail, it bounces back to the sender's allowed `zoneFallbackRecipient` on the zone.
+If a TIP-403 policy causes a withdrawal transfer to fail, it bounces back to the sender's `zoneFallbackRecipient`.
 
 <br>
 

@@ -16,7 +16,6 @@ import {
     IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
-    IZonePortal,
     IZoneToken,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -392,11 +391,6 @@ contract ZoneInbox is IZoneInbox {
         uint64 fallbackNonce = uint64(uint160(d.to));
         address zoneFallbackRecipient =
             IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
-        if (!config.isAllowedAccount(zoneFallbackRecipient)) {
-            refunds[d.token][zoneFallbackRecipient] += d.amount;
-            emit WithdrawalBounceBackPending(zoneFallbackRecipient, d.token, d.amount);
-            return;
-        }
         try IZoneToken(d.token).mint(zoneFallbackRecipient, d.amount) {
             emit WithdrawalBounceBackProcessed(zoneFallbackRecipient, d.token, d.amount);
         } catch {
@@ -406,9 +400,6 @@ contract ZoneInbox is IZoneInbox {
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
-        if (!config.isAllowedAccount(msg.sender)) {
-            revert IZonePortal.AccountNotAllowed(msg.sender);
-        }
         amount = refunds[token][msg.sender];
         refunds[token][msg.sender] = 0;
 
