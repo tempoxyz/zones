@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
@@ -211,6 +212,22 @@ contract ZonePortalProxyStorageTest is Test {
 
     function test_proxyMetadataIsReadFromPortalStorage() public {
         address initialToken = makeAddr("initial token");
+        address[] memory tokens = new address[](1);
+        tokens[0] = initialToken;
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(1)
+        );
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
+            abi.encode(true, uint64(1))
+        );
+        vm.expectCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
+        );
         vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
         );
@@ -263,6 +280,37 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyB).messenger(), messengerB);
         assertEq(ZonePortal(proxyB).verifier(), verifierB);
         assertEq(ZonePortal(proxyB).blockHash(), bytes32(0));
+    }
+
+    function test_initializeRevertsIfTokenPolicyBindingIsNotSet() public {
+        address initialToken = makeAddr("unmigrated initial token");
+        address[] memory tokens = new address[](1);
+        tokens[0] = initialToken;
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(0)
+        );
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
+            abi.encode(false, uint64(1))
+        );
+
+        ZonePortal portal = new ZonePortal();
+        vm.prank(ZONE_FACTORY_ADDRESS);
+        vm.expectRevert(IZonePortal.TokenTransferPolicyNotSet.selector);
+        portal.initialize(
+            1,
+            initialToken,
+            makeAddr("messenger"),
+            makeAddr("admin"),
+            makeAddr("sequencer"),
+            makeAddr("verifier"),
+            keccak256("genesis"),
+            100,
+            ""
+        );
     }
 
     function _initializePortal(
@@ -693,6 +741,34 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.enableToken(address(pathUSD));
         vm.stopPrank();
+    }
+
+    function test_enableToken_migratesPolicyBinding() public {
+        address token = address(token1);
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        _mockTokenPolicyMigration(token, true);
+
+        vm.expectCall(
+            _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
+        );
+        vm.expectCall(
+            _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token))
+        );
+
+        vm.prank(admin);
+        portal.enableToken(token);
+
+        assertTrue(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_revertsIfPolicyBindingIsNotSet() public {
+        address token = address(token1);
+        _mockTokenPolicyMigration(token, false);
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.TokenTransferPolicyNotSet.selector);
+        portal.enableToken(token);
     }
 
     function test_sequencerGovernance_revertsIfAdmin() public {

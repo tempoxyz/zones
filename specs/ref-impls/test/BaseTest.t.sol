@@ -146,6 +146,23 @@ contract BaseTest is Test {
                 "TOKEN2", "T2", "USD", ITIP20(_PATH_USD), sequencer, bytes32("token2")
             )
         );
+
+        _mockTokenPolicyMigration(_PATH_USD, true);
+    }
+
+    function _mockTokenPolicyMigration(address token, bool isSet) internal {
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        vm.mockCall(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(isSet ? 1 : 0)
+        );
+        vm.mockCall(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token)),
+            abi.encode(isSet, uint64(1))
+        );
     }
 
     /// @notice Installs the shared runtimes managed by the native TIP-1091 factory.
