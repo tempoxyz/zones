@@ -625,6 +625,16 @@ contract ZonePortalTest is BaseTest {
         portal.setZoneGateway(alice, true);
     }
 
+    function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setZoneGateway(address(0), true);
+        assertTrue(portal.zoneGateway(address(0)));
+        portal.setZoneGateway(address(0), false);
+        vm.stopPrank();
+
+        assertFalse(portal.zoneGateway(address(0)));
+    }
+
     function test_setZoneGateway_revertsIfNotAdmin() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
@@ -667,10 +677,14 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.allowedAccount(address(zoneGateway)));
     }
 
-    function test_setAllowedAccount_revertsForZeroAddress() public {
-        vm.prank(admin);
-        vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
+    function test_setAllowedAccount_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
         portal.setAllowedAccount(address(0), true);
+        assertTrue(portal.allowedAccount(address(0)));
+        portal.setAllowedAccount(address(0), false);
+        vm.stopPrank();
+
+        assertFalse(portal.allowedAccount(address(0)));
     }
 
     function test_setAllowedAccount_revertsIfNotAdmin() public {

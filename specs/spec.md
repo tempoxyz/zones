@@ -237,8 +237,8 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | Parameter | Description |
 |-----------|-------------|
 | `initialToken` | The first TIP-20 token to enable. The admin can enable additional tokens later. |
-| `allowedAccounts` | Non-empty, duplicate-free initial membership. Every member MUST be non-zero and MUST NOT be the messenger. The admin may later enable or disable members. Membership applies to deposit callers, Tempo refund recipients, and plain withdrawal destinations. |
-| `zoneGateways` | Non-empty, duplicate-free initial set of callback-only gateway contracts. Gateways MUST be non-zero and MUST NOT also be allowed accounts. The admin may later enable a replacement while retaining a legacy gateway during migration. |
+| `allowedAccounts` | Non-empty initial membership. Duplicate entries are accepted and have the same effect as one entry. Members MUST NOT be the messenger. Membership applies to deposit callers, Tempo refund recipients, and plain withdrawal destinations. |
+| `zoneGateways` | Non-empty initial set of callback-only gateway contracts. Duplicate entries are accepted and have the same effect as one entry. Gateways MUST NOT also be allowed accounts. The admin may later enable a replacement while retaining a legacy gateway during migration. |
 | `admin` | The address that holds the admin role for the zone (token enablement, deposit pause/resume). MUST NOT be the zero address. May be the same as `sequencer`. See [Access Control](#access-control). |
 | `sequencer` | The address that will operate the zone (block production, batch submission, withdrawal processing). |
 | `verifier` | The `IVerifier` contract used to validate batch proofs. |
