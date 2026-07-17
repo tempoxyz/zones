@@ -258,11 +258,11 @@ contract ZoneOutbox is IZoneOutbox {
             revert CallbackDataTooLarge();
         }
 
-        _validateGasLimit(gasLimit);
         if (gasLimit == 0) {
             if (config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
             if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
         } else {
+            _validateGasLimit(gasLimit);
             if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
             // Reject malformed or unsupported callback ABI before burning or queueing.
             CallbackData memory callback = abi.decode(data, (CallbackData));
