@@ -5,6 +5,7 @@
 
 use crate::{
     ZoneEngine,
+    fee_token_validator::ZoneFeeTokenValidator,
     replication::{broadcast_persisted_blocks, import_leader_blocks},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
@@ -1064,6 +1065,15 @@ where
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
+        let policy_provider = evm_config
+            .policy_provider()
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("zone fee-token validation requires a policy provider"))?;
+        let fee_token_validator = ZoneFeeTokenValidator::new(
+            ctx.provider().clone(),
+            evm_config.l1_provider().clone(),
+            zone_precompiles::ZoneTip403ProxyRegistry::new(policy_provider),
+        );
         let tempo_evm_config = TempoEvmConfig::new(evm_config.tempo_chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
@@ -1102,13 +1112,14 @@ where
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
 
-        let validator = validator.map(|v| {
+        let validator = validator.map(move |v| {
             TempoTransactionValidator::new(
                 v,
                 DEFAULT_AA_VALID_AFTER_MAX_SECS,
                 DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
+            .with_fee_token_validator(fee_token_validator.clone())
         });
         let protocol_pool = Pool::new(
             validator,

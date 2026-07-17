@@ -164,10 +164,10 @@ impl ZoneFeeManager {
         if amount.is_zero() {
             return Ok(());
         }
-        self.collected_fees[sequencer][token].write(U256::ZERO)?;
 
         let mut tip20 = TIP20Token::from_address(token)?;
         self.ensure_transfer_authorized(registry, token, self.address, sequencer)?;
+        self.collected_fees[sequencer][token].write(U256::ZERO)?;
         tip20.transfer(
             self.address,
             ITIP20::transferCall {
@@ -527,6 +527,55 @@ mod tests {
                 .unwrap_err();
 
             assert_eq!(error, TIP20Error::policy_forbids().into());
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn rejects_fee_distribution_forbidden_by_l1_policy() -> TestResult {
+        let mut storage = HashMapStorageProvider::new(1);
+        let admin = Address::random();
+        let user = Address::random();
+        let sequencer = Address::random();
+        let amount = U256::from(1_000);
+
+        StorageCtx::enter(&mut storage, || {
+            let token = TIP20Setup::create("Restricted USD", "rUSD", admin)
+                .with_issuer(admin)
+                .with_mint(user, U256::from(10_000u64))
+                .apply()?;
+            let allowed = MockZoneConfig {
+                portal: Address::random(),
+                enabled: vec![token.address()],
+                authorized: true,
+            };
+            let allowed_registry = ZoneTip403ProxyRegistry::new(allowed.clone());
+            let mut manager = ZoneFeeManager::new();
+            manager.collect_fee_pre_tx(
+                &allowed,
+                Some(&allowed_registry),
+                user,
+                token.address(),
+                amount,
+            )?;
+            manager.collect_fee_post_tx(user, amount, U256::ZERO, token.address(), sequencer)?;
+
+            let denied = MockZoneConfig {
+                authorized: false,
+                ..allowed
+            };
+            let denied_registry = ZoneTip403ProxyRegistry::new(denied);
+            let error = manager
+                .distribute_fees(Some(&denied_registry), sequencer, token.address())
+                .unwrap_err();
+
+            assert_eq!(error, TIP20Error::policy_forbids().into());
+            assert_eq!(manager.collected_fees(sequencer, token.address())?, amount);
+            assert_eq!(
+                TIP20Token::from_address(token.address())?
+                    .balance_of(ITIP20::balanceOfCall { account: sequencer })?,
+                U256::ZERO
+            );
             Ok(())
         })
     }

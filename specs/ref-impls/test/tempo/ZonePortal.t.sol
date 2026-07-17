@@ -256,6 +256,9 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
         assertEq(ZonePortal(proxyA).verifier(), verifierA);
         assertEq(ZonePortal(proxyA).genesisTempoBlockNumber(), 100);
+        assertTrue(ZonePortal(proxyA).isTokenEnabled(StdTokens.PATH_USD_ADDRESS));
+        assertTrue(ZonePortal(proxyA).isTokenEnabled(initialToken));
+        assertEq(ZonePortal(proxyA).enabledTokenCount(), 2);
 
         assertEq(ZonePortal(proxyB).zoneId(), 2);
         assertEq(ZonePortal(proxyB).messenger(), messengerB);

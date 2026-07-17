@@ -330,6 +330,16 @@ impl ZoneEvmConfig {
     pub fn tempo_chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
     }
+
+    /// Returns the L1 provider used for portal-backed configuration reads.
+    pub fn l1_provider(&self) -> &L1StateProvider {
+        &self.zone_factory.l1_reader
+    }
+
+    /// Returns the L1-backed TIP-403 policy provider, when configured.
+    pub fn policy_provider(&self) -> Option<&PolicyProvider> {
+        self.zone_factory.policy_provider.as_ref()
+    }
 }
 
 impl BlockExecutorFactory for ZoneEvmConfig {

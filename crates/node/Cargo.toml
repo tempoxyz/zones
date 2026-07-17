@@ -16,6 +16,7 @@ tempo-chainspec.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
 tempo-primitives.workspace = true
+tempo-revm.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
@@ -53,6 +54,9 @@ reth-storage-api.workspace = true
 reth-tasks.workspace = true
 reth-tracing = { workspace = true, optional = true }
 reth-transaction-pool.workspace = true
+
+# revm
+revm.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -101,12 +105,10 @@ reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
 reth-node-core.workspace = true
 reth-tracing.workspace = true
 reqwest.workspace = true
-revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
-tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
