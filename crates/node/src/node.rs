@@ -629,22 +629,46 @@ where
             tokens
         } else {
             let portal = self.portal_address;
-            let tokens = ZonePortal::new(portal, l1_provider)
-                .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
+            let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+            let portal_code = l1_provider
+                .get_code_at(portal)
+                .block_id(block_id)
                 .await
                 .map_err(|err| {
                     eyre::eyre!(
-                        "failed to discover enabled tokens for portal {portal} at canonical L1 block {block_number}: {err}"
+                        "failed to read code for portal {portal} at canonical L1 block {block_number}: {err}"
                     )
                 })?;
-            info!(
-                target: "reth::cli",
-                count = tokens.len(),
-                ?tokens,
-                block_number,
-                "Discovered enabled tokens from canonical L1 state"
-            );
-            tokens
+
+            if portal_code.is_empty() {
+                // A zone may intentionally anchor immediately before its portal is deployed. The
+                // subscriber will replay the creation block and dynamically track tokens from its
+                // TokenEnabled events.
+                info!(
+                    target: "reth::cli",
+                    %portal,
+                    block_number,
+                    "Portal is not deployed at canonical L1 anchor; starting without tracked tokens"
+                );
+                Vec::new()
+            } else {
+                let tokens = ZonePortal::new(portal, l1_provider)
+                    .enabled_tokens_at(block_id)
+                    .await
+                    .map_err(|err| {
+                        eyre::eyre!(
+                            "failed to discover enabled tokens for portal {portal} at canonical L1 block {block_number}: {err}"
+                        )
+                    })?;
+                info!(
+                    target: "reth::cli",
+                    count = tokens.len(),
+                    ?tokens,
+                    block_number,
+                    "Discovered enabled tokens from canonical L1 state"
+                );
+                tokens
+            }
         };
 
         let mut cache = self.l1_state_cache.write();
