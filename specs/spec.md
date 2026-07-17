@@ -118,7 +118,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
-| Allowed account | An address currently enabled in the portal's admin-managed closed-loop membership mapping. It may initiate deposits and receive deposits, refunds, and plain withdrawals. |
+| Allowed account | An address currently enabled in the portal's admin-managed closed-loop membership mapping. It may initiate deposits and receive Tempo-side refunds and plain withdrawals. |
 | ZoneGateway | A callback-only Tempo contract registered in a portal's separate gateway mapping. A gateway is never an allowed plain-withdrawal recipient. |
 
 <br>
@@ -129,7 +129,7 @@ Each zone is operated by a **sequencer** that collects transactions, produces bl
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
-On Tempo, each zone has a **portal** that locks deposited tokens. Only allowed accounts may initiate deposits, and plaintext deposit recipients and refund recipients must also be allowed. Encrypted deposit recipients are private zone addresses and need not be allowed accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
+On Tempo, each zone has a **portal** that locks deposited tokens. Only allowed accounts may initiate deposits, and refund recipients must also be allowed. Plaintext and encrypted deposit recipients are zone addresses and need not be allowed Tempo accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
 Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data, and data availability is entrusted to the sequencer. The sequencer has full visibility into zone activity. Privacy protects against public observers on Tempo, not against the sequencer.
 
@@ -359,7 +359,7 @@ Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, 
 
 An allowed account deposits by calling `deposit(token, to, amount, memo, tempoRefundRecipient)` on the portal. The portal:
 
-1. Requires `msg.sender`, `to`, and `tempoRefundRecipient` to be allowed accounts. The gateway mapping is separate and never satisfies this check.
+1. Requires `msg.sender` and `tempoRefundRecipient` to be allowed accounts. The zone recipient `to` need not be allowed.
 2. Validates the token is enabled and deposits are active, requires `tempoRefundRecipient != address(0)`, validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `tempoRefundRecipient` against the token's TIP-403 recipient policy.
 3. Computes `depositFee` from `zoneGasRate` and checks `amount >= depositFee + currentBouncebackFee`, where `currentBouncebackFee = ceil(bouncebackGas * block.basefee / 1e12)` (reverts `DepositTooSmall` otherwise). This prevents obvious dust deposits that could not pay for an immediate Tempo refund when bounce-back gas is configured.
 4. Transfers `amount` from the user into the portal.
@@ -497,7 +497,7 @@ sequenceDiagram
 
 Deposits can fail for three main reasons: a recipient blocked by the TIP-403 policy, an invalid encrypted deposit, or rejection by the sequencer. To make sure that all cases can be handled without loss of user funds, every deposit carries a `tempoRefundRecipient`: a Tempo address that receives a refund if zone-side processing fails.
 
-**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require an allowed `tempoRefundRecipient` and require it to be authorized by the token's TIP-403 recipient policy. Regular deposit recipients are checked on Tempo; encrypted recipients are checked after decryption on the zone. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and may be claimed only by that allowed recipient via `claimRefund(token)`.
+**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require an allowed `tempoRefundRecipient` and require it to be authorized by the token's TIP-403 recipient policy. Zone recipients are not checked against closed-loop membership. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and may be claimed only by that allowed recipient via `claimRefund(token)`.
 
 **Triggering conditions.** There are three triggering sites:
 
@@ -662,7 +662,7 @@ For a plain withdrawal (`gasLimit == 0`), the portal requires `to` to be an allo
 
 ### Withdrawal Callbacks
 
-For withdrawals with `gasLimit > 0`, `to` must be present in the portal's `zoneGateway[address]` mapping. The portal snapshots `currentDepositQueueHash`, transfers exactly `amount` to its configured `ZoneMessenger` in a revertable self-call, and asks the messenger to relay the callback. The messenger authenticates the source portal through `ZoneFactory`, independently confirms `to` against that portal's gateway mapping, decodes `callbackData` as `CallbackData`, transfers the funds to the gateway, invokes `onWithdrawalReceived`, and requires the expected selector.
+For withdrawals with `gasLimit > 0`, `to` must be present in the portal's `zoneGateway[address]` mapping. The portal snapshots `currentDepositQueueHash`, transfers exactly `amount` to its configured `ZoneMessenger`, and asks the messenger to relay the callback. The messenger authenticates the source portal through `ZoneFactory`, independently confirms `to` against that portal's gateway mapping, decodes `callbackData` as `CallbackData`, transfers the funds to the gateway, invokes `onWithdrawalReceived`, and requires the expected selector.
 
 `ZoneOutbox`, `ZoneMessenger`, and the ZoneGateway each decode the payload. `Flow` permits only `Deposit` and `Redeem`.
 
@@ -1792,7 +1792,7 @@ interface IZonePortal {
     function setRpcUrl(string calldata rpcUrl) external; // sequencer-only
 
     // Deposits
-    /// @dev Caller, `to`, and `tempoRefundRecipient` must be allowed accounts.
+    /// @dev Caller and `tempoRefundRecipient` must be allowed accounts. `to` is a zone address.
     function deposit(
         address token, address to, uint128 amount, bytes32 memo, address tempoRefundRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);

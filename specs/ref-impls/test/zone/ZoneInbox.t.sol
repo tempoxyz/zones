@@ -669,6 +669,31 @@ contract ZoneInboxTest is Test {
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
     }
 
+    function test_advanceTempo_regularDeposit_allowsUnlistedRecipient() public {
+        address outsider = address(0x600);
+        assertFalse(config.isAllowedAccount(outsider));
+
+        Deposit[] memory deposits = new Deposit[](1);
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: outsider,
+            amount: 1000e6,
+            bouncebackRecipient: alice,
+            memo: bytes32("payment")
+        });
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
+        );
+
+        vm.prank(sequencer);
+        _advanceTempo(deposits);
+
+        assertEq(zoneToken.balanceOf(outsider), 1000e6);
+        assertEq(inbox.processedDepositQueueHash(), expectedHash);
+    }
+
     function test_advanceTempo_encryptedDeposit_decryptionFails() public {
         uint128 amount = 1000e6;
 

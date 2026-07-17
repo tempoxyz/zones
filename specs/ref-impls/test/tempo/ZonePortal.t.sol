@@ -731,11 +731,16 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
     }
 
-    function test_deposit_revertsForUnallowedRecipient() public {
+    function test_deposit_allowsUnlistedZoneRecipient() public {
         address outsider = makeAddr("outsider");
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        assertFalse(portal.allowedAccount(outsider));
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1);
         portal.deposit(address(pathUSD), outsider, 1, bytes32(0), alice);
+        vm.stopPrank();
+
+        assertEq(pathUSD.balanceOf(address(portal)), 1);
     }
 
     function test_deposit_revertsForUnallowedBouncebackRecipient() public {

@@ -654,7 +654,6 @@ interface IZonePortal {
     error InvalidTempoBlockNumber();
     error CallbackRejected();
     error TransferFailed();
-    error NotSelf();
     error ReentrantWithdrawal();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
@@ -896,16 +895,6 @@ interface IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash);
 
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
-
-    function deliverWithdrawal(
-        address token,
-        address target,
-        uint128 amount,
-        bytes32 senderTag,
-        uint64 gasLimit,
-        bytes calldata data
-    )
-        external;
 
     function refunds(address token, address owner) external view returns (uint128);
 
