@@ -106,24 +106,6 @@ struct EncryptedDeposit {
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 
-enum Flow {
-    Deposit,
-    Redeem
-}
-
-/// @notice Vault-adapter callback payload for an encrypted return to the source zone.
-struct CallbackData {
-    Flow flow;
-    address outputToken;
-    uint256 keyIndex;
-    EncryptedDepositPayload encrypted;
-    uint128 minVaultAssets;
-    uint128 minVaultShares;
-    uint128 minOutputAmount;
-    bytes32 actionId;
-    address tempoRefundRecipient;
-}
-
 /// @notice Historical record of an encryption key with its activation block
 /// @dev Storage layout per entry (2 slots):
 ///      slot 0: x (bytes32) — full slot
@@ -510,7 +492,7 @@ interface IZoneFactory {
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
 
-    /// @notice Returns the fixed shared messenger assigned to newly created portals.
+    /// @notice Returns the default messenger assigned to newly created portals.
     /// @return messenger The default messenger contract address.
     function messenger() external view returns (address);
 

@@ -676,6 +676,7 @@ contract ZonePortal is IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        // Gateways may deposit callback returns without also being allowed accounts.
         if (!zoneGateway[msg.sender]) _requireAllowed(msg.sender);
         _requireAllowed(tempoRefundRecipient);
 
@@ -841,8 +842,8 @@ contract ZonePortal is IZonePortal {
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
 
-        // This proves only that some deposit was appended. Token and amount conservation rests
-        // on the correctness of the admin-configured ZoneGateway implementation.
+        // This proves only that some deposit was appended. Callback data is opaque; the configured
+        // gateway is trusted to allow only deposit/redeem and deposit the result back into the zone.
         if (currentDepositQueueHash == depositQueueHashBefore) revert CallbackDidNotReturnToZone();
     }
 

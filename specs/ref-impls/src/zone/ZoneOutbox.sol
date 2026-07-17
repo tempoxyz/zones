@@ -2,7 +2,6 @@
 pragma solidity ^0.8.13;
 
 import {
-    CallbackData,
     IZoneConfig,
     IZoneOutbox,
     IZonePortal,
@@ -253,7 +252,7 @@ contract ZoneOutbox is IZoneOutbox {
             revert IZonePortal.TokenNotEnabled();
         }
 
-        // Bound raw data before decoding a callback payload.
+        // Bound callback data before queueing.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
         }
@@ -264,11 +263,6 @@ contract ZoneOutbox is IZoneOutbox {
         } else {
             _validateGasLimit(gasLimit);
             if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
-            // Reject malformed or unsupported callback ABI before burning or queueing.
-            CallbackData memory callback = abi.decode(data, (CallbackData));
-            if (!config.isAllowedAccount(callback.tempoRefundRecipient)) {
-                revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);
-            }
         }
 
         _validateRevealTo(revealTo);

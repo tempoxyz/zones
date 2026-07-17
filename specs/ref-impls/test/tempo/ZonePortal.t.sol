@@ -6,7 +6,6 @@ import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 import {
     BlockTransition,
-    CallbackData,
     Deposit,
     DepositQueueTransition,
     DepositType,
@@ -14,7 +13,6 @@ import {
     EncryptedDeposit,
     EncryptedDepositPayload,
     EncryptionKeyEntry,
-    Flow,
     IVerifier,
     IWithdrawalReceiver,
     IZoneFactory,
@@ -44,7 +42,7 @@ import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
-import { MockZoneGateway } from "../mocks/MockZoneGateway.sol";
+import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
 import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
@@ -1337,12 +1335,12 @@ contract ZonePortalTest is BaseTest {
                      CALLBACK & BOUNCE-BACK TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function _callbackData(Flow flow) internal view returns (bytes memory) {
+    function _callbackData(GatewayFlow flow) internal view returns (bytes memory) {
         return _callbackData(flow, alice, 0);
     }
 
     function _callbackData(
-        Flow flow,
+        GatewayFlow flow,
         address tempoRefundRecipient,
         uint128 minOutputAmount
     )
@@ -1351,7 +1349,7 @@ contract ZonePortalTest is BaseTest {
         returns (bytes memory)
     {
         return abi.encode(
-            CallbackData({
+            GatewayCallbackData({
                 flow: flow,
                 outputToken: address(pathUSD),
                 keyIndex: 0,
@@ -1366,7 +1364,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function _unsupportedFlowCallback() internal view returns (bytes memory data) {
-        data = _callbackData(Flow.Deposit);
+        data = _callbackData(GatewayFlow.Deposit);
         assembly {
             mstore(add(data, 0x40), 2)
         }
@@ -1380,7 +1378,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             address(pathUSD),
             1,
-            _callbackData(Flow.Deposit)
+            _callbackData(GatewayFlow.Deposit)
         );
     }
 
@@ -1396,7 +1394,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             address(pathUSD),
             1,
-            _callbackData(Flow.Deposit)
+            _callbackData(GatewayFlow.Deposit)
         );
     }
 
@@ -1426,7 +1424,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             address(pathUSD),
             1,
-            _callbackData(Flow.Deposit, outsider, 0)
+            _callbackData(GatewayFlow.Deposit, outsider, 0)
         );
     }
 
@@ -1441,7 +1439,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             address(pathUSD),
             1,
-            _callbackData(Flow.Redeem, alice, 2)
+            _callbackData(GatewayFlow.Redeem, alice, 2)
         );
     }
 
@@ -1487,7 +1485,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             2_000_000,
             alice,
-            _callbackData(Flow.Deposit)
+            _callbackData(GatewayFlow.Deposit)
         );
         _enqueueWithdrawal(withdrawal);
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
@@ -1513,7 +1511,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             2_000_000,
             alice,
-            _callbackData(Flow.Redeem)
+            _callbackData(GatewayFlow.Redeem)
         );
         _enqueueWithdrawal(withdrawal);
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
@@ -1595,7 +1593,7 @@ contract ZonePortalTest is BaseTest {
             bytes32(0),
             2_000_000,
             alice,
-            _callbackData(Flow.Deposit)
+            _callbackData(GatewayFlow.Deposit)
         );
         _enqueueWithdrawal(withdrawal);
         bytes32 depositHashBefore = portal.currentDepositQueueHash();

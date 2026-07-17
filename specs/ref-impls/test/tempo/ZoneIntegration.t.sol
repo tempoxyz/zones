@@ -3,14 +3,12 @@ pragma solidity ^0.8.13;
 
 import {
     BlockTransition,
-    CallbackData,
     DecryptionData,
     Deposit,
     DepositQueueTransition,
     DepositType,
     EnabledToken,
     EncryptedDepositPayload,
-    Flow,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
@@ -28,6 +26,7 @@ import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { GatewayCallbackData, GatewayFlow } from "../mocks/MockZoneGateway.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
@@ -105,8 +104,8 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.setSequencerEncryptionKey(x, yParity, v, r, s);
 
         return abi.encode(
-            CallbackData({
-                flow: Flow.Deposit,
+            GatewayCallbackData({
+                flow: GatewayFlow.Deposit,
                 outputToken: address(l2ZoneToken),
                 keyIndex: 0,
                 encrypted: EncryptedDepositPayload({

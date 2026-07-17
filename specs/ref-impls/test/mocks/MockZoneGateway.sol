@@ -1,11 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { CallbackData, IWithdrawalReceiver, IZonePortal } from "../../src/interfaces/IZone.sol";
+import {
+    EncryptedDepositPayload,
+    IWithdrawalReceiver,
+    IZonePortal
+} from "../../src/interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
+enum GatewayFlow {
+    Deposit,
+    Redeem
+}
+
+struct GatewayCallbackData {
+    GatewayFlow flow;
+    address outputToken;
+    uint256 keyIndex;
+    EncryptedDepositPayload encrypted;
+    uint128 minVaultAssets;
+    uint128 minVaultShares;
+    uint128 minOutputAmount;
+    bytes32 actionId;
+    address tempoRefundRecipient;
+}
+
 /// @notice Callback-only stand-in until the production ZoneGateway is implemented.
-/// @dev It decodes the canonical callback payload and models only the two synchronous
+/// @dev It owns its callback payload and models only the two synchronous
 ///      closed-loop returns. Token conversion/vault behavior is intentionally not modeled.
 contract MockZoneGateway is IWithdrawalReceiver {
 
@@ -36,7 +57,7 @@ contract MockZoneGateway is IWithdrawalReceiver {
         if (msg.sender != portal.messenger()) revert UnauthorizedMessenger();
         if (!portal.zoneGateway(address(this))) revert UnregisteredGateway();
 
-        CallbackData memory callback = abi.decode(callbackData, (CallbackData));
+        GatewayCallbackData memory callback = abi.decode(callbackData, (GatewayCallbackData));
         if (callback.outputToken != token) revert InvalidOutputToken();
         if (!portal.allowedAccount(callback.tempoRefundRecipient)) {
             revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);

@@ -5,7 +5,6 @@ import {
     AES_GCM_DECRYPT,
     BlockTransition,
     CHAUM_PEDERSEN_VERIFY,
-    CallbackData,
     ChaumPedersenProof,
     DecryptionData,
     Deposit,
@@ -14,7 +13,6 @@ import {
     EnabledToken,
     EncryptedDeposit,
     EncryptedDepositPayload,
-    Flow,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
     IWithdrawalReceiver,
@@ -40,6 +38,7 @@ import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
+import { GatewayCallbackData, GatewayFlow } from "../mocks/MockZoneGateway.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -602,7 +601,7 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 processedHash = _sequencerRelayDepositsToL2();
         _sequencerSubmitBatch(processedHash);
         _setEncKeyOnL1(ENC_KEY_1);
-        bytes memory callbackData = _callbackData(Flow.Deposit);
+        bytes memory callbackData = _callbackData(GatewayFlow.Deposit);
 
         // Request withdrawal with callback
         vm.startPrank(alice);
@@ -647,7 +646,7 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 processedHash = _sequencerRelayDepositsToL2();
         _sequencerSubmitBatch(processedHash);
         _setEncKeyOnL1(ENC_KEY_1);
-        bytes memory callbackData = _callbackData(Flow.Redeem);
+        bytes memory callbackData = _callbackData(GatewayFlow.Redeem);
 
         // Request a callback withdrawal, then make the mock omit its return deposit.
         zoneGateway.setReturnToZone(false);
@@ -892,9 +891,9 @@ contract ZoneBridgeTest is BaseTest {
         });
     }
 
-    function _callbackData(Flow flow) internal view returns (bytes memory) {
+    function _callbackData(GatewayFlow flow) internal view returns (bytes memory) {
         return abi.encode(
-            CallbackData({
+            GatewayCallbackData({
                 flow: flow,
                 outputToken: address(l2ZoneToken),
                 keyIndex: 0,
