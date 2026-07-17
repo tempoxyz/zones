@@ -167,6 +167,14 @@ impl L1StateCacheInner {
         self.anchor
     }
 
+    /// Adds an address to the conservative mutation-tracking set.
+    ///
+    /// Returns `true` when the address was newly inserted. Tracking is retained across
+    /// [`clear`](Self::clear), so tokens discovered from L1 remain safe across reconnects and reorgs.
+    pub fn track(&mut self, address: Address) -> bool {
+        self.tracked_contracts.insert(address)
+    }
+
     /// Returns `true` if the given address is one of the tracked contracts.
     pub fn is_tracked(&self, address: &Address) -> bool {
         self.tracked_contracts.contains(address)
@@ -278,6 +286,8 @@ mod tests {
     fn clear_removes_chain_data_but_preserves_canonical_floor() {
         let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
 
+        let discovered_token = Address::with_last_byte(0x44);
+        assert!(cache.track(discovered_token));
         assert!(cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1)));
         cache.invalidate(PORTAL, 101);
         cache.advance_floor(100);
@@ -292,6 +302,7 @@ mod tests {
         assert!(cache.invalidations.is_empty());
         assert_eq!(cache.block_floor, 100);
         assert_eq!(cache.anchor(), NumHash::default());
+        assert!(cache.is_tracked(&discovered_token));
     }
 
     #[test]

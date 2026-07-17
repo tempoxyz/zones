@@ -76,7 +76,7 @@ use crate::{
             SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
         },
     },
-    state::{cache::L1StateCacheInner, tip403::PolicyEvent},
+    state::cache::L1StateCacheInner,
 };
 
 mod block;

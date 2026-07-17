@@ -212,7 +212,6 @@ impl ZoneNode {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
-            policy_cache: policy_cache.clone(),
             l1_state_cache: l1_state_cache.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
@@ -489,7 +488,8 @@ where
             .await?
             .erased();
 
-        self.resolve_and_seed_tokens(&l1_provider).await?;
+        self.initialize_tracked_tokens(tempo_block_number, &l1_provider)
+            .await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
         if p2p_role == Some(Role::Follower) {
             // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
@@ -637,58 +637,39 @@ where
         Ok(())
     }
 
-    /// Resolve enabled tokens and seed the policy cache.
-    async fn resolve_and_seed_tokens(
+    /// Initialize subscriber token tracking at the canonical Zone L1 anchor.
+    async fn initialize_tracked_tokens(
         &mut self,
+        block_number: u64,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
     ) -> eyre::Result<()> {
-        let portal = self.portal_address;
-        let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
+        let tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let block_number = self.policy_cache.last_l1_block();
-            let tokens = match ZonePortal::new(portal, l1_provider)
+            let portal = self.portal_address;
+            let tokens = ZonePortal::new(portal, l1_provider)
                 .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
                 .await
-            {
-                Ok(tokens) => tokens,
-                Err(err) => {
-                    warn!(
-                        target: "reth::cli",
-                        %err,
-                        block_number,
-                        %portal,
-                        "Failed to discover enabled tokens from L1 for policy cache seeding; continuing without initial token policy seed"
-                    );
-                    return Ok(());
-                }
-            };
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to discover enabled tokens for portal {portal} at canonical L1 block {block_number}: {err}"
+                    )
+                })?;
             info!(
                 target: "reth::cli",
                 count = tokens.len(),
                 ?tokens,
                 block_number,
-                "Discovered enabled tokens from L1"
+                "Discovered enabled tokens from canonical L1 state"
             );
             tokens
         };
 
-        if let Err(err) = self
-            .policy_cache
-            .seed_token_policies(portal, &tracked_tokens, l1_provider)
-            .await
-        {
-            warn!(
-                target: "reth::cli",
-                %err,
-                count = tracked_tokens.len(),
-                %portal,
-                "Failed to seed token policies from L1; continuing with RPC fallback"
-            );
-            return Ok(());
+        let mut cache = self.l1_state_cache.write();
+        for token in tokens {
+            cache.track(token);
         }
-        info!(target: "reth::cli", "Seeded token policies from L1");
         Ok(())
     }
 

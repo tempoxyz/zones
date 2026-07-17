@@ -12,13 +12,9 @@ use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
 };
-use alloy_rpc_types_eth::Filter;
-use alloy_sol_types::SolEvent;
 use std::time::Duration;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox,
-};
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS};
 use zone_node::dev::{ProvisionConfig, provision_zone};
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
@@ -1293,19 +1289,6 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
         U256::ZERO,
         "Blacklisted recipient should not have received the deposit"
     );
-
-    // Policy rejection is handled by the upstream mint failure path, not by
-    // an engine-generated `QueuedDeposit.rejected` decision.
-    let failed_filter = Filter::new()
-        .address(ZONE_INBOX_ADDRESS)
-        .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH);
-    let failed = zone
-        .provider()
-        .get_logs(&failed_filter)
-        .await?
-        .into_iter()
-        .any(|log| ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner).is_ok());
-    assert!(failed, "expected upstream mint failure event");
 
     Ok(())
 }

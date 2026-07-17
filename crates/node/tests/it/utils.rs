@@ -954,6 +954,8 @@ impl ZoneTestNode {
         }
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
+        } else if is_local_dummy_l1 {
+            zone_node = zone_node.with_initial_tokens(vec![PATH_USD_ADDRESS]);
         }
         let p2p_enabled = p2p_config.is_some();
         if let Some(p2p_config) = p2p_config {
@@ -3809,7 +3811,7 @@ impl L1Fixture {
         self.seed_regular_deposit_policy_state(block.header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
-        queue.enqueue(block.header.clone(), events, vec![]);
+        queue.enqueue(block.header.clone(), events);
     }
 
     /// Enqueue a pre-built block into a deposit queue with full portal events.
@@ -3827,7 +3829,7 @@ impl L1Fixture {
                     .expect("event receive-policy fixture seed must be admitted");
             }
         }
-        queue.enqueue(block.header.clone(), events, vec![]);
+        queue.enqueue(block.header.clone(), events);
     }
 
     /// Create a [`Deposit`] for a specific L1 block.
@@ -3861,13 +3863,13 @@ impl L1Fixture {
             enabled_tokens: tokens,
             ..Default::default()
         };
-        queue.enqueue(header, events, vec![]);
+        queue.enqueue(header, events);
     }
 
     /// Inject an empty L1 block (no deposits) into the queue.
     pub(crate) fn inject_empty_block(&mut self, queue: &DepositQueue) {
         let header = self.next_header();
-        queue.enqueue(header, L1PortalEvents::default(), vec![]);
+        queue.enqueue(header, L1PortalEvents::default());
     }
 
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
@@ -3883,7 +3885,7 @@ impl L1Fixture {
         self.seed_regular_deposit_policy_state(header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
-        queue.enqueue(header, events, vec![]);
+        queue.enqueue(header, events);
     }
 
     /// Inject an L1 block with mixed regular and encrypted deposits.
@@ -3891,7 +3893,7 @@ impl L1Fixture {
     pub(crate) fn inject_l1_deposits(&mut self, queue: &DepositQueue, deposits: Vec<L1Deposit>) {
         let header = self.next_header();
         let events = L1PortalEvents::from_deposits(deposits);
-        queue.enqueue(header, events, vec![]);
+        queue.enqueue(header, events);
     }
 
     /// Create an [`EncryptedDeposit`] for testing with dummy ECIES parameters.
