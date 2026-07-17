@@ -70,23 +70,16 @@ contract ZoneFactory is IZoneFactory {
 
         for (uint256 i; i < params.allowedAccounts.length; ++i) {
             address account = params.allowedAccounts[i];
-            if (account == address(0) || account == _messenger) {
+            if (account == _messenger) {
                 revert InvalidClosedLoopConfig();
-            }
-            for (uint256 j; j < i; ++j) {
-                if (params.allowedAccounts[j] == account) revert DuplicateAllowedAccount();
             }
         }
 
         for (uint256 i; i < params.zoneGateways.length; ++i) {
             address gateway = params.zoneGateways[i];
-            if (gateway == address(0)) revert InvalidClosedLoopConfig();
             for (uint256 j; j < params.allowedAccounts.length; ++j) {
                 // A gateway is a withdrawal-and-call destination, never a plain recipient.
                 if (params.allowedAccounts[j] == gateway) revert InvalidClosedLoopConfig();
-            }
-            for (uint256 j; j < i; ++j) {
-                if (params.zoneGateways[j] == gateway) revert DuplicateZoneGateway();
             }
         }
 
