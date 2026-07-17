@@ -407,8 +407,11 @@ contract ZonePortal is IZonePortal {
         address[] memory tokens = new address[](1);
         tokens[0] = _token;
 
-        TIP403_REGISTRY.migrateTransferPolicyIds(tokens);
         (bool isSet,) = TIP403_REGISTRY.tokenTransferPolicyId(_token);
+        if (!isSet) {
+            TIP403_REGISTRY.migrateTransferPolicyIds(tokens);
+            (isSet,) = TIP403_REGISTRY.tokenTransferPolicyId(_token);
+        }
         if (!isSet) {
             revert TokenTransferPolicyNotSet();
         }

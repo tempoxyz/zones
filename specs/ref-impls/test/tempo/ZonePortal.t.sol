@@ -214,19 +214,15 @@ contract ZonePortalProxyStorageTest is Test {
         address initialToken = makeAddr("initial token");
         address[] memory tokens = new address[](1);
         tokens[0] = initialToken;
-        vm.mockCall(
+        vm.mockCallRevert(
             StdPrecompiles.TIP403_REGISTRY_ADDRESS,
             abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
-            abi.encode(1)
+            abi.encodeWithSignature("UnexpectedMigration()")
         );
         vm.mockCall(
             StdPrecompiles.TIP403_REGISTRY_ADDRESS,
             abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
             abi.encode(true, uint64(1))
-        );
-        vm.expectCall(
-            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
-            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
         );
         vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
@@ -296,8 +292,19 @@ contract ZonePortalProxyStorageTest is Test {
             abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
             abi.encode(false, uint64(1))
         );
+        vm.expectCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
+        );
+        vm.expectCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
+            2
+        );
 
         ZonePortal portal = new ZonePortal();
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer");
         vm.prank(ZONE_FACTORY_ADDRESS);
         vm.expectRevert(IZonePortal.TokenTransferPolicyNotSet.selector);
         portal.initialize(
@@ -305,10 +312,9 @@ contract ZonePortalProxyStorageTest is Test {
             initialToken,
             makeAddr("messenger"),
             makeAddr("admin"),
-            makeAddr("sequencer"),
+            sequencers,
+            1,
             makeAddr("verifier"),
-            keccak256("genesis"),
-            100,
             ""
         );
     }
@@ -747,11 +753,44 @@ contract ZonePortalTest is BaseTest {
         address token = address(token1);
         address[] memory tokens = new address[](1);
         tokens[0] = token;
-        _mockTokenPolicyMigration(token, true);
+        bytes[] memory lookupResults = new bytes[](2);
+        lookupResults[0] = abi.encode(false, uint64(1));
+        lookupResults[1] = abi.encode(true, uint64(1));
+        vm.mockCalls(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token)),
+            lookupResults
+        );
+        vm.mockCall(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(1)
+        );
 
         vm.expectCall(
             _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
         );
+        vm.expectCall(
+            _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token)), 2
+        );
+
+        vm.prank(admin);
+        portal.enableToken(token);
+
+        assertTrue(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_skipsMigrationIfPolicyBindingIsSet() public {
+        address token = address(token1);
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        _mockTokenPolicyMigration(token, true);
+        vm.mockCallRevert(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encodeWithSignature("UnexpectedMigration()")
+        );
+
         vm.expectCall(
             _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token))
         );
