@@ -245,36 +245,119 @@ mod tests {
     use alloy_sol_types::SolCall;
     use tempo_precompiles::storage::StorageCtx;
 
+    struct TempoStateHarness {
+        ctx: TestContext,
+        controller: L1AnchorController,
+        precompile: DynPrecompile,
+    }
+
+    impl TempoStateHarness {
+        fn new(header: &TempoHeader) -> eyre::Result<Self> {
+            Self::with_reader(header, MockL1Reader::default())
+        }
+
+        fn with_reader(header: &TempoHeader, reader: MockL1Reader) -> eyre::Result<Self> {
+            let mut ctx = test_context();
+            let encoded = encode_header(header);
+            let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
+            drop(storage);
+
+            let controller = L1AnchorController::default();
+            let precompile = TempoState::create(reader, controller.clone(), &test_env(&ctx));
+            Ok(Self {
+                ctx,
+                controller,
+                precompile,
+            })
+        }
+
+        fn call(
+            &mut self,
+            caller: Address,
+            calldata: impl Into<Bytes>,
+            is_static: bool,
+        ) -> PrecompileResult {
+            self.call_as(
+                caller,
+                calldata,
+                is_static,
+                TEMPO_STATE_ADDRESS,
+                TEMPO_STATE_ADDRESS,
+            )
+        }
+
+        fn call_as(
+            &mut self,
+            caller: Address,
+            calldata: impl Into<Bytes>,
+            is_static: bool,
+            target: Address,
+            bytecode_address: Address,
+        ) -> PrecompileResult {
+            let calldata = calldata.into();
+            call_precompile(
+                &mut self.ctx,
+                &self.precompile,
+                caller,
+                &calldata,
+                u64::MAX,
+                is_static,
+                target,
+                bytecode_address,
+            )
+        }
+
+        fn finalize_raw(
+            &mut self,
+            caller: Address,
+            header: Bytes,
+            is_static: bool,
+        ) -> PrecompileResult {
+            self.call(caller, finalize_calldata(header), is_static)
+        }
+
+        fn finalize(
+            &mut self,
+            caller: Address,
+            header: &TempoHeader,
+            is_static: bool,
+        ) -> PrecompileResult {
+            self.finalize_raw(caller, encode_header(header), is_static)
+        }
+
+        fn assert_checkpoint(
+            &mut self,
+            expected_hash: B256,
+            expected_number: u64,
+        ) -> eyre::Result<()> {
+            let block_hash = self.call(
+                Address::ZERO,
+                TempoStateAbi::tempoBlockHashCall {}.abi_encode(),
+                true,
+            )?;
+            assert_eq!(
+                TempoStateAbi::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
+                expected_hash
+            );
+
+            let block_number = self.call(
+                Address::ZERO,
+                TempoStateAbi::tempoBlockNumberCall {}.abi_encode(),
+                true,
+            )?;
+            assert_eq!(
+                TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
+                expected_number
+            );
+            Ok(())
+        }
+    }
+
     fn encode_header(header: &TempoHeader) -> Bytes {
         let mut encoded = Vec::new();
         header.encode(&mut encoded);
         encoded.into()
-    }
-
-    fn initialize(ctx: &mut TestContext, header: &[u8]) -> eyre::Result<()> {
-        let mut storage = test_storage_provider(ctx, u64::MAX, false);
-
-        StorageCtx::enter(&mut storage, || TempoState::new().initialize(header))?;
-        Ok(())
-    }
-
-    fn call(
-        ctx: &mut TestContext,
-        precompile: &DynPrecompile,
-        caller: Address,
-        calldata: Bytes,
-        is_static: bool,
-    ) -> PrecompileResult {
-        call_precompile(
-            ctx,
-            precompile,
-            caller,
-            &calldata,
-            u64::MAX,
-            is_static,
-            TEMPO_STATE_ADDRESS,
-            TEMPO_STATE_ADDRESS,
-        )
     }
 
     fn child_header(parent_hash: B256, number: u64) -> TempoHeader {
@@ -313,117 +396,50 @@ mod tests {
             .into()
     }
 
-    fn assert_checkpoint(
-        ctx: &mut TestContext,
-        precompile: &DynPrecompile,
-        expected_hash: B256,
-        expected_number: u64,
-    ) -> eyre::Result<()> {
-        let block_hash = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoBlockHashCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
-            expected_hash
-        );
-
-        let block_number = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoBlockNumberCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
-            expected_number
-        );
-        Ok(())
+    fn read_slot_calldata() -> Bytes {
+        TempoStateAbi::readTempoStorageSlotCall {
+            account: Address::repeat_byte(0x44),
+            slot: B256::ZERO,
+        }
+        .abi_encode()
+        .into()
     }
 
     #[test]
     fn explicit_read_before_finalize_blocks_advancement() -> eyre::Result<()> {
         let genesis = child_header(B256::repeat_byte(0xaa), 10);
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-        let controller = L1AnchorController::default();
-        let precompile = TempoState::create(
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::with_reader(
+            &genesis,
             MockL1Reader::returning(B256::repeat_byte(0x11)),
-            controller.clone(),
-            &test_env(&ctx),
-        );
-
-        let read = TempoStateAbi::readTempoStorageSlotCall {
-            account: Address::repeat_byte(0x44),
-            slot: B256::ZERO,
-        };
-        call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            read.abi_encode().into(),
-            true,
         )?;
+
+        harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
         assert_eq!(
-            controller.phase(),
+            harness.controller.phase(),
             L1AnchorPhase::Parent {
                 anchor: 10,
                 has_read_l1: true
             }
         );
 
-        let child = encode_header(&child_header(genesis_hash, 11));
-        assert!(
-            call(
-                &mut ctx,
-                &precompile,
-                ZONE_INBOX_ADDRESS,
-                finalize_calldata(child),
-                false,
-            )
-            .is_err()
-        );
+        let child = child_header(genesis_hash, 11);
+        assert!(harness.finalize(ZONE_INBOX_ADDRESS, &child, false).is_err());
         Ok(())
     }
 
     #[test]
     fn explicit_read_after_finalize_uses_advanced_anchor() -> eyre::Result<()> {
         let genesis = child_header(B256::repeat_byte(0xaa), 10);
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-        let controller = L1AnchorController::default();
+        let genesis_hash = keccak256(encode_header(&genesis));
         let reader = MockL1Reader::returning(B256::repeat_byte(0x11));
-        let precompile = TempoState::create(reader.clone(), controller.clone(), &test_env(&ctx));
+        let mut harness = TempoStateHarness::with_reader(&genesis, reader.clone())?;
 
-        let child = encode_header(&child_header(genesis_hash, 11));
-        call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(child),
-            false,
-        )?;
-        let read = TempoStateAbi::readTempoStorageSlotCall {
-            account: Address::repeat_byte(0x44),
-            slot: B256::ZERO,
-        };
-        call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            read.abi_encode().into(),
-            true,
-        )?;
+        let child = child_header(genesis_hash, 11);
+        harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
         assert_eq!(
-            controller.phase(),
+            harness.controller.phase(),
             L1AnchorPhase::Advanced { from: 10, to: 11 }
         );
         assert!(
@@ -438,261 +454,131 @@ mod tests {
     #[test]
     fn initialize_sets_checkpoint() -> eyre::Result<()> {
         let header = child_header(B256::repeat_byte(0xaa), 42);
-        let header_rlp = encode_header(&header);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &header_rlp)?;
-
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
-        );
-        assert_checkpoint(&mut ctx, &precompile, keccak256(&header_rlp), 42)?;
-
-        Ok(())
+        let mut harness = TempoStateHarness::new(&header)?;
+        harness.assert_checkpoint(keccak256(encode_header(&header)), 42)
     }
 
     #[test]
     fn finalize_tempo_updates_checkpoint() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
         let child = child_header(genesis_hash, 1);
-        let child_rlp = encode_header(&child);
-        let child_hash = keccak256(&child_rlp);
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
-        );
 
-        let output = call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(child_rlp),
-            false,
-        )?;
+        let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
-        assert_checkpoint(&mut ctx, &precompile, child_hash, 1)?;
-
-        Ok(())
+        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
     }
 
     #[test]
     fn finalize_tempo_reverts_for_non_inbox_caller() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 1);
 
-        let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
-        );
-        let output = call(
-            &mut ctx,
-            &precompile,
-            Address::ZERO,
-            finalize_calldata(child_rlp),
-            false,
-        )?;
-
-        assert!(output.is_revert());
-        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
-
-        Ok(())
+        assert!(harness.finalize(Address::ZERO, &child, false)?.is_revert());
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
     fn delegate_call_reverts() -> eyre::Result<()> {
-        let genesis_rlp = encode_header(&TempoHeader::default());
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
-        );
-        let calldata = TempoStateAbi::tempoBlockHashCall {}.abi_encode();
-        let output = call_precompile(
-            &mut ctx,
-            &precompile,
+        let mut harness = TempoStateHarness::new(&TempoHeader::default())?;
+        let output = harness.call_as(
             Address::ZERO,
-            &calldata,
-            u64::MAX,
+            TempoStateAbi::tempoBlockHashCall {}.abi_encode(),
             true,
             TEMPO_STATE_ADDRESS,
             address!("0x000000000000000000000000000000000000dEaD"),
         )?;
 
         assert!(output.is_revert());
-        // Direct-call-only precompiles reject delegate calls before metering or storage setup.
         assert_eq!(output.gas_used, 0);
-
         Ok(())
     }
 
     #[test]
     fn finalize_tempo_reverts_on_static_call() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 1);
 
-        let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
+        assert!(
+            harness
+                .finalize(ZONE_INBOX_ADDRESS, &child, true)?
+                .is_revert()
         );
-        let output = call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(child_rlp),
-            true,
-        )?;
-
-        assert!(output.is_revert());
-        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
-
-        Ok(())
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
     fn finalize_tempo_reverts_on_invalid_rlp() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
 
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
+        assert!(
+            harness
+                .finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(vec![0xff]), false)?
+                .is_revert()
         );
-        let output = call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(Bytes::from(vec![0xff])),
-            false,
-        )?;
-
-        assert!(output.is_revert());
-        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
-
-        Ok(())
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
     fn finalize_tempo_reverts_on_trailing_header_bytes() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-
-        let child_rlp = encode_header(&child_header(genesis_hash, 1));
-        let mut malformed = child_rlp.to_vec();
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let mut malformed = encode_header(&child_header(genesis_hash, 1)).to_vec();
         malformed.push(0);
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
+
+        assert!(
+            harness
+                .finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(malformed), false)?
+                .is_revert()
         );
-        let output = call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(Bytes::from(malformed)),
-            false,
-        )?;
-
-        assert!(output.is_revert());
-        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
-
-        Ok(())
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
     fn finalize_tempo_reverts_on_invalid_parent_hash() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(B256::ZERO, 1);
 
-        let child_rlp = encode_header(&child_header(B256::ZERO, 1));
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
+        assert!(
+            harness
+                .finalize(ZONE_INBOX_ADDRESS, &child, false)?
+                .is_revert()
         );
-        let output = call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(child_rlp),
-            false,
-        )?;
-
-        assert!(output.is_revert());
-        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
-
-        Ok(())
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
     fn finalize_tempo_reverts_on_invalid_block_number() -> eyre::Result<()> {
         let genesis = TempoHeader::default();
-        let genesis_rlp = encode_header(&genesis);
-        let genesis_hash = keccak256(&genesis_rlp);
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::new(&genesis)?;
+        let child = child_header(genesis_hash, 2);
 
-        let child_rlp = encode_header(&child_header(genesis_hash, 2));
-        let precompile = TempoState::create(
-            MockL1Reader::default(),
-            L1AnchorController::default(),
-            &test_env(&ctx),
+        assert!(
+            harness
+                .finalize(ZONE_INBOX_ADDRESS, &child, false)?
+                .is_revert()
         );
-        let output = call(
-            &mut ctx,
-            &precompile,
-            ZONE_INBOX_ADDRESS,
-            finalize_calldata(child_rlp),
-            false,
-        )?;
-
-        assert!(output.is_revert());
-        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
-
-        Ok(())
+        harness.assert_checkpoint(genesis_hash, genesis.number())
     }
 
     #[test]
     fn read_tempo_storage_slot_is_system_only() -> eyre::Result<()> {
-        let genesis_rlp = encode_header(&TempoHeader::default());
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-
         let expected = b256!("0xabababababababababababababababababababababababababababababababab");
-        let precompile = TempoState::create(
+        let mut harness = TempoStateHarness::with_reader(
+            &TempoHeader::default(),
             MockL1Reader::returning(expected),
-            L1AnchorController::default(),
-            &test_env(&ctx),
-        );
+        )?;
         let calldata: Bytes = TempoStateAbi::readTempoStorageSlotCall {
             account: address!("0x0000000000000000000000000000000000009999"),
             slot: B256::ZERO,
@@ -700,46 +586,37 @@ mod tests {
         .abi_encode()
         .into();
 
-        let outsider = call(
-            &mut ctx,
-            &precompile,
-            address!("0x000000000000000000000000000000000000aaaa"),
-            calldata.clone(),
-            true,
-        )?;
-        assert!(outsider.is_revert());
-
-        let system = call(&mut ctx, &precompile, ZONE_CONFIG_ADDRESS, calldata, true)?;
+        assert!(
+            harness
+                .call(
+                    address!("0x000000000000000000000000000000000000aaaa"),
+                    calldata.clone(),
+                    true,
+                )?
+                .is_revert()
+        );
+        let system = harness.call(ZONE_CONFIG_ADDRESS, calldata, true)?;
         assert_eq!(
             TempoStateAbi::readTempoStorageSlotCall::abi_decode_returns(&system.bytes)?,
             expected
         );
-
         Ok(())
     }
 
     #[test]
     fn read_tempo_storage_slots_returns_batch() -> eyre::Result<()> {
-        let genesis_rlp = encode_header(&TempoHeader::default());
-        let mut ctx = test_context();
-        initialize(&mut ctx, &genesis_rlp)?;
-
         let expected = b256!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
-        let precompile = TempoState::create(
+        let mut harness = TempoStateHarness::with_reader(
+            &TempoHeader::default(),
             MockL1Reader::returning(expected),
-            L1AnchorController::default(),
-            &test_env(&ctx),
-        );
-        let output = call(
-            &mut ctx,
-            &precompile,
+        )?;
+        let output = harness.call(
             ZONE_OUTBOX_ADDRESS,
             TempoStateAbi::readTempoStorageSlotsCall {
                 account: address!("0x0000000000000000000000000000000000009999"),
                 slots: vec![B256::ZERO, B256::with_last_byte(1)],
             }
-            .abi_encode()
-            .into(),
+            .abi_encode(),
             true,
         )?;
 
@@ -747,7 +624,6 @@ mod tests {
             TempoStateAbi::readTempoStorageSlotsCall::abi_decode_returns(&output.bytes)?,
             vec![expected, expected]
         );
-
         Ok(())
     }
 }

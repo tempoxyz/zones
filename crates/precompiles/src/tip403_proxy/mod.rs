@@ -5,12 +5,10 @@
 //! storage. The zone keeps mutating selectors read-only and otherwise follows upstream dispatch,
 //! gas, delegate-call, and receive-policy behavior.
 
+use crate::execution::{CallCheck, CallRules};
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError};
 use tempo_contracts::precompiles::{ITIP403Registry, TIP403_REGISTRY_ADDRESS};
-use tempo_precompiles::storage::StorageCtx;
-
-use crate::execution::{CallCheck, CallRules, ZoneCall};
 
 /// Canonical TIP-403 registry address, shared with Tempo L1.
 pub const ZONE_TIP403_PROXY_ADDRESS: Address = TIP403_REGISTRY_ADDRESS;
@@ -35,18 +33,12 @@ alloy_sol_types::sol! {
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn is_delegate_call_allowed(&self) -> bool {
-        false
-    }
-
-    fn check(&self, call: ZoneCall<'_>) -> CallCheck {
-        if call
-            .selector()
-            .is_some_and(|selector| TIP403_MUTATING_SELECTORS.contains(&selector))
+    fn admit(&self, data: &[u8], _caller: Address) -> CallCheck {
+        if TIP403_MUTATING_SELECTORS
+            .iter()
+            .any(|selector| data.starts_with(selector))
         {
-            return CallCheck::Return(Ok(
-                StorageCtx::default().revert_output(ReadOnlyRegistry {}.abi_encode().into())
-            ));
+            return CallCheck::Revert(ReadOnlyRegistry {}.abi_encode().into());
         }
 
         CallCheck::Continue
