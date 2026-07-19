@@ -22,6 +22,9 @@ use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use crate::execution::{CallCheck, CallRules};
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
+///
+/// A constant charge hides storage-dependent execution costs that could reveal whether a recipient
+/// has previously received tokens. This intentionally replaces upstream variable gas pricing.
 pub const TIP20_FIXED_TRANSFER_GAS: u64 = 100_000;
 
 pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
