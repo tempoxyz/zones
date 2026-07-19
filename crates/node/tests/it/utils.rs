@@ -198,7 +198,7 @@ pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
 /// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
 ///
 /// Requires `forge build` to have been run in `specs/ref-impls`.
-fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
