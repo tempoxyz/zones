@@ -23,34 +23,6 @@ use zone_precompiles::{
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
-/// Database error produced by [`AnchoredZoneDb`].
-#[derive(Debug, Error)]
-pub enum ZoneDbError<E> {
-    /// Error from the caller-provided database.
-    #[error("inner database error: {0}")]
-    Inner(#[source] E),
-    /// The selected Zone state contains an invalid Tempo anchor.
-    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
-    AnchorOverflow(U256),
-    /// The execution-local anchor transition is inconsistent.
-    #[error(transparent)]
-    AnchorTransition(#[from] L1AnchorError),
-    /// Exact anchored L1 storage was unavailable.
-    #[error("Tempo L1 storage unavailable address={address} slot={slot} block={anchor}: {source}")]
-    L1Read {
-        address: Address,
-        slot: B256,
-        anchor: u64,
-        #[source]
-        source: PrecompileError,
-    },
-    /// A transaction attempted to persist mirrored Tempo-owned state.
-    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
-    L1Write { address: Address, slot: U256 },
-}
-
-impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
-
 /// Resolves mirrored L1 reads at the active Tempo anchor and forwards all other database
 /// operations to the caller-provided Zone database.
 pub struct AnchoredZoneDb<DB, L1> {
@@ -107,6 +79,34 @@ impl<DB: fmt::Debug, L1> fmt::Debug for AnchoredZoneDb<DB, L1> {
             .finish_non_exhaustive()
     }
 }
+
+/// Database error produced by [`AnchoredZoneDb`].
+#[derive(Debug, Error)]
+pub enum ZoneDbError<E> {
+    /// Error from the caller-provided database.
+    #[error("inner database error: {0}")]
+    Inner(#[source] E),
+    /// The selected Zone state contains an invalid Tempo anchor.
+    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
+    AnchorOverflow(U256),
+    /// The execution-local anchor transition is inconsistent.
+    #[error(transparent)]
+    AnchorTransition(#[from] L1AnchorError),
+    /// Exact anchored L1 storage was unavailable.
+    #[error("Tempo L1 storage unavailable address={address} slot={slot} block={anchor}: {source}")]
+    L1Read {
+        address: Address,
+        slot: B256,
+        anchor: u64,
+        #[source]
+        source: PrecompileError,
+    },
+    /// A transaction attempted to persist mirrored Tempo-owned state.
+    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
+    L1Write { address: Address, slot: U256 },
+}
+
+impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
 
 impl<E: DBErrorMarker> ZoneDbError<E> {
     pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
