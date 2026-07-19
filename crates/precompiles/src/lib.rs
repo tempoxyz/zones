@@ -126,7 +126,7 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
             Some(execution::create_precompile(
                 "TipFeeManager",
                 &env,
-                execution::DirectCallOnly,
+                execution::NoCallRules,
                 |data, caller| TipFeeManager::new().call(data, caller),
             ))
         } else if *address == STABLECOIN_DEX_ADDRESS {
@@ -177,7 +177,7 @@ impl TempoState {
         execution::create_precompile(
             "TempoState",
             env,
-            execution::DirectCallOnly,
+            execution::NoCallRules,
             move |data, caller| Self::new().call_with_provider(&reader, &controller, data, caller),
         )
     }
@@ -189,7 +189,7 @@ impl ZoneTokenFactory {
         execution::create_precompile(
             "ZoneTokenFactory",
             env,
-            execution::DirectCallOnly,
+            execution::NoCallRules,
             |data, caller| Self::new().call(data, caller),
         )
     }

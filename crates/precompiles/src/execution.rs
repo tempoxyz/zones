@@ -66,11 +66,6 @@ pub(crate) enum CallCheck {
 /// Rules may enforce admission policy and duplicate cheap business checks as fail-fast preflight.
 /// All state access remains in the implementation and resolves through the EVM database adapter.
 pub(crate) trait CallRules: 'static {
-    /// Returns whether this precompile accepts delegate calls.
-    fn is_delegate_call_allowed(&self) -> bool {
-        false
-    }
-
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
         None
@@ -82,17 +77,9 @@ pub(crate) trait CallRules: 'static {
     }
 }
 
-/// Rules for precompiles whose semantics require execution at their registered address.
-pub(crate) struct DirectCallOnly;
-impl CallRules for DirectCallOnly {}
-
-/// Rules for precompiles that allow delegate calls without additional admission checks.
+/// Rules with no additional selector or caller-specific restrictions, and regular gas pricing.
 pub(crate) struct NoCallRules;
-impl CallRules for NoCallRules {
-    fn is_delegate_call_allowed(&self) -> bool {
-        true
-    }
-}
+impl CallRules for NoCallRules {}
 
 pub(crate) fn create_precompile(
     id: &'static str,
@@ -102,7 +89,7 @@ pub(crate) fn create_precompile(
 ) -> DynPrecompile {
     let env = env.clone();
     DynPrecompile::new_stateful(PrecompileId::Custom(id.into()), move |input| {
-        if !rules.is_delegate_call_allowed() && !input.is_direct_call() {
+        if !input.is_direct_call() {
             return Ok(PrecompileOutput::revert(
                 0,
                 SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
