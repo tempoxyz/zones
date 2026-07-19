@@ -56,7 +56,6 @@ pub use storage::{L1AnchorController, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
-pub use tip403_proxy::ZONE_TIP403_PROXY_ADDRESS;
 pub use ztip20::SequencerExt;
 
 use alloc::{rc::Rc, sync::Arc};
@@ -114,7 +113,7 @@ pub fn extend_zone_precompiles<L1: L1StorageReader>(
     });
 
     let tip403_env = env.clone();
-    precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, move |_| {
+    precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
         Some(create_tip403_precompile(&tip403_env))
     });
 

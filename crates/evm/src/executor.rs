@@ -55,6 +55,7 @@ where
 
     /// Overrides `validatorTokens[beneficiary]` to match the resolved fee token
     /// so the handler skips FeeAMM.
+    // TODO: Remove this override once ZoneFeeManager lands.
     fn override_validator_token(&mut self) {
         let ctx = self.inner.evm.ctx_mut();
         let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());

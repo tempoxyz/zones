@@ -77,24 +77,24 @@ impl CallRules for TIP20Rules {
 
         match selector {
             ITIP20::mintCall::SELECTOR | ITIP20::mintWithMemoCall::SELECTOR => {
-                self.check_mint_auth(caller)
+                self.check_auth(caller, &[ZONE_INBOX_ADDRESS])
             }
             ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
-                self.check_burn_auth(caller)
+                self.check_auth(caller, &[ZONE_OUTBOX_ADDRESS])
             }
             ITIP20::balanceOfCall::SELECTOR => {
-                decode_and_check::<ITIP20::balanceOfCall>(args, |decoded| {
-                    self.check_balance_read(decoded.account, caller)
+                decode_and_check::<ITIP20::balanceOfCall>(args, |call| {
+                    self.check_auth_with_sequencer(caller, &[call.account])
                 })
             }
             ITIP20::allowanceCall::SELECTOR => {
-                decode_and_check::<ITIP20::allowanceCall>(args, |decoded| {
-                    self.check_allowance_read(decoded.owner, decoded.spender, caller)
+                decode_and_check::<ITIP20::allowanceCall>(args, |call| {
+                    self.check_auth_with_sequencer(caller, &[call.owner, call.spender])
                 })
             }
             IRolesAuth::hasRoleCall::SELECTOR => {
-                decode_and_check::<IRolesAuth::hasRoleCall>(args, |decoded| {
-                    self.check_balance_read(decoded.account, caller)
+                decode_and_check::<IRolesAuth::hasRoleCall>(args, |call| {
+                    self.check_auth_with_sequencer(caller, &[call.account])
                 })
             }
             _ => CallCheck::Continue,
@@ -102,51 +102,28 @@ impl CallRules for TIP20Rules {
     }
 }
 
-fn unauthorized() -> CallCheck {
-    CallCheck::Revert(Unauthorized {}.abi_encode().into())
-}
-
 impl TIP20Rules {
-    fn check_balance_read(&self, owner: Address, caller: Address) -> CallCheck {
-        if caller == owner {
-            return CallCheck::Continue;
-        }
-        self.check_sequencer(caller)
-    }
-
-    fn check_allowance_read(&self, owner: Address, spender: Address, caller: Address) -> CallCheck {
-        if caller == spender {
-            return CallCheck::Continue;
-        }
-        self.check_balance_read(owner, caller)
-    }
-
-    fn check_mint_auth(&self, caller: Address) -> CallCheck {
-        if caller == ZONE_INBOX_ADDRESS {
+    fn check_auth(&self, caller: Address, auths: &[Address]) -> CallCheck {
+        if auths.contains(&caller) {
             CallCheck::Continue
         } else {
-            unauthorized()
+            CallCheck::Revert(Unauthorized {}.abi_encode().into())
         }
     }
 
-    fn check_burn_auth(&self, caller: Address) -> CallCheck {
-        if caller == ZONE_OUTBOX_ADDRESS {
-            CallCheck::Continue
-        } else {
-            unauthorized()
+    fn check_auth_with_sequencer(&self, caller: Address, auths: &[Address]) -> CallCheck {
+        match self.check_auth(caller, auths) {
+            CallCheck::Continue => CallCheck::Continue,
+            _ if self.is_sequencer(caller) => CallCheck::Continue,
+            revert => revert,
         }
     }
 
-    fn check_sequencer(&self, caller: Address) -> CallCheck {
-        if self
-            .sequencer
+    #[inline]
+    fn is_sequencer(&self, caller: Address) -> bool {
+        self.sequencer
             .latest_sequencer()
-            .is_some_and(|sequencer| caller == sequencer)
-        {
-            CallCheck::Continue
-        } else {
-            unauthorized()
-        }
+            .is_some_and(|s| s == caller)
     }
 }
 

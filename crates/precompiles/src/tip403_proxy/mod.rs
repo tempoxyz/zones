@@ -8,10 +8,7 @@
 use crate::execution::{CallCheck, CallRules};
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError};
-use tempo_contracts::precompiles::{ITIP403Registry, TIP403_REGISTRY_ADDRESS};
-
-/// Canonical TIP-403 registry address, shared with Tempo L1.
-pub const ZONE_TIP403_PROXY_ADDRESS: Address = TIP403_REGISTRY_ADDRESS;
+use tempo_contracts::precompiles::ITIP403Registry;
 
 const TIP403_MUTATING_SELECTORS: &[[u8; 4]] = &[
     ITIP403Registry::createPolicyCall::SELECTOR,
@@ -53,6 +50,7 @@ mod tests {
     use alloy_primitives::{Bytes, U256, address};
     use revm::precompile::{PrecompileError, PrecompileOutput};
     use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
     use tempo_precompiles::{DelegateCallNotAllowed, storage::PrecompileStorageProvider};
 
     use crate::{
@@ -90,12 +88,7 @@ mod tests {
         }
 
         fn call(&mut self, data: &[u8], gas: u64) -> Result<PrecompileOutput, PrecompileError> {
-            self.call_as(
-                data,
-                gas,
-                ZONE_TIP403_PROXY_ADDRESS,
-                ZONE_TIP403_PROXY_ADDRESS,
-            )
+            self.call_as(data, gas, TIP403_REGISTRY_ADDRESS, TIP403_REGISTRY_ADDRESS)
         }
 
         fn call_as(
@@ -167,7 +160,7 @@ mod tests {
         let output = harness.call_as(
             &call,
             u64::MAX,
-            ZONE_TIP403_PROXY_ADDRESS,
+            TIP403_REGISTRY_ADDRESS,
             Address::repeat_byte(0x44),
         )?;
 

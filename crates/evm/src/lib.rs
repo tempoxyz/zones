@@ -10,12 +10,10 @@
 mod database;
 mod executor;
 pub mod precompiles;
-#[cfg(test)]
-mod test_utils;
 mod tx_context;
 mod zone_evm;
 
-pub use database::{AnchoredZoneDb, AnchoredZoneDbError};
+pub use database::{AnchoredZoneDb, ZoneDbError};
 pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 

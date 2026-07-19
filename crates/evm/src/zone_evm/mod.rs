@@ -4,7 +4,7 @@ pub(crate) mod contract_creation;
 
 use crate::{
     TempoCtx,
-    database::{AnchoredZoneDb, AnchoredZoneDbError},
+    database::{AnchoredZoneDb, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
 use alloy_primitives::{Address, Bytes};
@@ -19,7 +19,7 @@ use zone_precompiles::L1StorageReader;
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type TempoResult = ResultAndState<TempoHaltReason>;
-type AdaptedEvmError<E> = EVMError<AnchoredZoneDbError<E>, TempoInvalidTransaction>;
+type AdaptedEvmError<E> = EVMError<ZoneDbError<E>, TempoInvalidTransaction>;
 type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 
 /// Zone runtime EVM.

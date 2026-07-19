@@ -73,7 +73,7 @@ fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AnchoredZoneDb, ZoneEvm, test_utils::TestL1};
+    use crate::{AnchoredZoneDb, ZoneEvm};
     use alloy_evm::{Evm, EvmEnv};
     use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use revm::{
@@ -89,6 +89,7 @@ mod tests {
     use tempo_evm::{TempoBlockEnv, TempoHaltReason};
     use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+    use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
     type TestDb = CacheDB<EmptyDB>;
     type TestAdaptedDb = AnchoredZoneDb<TestDb, TestL1>;

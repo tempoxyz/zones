@@ -25,7 +25,7 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 /// Database error produced by [`AnchoredZoneDb`].
 #[derive(Debug, Error)]
-pub enum AnchoredZoneDbError<E> {
+pub enum ZoneDbError<E> {
     /// Error from the caller-provided database.
     #[error("inner database error: {0}")]
     Inner(#[source] E),
@@ -49,23 +49,7 @@ pub enum AnchoredZoneDbError<E> {
     L1Write { address: Address, slot: U256 },
 }
 
-impl<E: DBErrorMarker> DBErrorMarker for AnchoredZoneDbError<E> {}
-
-impl<E: DBErrorMarker> AnchoredZoneDbError<E> {
-    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
-        match self {
-            Self::Inner(error) => EVMError::Database(error),
-            error => EVMError::CustomAny(AnyError::new(error)),
-        }
-    }
-}
-
-// TODO(rusowsky): remove once TIP-1092 is implemented
-#[derive(Debug, Clone, Copy)]
-struct PackedPolicySlot {
-    local: U256,
-    l1: U256,
-}
+impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
 
 /// Resolves mirrored L1 reads at the active Tempo anchor and forwards all other database
 /// operations to the caller-provided Zone database.
@@ -75,15 +59,6 @@ pub struct AnchoredZoneDb<DB, L1> {
     controller: L1AnchorController,
     // TODO(rusowsky): remove once TIP-1092 is implemented
     packed_policy_slots: HashMap<(Address, U256), PackedPolicySlot>,
-}
-
-impl<DB: fmt::Debug, L1> fmt::Debug for AnchoredZoneDb<DB, L1> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AnchoredZoneDb")
-            .field("inner", &self.inner)
-            .field("controller", &self.controller)
-            .finish_non_exhaustive()
-    }
 }
 
 impl<DB, L1> AnchoredZoneDb<DB, L1> {
@@ -124,8 +99,33 @@ impl<DB, L1> AnchoredZoneDb<DB, L1> {
     }
 }
 
+impl<DB: fmt::Debug, L1> fmt::Debug for AnchoredZoneDb<DB, L1> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AnchoredZoneDb")
+            .field("inner", &self.inner)
+            .field("controller", &self.controller)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<E: DBErrorMarker> ZoneDbError<E> {
+    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
+        match self {
+            Self::Inner(error) => EVMError::Database(error),
+            error => EVMError::CustomAny(AnyError::new(error)),
+        }
+    }
+}
+
+// TODO(rusowsky): remove once TIP-1092 is implemented
+#[derive(Debug, Clone, Copy)]
+struct PackedPolicySlot {
+    local: U256,
+    l1: U256,
+}
+
 impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
-    fn anchor(&mut self) -> Result<u64, AnchoredZoneDbError<DB::Error>> {
+    fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
         if let Some(anchor) = self.controller.current() {
             return Ok(anchor);
         }
@@ -133,9 +133,8 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
         let value = self
             .inner
             .storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)
-            .map_err(AnchoredZoneDbError::Inner)?;
-        let anchor =
-            u64::try_from(value).map_err(|_| AnchoredZoneDbError::AnchorOverflow(value))?;
+            .map_err(ZoneDbError::Inner)?;
+        let anchor = u64::try_from(value).map_err(|_| ZoneDbError::AnchorOverflow(value))?;
         Ok(anchor)
     }
 
@@ -144,11 +143,11 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
         address: Address,
         slot: U256,
         anchor: u64,
-    ) -> Result<U256, AnchoredZoneDbError<DB::Error>> {
+    ) -> Result<U256, ZoneDbError<DB::Error>> {
         self.l1
             .read_l1_storage(address, B256::from(slot), anchor)
             .map(|value| value.into())
-            .map_err(|source| AnchoredZoneDbError::L1Read {
+            .map_err(|source| ZoneDbError::L1Read {
                 address,
                 slot: slot.into(),
                 anchor,
@@ -160,16 +159,20 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
     pub fn sanitize_state(
         &self,
         state: &mut AddressMap<Account>,
-    ) -> Result<(), AnchoredZoneDbError<DB::Error>> {
-        let l1_write = |address, slot| Err(AnchoredZoneDbError::L1Write { address, slot });
-
+    ) -> Result<(), ZoneDbError<DB::Error>> {
         if let Some(account) = state.get(&TIP403_REGISTRY_ADDRESS) {
             if account.info != account.original_info() {
-                return l1_write(TIP403_REGISTRY_ADDRESS, U256::ZERO);
+                return Err(ZoneDbError::L1Write {
+                    address: TIP403_REGISTRY_ADDRESS,
+                    slot: U256::ZERO,
+                });
             }
             for (slot, value) in &account.storage {
                 if value.is_changed() {
-                    return l1_write(TIP403_REGISTRY_ADDRESS, *slot);
+                    return Err(ZoneDbError::L1Write {
+                        address: TIP403_REGISTRY_ADDRESS,
+                        slot: *slot,
+                    });
                 }
             }
         }
@@ -185,7 +188,10 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
             if storage::merge_transfer_policy_id(U256::ZERO, value.present_value)
                 != storage::merge_transfer_policy_id(U256::ZERO, observed.l1)
             {
-                return l1_write(*address, *slot);
+                return Err(ZoneDbError::L1Write {
+                    address: *address,
+                    slot: *slot,
+                });
             }
 
             value.original_value =
@@ -198,25 +204,23 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
 }
 
 impl<DB: Database, L1: L1StorageReader> RevmDatabase for AnchoredZoneDb<DB, L1> {
-    type Error = AnchoredZoneDbError<DB::Error>;
+    type Error = ZoneDbError<DB::Error>;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.inner
-            .basic(address)
-            .map_err(AnchoredZoneDbError::Inner)
+        self.inner.basic(address).map_err(ZoneDbError::Inner)
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
         self.inner
             .code_by_hash(code_hash)
-            .map_err(AnchoredZoneDbError::Inner)
+            .map_err(ZoneDbError::Inner)
     }
 
     fn storage(&mut self, address: Address, slot: StorageKey) -> Result<StorageValue, Self::Error> {
         let local = self
             .inner
             .storage(address, slot)
-            .map_err(AnchoredZoneDbError::Inner)?;
+            .map_err(ZoneDbError::Inner)?;
         if address != TIP403_REGISTRY_ADDRESS && !storage::is_tip20_policy_id_slot(address, slot) {
             return Ok(local);
         }
@@ -225,7 +229,7 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for AnchoredZoneDb<DB, L1> 
         let l1 = self.l1_storage(address, slot, anchor)?;
         self.controller
             .observe_read(anchor)
-            .map_err(AnchoredZoneDbError::AnchorTransition)?;
+            .map_err(ZoneDbError::AnchorTransition)?;
 
         if storage::is_tip20_policy_id_slot(address, slot) {
             self.packed_policy_slots
@@ -237,21 +241,19 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for AnchoredZoneDb<DB, L1> 
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        self.inner
-            .block_hash(number)
-            .map_err(AnchoredZoneDbError::Inner)
+        self.inner.block_hash(number).map_err(ZoneDbError::Inner)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::TestL1;
     use revm::{
         database::{CacheDB, EmptyDB},
         state::EvmStorageSlot,
     };
     use tempo_precompiles::{PATH_USD_ADDRESS, tip20::tip20_slots};
+    use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
     fn test_db(anchor: u64) -> CacheDB<EmptyDB> {
         let mut db = CacheDB::new(EmptyDB::default());
@@ -284,7 +286,7 @@ mod tests {
         let mut failing = AnchoredZoneDb::new(test_db(anchor), TestL1::failing_storage());
         assert!(matches!(
             failing.storage(TIP403_REGISTRY_ADDRESS, slot),
-            Err(AnchoredZoneDbError::L1Read { anchor: 42, .. })
+            Err(ZoneDbError::L1Read { anchor: 42, .. })
         ));
 
         let reader = TestL1::default();
