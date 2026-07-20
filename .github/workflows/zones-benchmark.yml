@@ -7,6 +7,7 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
+        default: roundtrip
         options:
           - roundtrip
           - deposit
@@ -62,23 +63,29 @@ on:
         default: "1000000"
 
   # workflow_dispatch is unavailable until this file reaches the default branch.
-  # A repository member can label a same-repository draft PR to run the benchmark.
+  # Until then, benchmark-harness changes run the default roundtrip on PR updates.
   pull_request:
-    types: [labeled]
+    types: [opened, synchronize, reopened]
+    paths:
+      - ".github/workflows/zones-benchmark.yml"
+      - "contrib/bench/**"
+      - "docs/ZONES_BENCHMARK.md"
+      - "xtask/**"
 
 permissions:
   contents: read
   pull-requests: read
 
 concurrency:
-  group: zones-benchmark
-  cancel-in-progress: false
+  group: zones-benchmark-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
   RUSTFLAGS: -C target-cpu=native
   RUSTC_WRAPPER: sccache
+  SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
@@ -88,8 +95,7 @@ jobs:
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(fromJSON('["zones-benchmark-roundtrip","zones-benchmark-roundtrip-smoke","zones-benchmark-deposit"]'), github.event.label.name))
+       github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-latest
     outputs:
       phase: ${{ steps.config.outputs.phase }}
@@ -108,7 +114,7 @@ jobs:
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
-      - name: Require a trusted labeler and PR author
+      - name: Require a trusted actor and PR author
         if: github.event_name == 'pull_request'
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
@@ -123,14 +129,14 @@ jobs:
               return response.data.permission;
             };
 
-            const labeler = context.actor;
+            const actor = context.actor;
             const author = context.payload.pull_request.user.login;
-            const [labelerPermission, authorPermission] = await Promise.all([
-              permission(labeler),
+            const [actorPermission, authorPermission] = await Promise.all([
+              permission(actor),
               permission(author),
             ]);
-            if (!accepted.has(labelerPermission)) {
-              core.setFailed(`@${labeler} cannot authorize a bare-metal benchmark`);
+            if (!accepted.has(actorPermission)) {
+              core.setFailed(`@${actor} cannot authorize a bare-metal benchmark`);
             }
             if (!accepted.has(authorPermission)) {
               core.setFailed(`PR author @${author} is not a repository member`);
@@ -140,7 +146,6 @@ jobs:
         id: config
         env:
           EVENT_NAME: ${{ github.event_name }}
-          EVENT_LABEL: ${{ github.event.label.name }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
@@ -163,15 +168,7 @@ jobs:
 
           phase="$INPUT_PHASE"
           if [ "$EVENT_NAME" = pull_request ]; then
-            phase="${EVENT_LABEL#zones-benchmark-}"
-            if [ "$phase" = roundtrip-smoke ]; then
-              phase=roundtrip
-              INPUT_ACCOUNTS=1
-              INPUT_COUNT=1
-              INPUT_TPS=1
-              INPUT_MAX_CONCURRENT=1
-              INPUT_STATE_BLOAT_GIB=0
-            fi
+            phase=roundtrip
           fi
           case "$phase" in
             roundtrip|deposit) ;;
@@ -248,6 +245,9 @@ jobs:
     name: ${{ needs.authorize.outputs.phase }}
     needs: authorize
     runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
+    concurrency:
+      group: zones-benchmark-host
+      cancel-in-progress: false
     timeout-minutes: 300
     env:
       ZONES_BENCH_PHASE: ${{ needs.authorize.outputs.phase }}
@@ -266,7 +266,7 @@ jobs:
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
       ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
       ZONES_BENCH_ZONES_REF: ${{ needs.authorize.outputs.sha }}
-      ZONES_BENCH_BUILD_PROFILE: maxperf
+      ZONES_BENCH_BUILD_PROFILE: profiling
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
       ZONES_BENCH_ZONE_CPUS: 8-13,24-29
@@ -299,6 +299,23 @@ jobs:
 
       - uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
 
+      - name: Prepare persistent build directories
+        env:
+          RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
+        run: |
+          set -euo pipefail
+          cache_base="${RUNNER_TOOL_CACHE_DIR:-${RUNNER_TEMP:?}/zones-benchmark-build-cache}"
+          build_key="$({ rustc -vV; printf '%s\n' "$RUSTFLAGS" profiling; } \
+            | sha256sum | awk '{print $1}')"
+          cache_root="$cache_base/zones-benchmark/cargo"
+          zones_target="$cache_root/zones/$build_key"
+          tempo_target="$cache_root/tempo/$ZONES_BENCH_TEMPO_REF/$build_key"
+          mkdir -p "$zones_target" "$tempo_target"
+          {
+            echo "ZONES_BENCH_ZONES_TARGET_DIR=$zones_target"
+            echo "ZONES_BENCH_TEMPO_TARGET_DIR=$tempo_target"
+          } >> "$GITHUB_ENV"
+
       - name: Restore isolated benchmark volumes
         run: |
           set -euo pipefail
@@ -324,15 +341,19 @@ jobs:
       - name: Build real L1 and Zone binaries
         run: |
           set -euo pipefail
-          (cd specs/ref-impls && forge build)
-          cargo build --profile maxperf -p tempo-zone -p tempo-xtask
-          cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile maxperf --bin tempo
-          cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile maxperf -p tempo-xtask
+          cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
+            --profile profiling -p tempo-zone -p tempo-xtask
+          nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
+            '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
+            'jemalloc,asm-keccak,keccak-cache-global,otlp' \
+            '$ZONES_BENCH_TEMPO_REF'"
+          cargo build --target-dir "$ZONES_BENCH_TEMPO_TARGET_DIR" \
+            --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
-            echo "ZONE_BIN=$GITHUB_WORKSPACE/target/maxperf/tempo-zone"
-            echo "ZONES_XTASK_BIN=$GITHUB_WORKSPACE/target/maxperf/tempo-xtask"
-            echo "TEMPO_BIN=$TEMPO_ROOT/target/maxperf/tempo"
-            echo "TEMPO_XTASK_BIN=$TEMPO_ROOT/target/maxperf/tempo-xtask"
+            echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
+            echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
+            echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
+            echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
           } >> "$GITHUB_ENV"
 
       - name: Install pinned txgen
@@ -347,8 +368,9 @@ jobs:
           echo "$cargo_bin_dir" >> "$GITHUB_PATH"
           echo "TXGEN_TEMPO_BIN=$cargo_bin_dir/txgen-tempo" >> "$GITHUB_ENV"
           echo "TXGEN_BENCH_BIN=$cargo_bin_dir/bench" >> "$GITHUB_ENV"
-          TXGEN_TEMPO_BIN="$cargo_bin_dir/txgen-tempo" \
-            cargo test --profile maxperf -p tempo-xtask \
+          CARGO_TARGET_DIR="$ZONES_BENCH_ZONES_TARGET_DIR" \
+            TXGEN_TEMPO_BIN="$cargo_bin_dir/txgen-tempo" \
+            cargo test --profile profiling -p tempo-xtask \
               txgen_generates_representative_local_transactions_when_installed
 
       - name: Apply benchmark host tuning

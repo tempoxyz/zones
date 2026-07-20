@@ -15,9 +15,11 @@ on the runner itself:
 
 1. `tempo-xtask generate-localnet` creates a two-validator Tempo genesis with
    DKG material and an explicitly supplied private mnemonic.
-2. `tempo-xtask install-reference-zone-factory` installs constructor-equivalent
-   reference ZoneFactory, Verifier, and ZoneMessenger state at the canonical
-   TIP-1091 factory address before either validator database is initialized.
+2. `tempo-xtask install-reference-zone-factory` installs the canonical EIP-2935
+   history contract plus constructor-equivalent reference ZoneFactory,
+   Verifier, and ZoneMessenger state before either validator database is
+   initialized. The provisioner verifies that both validators return the
+   canonical hash for a recent L1 block before creating the Zone.
 3. Two real `tempo node` consensus processes start from separate databases and
    identities. The provisioner waits for both RPCs, peering, and chain progress.
 4. The factory owner submits a real `createZone` transaction. A separate portal
@@ -146,16 +148,16 @@ defaults to zero for a faster topology smoke test.
 ```bash
 export TEMPO_ROOT="$HOME/projects/tempo"
 
-cargo build --profile maxperf -p tempo-zone -p tempo-xtask
+cargo build --profile profiling -p tempo-zone -p tempo-xtask
 cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" \
-  --profile maxperf --bin tempo
+  --profile profiling --bin tempo
 cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" \
-  --profile maxperf -p tempo-xtask
+  --profile profiling -p tempo-xtask
 
-export ZONE_BIN="$PWD/target/maxperf/tempo-zone"
-export ZONES_XTASK_BIN="$PWD/target/maxperf/tempo-xtask"
-export TEMPO_BIN="$TEMPO_ROOT/target/maxperf/tempo"
-export TEMPO_XTASK_BIN="$TEMPO_ROOT/target/maxperf/tempo-xtask"
+export ZONE_BIN="$PWD/target/profiling/tempo-zone"
+export ZONES_XTASK_BIN="$PWD/target/profiling/tempo-xtask"
+export TEMPO_BIN="$TEMPO_ROOT/target/profiling/tempo"
+export TEMPO_XTASK_BIN="$TEMPO_ROOT/target/profiling/tempo-xtask"
 export ZONES_BENCH_MNEMONIC='<private mnemonic for this isolated run>'
 export ZONES_BENCH_ACCOUNT_START=16
 export ZONES_BENCH_ACCOUNTS=100
@@ -537,11 +539,12 @@ job:
 
 1. restores the two isolated Schelk volumes and assigns unique state roots;
 2. checks out the exact Tempo revision and txgen commit
-   `f1fe55ea308b7f44b81bbc2322992a71d4522a03`, then builds max-performance
-   Tempo and Zone binaries with `-C target-cpu=native`;
+   `f1fe55ea308b7f44b81bbc2322992a71d4522a03`, then builds Tempo and Zone
+   binaries with the e2e benchmark's `profiling` profile and
+   `-C target-cpu=native`;
 3. generates a fresh private 24-word mnemonic for the run;
-4. applies the pinned Tempo benchmark host tuning and restores it during
-   teardown;
+4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
+   during teardown;
 5. generates the two-validator L1, optionally imports the selected four-token
    state bloat into both L1 databases, creates an unbloated real Zone, and
    starts all nodes;
@@ -553,6 +556,14 @@ job:
 7. for `deposit`, runs the independent preflight/generate/bench pipeline; and
 8. uploads rendered non-secret assets, host/storage metadata, JSON reports, and node logs before
    stopping the nodes and restoring the benchmark volumes.
+
+Repeat runs use the pinned Tempo benchmark's commit-and-feature-keyed MinIO
+cache for the `tempo` binary. Cache misses build from source and, when the
+runner's MinIO alias is available, populate it through `tempo.nu`. Separate
+Cargo target directories under the runner tool cache retain unchanged Zones and
+`tempo-xtask` artifacts across clean checkouts. These caches contain build
+outputs only; every run still generates fresh L1 databases, L1 state bloat,
+identities, contracts, and Zone state.
 
 Tempo and txgen are fetched from public repositories at exact commits, so no
 dependency-access secret is required. No mnemonic, portal, chain ID, token,
@@ -575,15 +586,21 @@ gh workflow run zones-benchmark.yml \
 ```
 
 GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
-file exists on the default branch. For a same-repository draft PR, apply
-`zones-benchmark-roundtrip` or `zones-benchmark-deposit` to opt into the matching
-PR-label trigger with workflow defaults. The authorization job requires both
-the labeler and PR author to have repository write access and rejects fork PRs.
-Use `zones-benchmark-roundtrip-smoke` to run the same real bootstrap and complete
-scenario with one account, one journey, and no state bloat. The smoke path
-validates topology and txgen integration without claiming a benchmark result.
-The scripts can also be executed directly on the benchmark host while the
-workflow is under review.
+file exists on the default branch. Before merge, opening, reopening, or pushing
+a commit to a same-repository PR whose cumulative diff touches the workflow,
+`contrib/bench`, `xtask`, or this document runs `roundtrip` with the workflow
+defaults. The authorization job requires both the triggering actor and PR
+author to have repository write access and rejects fork PRs. A newer commit
+cancels an obsolete run for the same PR, while benchmark jobs from different
+PRs and manual dispatches serialize on the shared Schelk host resources. The
+scripts can also be executed directly on the benchmark host while the workflow
+is under review.
+
+This is a public repository, and a `pull_request` run evaluates the workflow
+definition from the PR. The GitHub repository or organization policy must
+require approval for outside-collaborator workflows before they can reach a
+self-hosted runner. The same-repository and write-permission checks above are
+defense in depth; they do not replace that GitHub-side policy.
 
 Activity and withdrawal are intentionally not dispatch choices because this
 self-provisioning workflow starts from a fresh pool with no pre-existing Zone
@@ -606,17 +623,23 @@ single-chain benchmark harness.
 
 The pinned txgen scenario runtime currently serializes expiring-nonce activity
 submissions through one internal fee-uniqueness scheduling lane until each RPC
-accepts the transaction. This does not block the smoke or expected default rate
-of 10 journey starts per second, but it can cap higher-rate Zone activity and
-must be fixed upstream before interpreting that path as unconstrained
-throughput. Reverted withdrawals and rejected bridge outcomes also surface as
-step timeouts rather than immediate terminal classifications.
+accepts the transaction. Its capacity depends on RPC acceptance latency and it
+can cap measured Zone activity at any configured rate; it must be fixed upstream
+before interpreting that path as unconstrained throughput. Reverted withdrawals
+and rejected bridge outcomes also surface as step timeouts rather than immediate
+terminal classifications.
 
 The workflow pins disjoint CPU sets but runs two validators, one Zone, and the
 sender on one 32-logical-CPU host without the two-validator harness's 60 GiB
 per-process memory scopes. Combined with the shared Zone/validator-A device,
 this means results describe this explicit single-host topology rather than
 separate production hosts.
+
+Tempo's pinned `restore-system-tuning` cleanup hook restarts `cron`, but it does
+not restore the prior sysctls, CPU governor/turbo settings, swap, transparent
+huge-page settings, or `unattended-upgrades` service state. The dedicated runner
+therefore remains benchmark-tuned after this workflow, just as it does after
+Tempo's e2e benchmark.
 
 Finally, the pinned txgen commit is on an unmerged branch. The branch must remain
 reachable until those changes merge and this workflow is repinned to a
