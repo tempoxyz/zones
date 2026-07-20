@@ -18,7 +18,6 @@ crate::sol! {
             bytes32 txHash;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
