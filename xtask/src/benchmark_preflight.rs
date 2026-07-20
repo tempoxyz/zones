@@ -19,6 +19,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
@@ -40,13 +41,26 @@ alloy::sol! {
     }
 }
 
-#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CheckPhase {
     Deposit,
     Activity,
     Withdrawal,
     All,
+}
+
+/// Expected bridge state restored before the selected benchmark phase.
+///
+/// This is deliberately a read-only assertion. It does not prepare either fixture or wait for
+/// one to become ready.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum FixtureState {
+    /// A newly created Zone with no deposits or benchmark-account Zone balances.
+    Empty,
+    /// A Zone funded through deposits that have all been confirmed by an L1 batch.
+    Funded,
 }
 
 impl CheckPhase {
@@ -122,6 +136,11 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long)]
     check_phase: CheckPhase,
 
+    /// Assert the restored bridge fixture is empty or funded for the selected phase.
+    /// This only reads state; it never prepares or waits for a fixture.
+    #[arg(long)]
+    fixture_state: Option<FixtureState>,
+
     /// Do not inject untimed max-approval setup transactions when allowances are insufficient.
     #[arg(long)]
     no_approval_setup: bool,
@@ -143,7 +162,7 @@ pub(crate) struct BenchmarkPreflight {
     zone_max_priority_fee_per_gas: Option<u128>,
 
     /// Gas limit for L1 deposit transactions.
-    #[arg(long, default_value_t = 500_000)]
+    #[arg(long, default_value_t = 2_000_000)]
     deposit_gas_limit: u64,
 
     /// Gas limit for ordinary Zone TIP-20 transfer transactions.
@@ -151,11 +170,11 @@ pub(crate) struct BenchmarkPreflight {
     activity_gas_limit: u64,
 
     /// Gas limit for Zone withdrawal-request transactions (not callback gasLimit).
-    #[arg(long, default_value_t = 2_000_000)]
+    #[arg(long, default_value_t = 10_000_000)]
     withdrawal_tx_gas_limit: u64,
 
     /// Gas limit for untimed TIP-20 approval setup transactions.
-    #[arg(long, default_value_t = 500_000)]
+    #[arg(long, default_value_t = 2_000_000)]
     approval_gas_limit: u64,
 
     /// Directory for rendered specs, copied minimal ABIs, and preflight.json.
@@ -201,6 +220,7 @@ impl From<&AccountState> for AccountReport {
 #[serde(rename_all = "camelCase")]
 struct PreflightReport {
     check_phase: CheckPhase,
+    fixture_state: Option<FixtureState>,
     l1_chain_id: u64,
     zone_chain_id: u64,
     l1_client_version: String,
@@ -214,6 +234,11 @@ struct PreflightReport {
     deposit_fee: u128,
     bounceback_fee: u128,
     withdrawal_fee: u128,
+    portal_token_balance: String,
+    deposit_count: u64,
+    last_processed_deposit_number: u64,
+    queried_l1_gas_price: u128,
+    queried_zone_gas_price: u128,
     l1_max_fee_per_gas: u128,
     zone_max_fee_per_gas: u128,
     activity_fee_bump: u128,
@@ -438,12 +463,19 @@ impl BenchmarkPreflight {
             deposit_fee,
             bounceback_fee,
             withdrawal_fee,
+            portal_token_balance,
+            deposit_count,
+            last_processed_deposit_number,
         ) = {
             let token_enabled_l1 = portal_contract.isTokenEnabled(token);
             let deposits_active = portal_contract.areDepositsActive(token);
             let token_enabled_zone = zone_config.isEnabledToken(token).from(first_address);
             let deposit_fee = portal_contract.calculateDepositFee();
             let bounceback_fee = portal_contract.calculateBouncebackFee();
+            let l1_token = ITIP20::new(token, &l1);
+            let portal_token_balance = l1_token.balanceOf(portal);
+            let deposit_count = portal_contract.depositCount();
+            let last_processed_deposit_number = portal_contract.lastProcessedDepositNumber();
             let outbox_contract = ZoneOutbox::new(outbox, &zone_provider);
             let withdrawal_fee = outbox_contract
                 .calculateWithdrawalFee(0)
@@ -455,6 +487,9 @@ impl BenchmarkPreflight {
                 deposit_fee.call(),
                 bounceback_fee.call(),
                 withdrawal_fee.call(),
+                portal_token_balance.call(),
+                deposit_count.call(),
+                last_processed_deposit_number.call(),
             )
             .wrap_err("failed querying benchmark contracts and fees")?
         };
@@ -494,7 +529,12 @@ impl BenchmarkPreflight {
         let l1_max_priority_fee_per_gas = self
             .l1_max_priority_fee_per_gas
             .unwrap_or(l1_max_fee_per_gas);
-        let zone_max_fee_per_gas = self.zone_max_fee_per_gas.unwrap_or(queried_zone_gas_price);
+        // A fresh Zone can return zero from eth_gasPrice before it has ordinary transaction
+        // history. Its genesis and public transaction filler still use Tempo's T0 base fee, so
+        // never render or budget a zero-fee transaction from that estimate.
+        let zone_max_fee_per_gas = self
+            .zone_max_fee_per_gas
+            .unwrap_or_else(|| queried_zone_gas_price.max(u128::from(TEMPO_T0_BASE_FEE)));
         let zone_max_priority_fee_per_gas = self
             .zone_max_priority_fee_per_gas
             .unwrap_or(zone_max_fee_per_gas);
@@ -591,6 +631,16 @@ impl BenchmarkPreflight {
             self.withdrawal_tx_gas_limit,
             self.approval_gas_limit,
         )?;
+        if let Some(fixture_state) = self.fixture_state {
+            validate_fixture_state(
+                &states,
+                self.check_phase,
+                fixture_state,
+                portal_token_balance,
+                deposit_count,
+                last_processed_deposit_number,
+            )?;
+        }
 
         let render = RenderConfig {
             l1_chain_id,
@@ -627,6 +677,7 @@ impl BenchmarkPreflight {
 
         let report = PreflightReport {
             check_phase: self.check_phase,
+            fixture_state: self.fixture_state,
             l1_chain_id,
             zone_chain_id,
             l1_client_version: l1_client_version.clone(),
@@ -640,6 +691,11 @@ impl BenchmarkPreflight {
             deposit_fee,
             bounceback_fee,
             withdrawal_fee,
+            portal_token_balance: portal_token_balance.to_string(),
+            deposit_count,
+            last_processed_deposit_number,
+            queried_l1_gas_price,
+            queried_zone_gas_price,
             l1_max_fee_per_gas,
             zone_max_fee_per_gas,
             activity_fee_bump,
@@ -680,6 +736,11 @@ impl BenchmarkPreflight {
         println!("  Deposit fee:       {deposit_fee}");
         println!("  Bounceback fee:    {bounceback_fee}");
         println!("  Withdrawal fee:    {withdrawal_fee}");
+        println!("  Portal balance:    {portal_token_balance}");
+        println!("  Deposits processed: {last_processed_deposit_number}/{deposit_count}");
+        println!("  L1 gas estimate:    {queried_l1_gas_price}");
+        println!("  Zone gas estimate:  {queried_zone_gas_price}");
+        println!("  Zone max fee:       {zone_max_fee_per_gas}");
         println!("  Activity fee bump: {activity_fee_bump}");
         println!("  Rendered specs:    {}", self.output.display());
         println!("  Account report:    {}", report_path.display());
@@ -869,6 +930,73 @@ fn validate_account_capacity(
                 state.address,
                 state.zone_balance,
                 required
+            );
+        }
+    }
+    Ok(())
+}
+
+fn validate_fixture_state(
+    states: &[AccountState],
+    phase: CheckPhase,
+    fixture_state: FixtureState,
+    portal_token_balance: U256,
+    deposit_count: u64,
+    last_processed_deposit_number: u64,
+) -> eyre::Result<()> {
+    match fixture_state {
+        FixtureState::Empty => {
+            ensure!(
+                phase == CheckPhase::Deposit,
+                "--fixture-state empty is only valid with --check-phase deposit"
+            );
+            ensure!(
+                deposit_count == 0,
+                "empty fixture portal has recorded {deposit_count} deposits"
+            );
+            ensure!(
+                last_processed_deposit_number == 0,
+                "empty fixture portal has processed {last_processed_deposit_number} deposits"
+            );
+            ensure!(
+                portal_token_balance.is_zero(),
+                "empty fixture portal holds token balance {portal_token_balance}"
+            );
+            for state in states {
+                ensure!(
+                    state.zone_balance.is_zero(),
+                    "empty fixture account {} (index {}) has Zone balance {}",
+                    state.address,
+                    state.index,
+                    state.zone_balance
+                );
+            }
+        }
+        FixtureState::Funded => {
+            ensure!(
+                phase != CheckPhase::Deposit,
+                "--fixture-state funded requires --check-phase activity, withdrawal, or all"
+            );
+            ensure!(
+                deposit_count > 0,
+                "funded fixture portal has no recorded deposits"
+            );
+            ensure!(
+                last_processed_deposit_number == deposit_count,
+                "funded fixture has only processed {last_processed_deposit_number} of {deposit_count} recorded deposits"
+            );
+            let pool_zone_balance = states.iter().try_fold(U256::ZERO, |total, state| {
+                total
+                    .checked_add(state.zone_balance)
+                    .ok_or_else(|| eyre!("benchmark pool Zone balance overflowed U256"))
+            })?;
+            ensure!(
+                !pool_zone_balance.is_zero(),
+                "funded fixture benchmark pool has zero aggregate Zone balance"
+            );
+            ensure!(
+                portal_token_balance >= pool_zone_balance,
+                "funded fixture portal balance {portal_token_balance} does not back benchmark pool Zone balance {pool_zone_balance}"
             );
         }
     }
@@ -1112,6 +1240,95 @@ mod tests {
     }
 
     #[test]
+    fn empty_fixture_requires_pristine_bridge_state() {
+        let empty = fixture_account(0, U256::ZERO);
+        validate_fixture_state(
+            &[empty],
+            CheckPhase::Deposit,
+            FixtureState::Empty,
+            U256::ZERO,
+            0,
+            0,
+        )
+        .unwrap();
+
+        let funded = fixture_account(0, U256::from(1));
+        assert!(
+            validate_fixture_state(
+                &[funded],
+                CheckPhase::Deposit,
+                FixtureState::Empty,
+                U256::ZERO,
+                0,
+                0,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_fixture_state(
+                &[fixture_account(0, U256::ZERO)],
+                CheckPhase::Deposit,
+                FixtureState::Empty,
+                U256::from(1),
+                1,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn funded_fixture_requires_confirmed_deposits_and_portal_backing() {
+        let states = [
+            fixture_account(0, U256::from(10)),
+            fixture_account(1, U256::from(20)),
+        ];
+        validate_fixture_state(
+            &states,
+            CheckPhase::Withdrawal,
+            FixtureState::Funded,
+            U256::from(30),
+            2,
+            2,
+        )
+        .unwrap();
+
+        assert!(
+            validate_fixture_state(
+                &states,
+                CheckPhase::Activity,
+                FixtureState::Funded,
+                U256::from(30),
+                2,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_fixture_state(
+                &states,
+                CheckPhase::Activity,
+                FixtureState::Funded,
+                U256::from(29),
+                2,
+                2,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_fixture_state(
+                &states,
+                CheckPhase::Deposit,
+                FixtureState::Funded,
+                U256::from(30),
+                2,
+                2,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn expiring_fee_cap_reserves_txgen_uniqueness_bump() {
         assert_eq!(expiring_fee_caps(100, 90, 25).unwrap(), (125, 115));
         assert!(expiring_fee_caps(u128::MAX, 90, 1).is_err());
@@ -1126,6 +1343,7 @@ mod tests {
 
         let report = PreflightReport {
             check_phase: CheckPhase::All,
+            fixture_state: Some(FixtureState::Funded),
             l1_chain_id: 1,
             zone_chain_id: 2,
             l1_client_version: "tempo/test".into(),
@@ -1139,6 +1357,11 @@ mod tests {
             deposit_fee: 1,
             bounceback_fee: 1,
             withdrawal_fee: 1,
+            portal_token_balance: "1".into(),
+            deposit_count: 1,
+            last_processed_deposit_number: 1,
+            queried_l1_gas_price: 1,
+            queried_zone_gas_price: 1,
             l1_max_fee_per_gas: 1,
             zone_max_fee_per_gas: 1,
             activity_fee_bump: 1,
@@ -1315,10 +1538,21 @@ mod tests {
             l1_max_priority_fee_per_gas: 100_000_000_000,
             zone_max_fee_per_gas: 200_000_000_000,
             zone_max_priority_fee_per_gas: 200_000_000_000,
-            deposit_gas_limit: 500_000,
+            deposit_gas_limit: 2_000_000,
             activity_gas_limit: 500_000,
-            withdrawal_tx_gas_limit: 2_000_000,
-            approval_gas_limit: 500_000,
+            withdrawal_tx_gas_limit: 10_000_000,
+            approval_gas_limit: 2_000_000,
+        }
+    }
+
+    fn fixture_account(index: u32, zone_balance: U256) -> AccountState {
+        AccountState {
+            index,
+            address: Address::with_last_byte(index as u8 + 1),
+            l1_balance: U256::ZERO,
+            portal_allowance: U256::ZERO,
+            zone_balance,
+            outbox_allowance: U256::ZERO,
         }
     }
 

@@ -84,8 +84,10 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value = "")]
     rpc_url: String,
 
-    /// Private key (hex) for signing the createZone transaction on L1.
-    #[arg(long)]
+    /// ZoneFactory owner private key (hex) for signing the createZone transaction on L1.
+    /// Prefer the ZONE_FACTORY_OWNER_KEY environment variable so the key is not exposed in the
+    /// process argument list.
+    #[arg(long, env = "ZONE_FACTORY_OWNER_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Base fee per gas for the zone L2.

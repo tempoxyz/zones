@@ -12,17 +12,12 @@ on:
           - activity
           - withdrawal
       accounts:
-        description: Number of accounts in the benchmark pool.
+        description: Number of benchmark accounts.
         type: string
         required: true
         default: "100"
-      account-start:
-        description: First BIP-44 account index in the benchmark pool.
-        type: string
-        required: true
-        default: "0"
       count:
-        description: Number of measured transactions to generate.
+        description: Number of measured transactions.
         type: string
         required: true
         default: "1000"
@@ -36,6 +31,16 @@ on:
         type: string
         required: true
         default: "100"
+      state-bloat-gib:
+        description: Tempo TIP-20 state bloat per validator (100 matches Tempo e2e).
+        type: choice
+        required: true
+        default: "100"
+        options:
+          - "0"
+          - "1"
+          - "10"
+          - "100"
       deposit-amount:
         description: Gross amount for each L1 deposit.
         type: string
@@ -57,24 +62,29 @@ on:
         required: true
         default: "300"
       seed:
-        description: Optional txgen seed. Empty derives one from the workflow run ID and attempt.
+        description: Optional txgen seed. Empty derives one from the workflow run.
         type: string
         required: false
         default: ""
+      tempo-ref:
+        description: Exact tempoxyz/tempo revision used for the L1 validators.
+        type: string
+        required: true
+        default: 436f6cf069a0c8aafa9a3a197ffa17488b5f1e81
       txgen-ref:
         description: Exact tempoxyz/txgen revision to install.
         type: string
         required: true
         default: 4a852e33965dce5e58c7aeb01d0b592f98159e53
 
-  # A newly added workflow_dispatch is unavailable until its file exists on the
-  # default branch. Same-repository draft PRs can opt into a protected test run
-  # by applying one of the zones-benchmark-* labels below.
+  # workflow_dispatch is unavailable until this file reaches the default branch.
+  # A repository member can label a same-repository draft PR to run one phase.
   pull_request:
     types: [labeled]
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: zones-benchmark
@@ -84,125 +94,183 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: full
   RUSTC_WRAPPER: sccache
+  ZONES_BENCH_ACCOUNT_START: "16"
+  ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
-  benchmark:
-    name: ${{ github.event_name == 'workflow_dispatch' && inputs.phase || github.event.label.name }}
+  authorize:
+    name: Resolve and authorize benchmark request
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
        contains(fromJSON('["zones-benchmark-deposit","zones-benchmark-activity","zones-benchmark-withdrawal"]'), github.event.label.name))
-    runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
-    timeout-minutes: 120
-    environment:
-      name: zones-benchmark
-    env:
-      L1_RPC_URL: ${{ secrets.ZONES_BENCH_L1_RPC_URL }}
-      ZONE_RPC_URL: ${{ secrets.ZONES_BENCH_ZONE_RPC_URL }}
-      ZONES_BENCH_MNEMONIC: ${{ secrets.ZONES_BENCH_MNEMONIC }}
-      ZONES_BENCH_TOKEN: ${{ vars.ZONES_BENCH_TOKEN }}
-      ZONES_BENCH_TARGET_ID: ${{ vars.ZONES_BENCH_TARGET_ID }}
-      L1_PORTAL_ADDRESS: ${{ vars.ZONES_BENCH_PORTAL }}
-      ZONES_BENCH_EXPECTED_L1_CHAIN_ID: ${{ vars.ZONES_BENCH_L1_CHAIN_ID }}
-      ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID: ${{ vars.ZONES_BENCH_ZONE_CHAIN_ID }}
-      ZONES_BENCH_EXPECTED_ZONE_ID: ${{ vars.ZONES_BENCH_ZONE_ID }}
-      ZONES_BENCH_L1_METRICS_URL: ${{ secrets.ZONES_BENCH_L1_METRICS_URL }}
-      ZONES_BENCH_ZONE_METRICS_URL: ${{ secrets.ZONES_BENCH_ZONE_METRICS_URL }}
-      TXGEN_GIT_TOKEN: ${{ secrets.DEREK_BENCH_TOKEN }}
-      INPUT_PHASE: ${{ inputs.phase }}
-      INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
-      INPUT_ACCOUNT_START: ${{ inputs.account-start || '0' }}
-      INPUT_COUNT: ${{ inputs.count || '1000' }}
-      INPUT_TPS: ${{ inputs.tps || '100' }}
-      INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
-      INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '1000000' }}
-      INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
-      INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
-      INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
-      INPUT_SEED: ${{ inputs.seed }}
-      INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '4a852e33965dce5e58c7aeb01d0b592f98159e53' }}
+    runs-on: ubuntu-latest
+    outputs:
+      phase: ${{ steps.config.outputs.phase }}
+      sha: ${{ steps.config.outputs.sha }}
+      accounts: ${{ steps.config.outputs.accounts }}
+      count: ${{ steps.config.outputs.count }}
+      tps: ${{ steps.config.outputs.tps }}
+      max-concurrent: ${{ steps.config.outputs.max-concurrent }}
+      state-bloat-gib: ${{ steps.config.outputs.state-bloat-gib }}
+      deposit-amount: ${{ steps.config.outputs.deposit-amount }}
+      activity-amount: ${{ steps.config.outputs.activity-amount }}
+      withdrawal-amount: ${{ steps.config.outputs.withdrawal-amount }}
+      drain-timeout: ${{ steps.config.outputs.drain-timeout }}
+      seed: ${{ steps.config.outputs.seed }}
+      tempo-ref: ${{ steps.config.outputs.tempo-ref }}
+      txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
-      - name: Resolve benchmark configuration
+      - name: Require a trusted labeler and PR author
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const accepted = new Set(['admin', 'maintain', 'write']);
+            const permission = async (username) => {
+              const response = await github.rest.repos.getCollaboratorPermissionLevel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                username,
+              });
+              return response.data.user.permission;
+            };
+
+            const labeler = context.actor;
+            const author = context.payload.pull_request.user.login;
+            const [labelerPermission, authorPermission] = await Promise.all([
+              permission(labeler),
+              permission(author),
+            ]);
+            if (!accepted.has(labelerPermission)) {
+              core.setFailed(`@${labeler} cannot authorize a bare-metal benchmark`);
+            }
+            if (!accepted.has(authorPermission)) {
+              core.setFailed(`PR author @${author} is not a repository member`);
+            }
+
+      - name: Resolve configuration
         id: config
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_LABEL: ${{ github.event.label.name }}
+          EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          INPUT_PHASE: ${{ inputs.phase }}
+          INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
+          INPUT_COUNT: ${{ inputs.count || '1000' }}
+          INPUT_TPS: ${{ inputs.tps || '100' }}
+          INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
+          INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '100' }}
+          INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '1000000' }}
+          INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
+          INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
+          INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
+          INPUT_SEED: ${{ inputs.seed }}
+          INPUT_TEMPO_REF: ${{ inputs.tempo-ref || '436f6cf069a0c8aafa9a3a197ffa17488b5f1e81' }}
+          INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '4a852e33965dce5e58c7aeb01d0b592f98159e53' }}
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
           phase="$INPUT_PHASE"
-          if [ "$EVENT_NAME" = "pull_request" ]; then
+          if [ "$EVENT_NAME" = pull_request ]; then
             phase="${EVENT_LABEL#zones-benchmark-}"
           fi
           case "$phase" in
             deposit|activity|withdrawal) ;;
             *) echo "::error::unsupported benchmark phase: $phase"; exit 1 ;;
           esac
+          if [ "$phase" != deposit ]; then
+            echo "::error::$phase requires a coordinated funded L1+Zone fixture. Building that fixture needs real deposits and cross-chain state waiting, which is intentionally outside this PR. Run the rendered phase manually against a fixture that passes --fixture-state funded."
+            exit 1
+          fi
+
           if [ -z "$INPUT_SEED" ]; then
             INPUT_SEED=$((10#$RUN_ID * 100000 + 10#$RUN_ATTEMPT))
           fi
-
           for name in \
-            L1_RPC_URL ZONE_RPC_URL ZONES_BENCH_MNEMONIC ZONES_BENCH_TOKEN \
-            ZONES_BENCH_TARGET_ID L1_PORTAL_ADDRESS \
-            ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
-            ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_ID \
-            TXGEN_GIT_TOKEN
-          do
-            if [ -z "${!name:-}" ]; then
-              echo "::error::$name is not configured in the selected GitHub environment"
-              exit 1
-            fi
-          done
-          if ! [[ "$ZONES_BENCH_TARGET_ID" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
-            echo "::error::ZONES_BENCH_TARGET_ID contains unsupported characters"
-            exit 1
-          fi
-          for name in \
-            INPUT_ACCOUNTS INPUT_ACCOUNT_START INPUT_COUNT INPUT_TPS \
-            INPUT_MAX_CONCURRENT \
-            INPUT_DEPOSIT_AMOUNT INPUT_ACTIVITY_AMOUNT INPUT_WITHDRAWAL_AMOUNT \
-            INPUT_DRAIN_TIMEOUT INPUT_SEED \
-            ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
-            ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_ID
+            INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT \
+            INPUT_STATE_BLOAT_GIB INPUT_DEPOSIT_AMOUNT INPUT_ACTIVITY_AMOUNT \
+            INPUT_WITHDRAWAL_AMOUNT INPUT_DRAIN_TIMEOUT INPUT_SEED
           do
             if ! [[ "${!name}" =~ ^[0-9]+$ ]]; then
               echo "::error::$name must be an unsigned integer"
               exit 1
             fi
           done
-          if ! [[ "$INPUT_TXGEN_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::txgen-ref must be an exact 40-character commit SHA"
-            exit 1
-          fi
+          for name in INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT; do
+            if (( 10#${!name} == 0 )); then
+              echo "::error::$name must be greater than zero"
+              exit 1
+            fi
+          done
+          case "$INPUT_STATE_BLOAT_GIB" in 0|1|10|100) ;; *) exit 1 ;; esac
+          for name in INPUT_TEMPO_REF INPUT_TXGEN_REF; do
+            if ! [[ "${!name}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              echo "::error::$name must be an exact 40-character commit SHA"
+              exit 1
+            fi
+          done
 
-          echo "::add-mask::$L1_RPC_URL"
-          echo "::add-mask::$ZONE_RPC_URL"
-          echo "::add-mask::$ZONES_BENCH_MNEMONIC"
-          echo "phase=$phase" >> "$GITHUB_OUTPUT"
           {
-            echo "ZONES_BENCH_PHASE=$phase"
-            echo "ZONES_BENCH_ACCOUNTS=$INPUT_ACCOUNTS"
-            echo "ZONES_BENCH_ACCOUNT_START=$INPUT_ACCOUNT_START"
-            echo "ZONES_BENCH_COUNT=$INPUT_COUNT"
-            echo "ZONES_BENCH_TPS=$INPUT_TPS"
-            echo "ZONES_BENCH_MAX_CONCURRENT=$INPUT_MAX_CONCURRENT"
-            echo "ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT=$INPUT_COUNT"
-            echo "ZONES_BENCH_DEPOSIT_AMOUNT=$INPUT_DEPOSIT_AMOUNT"
-            echo "ZONES_BENCH_ACTIVITY_AMOUNT=$INPUT_ACTIVITY_AMOUNT"
-            echo "ZONES_BENCH_WITHDRAWAL_AMOUNT=$INPUT_WITHDRAWAL_AMOUNT"
-            echo "ZONES_BENCH_DRAIN_TIMEOUT=$INPUT_DRAIN_TIMEOUT"
-            echo "ZONES_BENCH_SEED=$INPUT_SEED"
-            echo "ZONES_BENCH_TXGEN_REF=$INPUT_TXGEN_REF"
-            echo "ZONES_BENCH_OUTPUT=target/zones-benchmark/$phase"
-            echo "ZONES_BENCH_REPORT=target/zones-benchmark/report-$phase.json"
-          } >> "$GITHUB_ENV"
+            echo "phase=$phase"
+            echo "sha=$EVENT_SHA"
+            echo "accounts=$INPUT_ACCOUNTS"
+            echo "count=$INPUT_COUNT"
+            echo "tps=$INPUT_TPS"
+            echo "max-concurrent=$INPUT_MAX_CONCURRENT"
+            echo "state-bloat-gib=$INPUT_STATE_BLOAT_GIB"
+            echo "deposit-amount=$INPUT_DEPOSIT_AMOUNT"
+            echo "activity-amount=$INPUT_ACTIVITY_AMOUNT"
+            echo "withdrawal-amount=$INPUT_WITHDRAWAL_AMOUNT"
+            echo "drain-timeout=$INPUT_DRAIN_TIMEOUT"
+            echo "seed=$INPUT_SEED"
+            echo "tempo-ref=$INPUT_TEMPO_REF"
+            echo "txgen-ref=$INPUT_TXGEN_REF"
+          } >> "$GITHUB_OUTPUT"
 
+  benchmark:
+    name: ${{ needs.authorize.outputs.phase }}
+    needs: authorize
+    runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
+    timeout-minutes: 300
+    env:
+      CONFIGURED_BENCH_MNEMONIC: ${{ secrets.ZONES_BENCH_MNEMONIC }}
+      ZONES_BENCH_PHASE: ${{ needs.authorize.outputs.phase }}
+      ZONES_BENCH_ACCOUNTS: ${{ needs.authorize.outputs.accounts }}
+      ZONES_BENCH_COUNT: ${{ needs.authorize.outputs.count }}
+      ZONES_BENCH_TPS: ${{ needs.authorize.outputs.tps }}
+      ZONES_BENCH_MAX_CONCURRENT: ${{ needs.authorize.outputs.max-concurrent }}
+      ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT: ${{ needs.authorize.outputs.count }}
+      ZONES_BENCH_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
+      ZONES_BENCH_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.deposit-amount }}
+      ZONES_BENCH_ACTIVITY_AMOUNT: ${{ needs.authorize.outputs.activity-amount }}
+      ZONES_BENCH_WITHDRAWAL_AMOUNT: ${{ needs.authorize.outputs.withdrawal-amount }}
+      ZONES_BENCH_DRAIN_TIMEOUT: ${{ needs.authorize.outputs.drain-timeout }}
+      ZONES_BENCH_SEED: ${{ needs.authorize.outputs.seed }}
+      ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
+      ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
+      ZONES_BENCH_OUTPUT: target/zones-benchmark/${{ needs.authorize.outputs.phase }}
+      ZONES_BENCH_REPORT: target/zones-benchmark/report-${{ needs.authorize.outputs.phase }}.json
+      ZONES_BENCH_TOPOLOGY_ENV: target/zones-benchmark/topology.env
+      ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
+      ZONES_BENCH_PID_FILE: target/zones-benchmark/topology.pids
+      TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
+    steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ needs.authorize.outputs.sha }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Check out pinned Tempo L1
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: tempoxyz/tempo
+          ref: ${{ needs.authorize.outputs.tempo-ref }}
+          path: _benchmark-tempo
           persist-credentials: false
           submodules: recursive
 
@@ -210,27 +278,86 @@ jobs:
         with:
           toolchain: stable
 
+      - uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+
+      - name: Restore isolated benchmark volumes
+        run: |
+          set -euo pipefail
+          command -v nu >/dev/null
+          nu "$TEMPO_ROOT/bench-schelk.nu" restore /var/lib/schelk/a.json /reth-bench-a
+          nu "$TEMPO_ROOT/bench-schelk.nu" restore /var/lib/schelk/b.json /reth-bench-b
+          nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/a.json
+          nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/b.json
+          echo "ZONES_BENCH_STATE_A_ROOT=/reth-bench-a/zones-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          echo "ZONES_BENCH_STATE_B_ROOT=/reth-bench-b/zones-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+
+      - name: Generate private run identities
+        run: |
+          set -euo pipefail
+          mnemonic="$CONFIGURED_BENCH_MNEMONIC"
+          if [ -z "$mnemonic" ]; then
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+          fi
+          if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
+            echo "::error::benchmark mnemonic is empty or the public Tempo development mnemonic"
+            exit 1
+          fi
+          echo "::add-mask::$mnemonic"
+          echo "ZONES_BENCH_MNEMONIC=$mnemonic" >> "$GITHUB_ENV"
+
+      - name: Build real L1 and Zone binaries
+        run: |
+          set -euo pipefail
+          (cd specs/ref-impls && forge build)
+          cargo build --profile maxperf -p tempo-zone -p tempo-xtask
+          cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile maxperf --bin tempo
+          cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile maxperf -p tempo-xtask
+          {
+            echo "ZONE_BIN=$GITHUB_WORKSPACE/target/maxperf/tempo-zone"
+            echo "ZONES_XTASK_BIN=$GITHUB_WORKSPACE/target/maxperf/tempo-xtask"
+            echo "TEMPO_BIN=$TEMPO_ROOT/target/maxperf/tempo"
+            echo "TEMPO_XTASK_BIN=$TEMPO_ROOT/target/maxperf/tempo-xtask"
+          } >> "$GITHUB_ENV"
+
       - name: Install pinned txgen
         run: |
           set -euo pipefail
           cargo_bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
-          txgen_url="https://x-access-token:${TXGEN_GIT_TOKEN}@github.com/tempoxyz/txgen"
           cargo install \
-            --git "$txgen_url" \
+            --git https://github.com/tempoxyz/txgen \
             --rev "$ZONES_BENCH_TXGEN_REF" \
             --locked \
             txgen-tempo bench-cli
           echo "$cargo_bin_dir" >> "$GITHUB_PATH"
           echo "TXGEN_TEMPO_BIN=$cargo_bin_dir/txgen-tempo" >> "$GITHUB_ENV"
           echo "TXGEN_BENCH_BIN=$cargo_bin_dir/bench" >> "$GITHUB_ENV"
+          TXGEN_TEMPO_BIN="$cargo_bin_dir/txgen-tempo" \
+            cargo test --profile maxperf -p tempo-xtask \
+              txgen_generates_representative_local_transactions_when_installed
 
-      - name: Build benchmark preflight
+      - name: Provision topology and run ${{ needs.authorize.outputs.phase }} phase
+        env:
+          ZONES_BENCH_CPUSET: 14-15,30-31
         run: |
-          cargo build --profile release -p tempo-xtask
-          echo "ZONES_XTASK_BIN=$GITHUB_WORKSPACE/target/release/tempo-xtask" >> "$GITHUB_ENV"
-
-      - name: Run ${{ steps.config.outputs.phase }} phase
-        run: contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
+          set -euo pipefail
+          # Match pinned Tempo bench-e2e's decimal GiB-to-MiB preset conversion.
+          export ZONES_BENCH_BLOAT_MIB=$((10#$ZONES_BENCH_BLOAT_GIB * 1000))
+          export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
+          contrib/bench/provision-topology.sh up
+          set -a
+          source "$ZONES_BENCH_TOPOLOGY_ENV"
+          set +a
+          for name in \
+            L1_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS ZONE_RPC_URL L1_PORTAL_ADDRESS \
+            ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
+            ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
+            ZONES_BENCH_L1_GAS_LIMIT \
+            ZONES_BENCH_L1_METRICS_URL ZONES_BENCH_ZONE_METRICS_URL \
+            ZONES_BENCH_TOPOLOGY_DIR
+          do
+            printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
+          done
+          contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
 
       - name: Write job summary
         if: success()
@@ -242,15 +369,42 @@ jobs:
             echo "- Transactions: \`$ZONES_BENCH_COUNT\`"
             echo "- Target TPS: \`$ZONES_BENCH_TPS\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
+            echo "- Tempo state bloat: \`${{ needs.authorize.outputs.state-bloat-gib }} GiB\`"
             echo "- Target: \`$ZONES_BENCH_TARGET_ID\`"
+            echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload specs, preflight, and report
+      - name: Collect node logs
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -n "${ZONES_BENCH_TOPOLOGY_DIR:-}" ] && [ -d "$ZONES_BENCH_TOPOLOGY_DIR/logs" ]; then
+            cp -R "$ZONES_BENCH_TOPOLOGY_DIR/logs" target/zones-benchmark/node-logs
+          fi
+
+      - name: Upload specs, identities, logs, and report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: zones-benchmark-${{ steps.config.outputs.phase }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: zones-benchmark-${{ needs.authorize.outputs.phase }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: target/zones-benchmark/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Stop nodes and restore benchmark volumes
+        if: always()
+        run: |
+          set +e
+          if [ -x contrib/bench/provision-topology.sh ]; then
+            contrib/bench/provision-topology.sh cleanup
+          fi
+          if [ ! -f "$TEMPO_ROOT/bench-schelk.nu" ]; then
+            exit 0
+          fi
+          nu "$TEMPO_ROOT/bench-schelk.nu" cleanup /var/lib/schelk/a.json
+          status_a=$?
+          nu "$TEMPO_ROOT/bench-schelk.nu" cleanup /var/lib/schelk/b.json
+          status_b=$?
+          if (( status_a != 0 || status_b != 0 )); then
+            exit 1
+          fi
