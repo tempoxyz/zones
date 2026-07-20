@@ -1345,9 +1345,11 @@ fn render_all_specs(
                 config.account_start + *offset as u32,
                 config,
                 config.portal,
-                true,
-                false,
-                true,
+                ApprovalOptions {
+                    l1: true,
+                    sponsored: false,
+                    expiring_nonce: true,
+                },
             )
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -1360,9 +1362,11 @@ fn render_all_specs(
                 config.account_start + *offset as u32,
                 config,
                 config.outbox,
-                false,
-                false,
-                true,
+                ApprovalOptions {
+                    l1: false,
+                    sponsored: false,
+                    expiring_nonce: true,
+                },
             )
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -1374,9 +1378,11 @@ fn render_all_specs(
                 config.control_account_index,
                 config,
                 config.portal,
-                true,
-                false,
-                false,
+                ApprovalOptions {
+                    l1: true,
+                    sponsored: false,
+                    expiring_nonce: false,
+                },
             )
         })
         .transpose()?
@@ -1420,9 +1426,11 @@ fn render_all_specs(
                     config.account_start + *offset as u32,
                     config,
                     config.outbox,
-                    false,
-                    true,
-                    true,
+                    ApprovalOptions {
+                        l1: false,
+                        sponsored: true,
+                        expiring_nonce: true,
+                    },
                 )
             })
             .collect::<eyre::Result<Vec<_>>>()?,
@@ -1528,17 +1536,22 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
     ])
 }
 
+#[derive(Clone, Copy)]
+struct ApprovalOptions {
+    l1: bool,
+    sponsored: bool,
+    expiring_nonce: bool,
+}
+
 fn approval_step(
     pool: &str,
     pool_offset: usize,
     account_index: u32,
     config: &RenderConfig,
     spender: Address,
-    l1: bool,
-    sponsored: bool,
-    expiring_nonce: bool,
+    options: ApprovalOptions,
 ) -> eyre::Result<Value> {
-    let (max_fee, max_priority) = if l1 {
+    let (max_fee, max_priority) = if options.l1 {
         (
             config.l1_max_fee_per_gas,
             config.l1_max_priority_fee_per_gas,
@@ -1566,18 +1579,21 @@ fn approval_step(
             "args": [spender.to_string(), MAX_UINT256],
         },
     });
-    if sponsored {
+    if options.sponsored {
         transaction["sponsor"] = serde_json::json!({
             "pool": "sponsor",
             "select": { "index": 0 },
         });
     }
-    if expiring_nonce {
+    if options.expiring_nonce {
         transaction["expiring_nonce"] = serde_json::json!(true);
         transaction["valid_for_secs"] = serde_json::json!(EXPIRING_NONCE_VALID_FOR_SECS);
     }
     serde_yaml::to_value(serde_json::json!({
-        "id": format!("approve_{}_account_{account_index}", if l1 { "portal" } else { "outbox" }),
+        "id": format!(
+            "approve_{}_account_{account_index}",
+            if options.l1 { "portal" } else { "outbox" }
+        ),
         "tx": transaction,
     }))
     .wrap_err("failed encoding approval setup step")

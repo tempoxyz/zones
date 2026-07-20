@@ -92,6 +92,14 @@ reference factory deploys full portal bytecode, while the proposed native
 TIP-1091 lifecycle uses a protocol-managed implementation, so portal deployment
 gas is not final-production exact.
 
+The Zones Reth revision currently predates the retained-branch pruning fix in
+[reth#26376](https://github.com/paradigmxyz/reth/pull/26376). The provisioned
+Zone passes `--engine.disable-sparse-trie-cache-pruning` to avoid incorrect
+roots from a reused, pruned sparse trie. This keeps the asynchronous state-root
+task, reusable trie, transaction prewarming, and execution cache enabled, but
+retains more trie data between blocks and can improve warm-cache timings. Remove
+the override after Zones updates to a Reth revision containing that fix.
+
 ### Roundtrip bootstrap and fixture boundaries
 
 The provisioner stops at infrastructure readiness. The roundtrip runner then
@@ -369,6 +377,10 @@ verify every allowance. While the measured scenario runs, it prints the number
 of successful terminal `WithdrawalProcessed` events observed on L1 every 30
 seconds. On this fresh topology that is the externally visible completion
 count; txgen's authoritative journey report is still checked at the end.
+The same monitor fails fast on a dead Zone process, invalid payload, final state
+root mismatch, or panic. A recoverable asynchronous state-root mismatch is
+printed and recorded in `zone-state-root-fallbacks.log`, then left to Reth's
+synchronous verification path.
 
 The equivalent stages are described below for diagnosis or controlled manual
 execution.

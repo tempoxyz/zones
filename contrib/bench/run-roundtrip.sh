@@ -417,7 +417,24 @@ strip_ansi() {
     sed -E $'s/\x1B\\[[0-9;]*[[:alpha:]]//g'
 }
 
-zone_fatal_log_pattern='State root task returned incorrect state root|mismatched block state root|Error advancing the chain: Invalid payload for block|(^|[^[:alnum:]_])(panic|panicked|fatal)([^[:alnum:]_]|$)'
+zone_fatal_log_pattern='mismatched block state root|Error advancing the chain: Invalid payload for block|(^|[^[:alnum:]_])(panic|panicked|fatal)([^[:alnum:]_]|$)'
+zone_state_root_fallback_pattern='State root task returned incorrect state root'
+
+report_zone_state_root_fallbacks() {
+    local chunk="$1"
+    local warning_file="$2"
+    local line summary
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        grep -Fqx -- "$line" "$warning_file" 2>/dev/null && continue
+        printf '%s\n' "$line" >>"$warning_file"
+        summary="$(sed -E \
+            's/^.*(block_num=[0-9]+).*State root task returned incorrect state root (state_root=[^ ]+ block_state_root=[^ ]+).*$/\1 \2/' \
+            <<<"$line")"
+        echo "Zone state-root task used synchronous fallback: $summary" >&2
+    done < <(grep -Ei "$zone_state_root_fallback_pattern" <<<"$chunk" || true)
+}
 
 zone_process_problem() {
     local pid="$1"
@@ -473,6 +490,7 @@ monitor_zone_health() {
     local offset="$4"
     local scenario="$5"
     local failure_file="$6"
+    local warning_file="$7"
     local problem size scan_start chunk match
 
     trap 'exit 0' TERM INT
@@ -499,6 +517,7 @@ monitor_zone_health() {
                 scan_start=1
             fi
             chunk="$(tail -c "+$scan_start" "$log_file" 2>/dev/null | strip_ansi || true)"
+            report_zone_state_root_fallbacks "$chunk" "$warning_file"
             if match="$(grep -Eim1 "$zone_fatal_log_pattern" <<<"$chunk")"; then
                 fail_zone_health "$scenario" "$failure_file" \
                     "fatal execution evidence appeared in $log_file" "$match"
@@ -510,7 +529,7 @@ monitor_zone_health() {
 }
 
 prepare_zone_health_monitor() {
-    local zone_line existing_match problem _ extra
+    local zone_line existing_match fallback_count problem _ extra
 
     zone_health_enabled=0
     if [[ -z "${ZONES_BENCH_PID_FILE:-}" && -z "${ZONES_BENCH_TOPOLOGY_DIR:-}" ]]; then
@@ -544,7 +563,14 @@ prepare_zone_health_monitor() {
     fi
     zone_health_log_offset="$(stat -c '%s' "$zone_health_log")"
     zone_health_failure_file="$ZONES_BENCH_OUTPUT/zone-health-failure.log"
+    zone_health_warning_file="$ZONES_BENCH_OUTPUT/zone-state-root-fallbacks.log"
     rm -f -- "$zone_health_failure_file"
+    grep -Ei "$zone_state_root_fallback_pattern" "$zone_health_log" 2>/dev/null \
+        | strip_ansi | sort -u >"$zone_health_warning_file" || true
+    if [[ -s "$zone_health_warning_file" ]]; then
+        fallback_count="$(wc -l <"$zone_health_warning_file")"
+        echo "Zone state-root task already used synchronous fallback $fallback_count time(s) during setup" >&2
+    fi
     zone_health_enabled=1
     echo "Zone health supervision active for PID $zone_health_zone_pid ($zone_health_log)"
 }
@@ -712,7 +738,8 @@ if (( zone_health_enabled == 1 )); then
         "$zone_health_log" \
         "$zone_health_log_offset" \
         "$scenario_pid" \
-        "$zone_health_failure_file" &
+        "$zone_health_failure_file" \
+        "$zone_health_warning_file" &
     health_pid=$!
 fi
 
@@ -732,6 +759,9 @@ progress_pid=""
 
 if (( zone_health_enabled == 1 )) && [[ -s "$zone_health_failure_file" ]]; then
     die "roundtrip stopped because the Zone became unhealthy; see $zone_health_failure_file"
+fi
+if (( zone_health_enabled == 1 )) && [[ -s "$zone_health_warning_file" ]]; then
+    echo "Zone state-root synchronous fallbacks observed: $(wc -l <"$zone_health_warning_file")"
 fi
 report_roundtrip_progress
 (( scenario_status == 0 )) || die "roundtrip scenario failed with status $scenario_status"
