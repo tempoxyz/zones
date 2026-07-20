@@ -1,7 +1,11 @@
 use super::*;
+use std::collections::HashSet;
+use tempo_primitives::is_tip20_prefix;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>);
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -383,13 +387,18 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let portal_events = self.extract_events(block_number, &receipts);
+            let (events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
-            self.apply_portal_state_events(block_number, &portal_events);
-            self.deposit_queue.enqueue_sealed(sealed, portal_events);
+            self.update_l1_state_anchor(
+                block_number,
+                sealed.hash(),
+                sealed.parent_hash(),
+                &invalidated,
+            );
+            self.apply_portal_state_events(block_number, &events);
+            self.deposit_queue.enqueue_sealed(sealed, events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
 
@@ -445,7 +454,7 @@ impl L1Subscriber {
         // A block is only flushed to the deposit queue once the NEXT block
         // arrives with a matching parent hash, proving the buffered block
         // is on the canonical chain.
-        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, L1PortalEvents)> = None;
+        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, L1ProcessedEvents)> = None;
 
         loop {
             let stream_wait_start = std::time::Instant::now();
@@ -458,22 +467,20 @@ impl L1Subscriber {
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let events = self.extract_events(block_number, &receipts);
+            let (events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, portal_events)) = unconfirmed_tip.take() {
+            if let Some((tip_header, (tip_events, tip_invalidated))) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
                     // Confirmed — update the L1 state anchor, apply events, and
                     // flush to the queue.
                     let tip_number = tip_header.number();
-                    self.update_l1_state_anchor(
-                        tip_number,
-                        tip_header.hash(),
-                        tip_header.parent_hash(),
-                    );
-                    self.apply_portal_state_events(tip_number, &portal_events);
-                    match self.deposit_queue.try_enqueue(tip_header, portal_events) {
+                    let tip_hash = tip_header.hash();
+                    let tip_parent = tip_header.parent_hash();
+                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent, &tip_invalidated);
+                    self.apply_portal_state_events(tip_number, &tip_events);
+                    match self.deposit_queue.try_enqueue(tip_header, tip_events) {
                         EnqueueOutcome::Accepted => {
                             self.subscriber_metrics.blocks_enqueued.increment(1);
                         }
@@ -501,39 +508,53 @@ impl L1Subscriber {
                         new_parent = %sealed.parent_hash(),
                         "Discarding unconfirmed L1 block (reorg)"
                     );
-                    self.config.l1_state_cache.write().clear();
+                    let mut cache = self.config.l1_state_cache.write();
+                    let confirmed_anchor = cache.anchor().number;
+                    cache.clear();
+                    cache.initialize_floor(confirmed_anchor);
+                    drop(cache);
                 }
             }
 
             // Buffer the new block as unconfirmed tip.
-            unconfirmed_tip = Some((sealed, events));
+            unconfirmed_tip = Some((sealed, (events, invalidated)));
         }
 
         warn!("L1 block subscription stream ended");
         Ok(())
     }
 
-    /// Extract portal events from pre-fetched receipts (no RPC).
+    /// Extract portal events and raw-cache mutation barriers from fetched receipts.
     fn extract_events(
         &self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> L1PortalEvents {
+    ) -> L1ProcessedEvents {
+        use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
+
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
+        let mut invalidated = HashSet::new();
 
         for receipt in receipts {
             for log in receipt.logs() {
-                if log.address() == portal_address
-                    && let Err(e) = portal_events.push_log(log, block_number)
+                let address = log.address();
+
+                if address == portal_address {
+                    if let Err(e) = portal_events.push_log(log, block_number) {
+                        warn!(block_number, %e, "Failed to decode portal event from receipt");
+                    }
+                } else if address == TIP403_REGISTRY_ADDRESS
+                    || (is_tip20_prefix(address)
+                        && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH))
                 {
-                    warn!(block_number, %e, "Failed to decode portal event from receipt");
+                    invalidated.insert(address);
                 }
             }
         }
 
         self.record_portal_event_metrics(&portal_events);
-        portal_events
+        (portal_events, invalidated)
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -608,7 +629,13 @@ impl L1Subscriber {
     /// Update the L1 state cache anchor. Detects reorgs by comparing
     /// `parent_hash` against the current anchor and clears the cache when they
     /// diverge.
-    pub(crate) fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
+    pub(crate) fn update_l1_state_anchor(
+        &self,
+        number: u64,
+        hash: B256,
+        parent_hash: B256,
+        invalidated_accounts: &HashSet<Address>,
+    ) {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
         if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
@@ -620,7 +647,14 @@ impl L1Subscriber {
                 "Reorg detected, clearing L1 state cache"
             );
             guard.clear();
+            // Receipt coverage before the replacement block is no longer trustworthy. Rebase the
+            // non-advancing floor so later historical reads cannot repopulate stale baselines.
+            guard.initialize_floor(number);
         }
+        for &address in invalidated_accounts {
+            guard.invalidate(address, number);
+        }
+        // Publish receipt coverage only after every mutation barrier from this block is visible.
         guard.update_anchor(NumHash::new(number, hash));
     }
 }

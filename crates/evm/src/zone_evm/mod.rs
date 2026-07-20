@@ -4,7 +4,7 @@ pub(crate) mod contract_creation;
 
 use crate::{
     TempoCtx,
-    database::{AnchoredZoneDb, AnchoredZoneDbError},
+    database::{AnchoredZoneDb, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
 use alloy_primitives::{Address, Bytes};
@@ -19,13 +19,13 @@ use zone_precompiles::L1StorageReader;
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type TempoResult = ResultAndState<TempoHaltReason>;
-type AdaptedEvmError<E> = EVMError<AnchoredZoneDbError<E>, TempoInvalidTransaction>;
+type AdaptedEvmError<E> = EVMError<ZoneDbError<E>, TempoInvalidTransaction>;
 type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 
 /// Zone runtime EVM.
 ///
 /// Execution uses an anchored database adapter internally while the public [`Evm::DB`] remains the
-/// exact database supplied by the caller. Successful results are validated and sanitized before
+/// exact database supplied by the caller. All completed results are validated and sanitized before
 /// their state transitions can be committed through that public database.
 pub struct ZoneEvm<DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
@@ -72,9 +72,7 @@ where
     ) -> Result<TempoResult, ZoneEvmError<DB::Error>> {
         let result = match execute(&mut self.inner) {
             Ok(mut result) => {
-                if result.result.is_success()
-                    && let Err(error) = self.inner.db().sanitize_state(&mut result.state)
-                {
+                if let Err(error) = self.inner.db_mut().sanitize_state(&mut result.state) {
                     Err(error.into_evm_error())
                 } else {
                     Ok(result)
@@ -161,5 +159,71 @@ fn map_adapter_error<E: core::error::Error + DBErrorMarker>(
         EVMError::Database(error) => error.into_evm_error(),
         EVMError::Custom(error) => EVMError::Custom(error),
         EVMError::CustomAny(error) => EVMError::CustomAny(error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_evm::EvmEnv;
+    use alloy_primitives::U256;
+    use revm::{
+        context::result::{ExecutionResult, HaltReason, Output, ResultGas, SuccessReason},
+        database::EmptyDB,
+        inspector::NoOpInspector,
+        primitives::AddressMap,
+        state::{Account, EvmStorageSlot},
+    };
+    use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+    use zone_precompiles::test_utils::MockL1Reader;
+
+    fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
+        let db = AnchoredZoneDb::new(EmptyDB::default(), MockL1Reader::default());
+        ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
+    }
+
+    fn registry_write() -> AddressMap<Account> {
+        let mut account = Account::default();
+        account.storage.insert(
+            U256::ZERO,
+            EvmStorageSlot {
+                original_value: U256::ZERO,
+                present_value: U256::ONE,
+                ..Default::default()
+            },
+        );
+        AddressMap::from_iter([(TIP403_REGISTRY_ADDRESS, account)])
+    }
+
+    #[test]
+    fn sanitizes_all_completed_execution_results() {
+        let gas = ResultGas::default();
+        let results = [
+            ExecutionResult::Success {
+                reason: SuccessReason::Stop,
+                gas,
+                logs: Vec::new(),
+                output: Output::Call(Bytes::new()),
+            },
+            ExecutionResult::Revert {
+                gas,
+                logs: Vec::new(),
+                output: Bytes::new(),
+            },
+            ExecutionResult::Halt {
+                reason: TempoHaltReason::Ethereum(HaltReason::NotActivated),
+                gas,
+                logs: Vec::new(),
+            },
+        ];
+
+        for execution_result in results {
+            let mut evm = test_evm();
+            let result = evm.execute_inner(move |_| {
+                Ok(ResultAndState::new(execution_result, registry_write()))
+            });
+
+            assert!(matches!(result, Err(EVMError::CustomAny(_))));
+        }
     }
 }

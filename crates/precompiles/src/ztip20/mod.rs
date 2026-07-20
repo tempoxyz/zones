@@ -22,6 +22,9 @@ use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use crate::execution::{CallCheck, CallRules};
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
+///
+/// A constant charge hides storage-dependent execution costs that could reveal whether a recipient
+/// has previously received tokens. This intentionally replaces upstream variable gas pricing.
 pub const TIP20_FIXED_TRANSFER_GAS: u64 = 100_000;
 
 pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
@@ -33,7 +36,7 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
 ];
 
 fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck) -> CallCheck {
-    match C::abi_decode_raw_validate(args) {
+    match C::abi_decode_raw(args) {
         Ok(decoded) => check(decoded),
         Err(_) => CallCheck::Continue,
     }
@@ -77,24 +80,24 @@ impl CallRules for TIP20Rules {
 
         match selector {
             ITIP20::mintCall::SELECTOR | ITIP20::mintWithMemoCall::SELECTOR => {
-                self.check_mint_auth(caller)
+                self.check_auth(caller, &[ZONE_INBOX_ADDRESS])
             }
             ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
-                self.check_burn_auth(caller)
+                self.check_auth(caller, &[ZONE_OUTBOX_ADDRESS])
             }
             ITIP20::balanceOfCall::SELECTOR => {
-                decode_and_check::<ITIP20::balanceOfCall>(args, |decoded| {
-                    self.check_balance_read(decoded.account, caller)
+                decode_and_check::<ITIP20::balanceOfCall>(args, |call| {
+                    self.check_auth_with_sequencer(caller, &[call.account])
                 })
             }
             ITIP20::allowanceCall::SELECTOR => {
-                decode_and_check::<ITIP20::allowanceCall>(args, |decoded| {
-                    self.check_allowance_read(decoded.owner, decoded.spender, caller)
+                decode_and_check::<ITIP20::allowanceCall>(args, |call| {
+                    self.check_auth_with_sequencer(caller, &[call.owner, call.spender])
                 })
             }
             IRolesAuth::hasRoleCall::SELECTOR => {
-                decode_and_check::<IRolesAuth::hasRoleCall>(args, |decoded| {
-                    self.check_balance_read(decoded.account, caller)
+                decode_and_check::<IRolesAuth::hasRoleCall>(args, |call| {
+                    self.check_auth_with_sequencer(caller, &[call.account])
                 })
             }
             _ => CallCheck::Continue,
@@ -102,51 +105,28 @@ impl CallRules for TIP20Rules {
     }
 }
 
-fn unauthorized() -> CallCheck {
-    CallCheck::Revert(Unauthorized {}.abi_encode().into())
-}
-
 impl TIP20Rules {
-    fn check_balance_read(&self, owner: Address, caller: Address) -> CallCheck {
-        if caller == owner {
-            return CallCheck::Continue;
-        }
-        self.check_sequencer(caller)
-    }
-
-    fn check_allowance_read(&self, owner: Address, spender: Address, caller: Address) -> CallCheck {
-        if caller == spender {
-            return CallCheck::Continue;
-        }
-        self.check_balance_read(owner, caller)
-    }
-
-    fn check_mint_auth(&self, caller: Address) -> CallCheck {
-        if caller == ZONE_INBOX_ADDRESS {
+    fn check_auth(&self, caller: Address, auths: &[Address]) -> CallCheck {
+        if auths.contains(&caller) {
             CallCheck::Continue
         } else {
-            unauthorized()
+            CallCheck::Revert(Unauthorized {}.abi_encode().into())
         }
     }
 
-    fn check_burn_auth(&self, caller: Address) -> CallCheck {
-        if caller == ZONE_OUTBOX_ADDRESS {
-            CallCheck::Continue
-        } else {
-            unauthorized()
+    fn check_auth_with_sequencer(&self, caller: Address, auths: &[Address]) -> CallCheck {
+        match self.check_auth(caller, auths) {
+            CallCheck::Continue => CallCheck::Continue,
+            _ if self.is_sequencer(caller) => CallCheck::Continue,
+            revert => revert,
         }
     }
 
-    fn check_sequencer(&self, caller: Address) -> CallCheck {
-        if self
-            .sequencer
+    #[inline]
+    fn is_sequencer(&self, caller: Address) -> bool {
+        self.sequencer
             .latest_sequencer()
-            .is_some_and(|sequencer| caller == sequencer)
-        {
-            CallCheck::Continue
-        } else {
-            unauthorized()
-        }
+            .is_some_and(|s| s == caller)
     }
 }
 
@@ -325,6 +305,31 @@ mod tests {
         assert_allowed(&rules, role.clone(), owner);
         assert_allowed(&rules, role.clone(), sequencer);
         assert_unauthorized(&rules, role, outsider);
+    }
+
+    #[test]
+    fn non_canonical_address_padding_cannot_bypass_read_privacy() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new()?;
+        let mut calldata = ITIP20::balanceOfCall {
+            account: harness.alice,
+        }
+        .abi_encode();
+
+        calldata[4] = 1;
+        assert!(ITIP20::balanceOfCall::abi_decode_raw_validate(&calldata[4..]).is_err());
+        assert_eq!(
+            ITIP20::balanceOfCall::abi_decode_raw(&calldata[4..])?.account,
+            harness.alice
+        );
+
+        let allowed = harness.call(harness.alice, calldata.clone().into(), 100_000, true)?;
+        assert!(allowed.is_success());
+
+        let blocked = harness.call(harness.bob, calldata.into(), 100_000, true)?;
+        assert!(blocked.is_revert());
+        assert_eq!(blocked.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
     }
 
     #[test]

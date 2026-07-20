@@ -435,7 +435,11 @@ where
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+        self.l1_config
+            .l1_state_cache
+            .write()
+            .initialize_floor(tempo_block_number);
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(

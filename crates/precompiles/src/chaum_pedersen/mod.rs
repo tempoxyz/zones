@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 
 mod dispatch;
 
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
@@ -20,6 +21,8 @@ use k256::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
+use tempo_precompiles::Precompile as _;
+
 /// Chaum-Pedersen Verify precompile address on Zone L2.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
     address!("0x1C00000000000000000000000000000000000100");
@@ -62,6 +65,18 @@ pub use IChaumPedersenVerify::verifyProofCall;
 /// - `c' = keccak256(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
 /// - Check: `c == c'`
 pub struct ChaumPedersenVerify;
+
+impl ChaumPedersenVerify {
+    /// Creates the Chaum-Pedersen precompile with the shared zone execution environment.
+    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "ChaumPedersenVerify",
+            env,
+            crate::execution::NoCallRules,
+            |data, caller| Self.call(data, caller),
+        )
+    }
+}
 
 /// Recover a secp256k1 affine point from compressed form (x coordinate + y parity).
 ///

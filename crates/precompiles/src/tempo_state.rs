@@ -5,8 +5,9 @@
 
 use alloc::{format, string::ToString, vec::Vec};
 
-use crate::storage::{L1AnchorController, L1StorageReader};
+use crate::storage::{L1State, L1StorageReader};
 use alloy_consensus::BlockHeader;
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
@@ -36,6 +37,21 @@ pub struct TempoState {
 pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
 
 impl TempoState {
+    /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
+    ///
+    /// System-only arbitrary L1 storage reads are delegated through `l1` at the stored checkpoint.
+    pub fn create<P: L1StorageReader>(
+        l1: L1State<P>,
+        env: &crate::ZonePrecompileEnv,
+    ) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "TempoState",
+            env,
+            crate::execution::NoCallRules,
+            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
+        )
+    }
+
     /// Initializes the predeploy account code and checkpoint from the genesis Tempo header.
     pub fn initialize(&mut self, header_rlp: &[u8]) -> tempo_precompiles::Result<()> {
         self.__initialize()?;
@@ -80,20 +96,9 @@ impl TempoState {
             .revert_output(Error(message.into()).abi_encode().into()))
     }
 
-    fn observed_l1_anchor(
+    fn apply_checkpoint<P>(
         &mut self,
-        controller: &L1AnchorController,
-    ) -> tempo_precompiles::Result<u64> {
-        let anchor = self.tempo_block_number.read()?;
-        controller
-            .observe_read(anchor)
-            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))?;
-        Ok(anchor)
-    }
-
-    fn apply_checkpoint(
-        &mut self,
-        controller: &L1AnchorController,
+        l1: &L1State<P>,
         sender: Address,
         call: TempoStateAbi::finalizeTempoCall,
     ) -> PrecompileResult {
@@ -129,7 +134,7 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        if let Err(err) = controller.begin_advance(prev_block_number, header.number()) {
+        if let Err(err) = l1.advance_anchor(prev_block_number, header.number()) {
             return self
                 .storage
                 .error_result(TempoPrecompileError::Fatal(err.to_string()));
@@ -152,8 +157,7 @@ impl TempoState {
 
     fn read_tempo_storage_slot<P: L1StorageReader>(
         &mut self,
-        provider: &P,
-        controller: &L1AnchorController,
+        l1: &L1State<P>,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotCall,
     ) -> PrecompileResult {
@@ -162,11 +166,11 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.observed_l1_anchor(controller) {
+        let block_number = match self.tempo_block_number.read() {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
-        let value = provider.read_l1_storage(call.account, call.slot, block_number)?;
+        let value = l1.read_l1_storage(call.account, call.slot, block_number)?;
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
         ))
@@ -174,8 +178,7 @@ impl TempoState {
 
     fn read_tempo_storage_slots<P: L1StorageReader>(
         &mut self,
-        provider: &P,
-        controller: &L1AnchorController,
+        l1: &L1State<P>,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotsCall,
     ) -> PrecompileResult {
@@ -184,24 +187,23 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.observed_l1_anchor(controller) {
+        let block_number = match self.tempo_block_number.read() {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
-            values.push(provider.read_l1_storage(call.account, slot, block_number)?);
+            values.push(l1.read_l1_storage(call.account, slot, block_number)?);
         }
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotsCall::abi_encode_returns(&values).into(),
         ))
     }
 
-    /// Dispatch a `TempoState` call using `provider` for anchored Tempo storage reads.
-    pub(crate) fn call_with_provider<P: L1StorageReader>(
+    /// Dispatch a `TempoState` call using execution-local L1 state.
+    pub(crate) fn call_with_l1_state<P: L1StorageReader>(
         &mut self,
-        provider: &P,
-        controller: &L1AnchorController,
+        l1: &L1State<P>,
         calldata: &[u8],
         msg_sender: Address,
     ) -> PrecompileResult {
@@ -215,12 +217,12 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
-                    finalizeTempo(call) => self.apply_checkpoint(controller, msg_sender, call),
+                    finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
                     readTempoStorageSlot(call) => {
-                        self.read_tempo_storage_slot(provider, controller, msg_sender, call)
+                        self.read_tempo_storage_slot(l1, msg_sender, call)
                     },
                     readTempoStorageSlots(call) => {
-                        self.read_tempo_storage_slots(provider, controller, msg_sender, call)
+                        self.read_tempo_storage_slots(l1, msg_sender, call)
                     },
                 }
             },
@@ -232,12 +234,8 @@ impl TempoState {
 mod tests {
     use super::*;
 
-    use crate::{
-        storage::L1AnchorPhase,
-        test_utils::{
-            MockL1Reader, TestContext, call_precompile, test_context, test_env,
-            test_storage_provider,
-        },
+    use crate::test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
@@ -247,7 +245,7 @@ mod tests {
 
     struct TempoStateHarness {
         ctx: TestContext,
-        controller: L1AnchorController,
+        l1: L1State<MockL1Reader>,
         precompile: DynPrecompile,
     }
 
@@ -263,11 +261,11 @@ mod tests {
             StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             drop(storage);
 
-            let controller = L1AnchorController::default();
-            let precompile = TempoState::create(reader, controller.clone(), &test_env(&ctx));
+            let l1 = L1State::new(reader);
+            let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
             Ok(Self {
                 ctx,
-                controller,
+                l1,
                 precompile,
             })
         }
@@ -415,10 +413,7 @@ mod tests {
         )?;
 
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(
-            harness.controller.phase(),
-            L1AnchorPhase::Parent { anchor: 10 }
-        );
+        assert_eq!(harness.l1.get_anchor(), Some(10));
 
         let child = child_header(genesis_hash, 11);
         assert!(harness.finalize(ZONE_INBOX_ADDRESS, &child, false).is_err());
@@ -435,10 +430,7 @@ mod tests {
         let child = child_header(genesis_hash, 11);
         harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(
-            harness.controller.phase(),
-            L1AnchorPhase::Advanced { from: 10, to: 11 }
-        );
+        assert_eq!(harness.l1.get_anchor(), Some(11));
         assert!(
             reader
                 .storage_requests()

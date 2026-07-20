@@ -1,11 +1,11 @@
 //! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
 //! and the native `TempoState` precompile.
 
-use alloc::rc::Rc;
+use alloc::{rc::Rc, string::String};
 use core::{cell::Cell, fmt};
 
 use alloy_primitives::{Address, B256, U256};
-use revm::precompile::PrecompileError;
+use revm::{context::result::AnyError, precompile::PrecompileError};
 use tempo_precompiles::tip20::tip20_slots;
 use tempo_primitives::TempoAddressExt;
 use thiserror::Error;
@@ -20,128 +20,150 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
         account: Address,
         slot: B256,
         block_number: u64,
-    ) -> core::result::Result<B256, PrecompileError>;
+    ) -> core::result::Result<B256, L1StateError>;
 }
 
-/// Invalid operation for the current anchor phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("invalid anchor operation {operation:?} in phase {phase:?}")]
-pub struct L1AnchorError {
-    /// Attempted operation.
-    pub operation: L1AnchorOperation,
-    /// Phase in which the operation was attempted.
-    pub phase: L1AnchorPhase,
+/// Execution-local access to Tempo L1 storage at a single finalized block number.
+///
+/// The **anchor** is the Tempo L1 block number against which every external storage read in the
+/// current transaction attempt must be resolved. It corresponds to the checkpoint maintained in
+/// Zone state by the native `TempoState` precompile. The anchor starts unset and is selected in one
+/// of two ways:
+///
+/// - For an ordinary transaction, the first L1 read selects the `tempoBlockNumber` loaded from the
+///   chosen Zone state.
+/// - During `advanceTempo`, the native `TempoState` precompile governs advancement: it first
+///   validates that the submitted header is the direct child of the stored checkpoint, then
+///   advances the anchor to that child before any reads at the new checkpoint.
+///
+/// Once selected, the anchor is immutable for the transaction attempt. Reads at another block,
+/// advancement after a parent-anchor read, and duplicate or non-contiguous advancement are
+/// rejected. The Zone EVM resets the anchor after every transaction attempt, including failed and
+/// noncommitting simulations.
+///
+/// Clones share the selected anchor and provider handle so the Zone database adapter and native
+/// `TempoState` precompile enforce one view of L1 state. A new `L1State` must be created for each
+/// EVM execution context; it must not be shared across independent EVMs.
+#[derive(Clone)]
+pub struct L1State<P> {
+    /// Tempo block number selected for the current transaction attempt.
+    anchor: Rc<Cell<Option<u64>>>,
+    /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
+    provider: P,
 }
 
-/// Operation applied to the execution-local anchor state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum L1AnchorOperation {
-    /// Observe external Tempo state at an anchor.
-    Read { anchor: u64 },
-    /// Advance from a parent Tempo block to its direct child.
-    Advance { from: u64, to: u64 },
+impl<P> L1State<P> {
+    /// Creates execution-local L1 state backed by `provider`.
+    pub fn new(provider: P) -> Self {
+        Self {
+            anchor: Rc::new(Cell::new(None)),
+            provider,
+        }
+    }
+
+    /// Clears the selected anchor after the current transaction attempt completes.
+    pub fn reset_anchor(&self) {
+        self.anchor.set(None);
+    }
+
+    /// Returns the anchor selected for the current transaction, if any.
+    pub fn get_anchor(&self) -> Option<u64> {
+        self.anchor.get()
+    }
+
+    fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
+        match self.get_anchor() {
+            None => {
+                self.anchor.set(Some(new));
+                Ok(())
+            }
+            Some(current) if current == new => Ok(()),
+            Some(current) => Err(L1StateError::AnchorConflict { current, new }),
+        }
+    }
+
+    /// Selects the child anchor after `TempoState.finalizeTempo` validates the header transition.
+    ///
+    /// Advancement is valid only before any L1 read has selected an anchor and only from a parent
+    /// to its direct child.
+    pub fn advance_anchor(&self, from: u64, to: u64) -> Result<(), L1StateError> {
+        if from.checked_add(1) != Some(to) {
+            return Err(L1StateError::AdvanceTempoConflict { from, to });
+        } else if let Some(current) = self.get_anchor() {
+            return Err(L1StateError::AnchorConflict { current, new: to });
+        }
+
+        self.anchor.set(Some(to));
+        Ok(())
+    }
 }
 
-/// Current execution-local Tempo anchor phase.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum L1AnchorPhase {
-    /// The selected Zone state's checkpoint has not been loaded yet.
-    #[default]
-    Uninitialized,
-    /// External Tempo state was read at the parent anchor.
-    Parent {
-        /// Parent Tempo block number.
-        anchor: u64,
+impl<P: L1StorageReader> L1State<P> {
+    /// Reads L1 storage after selecting or validating `block_number` as this transaction's anchor.
+    pub fn read_l1_storage(
+        &self,
+        account: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256, L1StateError> {
+        self.set_anchor(block_number)?;
+        self.provider.read_l1_storage(account, slot, block_number)
+    }
+}
+
+impl<P> fmt::Debug for L1State<P> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("L1State")
+            .field("anchor", &self.get_anchor())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Failure to read or advance execution-local Tempo L1 state.
+#[derive(Debug, Clone, Error)]
+pub enum L1StateError {
+    /// The underlying L1 provider could not resolve storage at the requested block.
+    #[error(
+        "Tempo L1 storage unavailable account={account} slot={slot} block={block_number}: {reason}"
+    )]
+    StorageUnavailable {
+        /// Tempo account whose storage was requested.
+        account: Address,
+        /// Requested storage slot.
+        slot: B256,
+        /// Tempo block number at which storage was requested.
+        block_number: u64,
+        /// Provider failure diagnostic.
+        reason: String,
     },
-    /// The required system transaction advanced this execution to the child anchor.
-    Advanced {
+    /// An L1 read disagreed with the anchor already selected for this transaction.
+    #[error("Tempo L1 read at anchor {new} conflicts with currently selected anchor {current}")]
+    AnchorConflict {
+        /// Anchor already selected for this transaction.
+        current: u64,
+        /// Anchor requested by the new read.
+        new: u64,
+    },
+    /// Tempo advancement was non-contiguous or happened after an anchor was selected.
+    #[error("cannot advance Tempo L1 anchor from {from} to {to}")]
+    AdvanceTempoConflict {
         /// Parent Tempo block number.
         from: u64,
-        /// Child Tempo block number.
+        /// Requested child Tempo block number.
         to: u64,
     },
 }
 
-impl L1AnchorPhase {
-    /// Returns the anchor used by reads in this phase, if initialized.
-    pub const fn current(self) -> Option<u64> {
-        match self {
-            Self::Uninitialized => None,
-            Self::Parent { anchor } => Some(anchor),
-            Self::Advanced { to, .. } => Some(to),
-        }
-    }
-
-    fn apply(self, operation: L1AnchorOperation) -> Result<Self, L1AnchorError> {
-        let invalid = || L1AnchorError {
-            operation,
-            phase: self,
-        };
-
-        match operation {
-            L1AnchorOperation::Read { anchor: new } => match self {
-                Self::Uninitialized => Ok(Self::Parent { anchor: new }),
-                Self::Parent { anchor } if anchor == new => Ok(self),
-                Self::Advanced { to, .. } if to == new => Ok(self),
-                _ => Err(invalid()),
-            },
-            L1AnchorOperation::Advance { from, to } => {
-                if from.checked_add(1) == Some(to) && matches!(self, Self::Uninitialized) {
-                    Ok(Self::Advanced { from, to })
-                } else {
-                    Err(invalid())
-                }
-            }
-        }
+impl L1StateError {
+    /// Returns whether this is an underlying storage-provider failure.
+    pub const fn is_storage_unavailable(&self) -> bool {
+        matches!(self, Self::StorageUnavailable { .. })
     }
 }
 
-/// The execution-local Tempo anchor used by the database adapter.
-#[derive(Clone, Default)]
-pub struct L1AnchorController {
-    state: Rc<Cell<L1AnchorPhase>>,
-}
-
-impl fmt::Debug for L1AnchorController {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AnchorController")
-            .field("phase", &self.phase())
-            .finish()
-    }
-}
-
-impl L1AnchorController {
-    fn apply(&self, operation: L1AnchorOperation) -> Result<L1AnchorPhase, L1AnchorError> {
-        let next = self.state.get().apply(operation)?;
-        self.state.set(next);
-        Ok(next)
-    }
-
-    /// Returns the current phase.
-    pub fn phase(&self) -> L1AnchorPhase {
-        self.state.get()
-    }
-
-    /// Resets the controller for the next transaction attempt.
-    pub fn reset(&self) {
-        self.state.set(L1AnchorPhase::Uninitialized);
-    }
-
-    /// Returns the anchor used by reads in the current phase, if initialized.
-    pub fn current(&self) -> Option<u64> {
-        self.phase().current()
-    }
-
-    /// Validates the active anchor and records an external Tempo state read.
-    pub fn observe_read(&self, anchor: u64) -> Result<(), L1AnchorError> {
-        self.apply(L1AnchorOperation::Read { anchor })?;
-        Ok(())
-    }
-
-    /// Advances the execution-local anchor after `finalizeTempo` validates the next header.
-    pub fn begin_advance(&self, from: u64, to: u64) -> Result<(), L1AnchorError> {
-        self.apply(L1AnchorOperation::Advance { from, to })?;
-        Ok(())
+impl From<L1StateError> for PrecompileError {
+    fn from(error: L1StateError) -> Self {
+        Self::FatalAny(AnyError::new(error))
     }
 }
 
@@ -161,36 +183,55 @@ pub fn merge_transfer_policy_id(local_slot: U256, l1_slot: U256) -> U256 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::MockL1Reader;
 
-    #[test]
-    fn controller_rejects_advance_after_parent_read() {
-        let controller = L1AnchorController::default();
-        controller.observe_read(10).unwrap();
-        assert!(controller.begin_advance(10, 11).is_err());
+    fn read(l1: &L1State<MockL1Reader>, anchor: u64) -> Result<B256, L1StateError> {
+        l1.read_l1_storage(Address::ZERO, B256::ZERO, anchor)
     }
 
     #[test]
-    fn controller_accepts_reads_at_advanced_anchor() {
-        let controller = L1AnchorController::default();
-        controller.begin_advance(10, 11).unwrap();
-        controller.observe_read(11).unwrap();
-        assert_eq!(
-            controller.phase(),
-            L1AnchorPhase::Advanced { from: 10, to: 11 }
-        );
+    fn l1_state_rejects_advance_after_parent_read() {
+        let l1 = L1State::new(MockL1Reader::default());
+        read(&l1, 10).unwrap();
+        assert!(l1.advance_anchor(10, 11).is_err());
     }
 
     #[test]
-    fn controller_rejects_reads_at_wrong_anchor() {
-        let controller = L1AnchorController::default();
-        controller.observe_read(10).unwrap();
-        assert!(controller.observe_read(11).is_err());
+    fn l1_state_accepts_reads_at_advanced_anchor() {
+        let l1 = L1State::new(MockL1Reader::default());
+        l1.advance_anchor(10, 11).unwrap();
+        read(&l1, 11).unwrap();
+        assert_eq!(l1.get_anchor(), Some(11));
     }
 
     #[test]
-    fn controller_rejects_duplicate_advance() {
-        let controller = L1AnchorController::default();
-        controller.begin_advance(10, 11).unwrap();
-        assert!(controller.begin_advance(11, 12).is_err());
+    fn l1_state_clones_reject_reads_at_different_anchors() {
+        let l1 = L1State::new(MockL1Reader::default());
+        let clone = l1.clone();
+        read(&l1, 10).unwrap();
+        assert!(read(&clone, 11).is_err());
+    }
+
+    #[test]
+    fn l1_state_rejects_duplicate_advance() {
+        let l1 = L1State::new(MockL1Reader::default());
+        l1.advance_anchor(10, 11).unwrap();
+        assert!(l1.advance_anchor(11, 12).is_err());
+    }
+
+    #[test]
+    fn l1_state_rejects_non_contiguous_advance() {
+        let l1 = L1State::new(MockL1Reader::default());
+        assert!(l1.advance_anchor(10, 12).is_err());
+        assert_eq!(l1.get_anchor(), None);
+    }
+
+    #[test]
+    fn l1_state_reset_allows_a_new_anchor() {
+        let l1 = L1State::new(MockL1Reader::default());
+        read(&l1, 10).unwrap();
+        l1.reset_anchor();
+        l1.advance_anchor(10, 11).unwrap();
+        assert_eq!(l1.get_anchor(), Some(11));
     }
 }

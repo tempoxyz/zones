@@ -17,6 +17,7 @@ zone-precompiles = { workspace = true, features = ["std"] }
 
 # tempo
 tempo-alloy.workspace = true
+tempo-contracts.workspace = true
 tempo-primitives.workspace = true
 
 # reth
@@ -36,9 +37,6 @@ alloy-rpc-client.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
-
-# revm
-revm.workspace = true
 
 # misc
 derive_more = { workspace = true, features = ["deref"] }

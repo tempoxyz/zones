@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::rpc::TempoTransactionReceipt;
+use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_primitives::{TempoReceipt, TempoTxType};
 
 #[derive(Deserialize)]
@@ -396,31 +397,72 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
-fn update_l1_state_anchor_reorg_clears_raw_state() {
+fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     let subscriber = test_subscriber(
         Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
         Some(0),
     );
-    let token = address!("0x0000000000000000000000000000000000000011");
+    let slot = B256::with_last_byte(1);
+    let value = B256::with_last_byte(2);
+    subscriber
+        .config
+        .l1_state_cache
+        .write()
+        .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
 
-    let old_header = make_test_header(10);
-    subscriber.update_l1_state_anchor(10, header_hash(&old_header), old_header.inner.parent_hash);
-    subscriber.config.l1_state_cache.write().set(
-        token,
-        B256::with_last_byte(1),
-        10,
-        B256::with_last_byte(0xaa),
-    );
-
-    let replacement_parent = B256::with_last_byte(0x44);
-    let replacement_header = make_chained_header(11, replacement_parent);
-    subscriber.update_l1_state_anchor(11, header_hash(&replacement_header), replacement_parent);
+    let hash_10 = B256::with_last_byte(10);
+    subscriber.update_l1_state_anchor(10, hash_10, B256::ZERO, &HashSet::new());
     assert_eq!(
         subscriber
             .config
             .l1_state_cache
             .read()
-            .get(token, B256::with_last_byte(1), 10),
+            .get(TIP403_REGISTRY_ADDRESS, slot, 10),
+        Some(value)
+    );
+
+    subscriber.update_l1_state_anchor(
+        11,
+        B256::with_last_byte(11),
+        hash_10,
+        &HashSet::from([TIP403_REGISTRY_ADDRESS]),
+    );
+    let cache = subscriber.config.l1_state_cache.read();
+    assert_eq!(cache.anchor().number, 11);
+    assert_eq!(cache.get(TIP403_REGISTRY_ADDRESS, slot, 11), None);
+}
+
+#[test]
+fn update_l1_state_anchor_reorg_clears_raw_state_and_rebases_floor() {
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
+        Some(0),
+    );
+    let token = address!("0x0000000000000000000000000000000000000011");
+    let slot = B256::with_last_byte(1);
+
+    let old_header = make_test_header(10);
+    let old_hash = header_hash(&old_header);
+    subscriber.update_l1_state_anchor(10, old_hash, old_header.inner.parent_hash, &HashSet::new());
+    subscriber
+        .config
+        .l1_state_cache
+        .write()
+        .set(token, slot, 10, B256::with_last_byte(0xaa));
+
+    let replacement_parent = B256::with_last_byte(0x44);
+    let replacement_header = make_chained_header(11, replacement_parent);
+    subscriber.update_l1_state_anchor(
+        11,
+        header_hash(&replacement_header),
+        replacement_parent,
+        &HashSet::new(),
+    );
+
+    let cache = subscriber.config.l1_state_cache.read();
+    assert_eq!(cache.block_floor(), 11);
+    assert_eq!(
+        cache.get(token, slot, 10),
         None,
         "reorg must clear raw L1 state"
     );

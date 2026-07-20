@@ -3650,6 +3650,9 @@ impl L1Fixture {
             );
         }
 
+        // System transactions resolve their zero-address fee token before execution. Keep that
+        // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
+        seed_raw_tip20_policy_id(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
         seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         cache.update_anchor(NumHash {
             number: num_blocks,
@@ -3723,6 +3726,14 @@ impl L1Fixture {
         self.last_hash = keccak256(&rlp_buf);
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
+
+        // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
+        // coverage the subscriber would publish before the engine consumes this block.
+        for cache in self.caches.lock().unwrap().iter() {
+            cache
+                .write()
+                .update_anchor(NumHash::new(number, self.last_hash));
+        }
 
         header
     }
