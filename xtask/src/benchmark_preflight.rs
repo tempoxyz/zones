@@ -1967,18 +1967,22 @@ mod tests {
         let roundtrip_steps = roundtrip_scenario["scenario"]["steps"]
             .as_sequence()
             .unwrap();
-        assert_eq!(roundtrip_steps.len(), 10);
+        assert_eq!(roundtrip_steps.len(), 11);
         assert_eq!(roundtrip_steps[3]["wait_log"]["event"], "DepositProcessed");
         assert_eq!(
-            roundtrip_steps[8]["wait_log"]["event"],
+            roundtrip_steps[9]["wait_log"]["event"],
             "WithdrawalRequested"
         );
         assert_eq!(
-            roundtrip_steps[9]["wait_log"]["event"],
+            roundtrip_steps[9]["wait_log"]["from_block"]["var"],
+            "zone_before_withdrawal.block_number"
+        );
+        assert_eq!(
+            roundtrip_steps[10]["wait_log"]["event"],
             "WithdrawalProcessed"
         );
         assert_eq!(
-            roundtrip_steps[9]["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0],
+            roundtrip_steps[10]["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0],
             "address"
         );
 

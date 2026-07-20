@@ -106,6 +106,13 @@ scenario:
         chain: l1
       save: l1_before_withdrawal
 
+    # The private Zone RPC intentionally filters non-TIP-20 receipt logs. Use a
+    # trusted log-query checkpoint for the outbox event while retaining the
+    # transaction hash as the exact request correlation key.
+    - checkpoint:
+        chain: zone
+      save: zone_before_withdrawal
+
     - submit:
         chain: zone
         template: request_withdrawal
@@ -123,10 +130,11 @@ scenario:
               - "0x"
       save: withdrawal
 
-    # Receipt scoping identifies the exact overload call and captures its random
-    # memo, fee, fallback nonce, and other request fields for correlation.
+    # Transaction scoping identifies the exact overload call and captures its
+    # random memo, fee, fallback nonce, and other request fields for correlation.
     - wait_log:
         chain: zone
+        from_block: { var: zone_before_withdrawal.block_number }
         transaction_hash: { var: withdrawal.tx_hash }
         sender: { var: withdrawal.sender }
         address: "__OUTBOX__"
