@@ -610,8 +610,6 @@ provision_up() {
         --token "$PATH_USD"
 
     export SEQUENCER_KEY="$sequencer_key"
-    # Reth 1bf2384 predates the retained-branch pruning fix in reth#26376. Keep
-    # the async state-root task and reusable trie, but skip the unsafe prune.
     start_process zone "$ZONE_BIN" "${ZONES_BENCH_ZONE_CPUS:-8-13,24-29}" "$log_dir/zone.log" \
         "$ZONE_BIN" node \
         --chain "$zone_genesis" --datadir "$zone_db" \
@@ -625,7 +623,6 @@ provision_up() {
         --private-rpc.port 8544 \
         --log.file.directory "$log_dir/zone" \
         --ipcdisable \
-        --engine.disable-sparse-trie-cache-pruning \
         --sequencer
     unset SEQUENCER_KEY sequencer_key owner_key ZONES_BENCH_MNEMONIC
 

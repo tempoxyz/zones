@@ -92,13 +92,12 @@ reference factory deploys full portal bytecode, while the proposed native
 TIP-1091 lifecycle uses a protocol-managed implementation, so portal deployment
 gas is not final-production exact.
 
-The Zones Reth revision currently predates the retained-branch pruning fix in
-[reth#26376](https://github.com/paradigmxyz/reth/pull/26376). The provisioned
-Zone passes `--engine.disable-sparse-trie-cache-pruning` to avoid incorrect
-roots from a reused, pruned sparse trie. This keeps the asynchronous state-root
-task, reusable trie, transaction prewarming, and execution cache enabled, but
-retains more trie data between blocks and can improve warm-cache timings. Remove
-the override after Zones updates to a Reth revision containing that fix.
+The provisioned Zone uses the node's default state-root, trie, transaction
+prewarming, and execution-cache settings. The pinned Reth revision can report
+that its asynchronous state-root task disagreed with the block header; Reth then
+recomputes the root synchronously before accepting or rejecting that block. The
+benchmark records that fallback separately and only treats a final synchronous
+state-root mismatch as a Zone failure.
 
 ### Roundtrip bootstrap and fixture boundaries
 
