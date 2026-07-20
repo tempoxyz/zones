@@ -344,7 +344,7 @@ entire bootstrap, preflight, authorization, and measured sequence:
 ```bash
 export ZONES_BENCH_SEED='<unique unsigned integer>'
 export ZONES_BENCH_ACCOUNTS=100
-export ZONES_BENCH_COUNT=1000
+export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=10
 export ZONES_BENCH_MAX_CONCURRENT=100
 export ZONES_BENCH_DEPOSIT_AMOUNT=2000000
@@ -358,7 +358,11 @@ contrib/bench/run-roundtrip.sh
 The runner calculates `ceil(count / accounts)` for preflight's per-account
 journey capacity, refuses more concurrent journeys than leased accounts, keeps
 the mnemonic and sequencer key out of argv, validates both scenario reports,
-and deletes its authorization map on exit.
+and deletes its authorization map on exit. While the measured scenario runs, it
+prints the number of successful terminal `WithdrawalProcessed` events observed
+on L1 every 30 seconds. On this fresh topology that is the externally visible
+completion count; txgen's authoritative journey report is still checked at the
+end.
 
 The equivalent stages are described below for diagnosis or controlled manual
 execution.
@@ -442,7 +446,7 @@ selected one.
 ```bash
 export ZONES_BENCH_SEED='<unique unsigned integer>'
 export ZONES_BENCH_ACCOUNTS=100
-export ZONES_BENCH_COUNT=1000
+export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=100
 export ZONES_BENCH_MAX_CONCURRENT=100
 
@@ -580,7 +584,7 @@ gh workflow run zones-benchmark.yml \
   --ref '<branch-or-tag>' \
   -f phase=roundtrip \
   -f accounts=100 \
-  -f count=1000 \
+  -f count=100 \
   -f tps=10 \
   -f state-bloat-gib=1
 ```

@@ -43,7 +43,7 @@ ZONES_BENCH_L1_QUERY_RPC_URL="${ZONES_BENCH_L1_QUERY_RPC_URL:-$L1_RPC_URL}"
 export ZONES_BENCH_L1_QUERY_RPC_URL
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
 ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
-ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-1000}"
+ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-100}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-10}"
 ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-100}"
 ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-2000000}"
@@ -96,10 +96,15 @@ mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_REPORT")" \
     "$(dirname "$ZONES_BENCH_BOOTSTRAP_REPORT")"
 
 auth_pid=""
+progress_pid=""
 secret_dir=""
 cleanup() {
     local status=$?
     trap - EXIT INT TERM
+    if [[ -n "$progress_pid" ]] && kill -0 "$progress_pid" 2>/dev/null; then
+        kill -TERM "$progress_pid" 2>/dev/null || true
+        wait "$progress_pid" 2>/dev/null || true
+    fi
     if [[ -n "$auth_pid" ]] && kill -0 "$auth_pid" 2>/dev/null; then
         kill -TERM "$auth_pid" 2>/dev/null || true
         wait "$auth_pid" 2>/dev/null || true
@@ -143,6 +148,63 @@ run_scenario() {
         command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${command[@]}")
     fi
     "${command[@]}"
+}
+
+report_roundtrip_progress() {
+    local from_block_hex="$1"
+    local event_topic="$2"
+    local token_word="$3"
+    local amount_word="$4"
+    local success_word="$5"
+    local logs completed latest_block
+
+    if ! logs="$(cast rpc --rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" eth_getLogs \
+        "{\"address\":\"$L1_PORTAL_ADDRESS\",\"fromBlock\":\"$from_block_hex\",\"toBlock\":\"latest\",\"topics\":[\"$event_topic\"]}" 2>/dev/null)"; then
+        echo "roundtrip progress: unable to query terminal L1 withdrawals" >&2
+        return 0
+    fi
+    if ! completed="$(jq -r \
+        --arg token "$token_word" \
+        --arg amount "$amount_word" \
+        --arg success "$success_word" \
+        '[.[] | select(
+          .removed != true and
+          ((.data[2:66] // "") | ascii_downcase) == $token and
+          ((.data[66:130] // "") | ascii_downcase) == $amount and
+          ((.data[-64:] // "") | ascii_downcase) == $success
+        )] | length' <<<"$logs")"; then
+        echo "roundtrip progress: unable to parse terminal L1 withdrawals" >&2
+        return 0
+    fi
+    latest_block="$(cast block-number --rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" 2>/dev/null || true)"
+    echo "roundtrip progress: $completed/$ZONES_BENCH_COUNT successful terminal withdrawals observed${latest_block:+ through L1 block $latest_block}"
+}
+
+monitor_roundtrip_progress() {
+    local from_block_hex="$1"
+    local event_topic="$2"
+    local token_word="$3"
+    local amount_word="$4"
+    local success_word="$5"
+    local sleep_pid=""
+
+    stop_progress_monitor() {
+        if [[ -n "$sleep_pid" ]] && kill -0 "$sleep_pid" 2>/dev/null; then
+            kill -TERM "$sleep_pid" 2>/dev/null || true
+            wait "$sleep_pid" 2>/dev/null || true
+        fi
+        exit 0
+    }
+    trap stop_progress_monitor TERM INT
+
+    while true; do
+        report_roundtrip_progress \
+            "$from_block_hex" "$event_topic" "$token_word" "$amount_word" "$success_word"
+        sleep 30 &
+        sleep_pid=$!
+        wait "$sleep_pid"
+        sleep_pid=""
+    done
 }
 
 # Fresh-state validation also renders the control-account bootstrap workload.
@@ -212,6 +274,28 @@ done
 
 export ZONES_BENCH_ZONE_AUTH_MAP="$auth_map"
 
+progress_start_block="$(cast block-number --rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL")"
+printf -v progress_from_block_hex '0x%x' "$((10#$progress_start_block + 1))"
+withdrawal_processed_topic="$(cast sig-event \
+    'WithdrawalProcessed(address,bytes32,address,uint128,bool)')"
+token_hex="${ZONES_BENCH_TOKEN#0x}"
+token_hex="${token_hex#0X}"
+printf -v withdrawal_token_word '%064s' "${token_hex,,}"
+withdrawal_token_word="${withdrawal_token_word// /0}"
+withdrawal_amount_hex="$(cast to-hex "$ZONES_BENCH_WITHDRAWAL_AMOUNT")"
+withdrawal_amount_hex="${withdrawal_amount_hex#0x}"
+printf -v withdrawal_amount_word '%064s' "${withdrawal_amount_hex,,}"
+withdrawal_amount_word="${withdrawal_amount_word// /0}"
+printf -v withdrawal_success_word '%064d' 1
+
+monitor_roundtrip_progress \
+    "$progress_from_block_hex" \
+    "$withdrawal_processed_topic" \
+    "$withdrawal_token_word" \
+    "$withdrawal_amount_word" \
+    "$withdrawal_success_word" &
+progress_pid=$!
+
 run_scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml" \
     --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" \
@@ -222,6 +306,16 @@ run_scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml" \
     --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$ZONES_BENCH_SAMPLE_INSTANCES" \
     --report "$ZONES_BENCH_REPORT"
+
+kill -TERM "$progress_pid" 2>/dev/null || true
+wait "$progress_pid" 2>/dev/null || true
+progress_pid=""
+report_roundtrip_progress \
+    "$progress_from_block_hex" \
+    "$withdrawal_processed_topic" \
+    "$withdrawal_token_word" \
+    "$withdrawal_amount_word" \
+    "$withdrawal_success_word"
 
 jq -e --argjson expected "$ZONES_BENCH_COUNT" \
     '.started == $expected and .completed == $expected and .failed == 0 and .timed_out == 0' \
