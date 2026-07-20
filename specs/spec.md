@@ -998,7 +998,7 @@ It takes a complete witness of zone blocks and their dependencies, executes EVM 
 
 The witness contains everything needed to re-execute the batch:
 
-- **PublicInputs**: `zone_id`, `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with.
+- **PublicInputs**: `zone_id`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with. `prevBlockHash` is instead derived from `prev_block_header` and bound through the public `block_transition` output.
 - **BatchWitness**: the public inputs, the previous batch's block header, the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
 - **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
@@ -1012,7 +1012,7 @@ flowchart TB
     subgraph BW["BatchWitness"]
         direction TB
 
-        PI["PublicInputs<br/>zone_id<br/>prev_block_hash<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
+        PI["PublicInputs<br/>zone_id<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
 
         PH["ZoneHeader<br/>parent_hash<br/>beneficiary<br/>state_root<br/>transactions_root<br/>receipts_root<br/>number<br/>timestamp<br/>protocol_version"]
 
@@ -1085,9 +1085,6 @@ pub struct PublicInputs {
     /// Zone ID. The verifier must bind this public input to the zone portal;
     /// the program derives the EVM chain ID from it.
     pub zone_id: u32,
-
-    /// Previous batch's block hash (must equal portal.blockHash)
-    pub prev_block_hash: B256,
 
     /// Tempo block number for the batch (must equal portal's tempoBlockNumber)
     pub tempo_block_number: u64,
@@ -1299,8 +1296,8 @@ The state transition function produces:
 
 The stateless execution function must reject the witness on any failed check, missing read, or inconsistent state transition. A correct implementation proceeds in the following order:
 
-1. **Bind the previous block header to the public inputs.**
-   Require `keccak256(rlp(prev_block_header)) == public_inputs.prev_block_hash`. Require `prev_block_header.state_root == initial_zone_state.state_root`. These checks ensure that the witness starts from the exact predecessor block already committed on Tempo.
+1. **Derive the previous block hash and bind the predecessor state.**
+   Compute `initial_prev_block_hash = keccak256(rlp(prev_block_header))` and initialize `prev_block_hash` to that value. Require `prev_block_header.state_root == initial_zone_state.state_root`. The returned `block_transition.prev_block_hash` must equal `initial_prev_block_hash`; the verifier binds it to the submitted `BlockTransition`, whose `prevBlockHash` the portal checks against its stored `blockHash`. These checks ensure that the witness starts from the exact predecessor block already committed on Tempo without duplicating that hash in `PublicInputs`.
 
 2. **Verify and materialize the initial zone state.**
    Apply the [shared trie proof format](#shared-trie-proof-format) to `initial_zone_state`: index each node in `initial_zone_state.node_pool` by `keccak256(rlp(node))`, prove each `ZoneAccountRead` and `ZoneStorageRead` against `initial_zone_state.state_root`, require `keccak256(code) == code_hash` for every supplied account-code preimage, interpret non-membership as the canonical empty account or zero storage, and load the decoded results into the prover's in-memory execution state. After this step, ordinary zone-state reads during execution come from the materialized state, not from repeated Merkle-proof checks.
@@ -1333,7 +1330,7 @@ The stateless execution function must reject the witness on any failed check, mi
     Require `TempoState.tempoBlockNumber == public_inputs.tempo_block_number`. If `anchor_block_number == tempo_block_number`, require `TempoState.tempoBlockHash == anchor_block_hash`. Otherwise, verify the parent-hash chain from `tempo_block_number` to `anchor_block_number` using `tempo_ancestry_headers`, ending at `anchor_block_hash`.
 
 12. **Return the batch outputs.**
-    Set `block_transition.prev_block_hash = public_inputs.prev_block_hash` and `block_transition.next_block_hash = prev_block_hash` after the final block. Set `deposit_queue_transition.prev_processed_hash` and `deposit_queue_transition.prev_deposit_number` to the values captured before executing the batch, and set `deposit_queue_transition.next_processed_hash` and `deposit_queue_transition.next_deposit_number` to the final inbox processed hash and processed deposit number. Set `withdrawal_queue_hash` and `last_batch_commitment.withdrawal_batch_index` from the final `ZoneOutbox.lastBatch` state.
+    Set `block_transition.prev_block_hash = initial_prev_block_hash` and `block_transition.next_block_hash = prev_block_hash` after the final block. Set `deposit_queue_transition.prev_processed_hash` and `deposit_queue_transition.prev_deposit_number` to the values captured before executing the batch, and set `deposit_queue_transition.next_processed_hash` and `deposit_queue_transition.next_deposit_number` to the final inbox processed hash and processed deposit number. Set `withdrawal_queue_hash` and `last_batch_commitment.withdrawal_batch_index` from the final `ZoneOutbox.lastBatch` state.
 
 ### Tempo State Proofs
 
@@ -1995,13 +1992,12 @@ interface IZoneOutbox {
     function tempoGasRate() external view returns (uint128);
     function nextWithdrawalIndex() external view returns (uint64);
     function lastFallbackNonce() external view returns (uint64);
-    function withdrawalBatchIndex() external view returns (uint64);
     function lastBatch() external view returns (LastBatch memory);
     function pendingWithdrawalsCount() external view returns (uint256);
-    function maxWithdrawalsPerBlock() external view returns (uint256);
+    function maxWithdrawalsPerBlock() external view returns (uint32);
 
     function setTempoGasRate(uint128 _tempoGasRate) external;
-    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
+    function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
     /// @notice Compute the withdrawal fee for the current Tempo gas rate. Reads
     ///         zone-side `tempoGasRate` and snapshots it onto the queued withdrawal
     ///         at request time.

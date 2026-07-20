@@ -56,7 +56,6 @@ crate::sol! {
         // -- View functions --
 
         function lastBatch() external view returns (LastBatch memory);
-        function withdrawalBatchIndex() external view returns (uint64);
         function lastFinalizedTimestamp() external view returns (uint64);
         function nextWithdrawalIndex() external view returns (uint64);
         function lastFallbackNonce() external view returns (uint64);
