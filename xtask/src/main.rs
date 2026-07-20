@@ -34,7 +34,9 @@ async fn main() -> eyre::Result<()> {
 
     let args = Args::parse();
     match args.action {
-        Action::BenchmarkPreflight(args) => args.run().await.wrap_err("benchmark preflight failed"),
+        Action::BenchmarkPreflight(args) => {
+            (*args).run().await.wrap_err("benchmark preflight failed")
+        }
         Action::ConfigureBenchmarkFees(args) => args
             .run()
             .await
@@ -75,7 +77,7 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Action {
-    BenchmarkPreflight(BenchmarkPreflight),
+    BenchmarkPreflight(Box<BenchmarkPreflight>),
     ConfigureBenchmarkFees(ConfigureBenchmarkFees),
     CreateZone(CreateZone),
     DemoBlacklist(DemoBlacklist),

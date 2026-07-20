@@ -31,5 +31,126 @@
         "type": "bytes32"
       }
     ]
+  },
+  {
+    "type": "event",
+    "name": "DepositMade",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "newCurrentDepositQueueHash",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "sender",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "netAmount",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "fee",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "memo",
+        "type": "bytes32",
+        "indexed": false
+      },
+      {
+        "name": "bouncebackRecipient",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "depositNumber",
+        "type": "uint64",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "WithdrawalProcessed",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "to",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "senderTag",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "token",
+        "type": "address",
+        "indexed": false
+      },
+      {
+        "name": "amount",
+        "type": "uint128",
+        "indexed": false
+      },
+      {
+        "name": "callbackSuccess",
+        "type": "bool",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "BatchSubmitted",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "withdrawalBatchIndex",
+        "type": "uint64",
+        "indexed": true
+      },
+      {
+        "name": "withdrawalQueueIndex",
+        "type": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "nextProcessedDepositQueueHash",
+        "type": "bytes32",
+        "indexed": false
+      },
+      {
+        "name": "nextBlockHash",
+        "type": "bytes32",
+        "indexed": false
+      },
+      {
+        "name": "withdrawalQueueHash",
+        "type": "bytes32",
+        "indexed": false
+      },
+      {
+        "name": "lastProcessedDepositNumber",
+        "type": "uint64",
+        "indexed": false
+      }
+    ]
   }
 ]

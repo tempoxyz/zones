@@ -417,7 +417,7 @@ provision_up() {
 
     # The validator processes never need the account mnemonic. Keep it out of
     # their long-lived environments (and therefore out of /proc/<pid>/environ).
-    unset ZONES_BENCH_MNEMONIC CONFIGURED_BENCH_MNEMONIC
+    unset ZONES_BENCH_MNEMONIC
 
     local validator_a="$localnet_dir/127.0.0.2:8000"
     local validator_b="$localnet_dir/127.0.0.3:8100"
@@ -534,7 +534,8 @@ provision_up() {
     echo "configuring non-zero deposit and bounce-back fee rates"
     SEQUENCER_KEY="$sequencer_key" "$ZONES_XTASK_BIN" configure-benchmark-fees \
         --l1-rpc-url "$l1_a_rpc" \
-        --portal "$portal"
+        --portal "$portal" \
+        --token "$PATH_USD"
 
     export SEQUENCER_KEY="$sequencer_key"
     start_process zone "$ZONE_BIN" "${ZONES_BENCH_ZONE_CPUS:-8-13,24-29}" "$log_dir/zone.log" \
@@ -554,6 +555,7 @@ provision_up() {
     unset SEQUENCER_KEY sequencer_key owner_key ZONES_BENCH_MNEMONIC
 
     local zone_rpc="http://127.0.0.1:8546"
+    local zone_private_rpc="http://127.0.0.1:8544"
     wait_for_rpc "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_timeout"
@@ -567,8 +569,10 @@ provision_up() {
         L1_RPC_URL "$l1_a_rpc" \
         L1_WS_RPC_URL "ws://127.0.0.1:8545" \
         ZONES_BENCH_L1_B_RPC_URL "$l1_b_rpc" \
+        ZONES_BENCH_L1_QUERY_RPC_URL "$l1_b_rpc" \
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
+        ZONE_PRIVATE_RPC_URL "$zone_private_rpc" \
         ZONES_BENCH_TOKEN "$PATH_USD" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \
@@ -586,7 +590,7 @@ provision_up() {
     provision_succeeded=1
     provision_pid_file=""
     trap - EXIT INT TERM
-    echo "topology ready; source $env_file before invoking contrib/bench/run-phase.sh"
+    echo "topology ready; source $env_file before invoking a benchmark runner"
     echo "$env_file"
 }
 

@@ -1,0 +1,88 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: __L1_CHAIN_ID__
+    workload: ./bootstrap-deposit.yml
+
+  zone:
+    network: tempo
+    # Bootstrap only queries the Zone. Submissions use the authenticated private
+    # endpoint in roundtrip-scenario.yml after the token map has been generated.
+    rpc_url: "${ZONE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    chain_id: __ZONE_CHAIN_ID__
+    workload: ./zone-roundtrip.yml
+
+scenario:
+  name: zones-bootstrap-deposit
+  timeout: 10m
+
+  bindings:
+    account:
+      account:
+        pool: control
+        select: lease
+
+  steps:
+    - checkpoint:
+        chain: zone
+      save: zone_before_deposit
+
+    - checkpoint:
+        chain: l1
+      save: l1_before_deposit
+
+    - submit:
+        chain: l1
+        template: bootstrap_deposit
+        with:
+          from: { var: account.ref }
+      save: deposit
+
+    # The receipt-scoped event captures the randomly generated memo and the
+    # queue hash needed to identify this exact deposit on the Zone.
+    - wait_log:
+        chain: l1
+        transaction_hash: { var: deposit.tx_hash }
+        sender: { var: deposit.sender }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: DepositMade
+        where:
+          sender: { var: account.address }
+          token: "__TOKEN__"
+          to: "__SEQUENCER__"
+      save: deposit_made
+
+    - wait_log:
+        chain: zone
+        from_block: { var: zone_before_deposit.block_number }
+        address: "__INBOX__"
+        abi: ZoneInbox
+        event: DepositProcessed
+        where:
+          depositHash: { var: deposit_made.args.newCurrentDepositQueueHash }
+          sender: { var: account.address }
+          to: "__SEQUENCER__"
+          token: "__TOKEN__"
+          amount: { var: deposit_made.args.netAmount }
+          memo: { var: deposit_made.args.memo }
+        max_block_range: 1000
+      save: deposit_processed
+
+    # DepositProcessed proves the Zone credited the bootstrap. BatchSubmitted
+    # proves L1 committed the same deposit number before ready preflight runs.
+    - wait_log:
+        chain: l1
+        from_block: { var: l1_before_deposit.block_number }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: BatchSubmitted
+        where:
+          lastProcessedDepositNumber: { var: deposit_made.args.depositNumber }
+        max_block_range: 1000
+      save: batch_submitted

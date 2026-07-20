@@ -22,7 +22,9 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::transaction::calc_gas_balance_spending;
-use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
+use tempo_zone_contracts::{
+    ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal,
+};
 use zone_primitives::constants::zone_chain_id as derive_zone_chain_id;
 use zone_rpc::{ZoneProvider, ZoneProviderConfig};
 
@@ -44,9 +46,11 @@ alloy::sol! {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum CheckPhase {
+    Bootstrap,
     Deposit,
     Activity,
     Withdrawal,
+    Roundtrip,
     All,
 }
 
@@ -59,17 +63,27 @@ pub(crate) enum CheckPhase {
 pub(crate) enum FixtureState {
     /// A newly created Zone with no deposits or benchmark-account Zone balances.
     Empty,
+    /// The control-to-sequencer bootstrap deposit has reached the Zone. Benchmark users may
+    /// still have zero Zone balances because their deposits are part of the measured journey.
+    Ready,
     /// A Zone funded through deposits that have all been confirmed by an L1 batch.
     Funded,
 }
 
 impl CheckPhase {
     const fn deposit(self) -> bool {
-        matches!(self, Self::Deposit | Self::All)
+        matches!(
+            self,
+            Self::Bootstrap | Self::Deposit | Self::Roundtrip | Self::All
+        )
     }
 
     const fn withdrawal(self) -> bool {
-        matches!(self, Self::Withdrawal | Self::All)
+        matches!(self, Self::Withdrawal | Self::Roundtrip | Self::All)
+    }
+
+    const fn roundtrip(self) -> bool {
+        matches!(self, Self::Roundtrip)
     }
 }
 
@@ -90,6 +104,14 @@ pub(crate) struct BenchmarkPreflight {
     /// Number of benchmark accounts.
     #[arg(long)]
     accounts: u32,
+
+    /// BIP-44 account index used only for the untimed sequencer-funding deposit.
+    #[arg(long, default_value_t = 0)]
+    control_account_index: u32,
+
+    /// BIP-44 account index that must resolve to the Zone's configured sequencer.
+    #[arg(long, default_value_t = 4)]
+    sequencer_account_index: u32,
 
     /// Enabled TIP-20 used for transfers and transaction fees on both networks.
     /// Falls back to initialToken in --zone-dir/zone.json.
@@ -128,6 +150,10 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long)]
     withdrawal_amount: u128,
 
+    /// Gross control-account deposit used to fund fee configuration and sponsored approvals.
+    #[arg(long, default_value_t = 10_000_000)]
+    bootstrap_deposit_amount: u128,
+
     /// Capacity to require per account for each selected benchmark phase.
     #[arg(long, default_value_t = 1)]
     transactions_per_account: u64,
@@ -136,7 +162,7 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long)]
     check_phase: CheckPhase,
 
-    /// Assert the restored bridge fixture is empty or funded for the selected phase.
+    /// Assert the restored bridge fixture is empty, ready, or funded for the selected phase.
     /// This only reads state; it never prepares or waits for a fixture.
     #[arg(long)]
     fixture_state: Option<FixtureState>,
@@ -176,6 +202,10 @@ pub(crate) struct BenchmarkPreflight {
     /// Gas limit for untimed TIP-20 approval setup transactions.
     #[arg(long, default_value_t = 2_000_000)]
     approval_gas_limit: u64,
+
+    /// Conservative Zone gas budget for the sequencer's untimed fee-configuration transaction.
+    #[arg(long, default_value_t = 2_000_000)]
+    fee_config_gas_limit: u64,
 
     /// Directory for rendered specs, copied minimal ABIs, and preflight.json.
     #[arg(long, default_value = "target/zones-benchmark")]
@@ -244,8 +274,13 @@ struct PreflightReport {
     activity_fee_bump: u128,
     activity_max_fee_per_gas: u128,
     transactions_per_account: u64,
+    bootstrap_deposit_amount: u128,
+    bootstrap_minimum_deposit_amount: String,
+    sponsored_approval_fee_required: String,
     portal_approval_setup_accounts: Vec<u32>,
     outbox_approval_setup_accounts: Vec<u32>,
+    control_account: AccountReport,
+    sequencer_account: AccountReport,
     accounts: Vec<AccountReport>,
 }
 
@@ -255,12 +290,16 @@ struct RenderConfig {
     zone_chain_id: u64,
     account_start: u32,
     account_end: u32,
+    control_account_index: u32,
+    sequencer_account_index: u32,
+    sequencer: Address,
     portal: Address,
     outbox: Address,
     token: Address,
     deposit_amount: u128,
     activity_amount: u128,
     withdrawal_amount: u128,
+    bootstrap_deposit_amount: u128,
     l1_max_fee_per_gas: u128,
     l1_max_priority_fee_per_gas: u128,
     zone_max_fee_per_gas: u128,
@@ -290,16 +329,45 @@ impl BenchmarkPreflight {
             self.withdrawal_amount > 0,
             "--withdrawal-amount must be greater than zero"
         );
+        ensure!(
+            self.bootstrap_deposit_amount > 0,
+            "--bootstrap-deposit-amount must be greater than zero"
+        );
+        ensure!(
+            self.control_account_index != self.sequencer_account_index,
+            "control and sequencer account indices must be different"
+        );
+        ensure!(
+            self.control_account_index < u32::MAX,
+            "control account index must leave room for a one-account txgen range"
+        );
+        ensure!(
+            self.sequencer_account_index < u32::MAX,
+            "sequencer account index must leave room for a one-account txgen range"
+        );
 
         let account_end = self
             .account_start
             .checked_add(self.accounts)
             .ok_or_else(|| eyre!("benchmark account range overflows u32"))?;
+        ensure!(
+            !(self.account_start..account_end).contains(&self.control_account_index),
+            "control account index {} overlaps the benchmark pool",
+            self.control_account_index
+        );
+        ensure!(
+            !(self.account_start..account_end).contains(&self.sequencer_account_index),
+            "sequencer account index {} overlaps the benchmark pool",
+            self.sequencer_account_index
+        );
         // Read the mnemonic only from the environment so it cannot accidentally be exposed in
         // command-line process listings. It is never written to the rendered specs or report.
         let mnemonic = std::env::var("ZONES_BENCH_MNEMONIC")
             .wrap_err("ZONES_BENCH_MNEMONIC must be set for benchmark address derivation")?;
         let signers = derive_signers(&mnemonic, self.account_start, account_end)?;
+        let control_signer = derive_signer(&mnemonic, self.control_account_index)?;
+        let sequencer_signer = derive_signer(&mnemonic, self.sequencer_account_index)?;
+        let sequencer_address = sequencer_signer.address();
         let first_signer = signers
             .first()
             .cloned()
@@ -412,11 +480,16 @@ impl BenchmarkPreflight {
         }
 
         let portal_contract = ZonePortal::new(portal, &l1);
-        let zone_id = portal_contract
-            .zoneId()
-            .call()
-            .await
-            .wrap_err("failed querying portal zone ID")?;
+        let zone_id_call = portal_contract.zoneId();
+        let sequencer_call = portal_contract.sequencer();
+        let (zone_id, configured_sequencer) =
+            tokio::try_join!(zone_id_call.call(), sequencer_call.call())
+                .wrap_err("failed querying portal identity")?;
+        ensure!(
+            configured_sequencer == sequencer_address,
+            "sequencer account index {} resolves to {sequencer_address}, but portal {portal} is configured for {configured_sequencer}",
+            self.sequencer_account_index
+        );
         if let Some(expected) = self.expected_zone_id {
             ensure!(
                 zone_id == expected,
@@ -524,6 +597,13 @@ impl BenchmarkPreflight {
             self.withdrawal_amount,
             withdrawal_fee,
         )?;
+        validate_protocol_amounts(
+            self.bootstrap_deposit_amount,
+            deposit_fee,
+            bounceback_fee,
+            self.withdrawal_amount,
+            withdrawal_fee,
+        )?;
 
         let l1_max_fee_per_gas = self.l1_max_fee_per_gas.unwrap_or(queried_l1_gas_price);
         let l1_max_priority_fee_per_gas = self
@@ -586,6 +666,51 @@ impl BenchmarkPreflight {
             });
         }
 
+        let mut infrastructure_states = Vec::with_capacity(2);
+        for (index, signer) in [
+            (self.control_account_index, control_signer),
+            (self.sequencer_account_index, sequencer_signer),
+        ] {
+            let address = signer.address();
+            let private_zone = ZoneProvider::new(ZoneProviderConfig {
+                signer,
+                zone_id,
+                chain_id: zone_chain_id,
+                token_ttl: Duration::from_secs(AUTH_TOKEN_TTL_SECS),
+                rpc_url: zone_rpc_url.clone(),
+            })?;
+            let account_zone = private_zone.provider();
+            let l1_token = ITIP20::new(token, &l1);
+            let zone_token = ITIP20::new(token, &account_zone);
+            let l1_balance = l1_token.balanceOf(address).from(address);
+            let portal_allowance = l1_token.allowance(address, portal).from(address);
+            let zone_balance = zone_token.balanceOf(address).from(address);
+            let outbox_allowance = zone_token.allowance(address, outbox).from(address);
+            let (l1_balance, portal_allowance, zone_balance, outbox_allowance) = tokio::try_join!(
+                l1_balance.call(),
+                portal_allowance.call(),
+                zone_balance.call(),
+                outbox_allowance.call(),
+            )
+            .wrap_err_with(|| {
+                format!("failed reading balances/allowances for infrastructure account {address}")
+            })?;
+            infrastructure_states.push(AccountState {
+                index,
+                address,
+                l1_balance,
+                portal_allowance,
+                zone_balance,
+                outbox_allowance,
+            });
+        }
+        let sequencer_state = infrastructure_states
+            .pop()
+            .expect("sequencer state was queried");
+        let control_state = infrastructure_states
+            .pop()
+            .expect("control state was queried");
+
         let tx_count = U256::from(self.transactions_per_account);
         let portal_allowance_required = U256::from(self.deposit_amount)
             .checked_mul(tx_count)
@@ -612,12 +737,92 @@ impl BenchmarkPreflight {
             })
             .collect();
 
+        let l1_approval_fee =
+            calc_gas_balance_spending(self.approval_gas_limit, l1_max_fee_per_gas);
+        let l1_deposit_tx_fee =
+            calc_gas_balance_spending(self.deposit_gas_limit, l1_max_fee_per_gas);
+        let zone_approval_fee =
+            calc_gas_balance_spending(self.approval_gas_limit, zone_max_fee_per_gas);
+        let zone_fee_config_fee =
+            calc_gas_balance_spending(self.fee_config_gas_limit, zone_max_fee_per_gas);
+        let all_sponsored_approval_fees = zone_approval_fee
+            .checked_mul(U256::from(self.accounts))
+            .ok_or_else(|| eyre!("sponsored approval fee requirement overflowed U256"))?;
+        let bootstrap_net_required = zone_fee_config_fee
+            .checked_add(all_sponsored_approval_fees)
+            .ok_or_else(|| eyre!("bootstrap Zone fee requirement overflowed U256"))?;
+        let bootstrap_minimum_deposit_amount = U256::from(deposit_fee)
+            .checked_add(bootstrap_net_required.max(U256::from(bounceback_fee)))
+            .ok_or_else(|| eyre!("bootstrap deposit requirement overflowed U256"))?;
+        if matches!(
+            self.check_phase,
+            CheckPhase::Bootstrap | CheckPhase::Roundtrip
+        ) {
+            ensure!(
+                U256::from(self.bootstrap_deposit_amount) >= bootstrap_minimum_deposit_amount,
+                "bootstrap deposit amount {} is below required {} for sequencer fee configuration and {} sponsored approvals",
+                self.bootstrap_deposit_amount,
+                bootstrap_minimum_deposit_amount,
+                self.accounts
+            );
+        }
+
+        let control_needs_setup =
+            control_state.portal_allowance < U256::from(self.bootstrap_deposit_amount);
+        if self.check_phase == CheckPhase::Bootstrap {
+            if self.no_approval_setup {
+                ensure!(
+                    !control_needs_setup,
+                    "control account {} portal allowance {} is below bootstrap amount {}; enable approval setup or approve first",
+                    control_state.address,
+                    control_state.portal_allowance,
+                    self.bootstrap_deposit_amount
+                );
+            }
+            let control_required = U256::from(self.bootstrap_deposit_amount)
+                .checked_add(l1_deposit_tx_fee)
+                .and_then(|value| {
+                    value.checked_add(if control_needs_setup && !self.no_approval_setup {
+                        l1_approval_fee
+                    } else {
+                        U256::ZERO
+                    })
+                })
+                .ok_or_else(|| eyre!("control-account bootstrap requirement overflowed U256"))?;
+            ensure!(
+                control_state.l1_balance >= control_required,
+                "control account {} L1 balance {} is below bootstrap requirement {}",
+                control_state.address,
+                control_state.l1_balance,
+                control_required
+            );
+        }
+
+        let sponsored_approval_fee_required = zone_approval_fee
+            .checked_mul(U256::from(outbox_setup.len()))
+            .ok_or_else(|| eyre!("selected sponsored approval fee requirement overflowed U256"))?;
+        if self.check_phase.roundtrip() {
+            ensure!(
+                withdrawal_fee > 0,
+                "roundtrip benchmark requires a nonzero Zone withdrawal fee; fund the sequencer and configure ZoneOutbox first"
+            );
+            ensure!(
+                sequencer_state.zone_balance >= sponsored_approval_fee_required,
+                "sequencer {} Zone balance {} is below required {} to sponsor {} outbox approvals",
+                sequencer_state.address,
+                sequencer_state.zone_balance,
+                sponsored_approval_fee_required,
+                outbox_setup.len()
+            );
+        }
+
         validate_account_capacity(
             &states,
             self.check_phase,
             self.no_approval_setup,
             self.transactions_per_account,
             self.deposit_amount,
+            deposit_fee,
             self.activity_amount,
             self.withdrawal_amount,
             withdrawal_fee,
@@ -647,12 +852,16 @@ impl BenchmarkPreflight {
             zone_chain_id,
             account_start: self.account_start,
             account_end,
+            control_account_index: self.control_account_index,
+            sequencer_account_index: self.sequencer_account_index,
+            sequencer: sequencer_address,
             portal,
             outbox,
             token,
             deposit_amount: self.deposit_amount,
             activity_amount: self.activity_amount,
             withdrawal_amount: self.withdrawal_amount,
+            bootstrap_deposit_amount: self.bootstrap_deposit_amount,
             l1_max_fee_per_gas,
             l1_max_priority_fee_per_gas,
             zone_max_fee_per_gas,
@@ -673,7 +882,13 @@ impl BenchmarkPreflight {
         } else {
             outbox_setup
         };
-        render_all_specs(&self.output, &render, &portal_setup, &outbox_setup)?;
+        render_all_specs(
+            &self.output,
+            &render,
+            control_needs_setup && !self.no_approval_setup,
+            &portal_setup,
+            &outbox_setup,
+        )?;
 
         let report = PreflightReport {
             check_phase: self.check_phase,
@@ -701,6 +916,9 @@ impl BenchmarkPreflight {
             activity_fee_bump,
             activity_max_fee_per_gas,
             transactions_per_account: self.transactions_per_account,
+            bootstrap_deposit_amount: self.bootstrap_deposit_amount,
+            bootstrap_minimum_deposit_amount: bootstrap_minimum_deposit_amount.to_string(),
+            sponsored_approval_fee_required: sponsored_approval_fee_required.to_string(),
             portal_approval_setup_accounts: portal_setup
                 .iter()
                 .map(|offset| self.account_start + *offset as u32)
@@ -709,6 +927,8 @@ impl BenchmarkPreflight {
                 .iter()
                 .map(|offset| self.account_start + *offset as u32)
                 .collect(),
+            control_account: AccountReport::from(&control_state),
+            sequencer_account: AccountReport::from(&sequencer_state),
             accounts: states.iter().map(AccountReport::from).collect(),
         };
         let report_path = self.output.join("preflight.json");
@@ -742,6 +962,9 @@ impl BenchmarkPreflight {
         println!("  Zone gas estimate:  {queried_zone_gas_price}");
         println!("  Zone max fee:       {zone_max_fee_per_gas}");
         println!("  Activity fee bump: {activity_fee_bump}");
+        println!("  Bootstrap amount:  {}", self.bootstrap_deposit_amount);
+        println!("  Bootstrap minimum: {bootstrap_minimum_deposit_amount}");
+        println!("  Approval sponsor:  {sequencer_address}");
         println!("  Rendered specs:    {}", self.output.display());
         println!("  Account report:    {}", report_path.display());
 
@@ -762,6 +985,15 @@ fn derive_signers(
                 .map_err(|err| eyre!("failed deriving benchmark account index {index}: {err}"))
         })
         .collect()
+}
+
+fn derive_signer(mnemonic: &str, index: u32) -> eyre::Result<PrivateKeySigner> {
+    MnemonicBuilder::from_phrase(mnemonic)
+        .index(index)
+        .and_then(|builder| builder.build())
+        .map_err(|err| {
+            eyre!("failed deriving benchmark infrastructure account index {index}: {err}")
+        })
 }
 
 fn resolve_optional_address(
@@ -831,6 +1063,7 @@ fn validate_account_capacity(
     no_approval_setup: bool,
     transactions_per_account: u64,
     deposit_amount: u128,
+    deposit_fee: u128,
     activity_amount: u128,
     withdrawal_amount: u128,
     withdrawal_fee: u128,
@@ -852,6 +1085,26 @@ fn validate_account_capacity(
         calc_gas_balance_spending(withdrawal_tx_gas_limit, zone_max_fee_per_gas);
     let l1_approval_fee = calc_gas_balance_spending(approval_gas_limit, l1_max_fee_per_gas);
     let zone_approval_fee = calc_gas_balance_spending(approval_gas_limit, zone_max_fee_per_gas);
+
+    if phase.roundtrip() {
+        let deposit_net = U256::from(
+            deposit_amount
+                .checked_sub(deposit_fee)
+                .ok_or_else(|| eyre!("roundtrip deposit amount is below its protocol fee"))?,
+        );
+        let journey_required = U256::from(activity_amount)
+            .checked_add(zone_activity_tx_fee)
+            .and_then(|value| value.checked_add(U256::from(withdrawal_amount)))
+            .and_then(|value| value.checked_add(U256::from(withdrawal_fee)))
+            .and_then(|value| value.checked_add(zone_withdrawal_tx_fee))
+            .ok_or_else(|| eyre!("roundtrip per-journey Zone requirement overflowed U256"))?;
+        ensure!(
+            deposit_net >= journey_required,
+            "roundtrip deposit credits {} Zone token units, below required {} for activity, withdrawal, protocol fee, and transaction fee caps",
+            deposit_net,
+            journey_required
+        );
+    }
 
     for state in states {
         let portal_needs_setup = state.portal_allowance < portal_allowance_required;
@@ -914,7 +1167,7 @@ fn validate_account_capacity(
             })
             .ok_or_else(|| eyre!("Zone withdrawal balance requirement overflowed U256"))?;
         let zone_required = match phase {
-            CheckPhase::Deposit => None,
+            CheckPhase::Bootstrap | CheckPhase::Deposit | CheckPhase::Roundtrip => None,
             CheckPhase::Activity => Some(activity_required),
             CheckPhase::Withdrawal => Some(withdrawal_required),
             CheckPhase::All => Some(
@@ -947,8 +1200,8 @@ fn validate_fixture_state(
     match fixture_state {
         FixtureState::Empty => {
             ensure!(
-                phase == CheckPhase::Deposit,
-                "--fixture-state empty is only valid with --check-phase deposit"
+                matches!(phase, CheckPhase::Bootstrap | CheckPhase::Deposit),
+                "--fixture-state empty is only valid with --check-phase bootstrap or deposit"
             );
             ensure!(
                 deposit_count == 0,
@@ -972,9 +1225,39 @@ fn validate_fixture_state(
                 );
             }
         }
+        FixtureState::Ready => {
+            ensure!(
+                phase == CheckPhase::Roundtrip,
+                "--fixture-state ready requires --check-phase roundtrip"
+            );
+            ensure!(
+                deposit_count > 0,
+                "ready fixture portal has no bootstrap deposit"
+            );
+            ensure!(
+                last_processed_deposit_number == deposit_count,
+                "ready fixture has only processed {last_processed_deposit_number} of {deposit_count} recorded deposits"
+            );
+            ensure!(
+                !portal_token_balance.is_zero(),
+                "ready fixture portal has no token backing for the sequencer bootstrap"
+            );
+            for state in states {
+                ensure!(
+                    state.zone_balance.is_zero(),
+                    "ready fixture benchmark account {} (index {}) already has Zone balance {}; measured users must start unfunded",
+                    state.address,
+                    state.index,
+                    state.zone_balance
+                );
+            }
+        }
         FixtureState::Funded => {
             ensure!(
-                phase != CheckPhase::Deposit,
+                matches!(
+                    phase,
+                    CheckPhase::Activity | CheckPhase::Withdrawal | CheckPhase::All
+                ),
                 "--fixture-state funded requires --check-phase activity, withdrawal, or all"
             );
             ensure!(
@@ -1006,6 +1289,7 @@ fn validate_fixture_state(
 fn render_all_specs(
     output: &Path,
     config: &RenderConfig,
+    control_needs_setup: bool,
     portal_setup: &[usize],
     outbox_setup: &[usize],
 ) -> eyre::Result<()> {
@@ -1013,7 +1297,12 @@ fn render_all_specs(
     let output_abis = output.join("abis");
     fs::create_dir_all(&output_abis)
         .wrap_err_with(|| format!("failed creating {}", output_abis.display()))?;
-    for name in ["tip20.json", "zone-portal.json", "zone-outbox.json"] {
+    for name in [
+        "tip20.json",
+        "zone-inbox.json",
+        "zone-portal.json",
+        "zone-outbox.json",
+    ] {
         let source = Path::new(SOURCE_DIR).join("abis").join(name);
         let destination = output_abis.join(name);
         fs::copy(&source, &destination).wrap_err_with(|| {
@@ -1028,12 +1317,47 @@ fn render_all_specs(
     let common = common_replacements(config);
     let deposit_steps = portal_setup
         .iter()
-        .map(|offset| approval_step(*offset, config, config.portal, true))
+        .map(|offset| {
+            approval_step(
+                "users",
+                *offset,
+                config.account_start + *offset as u32,
+                config,
+                config.portal,
+                true,
+                false,
+            )
+        })
         .collect::<eyre::Result<Vec<_>>>()?;
     let withdrawal_steps = outbox_setup
         .iter()
-        .map(|offset| approval_step(*offset, config, config.outbox, false))
+        .map(|offset| {
+            approval_step(
+                "users",
+                *offset,
+                config.account_start + *offset as u32,
+                config,
+                config.outbox,
+                false,
+                false,
+            )
+        })
         .collect::<eyre::Result<Vec<_>>>()?;
+    let bootstrap_steps = control_needs_setup
+        .then(|| {
+            approval_step(
+                "control",
+                0,
+                config.control_account_index,
+                config,
+                config.portal,
+                true,
+                false,
+            )
+        })
+        .transpose()?
+        .into_iter()
+        .collect();
 
     render_spec(
         "deposit.yml",
@@ -1053,6 +1377,43 @@ fn render_all_specs(
         &common,
         withdrawal_steps,
     )?;
+    render_spec(
+        "bootstrap-deposit.yml",
+        &output.join("bootstrap-deposit.yml"),
+        &common,
+        bootstrap_steps,
+    )?;
+    render_spec(
+        "zone-roundtrip.yml",
+        &output.join("zone-roundtrip.yml"),
+        &common,
+        outbox_setup
+            .iter()
+            .map(|offset| {
+                approval_step(
+                    "users",
+                    *offset,
+                    config.account_start + *offset as u32,
+                    config,
+                    config.outbox,
+                    false,
+                    true,
+                )
+            })
+            .collect::<eyre::Result<Vec<_>>>()?,
+    )?;
+    render_document(
+        "bootstrap-scenario.yml",
+        &output.join("bootstrap-scenario.yml"),
+        &common,
+        false,
+    )?;
+    render_document(
+        "roundtrip-scenario.yml",
+        &output.join("roundtrip-scenario.yml"),
+        &common,
+        false,
+    )?;
     Ok(())
 }
 
@@ -1068,7 +1429,31 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
             Value::from(config.account_start),
         ),
         ("__ACCOUNT_END__".into(), Value::from(config.account_end)),
+        (
+            "__CONTROL_ACCOUNT_INDEX__".into(),
+            Value::from(config.control_account_index),
+        ),
+        (
+            "__CONTROL_ACCOUNT_END__".into(),
+            Value::from(config.control_account_index + 1),
+        ),
+        (
+            "__SEQUENCER_ACCOUNT_INDEX__".into(),
+            Value::from(config.sequencer_account_index),
+        ),
+        (
+            "__SEQUENCER_ACCOUNT_END__".into(),
+            Value::from(config.sequencer_account_index + 1),
+        ),
+        (
+            "__SEQUENCER__".into(),
+            Value::from(config.sequencer.to_string()),
+        ),
         ("__PORTAL__".into(), Value::from(config.portal.to_string())),
+        (
+            "__INBOX__".into(),
+            Value::from(ZONE_INBOX_ADDRESS.to_string()),
+        ),
         ("__OUTBOX__".into(), Value::from(config.outbox.to_string())),
         ("__TOKEN__".into(), Value::from(config.token.to_string())),
         (
@@ -1082,6 +1467,10 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
         (
             "__WITHDRAWAL_AMOUNT__".into(),
             yaml_value(config.withdrawal_amount),
+        ),
+        (
+            "__BOOTSTRAP_DEPOSIT_AMOUNT__".into(),
+            yaml_value(config.bootstrap_deposit_amount),
         ),
         (
             "__L1_MAX_FEE_PER_GAS__".into(),
@@ -1115,12 +1504,14 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
 }
 
 fn approval_step(
+    pool: &str,
     pool_offset: usize,
+    account_index: u32,
     config: &RenderConfig,
     spender: Address,
     l1: bool,
+    sponsored: bool,
 ) -> eyre::Result<Value> {
-    let account_index = config.account_start + pool_offset as u32;
     let (max_fee, max_priority) = if l1 {
         (
             config.l1_max_fee_per_gas,
@@ -1132,25 +1523,32 @@ fn approval_step(
             config.zone_max_priority_fee_per_gas,
         )
     };
+    let mut transaction = serde_json::json!({
+        "type": "tempo",
+        "from": {
+            "pool": pool,
+            "select": { "index": pool_offset },
+        },
+        "gas_limit": config.approval_gas_limit,
+        "max_fee_per_gas": max_fee,
+        "max_priority_fee_per_gas": max_priority,
+        "fee_token": config.token.to_string(),
+        "call": {
+            "to": config.token.to_string(),
+            "abi": "TIP20",
+            "function": "approve",
+            "args": [spender.to_string(), MAX_UINT256],
+        },
+    });
+    if sponsored {
+        transaction["sponsor"] = serde_json::json!({
+            "pool": "sponsor",
+            "select": { "index": 0 },
+        });
+    }
     serde_yaml::to_value(serde_json::json!({
         "id": format!("approve_{}_account_{account_index}", if l1 { "portal" } else { "outbox" }),
-        "tx": {
-            "type": "tempo",
-            "from": {
-                "pool": "users",
-                "select": { "index": pool_offset },
-            },
-            "gas_limit": config.approval_gas_limit,
-            "max_fee_per_gas": max_fee,
-            "max_priority_fee_per_gas": max_priority,
-            "fee_token": config.token.to_string(),
-            "call": {
-                "to": config.token.to_string(),
-                "abi": "TIP20",
-                "function": "approve",
-                "args": [spender.to_string(), MAX_UINT256],
-            },
-        },
+        "tx": transaction,
     }))
     .wrap_err("failed encoding approval setup step")
 }
@@ -1173,6 +1571,30 @@ fn render_spec(
         .ok_or_else(|| eyre!("{} must contain a setup mapping", source.display()))?;
     setup.insert(Value::from("steps"), Value::Sequence(setup_steps));
 
+    write_rendered_document(source, destination, document, true)
+}
+
+fn render_document(
+    source_name: &str,
+    destination: &Path,
+    replacements: &HashMap<String, Value>,
+    requires_mnemonic: bool,
+) -> eyre::Result<()> {
+    let source = Path::new(SOURCE_DIR).join(source_name);
+    let contents = fs::read_to_string(&source)
+        .wrap_err_with(|| format!("failed reading {}", source.display()))?;
+    let mut document: Value = serde_yaml::from_str(&contents)
+        .wrap_err_with(|| format!("failed parsing {}", source.display()))?;
+    replace_placeholders(&mut document, replacements);
+    write_rendered_document(source, destination, document, requires_mnemonic)
+}
+
+fn write_rendered_document(
+    source: PathBuf,
+    destination: &Path,
+    document: Value,
+    requires_mnemonic: bool,
+) -> eyre::Result<()> {
     let rendered = serde_yaml::to_string(&document)
         .wrap_err_with(|| format!("failed rendering {}", source.display()))?;
     ensure!(
@@ -1180,11 +1602,13 @@ fn render_spec(
         "unresolved renderer placeholder in {}",
         source.display()
     );
-    ensure!(
-        rendered.contains("${ZONES_BENCH_MNEMONIC}"),
-        "{} must retain the runtime mnemonic environment reference",
-        source.display()
-    );
+    if requires_mnemonic {
+        ensure!(
+            rendered.contains("${ZONES_BENCH_MNEMONIC}"),
+            "{} must retain the runtime mnemonic environment reference",
+            source.display()
+        );
+    }
     fs::write(destination, rendered)
         .wrap_err_with(|| format!("failed writing {}", destination.display()))
 }
@@ -1329,6 +1753,46 @@ mod tests {
     }
 
     #[test]
+    fn ready_fixture_requires_only_the_confirmed_sequencer_bootstrap() {
+        let states = [
+            fixture_account(16, U256::ZERO),
+            fixture_account(17, U256::ZERO),
+        ];
+        validate_fixture_state(
+            &states,
+            CheckPhase::Roundtrip,
+            FixtureState::Ready,
+            U256::from(1),
+            1,
+            1,
+        )
+        .unwrap();
+
+        assert!(
+            validate_fixture_state(
+                &[fixture_account(16, U256::from(1))],
+                CheckPhase::Roundtrip,
+                FixtureState::Ready,
+                U256::from(1),
+                1,
+                1,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_fixture_state(
+                &states,
+                CheckPhase::Roundtrip,
+                FixtureState::Ready,
+                U256::from(1),
+                1,
+                0,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn expiring_fee_cap_reserves_txgen_uniqueness_bump() {
         assert_eq!(expiring_fee_caps(100, 90, 25).unwrap(), (125, 115));
         assert!(expiring_fee_caps(u128::MAX, 90, 1).is_err());
@@ -1367,8 +1831,13 @@ mod tests {
             activity_fee_bump: 1,
             activity_max_fee_per_gas: 2,
             transactions_per_account: 1,
+            bootstrap_deposit_amount: 10,
+            bootstrap_minimum_deposit_amount: "10".into(),
+            sponsored_approval_fee_required: "1".into(),
             portal_approval_setup_accounts: vec![],
             outbox_approval_setup_accounts: vec![],
+            control_account: AccountReport::from(&fixture_account(0, U256::ZERO)),
+            sequencer_account: AccountReport::from(&fixture_account(4, U256::ZERO)),
             accounts: vec![],
         };
         assert!(
@@ -1382,15 +1851,32 @@ mod tests {
     fn renders_all_specs_and_expands_per_account_approvals() {
         let output = temp_output("render");
         let config = local_render_config();
-        render_all_specs(&output, &config, &[0, 1], &[1]).unwrap();
+        render_all_specs(&output, &config, true, &[0, 1], &[1]).unwrap();
 
-        for name in ["deposit.yml", "zone-activity.yml", "withdrawal.yml"] {
+        for name in [
+            "deposit.yml",
+            "zone-activity.yml",
+            "withdrawal.yml",
+            "bootstrap-deposit.yml",
+            "zone-roundtrip.yml",
+            "bootstrap-scenario.yml",
+            "roundtrip-scenario.yml",
+        ] {
+            let contents = fs::read_to_string(output.join(name)).unwrap();
+            let _: Value = serde_yaml::from_str(&contents).unwrap();
+            assert!(!contents.contains("__"), "unresolved placeholder in {name}");
+        }
+        for name in [
+            "deposit.yml",
+            "zone-activity.yml",
+            "withdrawal.yml",
+            "zone-roundtrip.yml",
+        ] {
             let contents = fs::read_to_string(output.join(name)).unwrap();
             let spec: Value = serde_yaml::from_str(&contents).unwrap();
             assert_eq!(spec["accounts"]["users"]["range"][0], 7);
             assert_eq!(spec["accounts"]["users"]["range"][1], 9);
             assert!(contents.contains("${ZONES_BENCH_MNEMONIC}"));
-            assert!(!contents.contains("__"));
         }
         let deposit: Value =
             serde_yaml::from_str(&fs::read_to_string(output.join("deposit.yml")).unwrap()).unwrap();
@@ -1414,9 +1900,78 @@ mod tests {
             serde_yaml::from_str(&fs::read_to_string(output.join("withdrawal.yml")).unwrap())
                 .unwrap();
         assert_eq!(withdrawal["setup"]["steps"].as_sequence().unwrap().len(), 1);
+        assert!(
+            withdrawal["setup"]["steps"][0]["tx"]
+                .get("sponsor")
+                .is_none()
+        );
         assert_eq!(
             withdrawal["templates"]["request_withdrawal"]["call"]["function"],
             "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
+        );
+
+        let bootstrap: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("bootstrap-deposit.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(bootstrap["accounts"]["control"]["range"][0], 0);
+        assert_eq!(bootstrap["accounts"]["control"]["range"][1], 1);
+        assert_eq!(bootstrap["setup"]["steps"].as_sequence().unwrap().len(), 1);
+        assert_eq!(
+            bootstrap["templates"]["bootstrap_deposit"]["call"]["args"][1],
+            config.sequencer.to_string()
+        );
+
+        let zone_roundtrip: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("zone-roundtrip.yml")).unwrap())
+                .unwrap();
+        let sponsored_approval = &zone_roundtrip["setup"]["steps"][0]["tx"];
+        assert_eq!(sponsored_approval["sponsor"]["pool"], "sponsor");
+        assert_eq!(sponsored_approval["call"]["function"], "approve");
+        assert_eq!(
+            zone_roundtrip["templates"]["request_withdrawal"]["call"]["function"],
+            "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
+        );
+
+        let bootstrap_scenario: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("bootstrap-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let bootstrap_steps = bootstrap_scenario["scenario"]["steps"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(bootstrap_steps.len(), 6);
+        assert_eq!(bootstrap_steps[4]["wait_log"]["event"], "DepositProcessed");
+        assert_eq!(bootstrap_steps[5]["wait_log"]["event"], "BatchSubmitted");
+
+        let roundtrip_scenario: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("roundtrip-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            roundtrip_scenario["chains"]["zone"]["rpc_url"],
+            "${ZONE_PRIVATE_RPC_URL}"
+        );
+        assert_eq!(
+            roundtrip_scenario["chains"]["zone"]["request_auth"]["sender_header"]["name"],
+            "X-Authorization-Token"
+        );
+        let roundtrip_steps = roundtrip_scenario["scenario"]["steps"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(roundtrip_steps.len(), 10);
+        assert_eq!(roundtrip_steps[3]["wait_log"]["event"], "DepositProcessed");
+        assert_eq!(
+            roundtrip_steps[8]["wait_log"]["event"],
+            "WithdrawalRequested"
+        );
+        assert_eq!(
+            roundtrip_steps[9]["wait_log"]["event"],
+            "WithdrawalProcessed"
+        );
+        assert_eq!(
+            roundtrip_steps[9]["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0],
+            "address"
         );
 
         fs::remove_dir_all(output).unwrap();
@@ -1444,7 +1999,7 @@ mod tests {
 
         let output = temp_output("generate");
         let config = local_render_config();
-        render_all_specs(&output, &config, &[0], &[0]).unwrap();
+        render_all_specs(&output, &config, true, &[0], &[0]).unwrap();
         let pool_addresses =
             derive_signers(TEST_MNEMONIC, config.account_start, config.account_end)
                 .unwrap()
@@ -1519,6 +2074,29 @@ mod tests {
         let second_call = ZoneOutbox::requestWithdrawalCall::abi_decode(second_input).unwrap();
         assert_ne!(call.memo, second_call.memo);
 
+        let bootstrap = generate(&txgen, &output.join("bootstrap-deposit.yml"));
+        assert_setup_approval(&bootstrap, config.token, config.portal);
+        assert_workload_inclusion_keys(&bootstrap);
+        let bootstrap_transactions = workload_envelopes(&bootstrap);
+        assert_eq!(bootstrap_transactions.len(), 2);
+        let (target, input) = only_call(&bootstrap_transactions[0]);
+        assert_eq!(target, config.portal);
+        let call = ZonePortal::depositCall::abi_decode(input).unwrap();
+        assert_eq!(call.to, config.sequencer);
+        assert_eq!(call.amount, config.bootstrap_deposit_amount);
+        assert_ne!(call.memo, alloy::primitives::B256::ZERO);
+
+        let zone_roundtrip = generate(&txgen, &output.join("zone-roundtrip.yml"));
+        assert_setup_approval(&zone_roundtrip, config.token, config.outbox);
+        let setup = zone_roundtrip
+            .iter()
+            .find(|tx| tx["phase"] == "setup")
+            .expect("sponsored approval must be generated");
+        let setup = decode_envelope(setup);
+        let sender = setup.recover_signer().unwrap();
+        assert_eq!(setup.fee_payer(sender).unwrap(), config.sequencer);
+        assert_workload_inclusion_keys(&zone_roundtrip);
+
         fs::remove_dir_all(output).unwrap();
     }
 
@@ -1528,12 +2106,16 @@ mod tests {
             zone_chain_id: 42432,
             account_start: 7,
             account_end: 9,
+            control_account_index: 0,
+            sequencer_account_index: 4,
+            sequencer: derive_signer(TEST_MNEMONIC, 4).unwrap().address(),
             portal: address!("0x0000000000000000000000000000000000001000"),
             outbox: ZONE_OUTBOX_ADDRESS,
             token: address!("0x20c0000000000000000000000000000000000000"),
             deposit_amount: 1_000_000,
             activity_amount: 1,
             withdrawal_amount: 100_000,
+            bootstrap_deposit_amount: 10_000_000,
             l1_max_fee_per_gas: 100_000_000_000,
             l1_max_priority_fee_per_gas: 100_000_000_000,
             zone_max_fee_per_gas: 200_000_000_000,

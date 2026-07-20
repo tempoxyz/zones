@@ -11,7 +11,7 @@ use alloy::{
     signers::local::PrivateKeySigner,
 };
 use eyre::{WrapErr as _, ensure};
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
 use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
 
 const DEFAULT_ZONE_GAS_RATE: u128 = 1;
@@ -26,6 +26,10 @@ pub(crate) struct ConfigureBenchmarkFees {
     /// ZonePortal address on Tempo L1.
     #[arg(long, env = "L1_PORTAL_ADDRESS")]
     portal: Address,
+
+    /// Enabled TIP-20 used to pay all configuration transaction fees.
+    #[arg(long, env = "ZONES_BENCH_TOKEN")]
+    token: Address,
 
     /// Zone token units charged per unit of deposit gas.
     #[arg(long, default_value_t = DEFAULT_ZONE_GAS_RATE)]
@@ -43,6 +47,10 @@ pub(crate) struct ConfigureBenchmarkFees {
     /// The sequencer must already hold enough enabled Zone fee token to submit this transaction.
     #[arg(long, requires = "zone_rpc_url")]
     tempo_gas_rate: Option<u128>,
+
+    /// Gas limit for the optional ZoneOutbox fee-rate transaction.
+    #[arg(long, default_value_t = 2_000_000)]
+    zone_tx_gas_limit: u64,
 }
 
 impl ConfigureBenchmarkFees {
@@ -59,6 +67,10 @@ impl ConfigureBenchmarkFees {
             ensure!(
                 tempo_gas_rate > 0,
                 "--tempo-gas-rate must be greater than zero for a benchmark deployment"
+            );
+            ensure!(
+                self.zone_tx_gas_limit > 0,
+                "--zone-tx-gas-limit must be greater than zero"
             );
         }
 
@@ -98,6 +110,7 @@ impl ConfigureBenchmarkFees {
         if current_zone_gas_rate != self.zone_gas_rate {
             let receipt = portal
                 .setZoneGasRate(self.zone_gas_rate)
+                .fee_token(self.token)
                 .send()
                 .await
                 .wrap_err("failed sending ZonePortal.setZoneGasRate")?
@@ -115,6 +128,7 @@ impl ConfigureBenchmarkFees {
         if current_bounceback_gas != self.bounceback_gas {
             let receipt = portal
                 .setBouncebackGas(self.bounceback_gas)
+                .fee_token(self.token)
                 .send()
                 .await
                 .wrap_err("failed sending ZonePortal.setBouncebackGas")?
@@ -155,6 +169,8 @@ impl ConfigureBenchmarkFees {
             if current_tempo_gas_rate != tempo_gas_rate {
                 let receipt = outbox
                     .setTempoGasRate(tempo_gas_rate)
+                    .fee_token(self.token)
+                    .gas(self.zone_tx_gas_limit)
                     .send()
                     .await
                     .wrap_err(
@@ -182,13 +198,15 @@ mod tests {
     use super::*;
     use clap::Parser as _;
 
-    fn required_args() -> [&'static str; 5] {
+    fn required_args() -> [&'static str; 7] {
         [
             "configure-benchmark-fees",
             "--l1-rpc-url",
             "http://127.0.0.1:8545",
             "--portal",
             "0x0000000000000000000000000000000000000001",
+            "--token",
+            "0x20c0000000000000000000000000000000000000",
         ]
     }
 
@@ -199,6 +217,7 @@ mod tests {
         assert_eq!(command.bounceback_gas, 300_000);
         assert!(command.zone_rpc_url.is_none());
         assert!(command.tempo_gas_rate.is_none());
+        assert_eq!(command.zone_tx_gas_limit, 2_000_000);
     }
 
     #[test]

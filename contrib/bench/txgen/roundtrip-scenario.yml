@@ -1,0 +1,161 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: __L1_CHAIN_ID__
+    workload: ./deposit.yml
+
+  zone:
+    network: tempo
+    rpc_url: "${ZONE_PRIVATE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    request_auth:
+      sender_header:
+        name: X-Authorization-Token
+        map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
+        reload_interval: 1s
+    chain_id: __ZONE_CHAIN_ID__
+    workload: ./zone-roundtrip.yml
+
+scenario:
+  name: zones-l1-zone-l1-roundtrip
+  timeout: 10m
+
+  bindings:
+    account:
+      account:
+        pool: users
+        select: lease
+    recipient:
+      account:
+        pool: users
+        select: random
+
+  steps:
+    - checkpoint:
+        chain: zone
+      save: zone_before_deposit
+
+    - submit:
+        chain: l1
+        template: deposit
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "__TOKEN__"
+              - { var: account.address }
+              - __DEPOSIT_AMOUNT__
+              - { random_bytes: 32 }
+              - { var: account.address }
+      save: deposit
+
+    # Capture this transaction's random memo and queue hash from its own receipt.
+    - wait_log:
+        chain: l1
+        transaction_hash: { var: deposit.tx_hash }
+        sender: { var: deposit.sender }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: DepositMade
+        where:
+          sender: { var: account.address }
+          token: "__TOKEN__"
+          to: { var: account.address }
+      save: deposit_made
+
+    - wait_log:
+        chain: zone
+        from_block: { var: zone_before_deposit.block_number }
+        address: "__INBOX__"
+        abi: ZoneInbox
+        event: DepositProcessed
+        where:
+          depositHash: { var: deposit_made.args.newCurrentDepositQueueHash }
+          sender: { var: account.address }
+          to: { var: account.address }
+          token: "__TOKEN__"
+          amount: { var: deposit_made.args.netAmount }
+          memo: { var: deposit_made.args.memo }
+        max_block_range: 1000
+      save: deposit_processed
+
+    - submit:
+        chain: zone
+        template: tip20_transfer
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - { var: recipient.address }
+              - __ACTIVITY_AMOUNT__
+      save: activity
+
+    - wait_receipt:
+        chain: zone
+        transaction_hash: { var: activity.tx_hash }
+        sender: { var: activity.sender }
+      save: activity_receipt
+
+    # Capture L1 before requesting the withdrawal so the terminal event can be
+    # backfilled even if settlement completes before its wait starts polling.
+    - checkpoint:
+        chain: l1
+      save: l1_before_withdrawal
+
+    - submit:
+        chain: zone
+        template: request_withdrawal
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "__TOKEN__"
+              - { var: account.address }
+              - __WITHDRAWAL_AMOUNT__
+              - { random_bytes: 32 }
+              - 0
+              - { var: account.address }
+              - "0x"
+              - "0x"
+      save: withdrawal
+
+    # Receipt scoping identifies the exact overload call and captures its random
+    # memo, fee, fallback nonce, and other request fields for correlation.
+    - wait_log:
+        chain: zone
+        transaction_hash: { var: withdrawal.tx_hash }
+        sender: { var: withdrawal.sender }
+        address: "__OUTBOX__"
+        abi: ZoneOutbox
+        event: WithdrawalRequested
+        where:
+          sender: { var: account.address }
+          token: "__TOKEN__"
+          to: { var: account.address }
+          amount: __WITHDRAWAL_AMOUNT__
+          gasLimit: 0
+      save: withdrawal_requested
+
+    - wait_log:
+        chain: l1
+        from_block: { var: l1_before_withdrawal.block_number }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: WithdrawalProcessed
+        where:
+          to: { var: account.address }
+          senderTag:
+            keccak256_packed:
+              types: [address, bytes32]
+              values:
+                - { var: account.address }
+                - { var: withdrawal.tx_hash }
+          token: "__TOKEN__"
+          amount: __WITHDRAWAL_AMOUNT__
+          callbackSuccess: true
+        max_block_range: 1000
+      save: withdrawal_processed

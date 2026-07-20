@@ -1,9 +1,11 @@
 # Zones benchmark transaction generation
 
 This benchmark support prepares three independent `txgen-tempo` workloads for an
-L1 deposit, ordinary Zone activity, and a Zone withdrawal. It does not submit a
-cross-chain scenario, wait for deposit or withdrawal events, or decide when the
-next phase is ready.
+L1 deposit, ordinary Zone activity, and a Zone withdrawal. It also renders a
+production-shaped L1 -> Zone -> L1 scenario that correlates each journey across
+both chains and waits for its deposit and withdrawal to finish. The independent
+phase runner remains available when only one transaction class should be
+measured.
 
 ## Production-shaped benchmark environment
 
@@ -34,15 +36,16 @@ and the sequencer have L1 token balances without a faucet. The topology
 environment file contains addresses and RPC metadata but never the mnemonic or
 private keys.
 
-The default workflow dispatch uses Tempo's `bloat=100` preset: 100,000 MiB of
-storage across all four TIP-20s, imported identically into both Tempo databases.
-On the 32-logical-CPU benchmark runner, the default partition is:
+The default workflow dispatch uses Tempo's `bloat=1` preset: 1,000 MiB of
+storage across all four TIP-20s, imported identically into both Tempo L1
+databases. State bloat is never imported into the Zone genesis or datadir. On
+the 32-logical-CPU benchmark runner, the default partition is:
 
 | Process | CPUs | HTTP RPC | Metrics |
 | --- | --- | --- | --- |
 | Tempo validator A | `0-3,16-19` | `127.0.0.1:8545` | `127.0.0.1:9001` |
 | Tempo validator B | `4-7,20-23` | `127.0.0.1:8645` | `127.0.0.1:9101` |
-| Zone sequencer | `8-13,24-29` | `127.0.0.1:8546` | `127.0.0.1:9201` |
+| Zone sequencer | `8-13,24-29` | public/query `127.0.0.1:8546`; private submission `127.0.0.1:8544` | `127.0.0.1:9201` |
 | txgen and bench | `14-15,30-31` | n/a | n/a |
 
 The two Tempo databases use separate restored Schelk volumes. The Zone datadir
@@ -55,12 +58,14 @@ sets that value in both genesis and each validator's payload builder. Override
 The temporary bloat dump is also placed on validator A's benchmark volume, not
 the runner's root filesystem; `ZONES_BENCH_BLOAT_TMP_DIR` can override it.
 
-`bench send` uses `txpool_status` for its default drain check. The selected
-trusted RPC must expose the `txpool` module, or the benchmark must explicitly use
-a zero drain timeout. Every generated workload still waits for its transaction
-receipt, but zero skips the final global pool-empty check and weakens isolation
-between consecutive runs. The workflow and runner script validate
-`txpool_status` before sending when the drain timeout is non-zero.
+Independent `bench send` phases use `txpool_status` for their drain check. The
+selected trusted RPC must expose the `txpool` module, or the benchmark must
+explicitly use a zero drain timeout. Every generated workload still waits for
+its transaction receipt, but zero skips the final global pool-empty check and
+weakens isolation between consecutive runs. The independent phase runner
+validates `txpool_status` before sending when the drain timeout is non-zero. The
+roundtrip scenario instead uses receipt-scoped and cross-chain event completion
+boundaries.
 
 This is production-shaped rather than production-equivalent. Zones is currently
 documented as testnet-only, the optional multi-sequencer topology has a static
@@ -69,38 +74,58 @@ reference factory deploys full portal bytecode, while the proposed native
 TIP-1091 lifecycle uses a protocol-managed implementation, so portal deployment
 gas is not final-production exact.
 
-### Fresh fixture boundary
+### Roundtrip bootstrap and fixture boundaries
 
-The provisioner stops at infrastructure readiness. It does not make benchmark
-deposits, wait for deposit ingestion, or create a cross-chain snapshot. A fresh
-topology can therefore run the deposit phase. It cannot honestly run activity
-or withdrawal: those phases require Zone balances created by real deposits and
-backed by portal escrow.
+The provisioner stops at infrastructure readiness. The roundtrip runner then
+performs a real, untimed bootstrap before starting measured journeys:
 
-The phase runner makes that boundary explicit with preflight fixture assertions:
+1. The control account at mnemonic index 0 approves the portal and deposits the
+   configured bootstrap amount to the sequencer at index 4.
+2. A bootstrap txgen scenario identifies the receipt-scoped `DepositMade` event
+   and waits for the matching Zone `DepositProcessed` event and the L1
+   `BatchSubmitted` commitment for that deposit number. The sequencer is
+   therefore funded by portal-backed tokens, not an artificial Zone-genesis
+   allocation.
+3. The sequencer submits the untimed `ZoneOutbox.setTempoGasRate` transaction,
+   making the withdrawal protocol fee nonzero.
+4. Roundtrip preflight verifies the ready state and renders one user-signed
+   outbox approval per benchmark account. The sequencer sponsors the Zone fees
+   for those approvals, so benchmark users can start with zero Zone balance.
+   Scenario initialization confirms the approvals before measurement begins.
+5. `txgen-tempo auth-token-map` derives a short-lived authorization token for
+   every benchmark sender. The measured scenario submits Zone transactions to
+   the authenticated private RPC on port 8544 while chain, nonce, checkpoint,
+   and log queries use the public endpoint on port 8546.
 
-- `--fixture-state empty`, used for deposit, requires zero recorded and processed
-  deposits, a zero portal token balance, and zero Zone balance for every account
-  in the benchmark pool.
-- `--fixture-state funded`, used for activity and withdrawal, requires at least
-  one recorded deposit, all recorded deposits processed, a nonzero aggregate
-  Zone balance for the pool, and portal escrow at least as large as that balance.
-  The ordinary phase-specific balance and allowance checks still apply to every
-  account.
+Each measured journey leases one pool account and executes:
 
-Consequently, the workflow rejects an activity or withdrawal request in its
-configuration job before reserving the bare-metal runner. Making those phases
-runnable requires a later fixture builder that performs untimed real deposits,
-waits for ingestion, and captures a coordinated L1/Zone state fixture, or an
-equivalent externally prepared fixture. Neither path exists in this change, and
-unbacked Zone genesis balances are not a valid substitute.
+1. a Tempo L1 deposit to that account with a unique random memo;
+2. a wait for its exact `DepositMade` and `DepositProcessed` events;
+3. an ordinary Zone TIP-20 transfer using an expiring nonce;
+4. the exact eight-argument withdrawal request; and
+5. a wait for the corresponding Tempo L1 `WithdrawalProcessed` event.
+
+The preflight fixture assertions distinguish the supported starting points:
+
+- `--fixture-state empty` requires no recorded or processed deposits, no portal
+  escrow, and zero Zone balance for the benchmark pool. It is valid for the
+  bootstrap or independent deposit checks.
+- `--fixture-state ready` requires the control-to-sequencer bootstrap deposit to
+  be processed and backed by portal escrow while every measured benchmark user
+  still has zero Zone balance. It is used for the roundtrip check.
+- `--fixture-state funded` is retained for independent activity, withdrawal, or
+  combined phase runs against a separately prepared pool. It requires deposits
+  to be fully processed, nonzero pool Zone balance, and sufficient portal
+  backing.
+
+Unbacked Zone-genesis balances are not a valid benchmark fixture.
 
 ### Provision and stop the topology manually
 
 Build the Zone and pinned Tempo binaries in an optimized profile, then pass
-their exact paths to the provisioner. To match Tempo's `bloat=100` preset in a
-manual run, set the bloat size to 100000 MiB; direct script invocation defaults to zero so a
-developer can perform a topology smoke test without creating a 100 GiB dump.
+their exact paths to the provisioner. To match the workflow's `bloat=1` preset
+in a manual run, set the L1 bloat size to 1000 MiB. Direct script invocation
+defaults to zero for a faster topology smoke test.
 
 ```bash
 export TEMPO_ROOT="$HOME/projects/tempo"
@@ -118,7 +143,7 @@ export TEMPO_XTASK_BIN="$TEMPO_ROOT/target/maxperf/tempo-xtask"
 export ZONES_BENCH_MNEMONIC='<private mnemonic for this isolated run>'
 export ZONES_BENCH_ACCOUNT_START=16
 export ZONES_BENCH_ACCOUNTS=100
-export ZONES_BENCH_BLOAT_MIB=100000
+export ZONES_BENCH_BLOAT_MIB=1000
 export ZONES_BENCH_TOPOLOGY_DIR="$PWD/target/zones-benchmark/topology"
 export ZONES_BENCH_STATE_A_ROOT='/reth-bench-a/zones-manual-<unique-run-id>'
 export ZONES_BENCH_STATE_B_ROOT='/reth-bench-b/zones-manual-<unique-run-id>'
@@ -130,20 +155,26 @@ source "$ZONES_BENCH_ENV_FILE"
 ```
 
 `up` leaves all three node processes alive. It also configures nonzero portal
-deposit and bounce-back fee rates before declaring the topology ready. The
-withdrawal rate cannot be configured on a fresh Zone because that transaction
-needs Zone fee token. After real deposits fund the sequencer, a future fixture
-builder must run the following untimed setup action before capturing the funded
-fixture:
+deposit and bounce-back fee rates before declaring the topology ready and
+exports both `ZONE_RPC_URL` for public queries and `ZONE_PRIVATE_RPC_URL` for
+authenticated submissions. The withdrawal rate cannot be configured on a fresh
+Zone because that transaction itself needs Zone fee token. The roundtrip setup
+first makes and observes the control-to-sequencer bootstrap deposit, then runs
+this untimed action:
 
 ```bash
 SEQUENCER_KEY='<private sequencer key>' \
   "$ZONES_XTASK_BIN" configure-benchmark-fees \
   --l1-rpc-url "$L1_RPC_URL" \
   --portal "$L1_PORTAL_ADDRESS" \
+  --token "$ZONES_BENCH_TOKEN" \
   --zone-rpc-url "$ZONE_RPC_URL" \
-  --tempo-gas-rate 1
+  --tempo-gas-rate 1 \
+  --zone-tx-gas-limit 2000000
 ```
+
+Pass the sequencer key only through the environment. Do not place it in a
+scenario, rendered artifact, command-line option, or workflow input.
 
 Always stop the recorded processes with the matching PID file:
 
@@ -175,25 +206,39 @@ an upstream Tempo environment- or file-based mnemonic option.
 - queries deposit, bounce-back, and withdrawal fees and deposit status;
 - records both RPC gas-price estimates and floors the default Zone fee caps at
   Tempo's nonzero T0 base fee when a fresh Zone reports a zero estimate;
-- checks token balances and allowances for every benchmark account;
+- checks token balances and allowances for every benchmark account plus the
+  distinct control and sequencer accounts;
 - rejects phase amounts that do not cover protocol and transaction fee budgets;
-- renders all three txgen specs and injects any required untimed approvals; and
+- checks that a roundtrip deposit can cover its Zone activity, withdrawal,
+  protocol fees, and transaction fee caps;
+- calculates the minimum sequencer bootstrap amount needed for fee
+  configuration and sponsored user approvals;
+- renders the independent specs, bootstrap and roundtrip workloads, both
+  scenario documents, and the minimal event ABIs;
+- injects required portal approvals and sequencer-sponsored outbox approvals as
+  untimed txgen setup transactions; and
 - writes a non-secret `preflight.json` report.
 
 It does not create a Zone, fund an account, submit an approval or workload
-transaction, wait for cross-chain state, or run txgen. The workflow calls it
-only after the separate topology provisioner has created and started the Zone.
+transaction, wait for cross-chain state, or run txgen. The roundtrip runner
+invokes it before and after the separate bootstrap scenario; txgen performs the
+submissions and event waits.
 
 ## Prerequisites
 
-Install compatible `txgen-tempo` and `bench` binaries from an explicitly pinned
-revision of the public `tempoxyz/txgen` repository:
+Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
+this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='<approved txgen commit>'
+export TXGEN_REV='f1fe55ea308b7f44b81bbc2322992a71d4522a03'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
+
+That commit is currently reachable through the public
+`tempoxyz/txgen:dan/zones-716-txgen` branch. The branch must remain reachable for
+fresh `cargo install --rev` operations until the required txgen changes merge;
+afterward this workflow should be repinned to their reachable merge commit.
 
 The render/generation compatibility test can be run with:
 
@@ -212,56 +257,163 @@ export ZONES_BENCH_MNEMONIC='your secret benchmark mnemonic'
 source target/zones-benchmark/topology.env
 ```
 
-There is no fallback mnemonic or public write endpoint. The provisioner funds
-the derived pool in the isolated Tempo genesis. Use real deposits to prepare the
-corresponding Zone balances before the activity or withdrawal phase; preflight
-fails instead of silently funding or bridging an account.
+There is no fallback mnemonic, public test mnemonic, public write endpoint, or
+mainnet write endpoint. The provisioner funds the derived pool only inside the
+isolated Tempo genesis. The roundtrip uses real deposits for every Zone balance;
+preflight fails instead of silently funding or bridging an account.
 
 ## Run preflight
 
-Run all checks and render all workload specs with:
+On a newly provisioned topology, first validate the empty state and render the
+bootstrap assets:
 
 ```bash
+journeys_per_account=$((
+  (ZONES_BENCH_COUNT + ZONES_BENCH_ACCOUNTS - 1) / ZONES_BENCH_ACCOUNTS
+))
+
 cargo run -p tempo-xtask -- benchmark-preflight \
   --l1-rpc-url "$L1_RPC_URL" \
   --zone-rpc-url "$ZONE_RPC_URL" \
   --token "$ZONES_BENCH_TOKEN" \
-  --accounts 100 \
-  --deposit-amount 1000000 \
-  --activity-amount 1 \
-  --withdrawal-amount 1000000 \
-  --transactions-per-account 100 \
-  --check-phase deposit \
+  --account-start "$ZONES_BENCH_ACCOUNT_START" \
+  --accounts "$ZONES_BENCH_ACCOUNTS" \
+  --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
+  --activity-amount "$ZONES_BENCH_ACTIVITY_AMOUNT" \
+  --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
+  --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" \
+  --transactions-per-account "$journeys_per_account" \
+  --check-phase bootstrap \
   --fixture-state empty \
   --output target/zones-benchmark
 ```
 
 Pass `--zone-dir generated/<zone>` when generated Zone metadata should be used
-to resolve and cross-check the deployed addresses. Use `--check-phase deposit`
-with `--fixture-state empty` for the fresh topology. A separately prepared real
-deposit fixture uses `--check-phase activity` or `withdrawal` with
-`--fixture-state funded`. Preflight always queries and reports both networks and
-renders all three specs, but injects approval setup only for the selected phase.
-The output directory contains `deposit.yml`, `zone-activity.yml`,
-`withdrawal.yml`, `preflight.json`, and the `abis/` files referenced by the
-specs.
+to resolve and cross-check the deployed addresses. After the bootstrap deposit
+has reached the Zone and the sequencer has configured the nonzero outbox rate,
+rerun the same command with `--check-phase roundtrip --fixture-state ready`.
+A separately prepared real deposit fixture uses `--check-phase activity`,
+`withdrawal`, or `all` with `--fixture-state funded`.
+
+Preflight always queries and reports both networks. The selected check controls
+which balance capacity and approval setup actions are enforced. Its output
+contains `deposit.yml`, `zone-activity.yml`, `withdrawal.yml`,
+`bootstrap-deposit.yml`, `zone-roundtrip.yml`, `bootstrap-scenario.yml`,
+`roundtrip-scenario.yml`, `preflight.json`, and their minimal ABI artifacts.
 
 Set `--transactions-per-account` to a conservative upper bound for how many
-measured transactions any one account may send. Preflight uses that capacity
-when checking token balances, transaction-fee headroom, and allowances; its
-default is one. The current txgen pool supports random or fixed-index selection,
-not round-robin selection, so no per-account maximum below the full transaction
-count is guaranteed. The phase runner therefore budgets the full count for every
-account. A lower manual value is a probabilistic capacity assumption. For
-expiring Zone activity, preflight also budgets txgen's monotonic fee-cap
-uniqueness bump through the configured transaction capacity.
+measured journeys or transactions any one account may send. Preflight uses that
+capacity when checking token balances, transaction-fee headroom, and allowances;
+its default is one. The roundtrip scenario uses leased accounts and requires
+`--max-in-flight` not to exceed the account pool; budget the maximum number of
+journeys that can reuse any one account. Independent phase specs select senders
+randomly, so the phase runner conservatively budgets the full transaction count
+for every account. For expiring Zone activity, preflight also budgets txgen's
+monotonic fee-cap uniqueness bump through the configured capacity.
 
-When an approval is needed, the rendered deposit or withdrawal spec includes it
-as a txgen setup transaction. `bench send` submits setup transactions and waits
-for their inclusion before it starts workload timing. Keep `--rpc` on the
-`txgen-tempo generate` command so these regular-nonce setup transactions start
-from the account's current protocol nonce. Use one write RPC for a phase that
-contains setup approvals.
+When an approval is needed, the rendered workload includes it as a txgen setup
+transaction. Scenario initialization or `bench send` submits setup transactions
+and confirms them before measurement starts. Roundtrip outbox approvals are
+signed by each benchmark user and fee-sponsored by the bootstrapped sequencer.
+Keep `--rpc` on independent `txgen-tempo generate` commands so regular-nonce
+setup transactions start from the account's current protocol nonce.
+
+## Run the full roundtrip
+
+With the topology environment loaded, the supported entry point performs the
+entire bootstrap, preflight, authorization, and measured sequence:
+
+```bash
+export ZONES_BENCH_SEED='<unique unsigned integer>'
+export ZONES_BENCH_ACCOUNTS=100
+export ZONES_BENCH_COUNT=1000
+export ZONES_BENCH_TPS=10
+export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_DEPOSIT_AMOUNT=2000000
+export ZONES_BENCH_ACTIVITY_AMOUNT=1
+export ZONES_BENCH_WITHDRAWAL_AMOUNT=1000000
+export ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT=10000000
+
+contrib/bench/run-roundtrip.sh
+```
+
+The runner calculates `ceil(count / accounts)` for preflight's per-account
+journey capacity, refuses more concurrent journeys than leased accounts, keeps
+the mnemonic and sequencer key out of argv, validates both scenario reports,
+and deletes its authorization map on exit.
+
+The equivalent stages are described below for diagnosis or controlled manual
+execution.
+
+After the empty/bootstrap preflight above, run the one-instance bootstrap
+scenario. It is setup traffic and is not part of the measured roundtrip report:
+
+```bash
+txgen-tempo scenario run \
+  --scenario target/zones-benchmark/bootstrap-scenario.yml \
+  --count 1 \
+  --max-in-flight 1 \
+  --seed "$ZONES_BENCH_SEED" \
+  --failure-policy fail-fast \
+  --report target/zones-benchmark/bootstrap-report.json
+```
+
+After that command has observed `DepositProcessed`, configure the nonzero
+withdrawal rate with the sequencer key through the environment, then rerun
+preflight with `--check-phase roundtrip --fixture-state ready`. The second
+preflight verifies that measured users still start with zero Zone balance, that
+the sequencer can sponsor every required approval, and that each measured
+deposit can pay for the activity and withdrawal that follow it.
+
+Generate the private-RPC sender map from the rendered user pool. Keep the map in
+a mode-0700 temporary directory outside the uploaded artifact tree;
+`auth-token-map` creates and atomically refreshes the file with mode 0600. Watch
+mode is needed when a run can outlive the initial token TTL.
+
+```bash
+auth_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-benchmark-auth.XXXXXX")"
+chmod 700 "$auth_dir"
+export ZONES_BENCH_ZONE_AUTH_MAP="$auth_dir/zone-auth.json"
+
+txgen-tempo auth-token-map \
+  --spec target/zones-benchmark/zone-roundtrip.yml \
+  --pool users \
+  --zone-id "$ZONES_BENCH_EXPECTED_ZONE_ID" \
+  --chain-id "$ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID" \
+  --ttl-secs 600 \
+  --refresh-before-secs 30 \
+  --watch \
+  --output "$ZONES_BENCH_ZONE_AUTH_MAP" &
+auth_map_pid=$!
+```
+
+Do not print, upload, or include the authorization map in the workflow summary.
+The map contains bearer-equivalent sender credentials even though it contains
+neither the mnemonic nor raw private keys.
+
+Once the initial map exists, start the measured scenario:
+
+```bash
+txgen-tempo scenario run \
+  --scenario target/zones-benchmark/roundtrip-scenario.yml \
+  --count "$ZONES_BENCH_COUNT" \
+  --starts-per-second "$ZONES_BENCH_TPS" \
+  --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
+  --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
+  --seed "$ZONES_BENCH_SEED" \
+  --failure-policy continue \
+  --report target/zones-benchmark/roundtrip-report.json
+
+kill "$auth_map_pid"
+wait "$auth_map_pid" || true
+rm -f -- "$ZONES_BENCH_ZONE_AUTH_MAP"
+rmdir -- "$auth_dir"
+```
+
+For a scenario, `--starts-per-second` is the number of complete journeys
+started per second, not raw transaction TPS. `--tx-rate` can independently cap
+submissions on each chain when that is useful. Each journey holds its leased
+account until its terminal L1 withdrawal event or failure.
 
 ## Run one phase
 
@@ -281,9 +433,10 @@ contrib/bench/run-phase.sh deposit
 # or: contrib/bench/run-phase.sh withdrawal
 ```
 
-Only `deposit` is valid immediately after `provision-topology.sh up`.
-`activity` and `withdrawal` are independent entry points for a later, verified
-funded fixture; they are not a phase chain.
+`deposit` is valid against the empty topology. `activity` and `withdrawal` are
+independent entry points for a verified, portal-backed funded fixture; they are
+not an implicit phase chain. Use the roundtrip scenario above when the benchmark
+should perform and time the complete L1 -> Zone -> L1 journey itself.
 
 Use a different seed for each run. A fixed seed repeats correlation memos across
 runs, even though memos remain distinct within one generated stream. The runner
@@ -317,7 +470,8 @@ txgen-tempo generate \
 The rendered spec uses the queried Zone chain ID and pays gas in the configured
 enabled TIP-20. Activity transactions use expiring nonces with a 25-second
 validity window, so they must be streamed into `bench send`; do not generate a
-file for later replay.
+file for later replay. For production-shaped private submission, generate a
+sender map from this spec's `users` pool as shown in the roundtrip section.
 
 ```bash
 txgen-tempo generate \
@@ -326,7 +480,10 @@ txgen-tempo generate \
   --seed "$ZONES_BENCH_SEED" \
   --rpc "$ZONE_RPC_URL" \
 | bench send \
-  --rpc-url "$ZONE_RPC_URL" \
+  --rpc-url "$ZONE_PRIVATE_RPC_URL" \
+  --query-rpc-url "$ZONE_RPC_URL" \
+  --sender-header-name X-Authorization-Token \
+  --sender-header-map "$ZONES_BENCH_ZONE_AUTH_MAP" \
   --tps "$ZONES_BENCH_TPS" \
   --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT"
 ```
@@ -346,34 +503,45 @@ txgen-tempo generate \
   --seed "$ZONES_BENCH_SEED" \
   --rpc "$ZONE_RPC_URL" \
 | bench send \
-  --rpc-url "$ZONE_RPC_URL" \
+  --rpc-url "$ZONE_PRIVATE_RPC_URL" \
+  --query-rpc-url "$ZONE_RPC_URL" \
+  --sender-header-name X-Authorization-Token \
+  --sender-header-map "$ZONES_BENCH_ZONE_AUTH_MAP" \
   --tps "$ZONES_BENCH_TPS" \
   --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT"
 ```
 
 ## GitHub workflow
 
-`.github/workflows/zones-benchmark.yml` runs one selected phase on the same
-private `bare-metal-dual-schelk` runner class used by Tempo's e2e benchmark. It
-does not use a GitHub Actions environment, a pre-existing Zone, or configured
-write RPCs. Each job:
+`.github/workflows/zones-benchmark.yml` runs a self-provisioned roundtrip or an
+independent deposit workload on the private `bare-metal-dual-schelk` runner
+class used by Tempo's e2e benchmark. It does not use a GitHub Actions
+environment, a pre-existing Zone, or an externally configured write RPC. Each
+job:
 
 1. restores the two isolated Schelk volumes and assigns unique state roots;
-2. checks out exact Tempo and txgen revisions and builds max-performance Tempo
-   and Zone binaries;
-3. generates a private 24-word mnemonic for the run unless the optional
-   `ZONES_BENCH_MNEMONIC` repository secret is set;
-4. generates the two-validator L1, optionally imports the requested four-token
-   state bloat into both databases, creates the Zone, and starts all nodes;
-5. runs one preflight/generate/send phase; and
-6. uploads the rendered files, report, and node logs before stopping the nodes
-   and restoring the benchmark volumes.
+2. checks out the exact Tempo revision and txgen commit
+   `f1fe55ea308b7f44b81bbc2322992a71d4522a03`, then builds max-performance
+   Tempo and Zone binaries;
+3. generates a fresh private 24-word mnemonic for the run;
+4. generates the two-validator L1, optionally imports the selected four-token
+   state bloat into both L1 databases, creates an unbloated real Zone, and
+   starts all nodes;
+5. for `roundtrip`, performs the real control-to-sequencer bootstrap deposit and
+   waits for its `DepositProcessed` and L1 `BatchSubmitted` events, configures
+   the nonzero outbox fee, creates the short-lived sender-auth map, confirms
+   sponsored user approvals, and runs the measured
+   deposit -> wait -> activity -> withdrawal -> wait scenario;
+6. for `deposit`, runs the independent preflight/generate/bench pipeline; and
+7. uploads rendered non-secret assets, JSON reports, and node logs before
+   stopping the nodes and restoring the benchmark volumes.
 
-Tempo and txgen are checked out from their public repositories at exact commits,
-so the workflow requires no dependency-access secret. No benchmark mnemonic,
-portal, chain ID, token, target ID, RPC URL, or metrics URL needs to be configured
-externally. Repository or organization Actions administrators must make the
-`bare-metal-dual-schelk` runner label available to this repository.
+Tempo and txgen are fetched from public repositories at exact commits, so no
+dependency-access secret is required. No mnemonic, portal, chain ID, token,
+target ID, or RPC URL needs to be configured externally. The workflow never
+selects a public test mnemonic or a public/mainnet write endpoint. Its private
+sender-auth map is created outside the artifact tree with mode 0600 and deleted
+on exit.
 
 After the workflow exists on the default branch, dispatch it from the Actions
 UI or CLI and select the branch/ref to test:
@@ -381,23 +549,43 @@ UI or CLI and select the branch/ref to test:
 ```bash
 gh workflow run zones-benchmark.yml \
   --ref '<branch-or-tag>' \
-  -f phase=deposit \
+  -f phase=roundtrip \
   -f accounts=100 \
   -f count=1000 \
-  -f tps=100 \
-  -f state-bloat-gib=100
+  -f tps=10 \
+  -f state-bloat-gib=1
 ```
 
 GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
-file exists on the default branch. For a same-repository draft PR, create and
-apply `zones-benchmark-deposit` to opt into the PR-label trigger with workflow
-defaults. The authorization job requires both the labeler and PR author to have
-repository write access and rejects fork PRs. The phase runner can also be
-executed directly on the benchmark host while the workflow is under review.
+file exists on the default branch. For a same-repository draft PR, apply
+`zones-benchmark-roundtrip` or `zones-benchmark-deposit` to opt into the matching
+PR-label trigger with workflow defaults. The authorization job requires both
+the labeler and PR author to have repository write access and rejects fork PRs.
+Use `zones-benchmark-roundtrip-smoke` to run the same real bootstrap and complete
+scenario with one account, one journey, and no state bloat. The smoke path
+validates topology and txgen integration without claiming a benchmark result.
+The scripts can also be executed directly on the benchmark host while the
+workflow is under review.
 
-Every run uploads its rendered specs, `preflight.json`, and bench JSON report.
-Although the dispatch form exposes activity and withdrawal choices so their
-wiring can be reviewed, the authorization/configuration job rejects them with a
-funded-fixture error before using the bare-metal runner. Do not treat either
-phase as workflow-runnable until coordinated funded-fixture creation and restore
-support is added.
+Activity and withdrawal are intentionally not dispatch choices because this
+self-provisioning workflow starts from a fresh pool with no pre-existing Zone
+balance. Run their independent assets manually against a fixture that passes
+`--fixture-state funded`, or select `roundtrip` to create balances within each
+measured journey.
+
+### Current scenario reporting limits
+
+The txgen scenario engine accepts one submission URL per named chain. This
+workflow submits measured L1 user transactions through validator A and uses
+validator B for aggregate queries; unlike the independent deposit pipeline, it
+does not spread L1 submissions across both validators.
+
+Scenario mode writes its journey and per-step latency JSON report, but it does
+not scrape the node metric endpoints and has no ClickHouse benchmark reporter.
+The workflow therefore uploads the scenario report and node logs without
+claiming the node-metric/ClickHouse reporting available to Tempo's existing
+single-chain benchmark harness.
+
+Finally, the pinned txgen commit is on an unmerged branch. The branch must remain
+reachable until those changes merge and this workflow is repinned to a
+reachable merge commit.

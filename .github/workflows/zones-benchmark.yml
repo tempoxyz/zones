@@ -1,41 +1,40 @@
-name: Zones benchmark phase
+name: Zones benchmark
 
 on:
   workflow_dispatch:
     inputs:
       phase:
-        description: Independent benchmark phase to run.
+        description: Benchmark workload to run.
         type: choice
         required: true
         options:
+          - roundtrip
           - deposit
-          - activity
-          - withdrawal
       accounts:
         description: Number of benchmark accounts.
         type: string
         required: true
         default: "100"
       count:
-        description: Number of measured transactions.
+        description: Number of measured transactions, or complete journeys for roundtrip.
         type: string
         required: true
         default: "1000"
       tps:
-        description: Target transactions per second.
+        description: Target phase TPS, or journey starts per second for roundtrip.
         type: string
         required: true
-        default: "100"
+        default: "10"
       max-concurrent:
-        description: Maximum concurrent sender requests.
+        description: Maximum concurrent transactions, or leased journeys for roundtrip.
         type: string
         required: true
         default: "100"
       state-bloat-gib:
-        description: Tempo TIP-20 state bloat per validator (100 matches Tempo e2e).
+        description: Tempo L1 TIP-20 state bloat per validator; never applied to the Zone.
         type: choice
         required: true
-        default: "100"
+        default: "1"
         options:
           - "0"
           - "1"
@@ -45,7 +44,12 @@ on:
         description: Gross amount for each L1 deposit.
         type: string
         required: true
-        default: "1000000"
+        default: "2000000"
+      bootstrap-deposit-amount:
+        description: Untimed control-to-sequencer deposit used for fee setup and approval sponsorship.
+        type: string
+        required: true
+        default: "10000000"
       activity-amount:
         description: Amount for each ordinary Zone TIP-20 transfer.
         type: string
@@ -56,29 +60,9 @@ on:
         type: string
         required: true
         default: "1000000"
-      drain-timeout:
-        description: Seconds bench waits for txpool drain; zero disables the check.
-        type: string
-        required: true
-        default: "300"
-      seed:
-        description: Optional txgen seed. Empty derives one from the workflow run.
-        type: string
-        required: false
-        default: ""
-      tempo-ref:
-        description: Exact tempoxyz/tempo revision used for the L1 validators.
-        type: string
-        required: true
-        default: 436f6cf069a0c8aafa9a3a197ffa17488b5f1e81
-      txgen-ref:
-        description: Exact tempoxyz/txgen revision to install.
-        type: string
-        required: true
-        default: 4a852e33965dce5e58c7aeb01d0b592f98159e53
 
   # workflow_dispatch is unavailable until this file reaches the default branch.
-  # A repository member can label a same-repository draft PR to run one phase.
+  # A repository member can label a same-repository draft PR to run the benchmark.
   pull_request:
     types: [labeled]
 
@@ -104,7 +88,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       contains(fromJSON('["zones-benchmark-deposit","zones-benchmark-activity","zones-benchmark-withdrawal"]'), github.event.label.name))
+       contains(fromJSON('["zones-benchmark-roundtrip","zones-benchmark-roundtrip-smoke","zones-benchmark-deposit"]'), github.event.label.name))
     runs-on: ubuntu-latest
     outputs:
       phase: ${{ steps.config.outputs.phase }}
@@ -115,6 +99,7 @@ jobs:
       max-concurrent: ${{ steps.config.outputs.max-concurrent }}
       state-bloat-gib: ${{ steps.config.outputs.state-bloat-gib }}
       deposit-amount: ${{ steps.config.outputs.deposit-amount }}
+      bootstrap-deposit-amount: ${{ steps.config.outputs.bootstrap-deposit-amount }}
       activity-amount: ${{ steps.config.outputs.activity-amount }}
       withdrawal-amount: ${{ steps.config.outputs.withdrawal-amount }}
       drain-timeout: ${{ steps.config.outputs.drain-timeout }}
@@ -159,16 +144,17 @@ jobs:
           INPUT_PHASE: ${{ inputs.phase }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
           INPUT_COUNT: ${{ inputs.count || '1000' }}
-          INPUT_TPS: ${{ inputs.tps || '100' }}
+          INPUT_TPS: ${{ inputs.tps || '10' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
-          INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '100' }}
-          INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '1000000' }}
+          INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
+          INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
+          INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
           INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
-          INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
-          INPUT_SEED: ${{ inputs.seed }}
-          INPUT_TEMPO_REF: ${{ inputs.tempo-ref || '436f6cf069a0c8aafa9a3a197ffa17488b5f1e81' }}
-          INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '4a852e33965dce5e58c7aeb01d0b592f98159e53' }}
+          INPUT_DRAIN_TIMEOUT: "300"
+          INPUT_SEED: ""
+          INPUT_TEMPO_REF: 436f6cf069a0c8aafa9a3a197ffa17488b5f1e81
+          INPUT_TXGEN_REF: f1fe55ea308b7f44b81bbc2322992a71d4522a03
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -177,15 +163,19 @@ jobs:
           phase="$INPUT_PHASE"
           if [ "$EVENT_NAME" = pull_request ]; then
             phase="${EVENT_LABEL#zones-benchmark-}"
+            if [ "$phase" = roundtrip-smoke ]; then
+              phase=roundtrip
+              INPUT_ACCOUNTS=1
+              INPUT_COUNT=1
+              INPUT_TPS=1
+              INPUT_MAX_CONCURRENT=1
+              INPUT_STATE_BLOAT_GIB=0
+            fi
           fi
           case "$phase" in
-            deposit|activity|withdrawal) ;;
+            roundtrip|deposit) ;;
             *) echo "::error::unsupported benchmark phase: $phase"; exit 1 ;;
           esac
-          if [ "$phase" != deposit ]; then
-            echo "::error::$phase requires a coordinated funded L1+Zone fixture. Building that fixture needs real deposits and cross-chain state waiting, which is intentionally outside this PR. Run the rendered phase manually against a fixture that passes --fixture-state funded."
-            exit 1
-          fi
 
           if [ -z "$INPUT_SEED" ]; then
             INPUT_SEED=$((10#$RUN_ID * 100000 + 10#$RUN_ATTEMPT))
@@ -193,7 +183,8 @@ jobs:
           for name in \
             INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT \
             INPUT_STATE_BLOAT_GIB INPUT_DEPOSIT_AMOUNT INPUT_ACTIVITY_AMOUNT \
-            INPUT_WITHDRAWAL_AMOUNT INPUT_DRAIN_TIMEOUT INPUT_SEED
+            INPUT_WITHDRAWAL_AMOUNT INPUT_BOOTSTRAP_DEPOSIT_AMOUNT \
+            INPUT_DRAIN_TIMEOUT INPUT_SEED
           do
             if ! [[ "${!name}" =~ ^[0-9]+$ ]]; then
               echo "::error::$name must be an unsigned integer"
@@ -201,11 +192,26 @@ jobs:
             fi
           done
           for name in INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT; do
-            if (( 10#${!name} == 0 )); then
+            value="${!name}"
+            if (( ${#value} > 9 || 10#$value == 0 )); then
+              echo "::error::$name must be between 1 and 999999999"
+              exit 1
+            fi
+          done
+          for name in \
+            INPUT_DEPOSIT_AMOUNT INPUT_BOOTSTRAP_DEPOSIT_AMOUNT \
+            INPUT_ACTIVITY_AMOUNT INPUT_WITHDRAWAL_AMOUNT
+          do
+            if ! [[ "${!name}" =~ ^0*[1-9][0-9]*$ ]]; then
               echo "::error::$name must be greater than zero"
               exit 1
             fi
           done
+          if [ "$phase" = roundtrip ] \
+            && (( 10#$INPUT_MAX_CONCURRENT > 10#$INPUT_ACCOUNTS )); then
+            echo "::error::max-concurrent cannot exceed accounts for roundtrip leases"
+            exit 1
+          fi
           case "$INPUT_STATE_BLOAT_GIB" in 0|1|10|100) ;; *) exit 1 ;; esac
           for name in INPUT_TEMPO_REF INPUT_TXGEN_REF; do
             if ! [[ "${!name}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -223,6 +229,7 @@ jobs:
             echo "max-concurrent=$INPUT_MAX_CONCURRENT"
             echo "state-bloat-gib=$INPUT_STATE_BLOAT_GIB"
             echo "deposit-amount=$INPUT_DEPOSIT_AMOUNT"
+            echo "bootstrap-deposit-amount=$INPUT_BOOTSTRAP_DEPOSIT_AMOUNT"
             echo "activity-amount=$INPUT_ACTIVITY_AMOUNT"
             echo "withdrawal-amount=$INPUT_WITHDRAWAL_AMOUNT"
             echo "drain-timeout=$INPUT_DRAIN_TIMEOUT"
@@ -237,7 +244,6 @@ jobs:
     runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
     timeout-minutes: 300
     env:
-      CONFIGURED_BENCH_MNEMONIC: ${{ secrets.ZONES_BENCH_MNEMONIC }}
       ZONES_BENCH_PHASE: ${{ needs.authorize.outputs.phase }}
       ZONES_BENCH_ACCOUNTS: ${{ needs.authorize.outputs.accounts }}
       ZONES_BENCH_COUNT: ${{ needs.authorize.outputs.count }}
@@ -246,6 +252,7 @@ jobs:
       ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT: ${{ needs.authorize.outputs.count }}
       ZONES_BENCH_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
       ZONES_BENCH_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.deposit-amount }}
+      ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.bootstrap-deposit-amount }}
       ZONES_BENCH_ACTIVITY_AMOUNT: ${{ needs.authorize.outputs.activity-amount }}
       ZONES_BENCH_WITHDRAWAL_AMOUNT: ${{ needs.authorize.outputs.withdrawal-amount }}
       ZONES_BENCH_DRAIN_TIMEOUT: ${{ needs.authorize.outputs.drain-timeout }}
@@ -291,13 +298,10 @@ jobs:
           echo "ZONES_BENCH_STATE_A_ROOT=/reth-bench-a/zones-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
           echo "ZONES_BENCH_STATE_B_ROOT=/reth-bench-b/zones-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
 
-      - name: Generate private run identities
+      - name: Generate ephemeral private run identities
         run: |
           set -euo pipefail
-          mnemonic="$CONFIGURED_BENCH_MNEMONIC"
-          if [ -z "$mnemonic" ]; then
-            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
-          fi
+          mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
           if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
             echo "::error::benchmark mnemonic is empty or the public Tempo development mnemonic"
             exit 1
@@ -335,12 +339,12 @@ jobs:
             cargo test --profile maxperf -p tempo-xtask \
               txgen_generates_representative_local_transactions_when_installed
 
-      - name: Provision topology and run ${{ needs.authorize.outputs.phase }} phase
+      - name: Provision topology and run ${{ needs.authorize.outputs.phase }} workload
         env:
           ZONES_BENCH_CPUSET: 14-15,30-31
         run: |
           set -euo pipefail
-          # Match pinned Tempo bench-e2e's decimal GiB-to-MiB preset conversion.
+          # Match pinned Tempo bench-e2e's decimal bloat-preset-to-MiB conversion.
           export ZONES_BENCH_BLOAT_MIB=$((10#$ZONES_BENCH_BLOAT_GIB * 1000))
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
           contrib/bench/provision-topology.sh up
@@ -349,7 +353,8 @@ jobs:
           source "$ZONES_BENCH_TOPOLOGY_ENV"
           set +a
           for name in \
-            L1_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS ZONE_RPC_URL L1_PORTAL_ADDRESS \
+            L1_RPC_URL ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS \
+            ZONE_RPC_URL ZONE_PRIVATE_RPC_URL L1_PORTAL_ADDRESS \
             ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
             ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
             ZONES_BENCH_L1_GAS_LIMIT \
@@ -358,21 +363,31 @@ jobs:
           do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
-          contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
+          if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+            contrib/bench/run-roundtrip.sh
+          else
+            contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
+          fi
 
       - name: Write job summary
         if: success()
         env:
           SUMMARY_STATE_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
         run: |
+          unit=Transactions
+          rate="Target TPS"
+          if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+            unit=Journeys
+            rate="Target journey starts/s"
+          fi
           {
             echo "### Zones benchmark"
             echo
             echo "- Phase: \`$ZONES_BENCH_PHASE\`"
-            echo "- Transactions: \`$ZONES_BENCH_COUNT\`"
-            echo "- Target TPS: \`$ZONES_BENCH_TPS\`"
+            echo "- $unit: \`$ZONES_BENCH_COUNT\`"
+            echo "- $rate: \`$ZONES_BENCH_TPS\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
-            echo "- Tempo state bloat: \`$SUMMARY_STATE_BLOAT_GIB GiB\`"
+            echo "- Tempo L1 state bloat: \`bloat=$SUMMARY_STATE_BLOAT_GIB\` (\`$((10#$SUMMARY_STATE_BLOAT_GIB * 1000)) MiB\` per validator)"
             echo "- Target: \`$ZONES_BENCH_TARGET_ID\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
@@ -385,12 +400,15 @@ jobs:
             cp -R "$ZONES_BENCH_TOPOLOGY_DIR/logs" target/zones-benchmark/node-logs
           fi
 
-      - name: Upload specs, identities, logs, and report
+      - name: Upload specs, logs, and reports
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zones-benchmark-${{ needs.authorize.outputs.phase }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/zones-benchmark/
+          path: |
+            target/zones-benchmark/${{ needs.authorize.outputs.phase }}/
+            target/zones-benchmark/*.json
+            target/zones-benchmark/node-logs/
           if-no-files-found: warn
           retention-days: 14
 
