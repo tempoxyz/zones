@@ -134,7 +134,7 @@ jobs:
                 repo: context.repo.repo,
                 username,
               });
-              return response.data.user.permission;
+              return response.data.permission;
             };
 
             const labeler = context.actor;
