@@ -18,22 +18,10 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, TempoTxEnv, evm::TempoContext};
+use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 
 use crate::{ZoneEvm, tx_context};
-
-/// Removes context that is only valid for speculative transaction prewarming.
-///
-/// Tempo's payload iterator annotates expiring-nonce transactions with their
-/// position in the block so isolated prewarming touches the eventual nonce-ring
-/// slots. Serial block execution must use the state left by prior transactions
-/// instead.
-fn clear_prewarming_context(tx_env: &mut TempoTxEnv) {
-    if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
-        tempo_tx_env.expiring_nonce_idx = None;
-    }
-}
 
 /// Simplified block executor for zone nodes.
 ///
@@ -110,7 +98,10 @@ where
         tx: impl ExecutableTx<Self>,
     ) -> Result<Self::Result, BlockExecutionError> {
         let (mut tx_env, recovered) = tx.into_parts();
-        clear_prewarming_context(&mut tx_env);
+        // Remove any prewarming-specific context that was added to the tx env.
+        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+            tempo_tx_env.expiring_nonce_idx = None;
+        }
 
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
@@ -146,7 +137,6 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::clear_prewarming_context;
     use alloy_primitives::{Address, U256};
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
@@ -167,7 +157,9 @@ mod tests {
             ..Default::default()
         };
 
-        clear_prewarming_context(&mut tx_env);
+        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+            tempo_tx_env.expiring_nonce_idx = None;
+        }
 
         let tempo_tx_env = tx_env.tempo_tx_env.unwrap();
         assert_eq!(tempo_tx_env.expiring_nonce_idx, None);
