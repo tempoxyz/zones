@@ -41,6 +41,16 @@ scenario:
         template: bootstrap_deposit
         with:
           from: { var: account.ref }
+          # Scenario bindings are materialized through `with`; repeat the
+          # account-dependent call arguments instead of leaving workload
+          # sequence variables in the base template.
+          call:
+            args:
+              - "__TOKEN__"
+              - "__SEQUENCER__"
+              - __BOOTSTRAP_DEPOSIT_AMOUNT__
+              - random_bytes: 32
+              - var: account.address
       save: deposit
 
     # The receipt-scoped event captures the randomly generated memo and the

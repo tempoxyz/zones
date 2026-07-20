@@ -1941,6 +1941,14 @@ mod tests {
             .as_sequence()
             .unwrap();
         assert_eq!(bootstrap_steps.len(), 6);
+        assert_eq!(
+            bootstrap_steps[2]["submit"]["with"]["call"]["args"][1],
+            config.sequencer.to_string()
+        );
+        assert_eq!(
+            bootstrap_steps[2]["submit"]["with"]["call"]["args"][4]["var"],
+            "account.address"
+        );
         assert_eq!(bootstrap_steps[4]["wait_log"]["event"], "DepositProcessed");
         assert_eq!(bootstrap_steps[5]["wait_log"]["event"], "BatchSubmitted");
 
