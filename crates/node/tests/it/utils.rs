@@ -1886,6 +1886,7 @@ impl L1TestNode {
             )
             .apply(|mut c| {
                 c.dev.block_time = Some(Duration::from_millis(500));
+                c.dev.finality_depth = std::num::NonZeroUsize::MIN;
                 c
             });
 
