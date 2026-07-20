@@ -266,6 +266,7 @@ crate::sol! {
         // -- View functions (token management) --
 
         function isTokenEnabled(address token) external view returns (bool);
+        function areDepositsActive(address token) external view returns (bool);
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);

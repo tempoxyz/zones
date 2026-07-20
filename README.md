@@ -123,7 +123,7 @@ just check-balance-private my-zone <token-address>
 ```
 
 
-See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references.
+See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references. Benchmark transaction generation is documented in [docs/ZONES_BENCHMARK.md](docs/ZONES_BENCHMARK.md).
 
 <br> 
 

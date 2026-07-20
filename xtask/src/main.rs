@@ -1,14 +1,15 @@
 //! xtask is a Swiss army knife of tools that help with running and testing tempo.
 use crate::{
-    create_zone::CreateZone, demo_blacklist::DemoBlacklist,
-    demo_swap_and_deposit::DemoSwapAndDeposit, deploy_router::DeployRouter,
-    encrypted_deposit::EncryptedDeposit, generate_p2p_key::GenerateP2pKey,
-    generate_zone_genesis::GenerateZoneGenesis, set_encryption_key::SetEncryptionKey,
-    spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
+    benchmark_preflight::BenchmarkPreflight, create_zone::CreateZone,
+    demo_blacklist::DemoBlacklist, demo_swap_and_deposit::DemoSwapAndDeposit,
+    deploy_router::DeployRouter, encrypted_deposit::EncryptedDeposit,
+    generate_p2p_key::GenerateP2pKey, generate_zone_genesis::GenerateZoneGenesis,
+    set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
 
+mod benchmark_preflight;
 mod create_zone;
 mod demo_blacklist;
 mod demo_swap_and_deposit;
@@ -29,6 +30,7 @@ async fn main() -> eyre::Result<()> {
 
     let args = Args::parse();
     match args.action {
+        Action::BenchmarkPreflight(args) => args.run().await.wrap_err("benchmark preflight failed"),
         Action::CreateZone(args) => args.run().await.wrap_err("failed to create zone"),
         Action::DemoBlacklist(args) => args.run().await.wrap_err("failed to run blacklist demo"),
         Action::DemoSwapAndDeposit(args) => args
@@ -62,6 +64,7 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Action {
+    BenchmarkPreflight(BenchmarkPreflight),
     CreateZone(CreateZone),
     DemoBlacklist(DemoBlacklist),
     DemoSwapAndDeposit(DemoSwapAndDeposit),

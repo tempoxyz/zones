@@ -1,0 +1,35 @@
+[
+  {
+    "type": "function",
+    "name": "deposit",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "token",
+        "type": "address"
+      },
+      {
+        "name": "to",
+        "type": "address"
+      },
+      {
+        "name": "amount",
+        "type": "uint128"
+      },
+      {
+        "name": "memo",
+        "type": "bytes32"
+      },
+      {
+        "name": "bouncebackRecipient",
+        "type": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "newCurrentDepositQueueHash",
+        "type": "bytes32"
+      }
+    ]
+  }
+]

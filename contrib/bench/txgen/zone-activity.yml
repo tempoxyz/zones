@@ -1,0 +1,39 @@
+chain_id: __ZONE_CHAIN_ID__
+
+gas:
+  max_fee_per_gas: __ZONE_MAX_FEE_PER_GAS__
+  max_priority_fee_per_gas: __ZONE_MAX_PRIORITY_FEE_PER_GAS__
+
+accounts:
+  users:
+    mnemonic: "${ZONES_BENCH_MNEMONIC}"
+    range: [__ACCOUNT_START__, __ACCOUNT_END__]
+
+artifacts:
+  TIP20: abis/tip20.json
+
+setup: { steps: [] }
+
+templates:
+  tip20_transfer:
+    type: tempo
+    from:
+      pool: users
+      select: random
+    gas_limit: __ACTIVITY_GAS_LIMIT__
+    fee_token: "__TOKEN__"
+    expiring_nonce: true
+    valid_for_secs: 25
+    call:
+      to: "__TOKEN__"
+      abi: TIP20
+      function: "transfer(address,uint256)"
+      args:
+        - pool:
+            pool: users
+            select: random
+        - __ACTIVITY_AMOUNT__
+
+mix:
+  - template: tip20_transfer
+    weight: 100

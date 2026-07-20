@@ -1,0 +1,1323 @@
+//! Render and validate txgen-tempo workloads for the L1 -> Zone -> L1 benchmark.
+//!
+//! This command is deliberately configuration-only. It reads chain state and writes
+//! transaction-generator inputs, but it never submits transactions or waits for bridge events.
+
+use alloy::{
+    primitives::{Address, U256},
+    providers::{Provider, ProviderBuilder},
+    signers::local::{MnemonicBuilder, PrivateKeySigner},
+};
+use eyre::{Context as _, ensure, eyre};
+use serde::Serialize;
+use serde_yaml::Value;
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    time::Duration,
+};
+use tempo_alloy::TempoNetwork;
+use tempo_contracts::precompiles::ITIP20;
+use tempo_primitives::transaction::calc_gas_balance_spending;
+use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
+use zone_rpc::{ZoneProvider, ZoneProviderConfig};
+
+use crate::zone_utils::ZoneMetadata;
+
+const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/bench/txgen");
+const MAX_UINT256: &str =
+    "115792089237316195423570985008687907853269984665640564039457584007913129639935";
+const AUTH_TOKEN_TTL_SECS: u64 = 300;
+
+alloy::sol! {
+    #[sol(rpc)]
+    interface ZoneBenchmarkConfig {
+        function tempoPortal() external view returns (address);
+        function isEnabledToken(address token) external view returns (bool);
+    }
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum CheckPhase {
+    Deposit,
+    Activity,
+    Withdrawal,
+    All,
+}
+
+impl CheckPhase {
+    const fn deposit(self) -> bool {
+        matches!(self, Self::Deposit | Self::All)
+    }
+
+    const fn withdrawal(self) -> bool {
+        matches!(self, Self::Withdrawal | Self::All)
+    }
+}
+
+#[derive(Debug, clap::Parser)]
+pub(crate) struct BenchmarkPreflight {
+    /// Tempo L1 RPC URL. No public endpoint is selected implicitly.
+    #[arg(long, env = "L1_RPC_URL")]
+    l1_rpc_url: String,
+
+    /// Zone HTTP RPC URL used for chain discovery and caller-scoped reads.
+    #[arg(long, env = "ZONE_RPC_URL")]
+    zone_rpc_url: String,
+
+    /// First BIP-44 account index in the benchmark pool.
+    #[arg(long, default_value_t = 0)]
+    account_start: u32,
+
+    /// Number of benchmark accounts.
+    #[arg(long)]
+    accounts: u32,
+
+    /// Enabled TIP-20 used for transfers and transaction fees on both networks.
+    /// Falls back to initialToken in --zone-dir/zone.json.
+    #[arg(long, env = "ZONES_BENCH_TOKEN")]
+    token: Option<Address>,
+
+    /// Optional generated Zone directory containing zone.json.
+    #[arg(long)]
+    zone_dir: Option<PathBuf>,
+
+    /// Optional expected portal address. The Zone config remains authoritative.
+    #[arg(long, env = "L1_PORTAL_ADDRESS")]
+    portal: Option<Address>,
+
+    /// Gross amount passed to ZonePortal.deposit (includes the deposit protocol fee).
+    #[arg(long)]
+    deposit_amount: u128,
+
+    /// Amount transferred by each ordinary Zone TIP-20 activity transaction.
+    #[arg(long)]
+    activity_amount: u128,
+
+    /// Net amount returned to Tempo by each Zone withdrawal request.
+    #[arg(long)]
+    withdrawal_amount: u128,
+
+    /// Capacity to require per account for each selected benchmark phase.
+    #[arg(long, default_value_t = 1)]
+    transactions_per_account: u64,
+
+    /// Balance/allowance checks to enforce. All networks are still queried and reported.
+    #[arg(long)]
+    check_phase: CheckPhase,
+
+    /// Do not inject untimed max-approval setup transactions when allowances are insufficient.
+    #[arg(long)]
+    no_approval_setup: bool,
+
+    /// Override the queried L1 gas price used as maxFeePerGas.
+    #[arg(long)]
+    l1_max_fee_per_gas: Option<u128>,
+
+    /// Override L1 maxPriorityFeePerGas (defaults to maxFeePerGas).
+    #[arg(long)]
+    l1_max_priority_fee_per_gas: Option<u128>,
+
+    /// Override the queried Zone gas price used as maxFeePerGas.
+    #[arg(long)]
+    zone_max_fee_per_gas: Option<u128>,
+
+    /// Override Zone maxPriorityFeePerGas (defaults to maxFeePerGas).
+    #[arg(long)]
+    zone_max_priority_fee_per_gas: Option<u128>,
+
+    /// Gas limit for L1 deposit transactions.
+    #[arg(long, default_value_t = 500_000)]
+    deposit_gas_limit: u64,
+
+    /// Gas limit for ordinary Zone TIP-20 transfer transactions.
+    #[arg(long, default_value_t = 500_000)]
+    activity_gas_limit: u64,
+
+    /// Gas limit for Zone withdrawal-request transactions (not callback gasLimit).
+    #[arg(long, default_value_t = 2_000_000)]
+    withdrawal_tx_gas_limit: u64,
+
+    /// Gas limit for untimed TIP-20 approval setup transactions.
+    #[arg(long, default_value_t = 500_000)]
+    approval_gas_limit: u64,
+
+    /// Directory for rendered specs, copied minimal ABIs, and preflight.json.
+    #[arg(long, default_value = "target/zones-benchmark")]
+    output: PathBuf,
+}
+
+#[derive(Debug)]
+struct AccountState {
+    index: u32,
+    address: Address,
+    l1_balance: U256,
+    portal_allowance: U256,
+    zone_balance: U256,
+    outbox_allowance: U256,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AccountReport {
+    index: u32,
+    address: String,
+    l1_balance: String,
+    portal_allowance: String,
+    zone_balance: String,
+    outbox_allowance: String,
+}
+
+impl From<&AccountState> for AccountReport {
+    fn from(value: &AccountState) -> Self {
+        Self {
+            index: value.index,
+            address: value.address.to_string(),
+            l1_balance: value.l1_balance.to_string(),
+            portal_allowance: value.portal_allowance.to_string(),
+            zone_balance: value.zone_balance.to_string(),
+            outbox_allowance: value.outbox_allowance.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PreflightReport {
+    check_phase: CheckPhase,
+    l1_chain_id: u64,
+    zone_chain_id: u64,
+    zone_id: u32,
+    portal: String,
+    outbox: String,
+    token: String,
+    deposit_fee: u128,
+    bounceback_fee: u128,
+    withdrawal_fee: u128,
+    l1_max_fee_per_gas: u128,
+    zone_max_fee_per_gas: u128,
+    activity_fee_bump: u128,
+    activity_max_fee_per_gas: u128,
+    transactions_per_account: u64,
+    portal_approval_setup_accounts: Vec<u32>,
+    outbox_approval_setup_accounts: Vec<u32>,
+    accounts: Vec<AccountReport>,
+}
+
+#[derive(Debug, Clone)]
+struct RenderConfig {
+    l1_chain_id: u64,
+    zone_chain_id: u64,
+    account_start: u32,
+    account_end: u32,
+    portal: Address,
+    outbox: Address,
+    token: Address,
+    deposit_amount: u128,
+    activity_amount: u128,
+    withdrawal_amount: u128,
+    l1_max_fee_per_gas: u128,
+    l1_max_priority_fee_per_gas: u128,
+    zone_max_fee_per_gas: u128,
+    zone_max_priority_fee_per_gas: u128,
+    deposit_gas_limit: u64,
+    activity_gas_limit: u64,
+    withdrawal_tx_gas_limit: u64,
+    approval_gas_limit: u64,
+}
+
+impl BenchmarkPreflight {
+    pub(crate) async fn run(self) -> eyre::Result<()> {
+        ensure!(self.accounts > 0, "--accounts must be greater than zero");
+        ensure!(
+            self.transactions_per_account > 0,
+            "--transactions-per-account must be greater than zero"
+        );
+        ensure!(
+            self.deposit_amount > 0,
+            "--deposit-amount must be greater than zero"
+        );
+        ensure!(
+            self.activity_amount > 0,
+            "--activity-amount must be greater than zero"
+        );
+        ensure!(
+            self.withdrawal_amount > 0,
+            "--withdrawal-amount must be greater than zero"
+        );
+
+        let account_end = self
+            .account_start
+            .checked_add(self.accounts)
+            .ok_or_else(|| eyre!("benchmark account range overflows u32"))?;
+        // Read the mnemonic only from the environment so it cannot accidentally be exposed in
+        // command-line process listings. It is never written to the rendered specs or report.
+        let mnemonic = std::env::var("ZONES_BENCH_MNEMONIC")
+            .wrap_err("ZONES_BENCH_MNEMONIC must be set for benchmark address derivation")?;
+        let signers = derive_signers(&mnemonic, self.account_start, account_end)?;
+        let first_signer = signers
+            .first()
+            .cloned()
+            .ok_or_else(|| eyre!("benchmark account pool is empty"))?;
+        let first_address = first_signer.address();
+
+        let metadata = self
+            .zone_dir
+            .as_deref()
+            .map(ZoneMetadata::load)
+            .transpose()?;
+        let metadata_token = metadata
+            .as_ref()
+            .map(|value| value.get_optional_address("initialToken"))
+            .transpose()?
+            .flatten();
+        let token =
+            resolve_optional_address("token", self.token, metadata_token)?.ok_or_else(|| {
+                eyre!("set --token/ZONES_BENCH_TOKEN or provide --zone-dir with initialToken")
+            })?;
+
+        let l1 = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(&self.l1_rpc_url)
+            .await
+            .wrap_err("failed connecting to Tempo L1 RPC")?;
+        let zone_public = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(&self.zone_rpc_url)
+            .await
+            .wrap_err("failed connecting to Zone RPC")?;
+
+        // Both IDs are read from their RPCs. In particular, the Zone ID is never derived from
+        // a portal ID or copied from zone.json.
+        let (l1_chain_id, zone_chain_id) =
+            tokio::try_join!(l1.get_chain_id(), zone_public.get_chain_id(),)
+                .wrap_err("failed querying L1 and Zone chain IDs")?;
+
+        let zone_rpc_url: url::Url = self
+            .zone_rpc_url
+            .parse()
+            .wrap_err("Zone RPC URL must be a valid HTTP(S) URL")?;
+        // Resolve the portal through the unauthenticated/internal Zone endpoint. A private Zone
+        // endpoint cannot be used for discovery because its auth token already requires zoneId.
+        let zone_config = ZoneBenchmarkConfig::new(ZONE_CONFIG_ADDRESS, &zone_public);
+        let portal = zone_config
+            .tempoPortal()
+            .from(first_address)
+            .call()
+            .await
+            .wrap_err("failed resolving ZonePortal from ZoneConfig")?;
+        ensure!(
+            portal != Address::ZERO,
+            "ZoneConfig returned the zero ZonePortal address"
+        );
+
+        if let Some(expected) = self.portal {
+            ensure!(
+                expected == portal,
+                "configured portal {expected} does not match ZoneConfig portal {portal}"
+            );
+        }
+        if let Some(expected) = metadata
+            .as_ref()
+            .map(|value| value.get_optional_address("portal"))
+            .transpose()?
+            .flatten()
+        {
+            ensure!(
+                expected == portal,
+                "zone.json portal {expected} does not match ZoneConfig portal {portal}"
+            );
+        }
+        if let Some(expected) = metadata_token {
+            ensure!(
+                expected == token,
+                "configured token {token} does not match zone.json initialToken {expected}"
+            );
+        }
+
+        let portal_contract = ZonePortal::new(portal, &l1);
+        let zone_id = portal_contract
+            .zoneId()
+            .call()
+            .await
+            .wrap_err("failed querying portal zone ID")?;
+
+        let zone = ZoneProvider::new(ZoneProviderConfig {
+            signer: first_signer,
+            zone_id,
+            chain_id: zone_chain_id,
+            token_ttl: Duration::from_secs(AUTH_TOKEN_TTL_SECS),
+            rpc_url: zone_rpc_url.clone(),
+        })?;
+        let zone_provider = zone.provider();
+        let zone_config = ZoneBenchmarkConfig::new(ZONE_CONFIG_ADDRESS, &zone_provider);
+        let outbox = ZONE_OUTBOX_ADDRESS;
+
+        let (
+            portal_code,
+            l1_token_code,
+            outbox_code,
+            zone_token_code,
+            queried_l1_gas_price,
+            queried_zone_gas_price,
+        ) = tokio::try_join!(
+            l1.get_code_at(portal),
+            l1.get_code_at(token),
+            zone_provider.get_code_at(outbox),
+            zone_provider.get_code_at(token),
+            l1.get_gas_price(),
+            zone_provider.get_gas_price(),
+        )
+        .wrap_err("failed querying benchmark contract code and gas prices")?;
+        let (
+            token_enabled_l1,
+            deposits_active,
+            token_enabled_zone,
+            deposit_fee,
+            bounceback_fee,
+            withdrawal_fee,
+        ) = {
+            let token_enabled_l1 = portal_contract.isTokenEnabled(token);
+            let deposits_active = portal_contract.areDepositsActive(token);
+            let token_enabled_zone = zone_config.isEnabledToken(token).from(first_address);
+            let deposit_fee = portal_contract.calculateDepositFee();
+            let bounceback_fee = portal_contract.calculateBouncebackFee();
+            let outbox_contract = ZoneOutbox::new(outbox, &zone_provider);
+            let withdrawal_fee = outbox_contract
+                .calculateWithdrawalFee(0)
+                .from(first_address);
+            tokio::try_join!(
+                token_enabled_l1.call(),
+                deposits_active.call(),
+                token_enabled_zone.call(),
+                deposit_fee.call(),
+                bounceback_fee.call(),
+                withdrawal_fee.call(),
+            )
+            .wrap_err("failed querying benchmark contracts and fees")?
+        };
+
+        ensure!(
+            !portal_code.is_empty(),
+            "no L1 contract code at portal {portal}"
+        );
+        ensure!(!l1_token_code.is_empty(), "no L1 TIP-20 code at {token}");
+        ensure!(!outbox_code.is_empty(), "no ZoneOutbox code at {outbox}");
+        ensure!(
+            !zone_token_code.is_empty(),
+            "no Zone TIP-20 code at {token}"
+        );
+        ensure!(
+            token_enabled_l1,
+            "token {token} is not enabled on portal {portal}"
+        );
+        ensure!(
+            deposits_active,
+            "deposits for token {token} are paused on portal {portal}"
+        );
+        ensure!(
+            token_enabled_zone,
+            "token {token} has not become enabled in the Zone's finalized L1 state"
+        );
+
+        validate_protocol_amounts(
+            self.deposit_amount,
+            deposit_fee,
+            bounceback_fee,
+            self.withdrawal_amount,
+            withdrawal_fee,
+        )?;
+
+        let l1_max_fee_per_gas = self.l1_max_fee_per_gas.unwrap_or(queried_l1_gas_price);
+        let l1_max_priority_fee_per_gas = self
+            .l1_max_priority_fee_per_gas
+            .unwrap_or(l1_max_fee_per_gas);
+        let zone_max_fee_per_gas = self.zone_max_fee_per_gas.unwrap_or(queried_zone_gas_price);
+        let zone_max_priority_fee_per_gas = self
+            .zone_max_priority_fee_per_gas
+            .unwrap_or(zone_max_fee_per_gas);
+        validate_gas_prices("L1", l1_max_fee_per_gas, l1_max_priority_fee_per_gas)?;
+        validate_gas_prices("Zone", zone_max_fee_per_gas, zone_max_priority_fee_per_gas)?;
+        let activity_transaction_capacity = u64::from(self.accounts)
+            .checked_mul(self.transactions_per_account)
+            .ok_or_else(|| eyre!("activity transaction capacity overflows u64"))?;
+        let activity_fee_bump = u128::from(activity_transaction_capacity);
+        let (activity_max_fee_per_gas, _) = expiring_fee_caps(
+            zone_max_fee_per_gas,
+            zone_max_priority_fee_per_gas,
+            activity_fee_bump,
+        )?;
+
+        let mut states = Vec::with_capacity(signers.len());
+        for (offset, signer) in signers.into_iter().enumerate() {
+            let address = signer.address();
+            let private_zone = ZoneProvider::new(ZoneProviderConfig {
+                signer,
+                zone_id,
+                chain_id: zone_chain_id,
+                token_ttl: Duration::from_secs(AUTH_TOKEN_TTL_SECS),
+                rpc_url: zone_rpc_url.clone(),
+            })?;
+            let account_zone = private_zone.provider();
+            let l1_token = ITIP20::new(token, &l1);
+            let zone_token = ITIP20::new(token, &account_zone);
+            let l1_balance = l1_token.balanceOf(address).from(address);
+            let portal_allowance = l1_token.allowance(address, portal).from(address);
+            let zone_balance = zone_token.balanceOf(address).from(address);
+            let outbox_allowance = zone_token.allowance(address, outbox).from(address);
+            let (l1_balance, portal_allowance, zone_balance, outbox_allowance) = tokio::try_join!(
+                l1_balance.call(),
+                portal_allowance.call(),
+                zone_balance.call(),
+                outbox_allowance.call(),
+            )
+            .wrap_err_with(|| {
+                format!("failed reading balances/allowances for account {address}")
+            })?;
+            states.push(AccountState {
+                index: self.account_start + offset as u32,
+                address,
+                l1_balance,
+                portal_allowance,
+                zone_balance,
+                outbox_allowance,
+            });
+        }
+
+        let tx_count = U256::from(self.transactions_per_account);
+        let portal_allowance_required = U256::from(self.deposit_amount)
+            .checked_mul(tx_count)
+            .ok_or_else(|| eyre!("deposit allowance requirement overflowed U256"))?;
+        let withdrawal_debit = U256::from(self.withdrawal_amount)
+            .checked_add(U256::from(withdrawal_fee))
+            .ok_or_else(|| eyre!("withdrawal amount plus protocol fee overflowed U256"))?;
+        let outbox_allowance_required = withdrawal_debit
+            .checked_mul(tx_count)
+            .ok_or_else(|| eyre!("withdrawal allowance requirement overflowed U256"))?;
+
+        let portal_setup: Vec<usize> = states
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, state)| {
+                (state.portal_allowance < portal_allowance_required).then_some(offset)
+            })
+            .collect();
+        let outbox_setup: Vec<usize> = states
+            .iter()
+            .enumerate()
+            .filter_map(|(offset, state)| {
+                (state.outbox_allowance < outbox_allowance_required).then_some(offset)
+            })
+            .collect();
+
+        validate_account_capacity(
+            &states,
+            self.check_phase,
+            self.no_approval_setup,
+            self.transactions_per_account,
+            self.deposit_amount,
+            self.activity_amount,
+            self.withdrawal_amount,
+            withdrawal_fee,
+            portal_allowance_required,
+            outbox_allowance_required,
+            l1_max_fee_per_gas,
+            zone_max_fee_per_gas,
+            activity_max_fee_per_gas,
+            self.deposit_gas_limit,
+            self.activity_gas_limit,
+            self.withdrawal_tx_gas_limit,
+            self.approval_gas_limit,
+        )?;
+
+        let render = RenderConfig {
+            l1_chain_id,
+            zone_chain_id,
+            account_start: self.account_start,
+            account_end,
+            portal,
+            outbox,
+            token,
+            deposit_amount: self.deposit_amount,
+            activity_amount: self.activity_amount,
+            withdrawal_amount: self.withdrawal_amount,
+            l1_max_fee_per_gas,
+            l1_max_priority_fee_per_gas,
+            zone_max_fee_per_gas,
+            zone_max_priority_fee_per_gas,
+            deposit_gas_limit: self.deposit_gas_limit,
+            activity_gas_limit: self.activity_gas_limit,
+            withdrawal_tx_gas_limit: self.withdrawal_tx_gas_limit,
+            approval_gas_limit: self.approval_gas_limit,
+        };
+
+        let portal_setup = if self.no_approval_setup || !self.check_phase.deposit() {
+            Vec::new()
+        } else {
+            portal_setup
+        };
+        let outbox_setup = if self.no_approval_setup || !self.check_phase.withdrawal() {
+            Vec::new()
+        } else {
+            outbox_setup
+        };
+        render_all_specs(&self.output, &render, &portal_setup, &outbox_setup)?;
+
+        let report = PreflightReport {
+            check_phase: self.check_phase,
+            l1_chain_id,
+            zone_chain_id,
+            zone_id,
+            portal: portal.to_string(),
+            outbox: outbox.to_string(),
+            token: token.to_string(),
+            deposit_fee,
+            bounceback_fee,
+            withdrawal_fee,
+            l1_max_fee_per_gas,
+            zone_max_fee_per_gas,
+            activity_fee_bump,
+            activity_max_fee_per_gas,
+            transactions_per_account: self.transactions_per_account,
+            portal_approval_setup_accounts: portal_setup
+                .iter()
+                .map(|offset| self.account_start + *offset as u32)
+                .collect(),
+            outbox_approval_setup_accounts: outbox_setup
+                .iter()
+                .map(|offset| self.account_start + *offset as u32)
+                .collect(),
+            accounts: states.iter().map(AccountReport::from).collect(),
+        };
+        let report_path = self.output.join("preflight.json");
+        fs::write(
+            &report_path,
+            serde_json::to_string_pretty(&report)
+                .wrap_err("failed serializing preflight report")?,
+        )
+        .wrap_err_with(|| format!("failed writing {}", report_path.display()))?;
+
+        println!(
+            "Zones benchmark preflight passed for {} accounts",
+            states.len()
+        );
+        println!("  L1 chain ID:       {l1_chain_id}");
+        println!("  Zone chain ID:     {zone_chain_id}");
+        println!("  Zone ID:           {zone_id}");
+        println!("  Portal:            {portal}");
+        println!("  Outbox:            {outbox}");
+        println!("  Token / fee token: {token}");
+        println!("  Deposit fee:       {deposit_fee}");
+        println!("  Bounceback fee:    {bounceback_fee}");
+        println!("  Withdrawal fee:    {withdrawal_fee}");
+        println!("  Activity fee bump: {activity_fee_bump}");
+        println!("  Rendered specs:    {}", self.output.display());
+        println!("  Account report:    {}", report_path.display());
+
+        Ok(())
+    }
+}
+
+fn derive_signers(
+    mnemonic: &str,
+    account_start: u32,
+    account_end: u32,
+) -> eyre::Result<Vec<PrivateKeySigner>> {
+    (account_start..account_end)
+        .map(|index| {
+            MnemonicBuilder::from_phrase(mnemonic)
+                .index(index)
+                .and_then(|builder| builder.build())
+                .map_err(|err| eyre!("failed deriving benchmark account index {index}: {err}"))
+        })
+        .collect()
+}
+
+fn resolve_optional_address(
+    label: &str,
+    configured: Option<Address>,
+    metadata: Option<Address>,
+) -> eyre::Result<Option<Address>> {
+    if let (Some(configured), Some(metadata)) = (configured, metadata) {
+        ensure!(
+            configured == metadata,
+            "configured {label} {configured} does not match zone.json {label} {metadata}"
+        );
+    }
+    Ok(configured.or(metadata))
+}
+
+fn validate_protocol_amounts(
+    deposit_amount: u128,
+    deposit_fee: u128,
+    bounceback_fee: u128,
+    withdrawal_amount: u128,
+    withdrawal_fee: u128,
+) -> eyre::Result<()> {
+    let deposit_minimum = deposit_fee
+        .checked_add(bounceback_fee)
+        .ok_or_else(|| eyre!("deposit and bounceback fees overflow u128"))?;
+    ensure!(
+        deposit_amount >= deposit_minimum,
+        "deposit amount {deposit_amount} cannot cover deposit fee {deposit_fee} plus bounceback fee {bounceback_fee}"
+    );
+    withdrawal_amount
+        .checked_add(withdrawal_fee)
+        .ok_or_else(|| eyre!("withdrawal amount plus fee overflows uint128"))?;
+    Ok(())
+}
+
+fn validate_gas_prices(label: &str, max_fee: u128, max_priority: u128) -> eyre::Result<()> {
+    ensure!(
+        max_fee > 0,
+        "{label} maxFeePerGas must be greater than zero"
+    );
+    ensure!(
+        max_priority <= max_fee,
+        "{label} maxPriorityFeePerGas {max_priority} exceeds maxFeePerGas {max_fee}"
+    );
+    Ok(())
+}
+
+fn expiring_fee_caps(
+    max_fee: u128,
+    max_priority: u128,
+    maximum_bump: u128,
+) -> eyre::Result<(u128, u128)> {
+    let max_fee = max_fee.checked_add(maximum_bump).ok_or_else(|| {
+        eyre!("Zone maxFeePerGas overflows the txgen expiring-nonce uniqueness bump")
+    })?;
+    let max_priority = max_priority.checked_add(maximum_bump).ok_or_else(|| {
+        eyre!("Zone maxPriorityFeePerGas overflows the txgen expiring-nonce uniqueness bump")
+    })?;
+    Ok((max_fee, max_priority))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_account_capacity(
+    states: &[AccountState],
+    phase: CheckPhase,
+    no_approval_setup: bool,
+    transactions_per_account: u64,
+    deposit_amount: u128,
+    activity_amount: u128,
+    withdrawal_amount: u128,
+    withdrawal_fee: u128,
+    portal_allowance_required: U256,
+    outbox_allowance_required: U256,
+    l1_max_fee_per_gas: u128,
+    zone_max_fee_per_gas: u128,
+    zone_activity_max_fee_per_gas: u128,
+    deposit_gas_limit: u64,
+    activity_gas_limit: u64,
+    withdrawal_tx_gas_limit: u64,
+    approval_gas_limit: u64,
+) -> eyre::Result<()> {
+    let count = U256::from(transactions_per_account);
+    let l1_tx_fee = calc_gas_balance_spending(deposit_gas_limit, l1_max_fee_per_gas);
+    let zone_activity_tx_fee =
+        calc_gas_balance_spending(activity_gas_limit, zone_activity_max_fee_per_gas);
+    let zone_withdrawal_tx_fee =
+        calc_gas_balance_spending(withdrawal_tx_gas_limit, zone_max_fee_per_gas);
+    let l1_approval_fee = calc_gas_balance_spending(approval_gas_limit, l1_max_fee_per_gas);
+    let zone_approval_fee = calc_gas_balance_spending(approval_gas_limit, zone_max_fee_per_gas);
+
+    for state in states {
+        let portal_needs_setup = state.portal_allowance < portal_allowance_required;
+        let outbox_needs_setup = state.outbox_allowance < outbox_allowance_required;
+
+        if phase.deposit() && no_approval_setup {
+            ensure!(
+                !portal_needs_setup,
+                "account {} portal allowance {} is below required {}; enable approval setup or approve first",
+                state.address,
+                state.portal_allowance,
+                portal_allowance_required
+            );
+        }
+        if phase.withdrawal() && no_approval_setup {
+            ensure!(
+                !outbox_needs_setup,
+                "account {} outbox allowance {} is below required {}; enable approval setup or approve first",
+                state.address,
+                state.outbox_allowance,
+                outbox_allowance_required
+            );
+        }
+
+        if phase.deposit() {
+            let required = U256::from(deposit_amount)
+                .checked_add(l1_tx_fee)
+                .and_then(|value| value.checked_mul(count))
+                .and_then(|value| {
+                    value.checked_add(if portal_needs_setup && !no_approval_setup {
+                        l1_approval_fee
+                    } else {
+                        U256::ZERO
+                    })
+                })
+                .ok_or_else(|| eyre!("L1 balance requirement overflowed U256"))?;
+            ensure!(
+                state.l1_balance >= required,
+                "account {} L1 balance {} is below required {} for the selected deposit capacity",
+                state.address,
+                state.l1_balance,
+                required
+            );
+        }
+
+        let activity_required = U256::from(activity_amount)
+            .checked_add(zone_activity_tx_fee)
+            .and_then(|value| value.checked_mul(count))
+            .ok_or_else(|| eyre!("Zone activity balance requirement overflowed U256"))?;
+        let withdrawal_required = U256::from(withdrawal_amount)
+            .checked_add(U256::from(withdrawal_fee))
+            .and_then(|value| value.checked_add(zone_withdrawal_tx_fee))
+            .and_then(|value| value.checked_mul(count))
+            .and_then(|value| {
+                value.checked_add(if outbox_needs_setup && !no_approval_setup {
+                    zone_approval_fee
+                } else {
+                    U256::ZERO
+                })
+            })
+            .ok_or_else(|| eyre!("Zone withdrawal balance requirement overflowed U256"))?;
+        let zone_required = match phase {
+            CheckPhase::Deposit => None,
+            CheckPhase::Activity => Some(activity_required),
+            CheckPhase::Withdrawal => Some(withdrawal_required),
+            CheckPhase::All => Some(
+                activity_required
+                    .checked_add(withdrawal_required)
+                    .ok_or_else(|| eyre!("combined Zone balance requirement overflowed U256"))?,
+            ),
+        };
+        if let Some(required) = zone_required {
+            ensure!(
+                state.zone_balance >= required,
+                "account {} Zone balance {} is below required {} for the selected phase capacity",
+                state.address,
+                state.zone_balance,
+                required
+            );
+        }
+    }
+    Ok(())
+}
+
+fn render_all_specs(
+    output: &Path,
+    config: &RenderConfig,
+    portal_setup: &[usize],
+    outbox_setup: &[usize],
+) -> eyre::Result<()> {
+    fs::create_dir_all(output).wrap_err_with(|| format!("failed creating {}", output.display()))?;
+    let output_abis = output.join("abis");
+    fs::create_dir_all(&output_abis)
+        .wrap_err_with(|| format!("failed creating {}", output_abis.display()))?;
+    for name in ["tip20.json", "zone-portal.json", "zone-outbox.json"] {
+        let source = Path::new(SOURCE_DIR).join("abis").join(name);
+        let destination = output_abis.join(name);
+        fs::copy(&source, &destination).wrap_err_with(|| {
+            format!(
+                "failed copying benchmark ABI {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+
+    let common = common_replacements(config);
+    let deposit_steps = portal_setup
+        .iter()
+        .map(|offset| approval_step(*offset, config, config.portal, true))
+        .collect::<eyre::Result<Vec<_>>>()?;
+    let withdrawal_steps = outbox_setup
+        .iter()
+        .map(|offset| approval_step(*offset, config, config.outbox, false))
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+    render_spec(
+        "deposit.yml",
+        &output.join("deposit.yml"),
+        &common,
+        deposit_steps,
+    )?;
+    render_spec(
+        "zone-activity.yml",
+        &output.join("zone-activity.yml"),
+        &common,
+        Vec::new(),
+    )?;
+    render_spec(
+        "withdrawal.yml",
+        &output.join("withdrawal.yml"),
+        &common,
+        withdrawal_steps,
+    )?;
+    Ok(())
+}
+
+fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
+    HashMap::from([
+        ("__L1_CHAIN_ID__".into(), Value::from(config.l1_chain_id)),
+        (
+            "__ZONE_CHAIN_ID__".into(),
+            Value::from(config.zone_chain_id),
+        ),
+        (
+            "__ACCOUNT_START__".into(),
+            Value::from(config.account_start),
+        ),
+        ("__ACCOUNT_END__".into(), Value::from(config.account_end)),
+        ("__PORTAL__".into(), Value::from(config.portal.to_string())),
+        ("__OUTBOX__".into(), Value::from(config.outbox.to_string())),
+        ("__TOKEN__".into(), Value::from(config.token.to_string())),
+        (
+            "__DEPOSIT_AMOUNT__".into(),
+            yaml_value(config.deposit_amount),
+        ),
+        (
+            "__ACTIVITY_AMOUNT__".into(),
+            yaml_value(config.activity_amount),
+        ),
+        (
+            "__WITHDRAWAL_AMOUNT__".into(),
+            yaml_value(config.withdrawal_amount),
+        ),
+        (
+            "__L1_MAX_FEE_PER_GAS__".into(),
+            yaml_value(config.l1_max_fee_per_gas),
+        ),
+        (
+            "__L1_MAX_PRIORITY_FEE_PER_GAS__".into(),
+            yaml_value(config.l1_max_priority_fee_per_gas),
+        ),
+        (
+            "__ZONE_MAX_FEE_PER_GAS__".into(),
+            yaml_value(config.zone_max_fee_per_gas),
+        ),
+        (
+            "__ZONE_MAX_PRIORITY_FEE_PER_GAS__".into(),
+            yaml_value(config.zone_max_priority_fee_per_gas),
+        ),
+        (
+            "__DEPOSIT_GAS_LIMIT__".into(),
+            Value::from(config.deposit_gas_limit),
+        ),
+        (
+            "__ACTIVITY_GAS_LIMIT__".into(),
+            Value::from(config.activity_gas_limit),
+        ),
+        (
+            "__WITHDRAWAL_TX_GAS_LIMIT__".into(),
+            Value::from(config.withdrawal_tx_gas_limit),
+        ),
+    ])
+}
+
+fn approval_step(
+    pool_offset: usize,
+    config: &RenderConfig,
+    spender: Address,
+    l1: bool,
+) -> eyre::Result<Value> {
+    let account_index = config.account_start + pool_offset as u32;
+    let (max_fee, max_priority) = if l1 {
+        (
+            config.l1_max_fee_per_gas,
+            config.l1_max_priority_fee_per_gas,
+        )
+    } else {
+        (
+            config.zone_max_fee_per_gas,
+            config.zone_max_priority_fee_per_gas,
+        )
+    };
+    serde_yaml::to_value(serde_json::json!({
+        "id": format!("approve_{}_account_{account_index}", if l1 { "portal" } else { "outbox" }),
+        "tx": {
+            "type": "tempo",
+            "from": {
+                "pool": "users",
+                "select": { "index": pool_offset },
+            },
+            "gas_limit": config.approval_gas_limit,
+            "max_fee_per_gas": max_fee,
+            "max_priority_fee_per_gas": max_priority,
+            "fee_token": config.token.to_string(),
+            "call": {
+                "to": config.token.to_string(),
+                "abi": "TIP20",
+                "function": "approve",
+                "args": [spender.to_string(), MAX_UINT256],
+            },
+        },
+    }))
+    .wrap_err("failed encoding approval setup step")
+}
+
+fn render_spec(
+    source_name: &str,
+    destination: &Path,
+    replacements: &HashMap<String, Value>,
+    setup_steps: Vec<Value>,
+) -> eyre::Result<()> {
+    let source = Path::new(SOURCE_DIR).join(source_name);
+    let contents = fs::read_to_string(&source)
+        .wrap_err_with(|| format!("failed reading {}", source.display()))?;
+    let mut document: Value = serde_yaml::from_str(&contents)
+        .wrap_err_with(|| format!("failed parsing {}", source.display()))?;
+    replace_placeholders(&mut document, replacements);
+    let setup = document
+        .get_mut("setup")
+        .and_then(Value::as_mapping_mut)
+        .ok_or_else(|| eyre!("{} must contain a setup mapping", source.display()))?;
+    setup.insert(Value::from("steps"), Value::Sequence(setup_steps));
+
+    let rendered = serde_yaml::to_string(&document)
+        .wrap_err_with(|| format!("failed rendering {}", source.display()))?;
+    ensure!(
+        !rendered.contains("__"),
+        "unresolved renderer placeholder in {}",
+        source.display()
+    );
+    ensure!(
+        rendered.contains("${ZONES_BENCH_MNEMONIC}"),
+        "{} must retain the runtime mnemonic environment reference",
+        source.display()
+    );
+    fs::write(destination, rendered)
+        .wrap_err_with(|| format!("failed writing {}", destination.display()))
+}
+
+fn replace_placeholders(value: &mut Value, replacements: &HashMap<String, Value>) {
+    match value {
+        Value::String(current) => {
+            if let Some(replacement) = replacements.get(current) {
+                *value = replacement.clone();
+            }
+        }
+        Value::Sequence(values) => {
+            for value in values {
+                replace_placeholders(value, replacements);
+            }
+        }
+        Value::Mapping(values) => {
+            for value in values.values_mut() {
+                replace_placeholders(value, replacements);
+            }
+        }
+        Value::Tagged(tagged) => replace_placeholders(&mut tagged.value, replacements),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn yaml_value(value: impl Serialize) -> Value {
+    serde_yaml::to_value(value).expect("primitive benchmark value must serialize to YAML")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::{
+        consensus::{Transaction, transaction::SignerRecoverable},
+        eips::eip2718::Decodable2718,
+        primitives::{TxKind, address},
+        sol_types::SolCall,
+    };
+    use std::{
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use tempo_primitives::TempoTxEnvelope;
+
+    const TEST_MNEMONIC: &str = "test test test test test test test test test test test junk";
+
+    #[test]
+    fn protocol_amounts_cover_bridge_fees() {
+        validate_protocol_amounts(30, 10, 20, u128::MAX - 2, 2).unwrap();
+        assert!(validate_protocol_amounts(29, 10, 20, 1, 1).is_err());
+        assert!(validate_protocol_amounts(30, 10, 20, u128::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn expiring_fee_cap_reserves_txgen_uniqueness_bump() {
+        assert_eq!(expiring_fee_caps(100, 90, 25).unwrap(), (125, 115));
+        assert!(expiring_fee_caps(u128::MAX, 90, 1).is_err());
+        assert!(expiring_fee_caps(100, u128::MAX, 1).is_err());
+    }
+
+    #[test]
+    fn derives_expected_account_range_without_serializing_mnemonic() {
+        let signers = derive_signers(TEST_MNEMONIC, 2, 4).unwrap();
+        assert_eq!(signers.len(), 2);
+        assert_ne!(signers[0].address(), signers[1].address());
+
+        let report = PreflightReport {
+            check_phase: CheckPhase::All,
+            l1_chain_id: 1,
+            zone_chain_id: 2,
+            zone_id: 3,
+            portal: Address::ZERO.to_string(),
+            outbox: Address::ZERO.to_string(),
+            token: Address::ZERO.to_string(),
+            deposit_fee: 1,
+            bounceback_fee: 1,
+            withdrawal_fee: 1,
+            l1_max_fee_per_gas: 1,
+            zone_max_fee_per_gas: 1,
+            activity_fee_bump: 1,
+            activity_max_fee_per_gas: 2,
+            transactions_per_account: 1,
+            portal_approval_setup_accounts: vec![],
+            outbox_approval_setup_accounts: vec![],
+            accounts: vec![],
+        };
+        assert!(
+            !serde_json::to_string(&report)
+                .unwrap()
+                .contains(TEST_MNEMONIC)
+        );
+    }
+
+    #[test]
+    fn renders_all_specs_and_expands_per_account_approvals() {
+        let output = temp_output("render");
+        let config = local_render_config();
+        render_all_specs(&output, &config, &[0, 1], &[1]).unwrap();
+
+        for name in ["deposit.yml", "zone-activity.yml", "withdrawal.yml"] {
+            let contents = fs::read_to_string(output.join(name)).unwrap();
+            let spec: Value = serde_yaml::from_str(&contents).unwrap();
+            assert_eq!(spec["accounts"]["users"]["range"][0], 7);
+            assert_eq!(spec["accounts"]["users"]["range"][1], 9);
+            assert!(contents.contains("${ZONES_BENCH_MNEMONIC}"));
+            assert!(!contents.contains("__"));
+        }
+        let deposit: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("deposit.yml")).unwrap()).unwrap();
+        assert_eq!(deposit["setup"]["steps"].as_sequence().unwrap().len(), 2);
+        assert_eq!(
+            deposit["templates"]["deposit"]["call"]["function"],
+            "deposit(address,address,uint128,bytes32,address)"
+        );
+        let activity: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("zone-activity.yml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            activity["templates"]["tip20_transfer"]["expiring_nonce"],
+            true
+        );
+        assert_eq!(
+            activity["templates"]["tip20_transfer"]["valid_for_secs"],
+            25
+        );
+        let withdrawal: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("withdrawal.yml")).unwrap())
+                .unwrap();
+        assert_eq!(withdrawal["setup"]["steps"].as_sequence().unwrap().len(), 1);
+        assert_eq!(
+            withdrawal["templates"]["request_withdrawal"]["call"]["function"],
+            "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
+        );
+
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    /// Compatibility smoke test for the separately installed transaction generator.
+    ///
+    /// Zones CI does not install txgen-tempo today, so this returns early when the binary is not
+    /// present. Set TXGEN_TEMPO_BIN to exercise a pinned binary in CI or locally.
+    #[test]
+    fn txgen_generates_representative_local_transactions_when_installed() {
+        let txgen = std::env::var_os("TXGEN_TEMPO_BIN").unwrap_or_else(|| "txgen-tempo".into());
+        match Command::new(&txgen).arg("--help").output() {
+            Ok(output) if output.status.success() => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("skipping txgen compatibility smoke test: txgen-tempo is not installed");
+                return;
+            }
+            Ok(output) => panic!(
+                "txgen-tempo --help failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ),
+            Err(error) => panic!("failed executing txgen-tempo: {error}"),
+        }
+
+        let output = temp_output("generate");
+        let config = local_render_config();
+        render_all_specs(&output, &config, &[0], &[0]).unwrap();
+        let pool_addresses =
+            derive_signers(TEST_MNEMONIC, config.account_start, config.account_end)
+                .unwrap()
+                .into_iter()
+                .map(|signer| signer.address())
+                .collect::<Vec<_>>();
+
+        let deposit = generate(&txgen, &output.join("deposit.yml"));
+        assert_setup_approval(&deposit, config.token, config.portal);
+        let deposits = workload_envelopes(&deposit);
+        assert_eq!(deposits.len(), 2);
+        let deposit = &deposits[0];
+        assert_eq!(deposit.chain_id(), Some(config.l1_chain_id));
+        assert_eq!(deposit.fee_token(), Some(config.token));
+        assert!(!deposit.is_expiring_nonce());
+        let sender = deposit.recover_signer().unwrap();
+        assert!(pool_addresses.contains(&sender));
+        let (target, input) = only_call(deposit);
+        assert_eq!(target, config.portal);
+        let call = ZonePortal::depositCall::abi_decode(input).unwrap();
+        assert_eq!(call.token, config.token);
+        assert_eq!(call.to, sender);
+        assert_eq!(call.amount, config.deposit_amount);
+        assert_ne!(call.memo, alloy::primitives::B256::ZERO);
+        assert_eq!(call.bouncebackRecipient, sender);
+        let (_, second_input) = only_call(&deposits[1]);
+        let second_call = ZonePortal::depositCall::abi_decode(second_input).unwrap();
+        assert_ne!(call.memo, second_call.memo);
+
+        let activity = generate(&txgen, &output.join("zone-activity.yml"));
+        let activities = workload_envelopes(&activity);
+        assert_eq!(activities.len(), 2);
+        let activity = &activities[0];
+        assert_eq!(activity.chain_id(), Some(config.zone_chain_id));
+        assert_eq!(activity.fee_token(), Some(config.token));
+        assert!(activity.is_expiring_nonce());
+        assert_eq!(activity.max_fee_per_gas(), config.zone_max_fee_per_gas + 1);
+        assert_eq!(
+            activities[1].max_fee_per_gas(),
+            config.zone_max_fee_per_gas + 2
+        );
+        let (target, input) = only_call(activity);
+        assert_eq!(target, config.token);
+        let call = ITIP20::transferCall::abi_decode(input).unwrap();
+        assert_eq!(call.amount, U256::from(config.activity_amount));
+        assert!(pool_addresses.contains(&call.to));
+
+        let withdrawal = generate(&txgen, &output.join("withdrawal.yml"));
+        assert_setup_approval(&withdrawal, config.token, config.outbox);
+        let withdrawals = workload_envelopes(&withdrawal);
+        assert_eq!(withdrawals.len(), 2);
+        let withdrawal = &withdrawals[0];
+        assert_eq!(withdrawal.chain_id(), Some(config.zone_chain_id));
+        assert_eq!(withdrawal.fee_token(), Some(config.token));
+        let sender = withdrawal.recover_signer().unwrap();
+        assert!(pool_addresses.contains(&sender));
+        let (target, input) = only_call(withdrawal);
+        assert_eq!(target, config.outbox);
+        let call = ZoneOutbox::requestWithdrawalCall::abi_decode(input).unwrap();
+        assert_eq!(call.token, config.token);
+        assert_eq!(call.to, sender);
+        assert_eq!(call.amount, config.withdrawal_amount);
+        assert_ne!(call.memo, alloy::primitives::B256::ZERO);
+        assert_eq!(call.gasLimit, 0);
+        assert_eq!(call.fallbackRecipient, sender);
+        assert!(call.data.is_empty());
+        assert!(call.revealTo.is_empty());
+        let (_, second_input) = only_call(&withdrawals[1]);
+        let second_call = ZoneOutbox::requestWithdrawalCall::abi_decode(second_input).unwrap();
+        assert_ne!(call.memo, second_call.memo);
+
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    fn local_render_config() -> RenderConfig {
+        RenderConfig {
+            l1_chain_id: 42431,
+            zone_chain_id: 42432,
+            account_start: 7,
+            account_end: 9,
+            portal: address!("0x0000000000000000000000000000000000001000"),
+            outbox: ZONE_OUTBOX_ADDRESS,
+            token: address!("0x20c0000000000000000000000000000000000000"),
+            deposit_amount: 1_000_000,
+            activity_amount: 1,
+            withdrawal_amount: 100_000,
+            l1_max_fee_per_gas: 100_000_000_000,
+            l1_max_priority_fee_per_gas: 100_000_000_000,
+            zone_max_fee_per_gas: 200_000_000_000,
+            zone_max_priority_fee_per_gas: 200_000_000_000,
+            deposit_gas_limit: 500_000,
+            activity_gas_limit: 500_000,
+            withdrawal_tx_gas_limit: 2_000_000,
+            approval_gas_limit: 500_000,
+        }
+    }
+
+    fn temp_output(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let output = std::env::temp_dir().join(format!(
+            "zones-txgen-{label}-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&output).unwrap();
+        output
+    }
+
+    fn generate(txgen: &std::ffi::OsStr, spec: &Path) -> Vec<serde_json::Value> {
+        let output = Command::new(txgen)
+            .arg("generate")
+            .arg("--spec")
+            .arg(spec)
+            .arg("--count")
+            .arg("2")
+            .arg("--seed")
+            .arg("7")
+            .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "txgen-tempo failed for {}\nstdout:\n{}\nstderr:\n{}",
+            spec.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    fn workload_envelopes(generated: &[serde_json::Value]) -> Vec<TempoTxEnvelope> {
+        generated
+            .iter()
+            .filter(|tx| tx["phase"] == "workload")
+            .map(decode_envelope)
+            .collect()
+    }
+
+    fn decode_envelope(tx: &serde_json::Value) -> TempoTxEnvelope {
+        let raw = tx["raw"].as_str().expect("raw transaction must be hex");
+        let raw = const_hex::decode(raw).unwrap();
+        TempoTxEnvelope::decode_2718_exact(&raw).unwrap()
+    }
+
+    fn only_call(envelope: &TempoTxEnvelope) -> (Address, &[u8]) {
+        let mut calls = envelope.calls();
+        let (kind, input) = calls.next().expect("transaction must contain one call");
+        assert!(calls.next().is_none());
+        let TxKind::Call(target) = kind else {
+            panic!("benchmark transaction must not create a contract")
+        };
+        (target, input)
+    }
+
+    fn assert_setup_approval(generated: &[serde_json::Value], token: Address, spender: Address) {
+        let setup = generated
+            .iter()
+            .find(|tx| tx["phase"] == "setup")
+            .expect("approval setup transaction must be generated");
+        let envelope = decode_envelope(setup);
+        let (target, input) = only_call(&envelope);
+        assert_eq!(target, token);
+        let call = ITIP20::approveCall::abi_decode(input).unwrap();
+        assert_eq!(call.spender, spender);
+        assert_eq!(call.amount, U256::MAX);
+    }
+}

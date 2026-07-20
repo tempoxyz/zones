@@ -20,6 +20,7 @@ tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-primitives.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
+zone-rpc.workspace = true
 zone-sequencer.workspace = true
 tempo-revm.workspace = true
 
@@ -49,7 +50,9 @@ rand.workspace = true
 reth-evm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
+url.workspace = true
 
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 

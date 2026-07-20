@@ -1,0 +1,51 @@
+chain_id: __L1_CHAIN_ID__
+
+gas:
+  max_fee_per_gas: __L1_MAX_FEE_PER_GAS__
+  max_priority_fee_per_gas: __L1_MAX_PRIORITY_FEE_PER_GAS__
+
+accounts:
+  users:
+    mnemonic: "${ZONES_BENCH_MNEMONIC}"
+    range: [__ACCOUNT_START__, __ACCOUNT_END__]
+
+artifacts:
+  TIP20: abis/tip20.json
+  ZonePortal: abis/zone-portal.json
+
+setup: { steps: [] }
+
+templates:
+  deposit:
+    type: tempo
+    from: { var: account.ref }
+    gas_limit: __DEPOSIT_GAS_LIMIT__
+    fee_token: "__TOKEN__"
+    call:
+      to: "__PORTAL__"
+      abi: ZonePortal
+      function: "deposit(address,address,uint128,bytes32,address)"
+      args:
+        - "__TOKEN__"
+        - { var: account.address }
+        - __DEPOSIT_AMOUNT__
+        - { var: memo }
+        - { var: account.address }
+
+sequences:
+  deposit:
+    bindings:
+      account:
+        account:
+          pool: users
+          select: random
+      memo:
+        bytes32:
+          random_bytes: 32
+    steps:
+      - name: deposit
+        template: deposit
+
+mix:
+  - sequence: deposit
+    weight: 100
