@@ -1,7 +1,7 @@
 //! Execution-local database adapter that overlays finalized Tempo L1 reads while preserving
 //! the caller-provided Zone database as the sole canonical state backend.
 
-use std::{collections::HashMap, fmt};
+use std::fmt;
 
 use alloy_evm::Database;
 use alloy_primitives::{Address, B256, U256};
@@ -28,8 +28,6 @@ pub struct AnchoredZoneDb<DB, L1> {
     inner: DB,
     l1: L1,
     controller: L1AnchorController,
-    // TODO(rusowsky): remove once TIP-1092 is implemented
-    packed_policy_slots: HashMap<(Address, U256), PackedPolicySlot>,
 }
 
 impl<DB, L1> AnchoredZoneDb<DB, L1> {
@@ -39,7 +37,6 @@ impl<DB, L1> AnchoredZoneDb<DB, L1> {
             inner,
             l1,
             controller: L1AnchorController::default(),
-            packed_policy_slots: HashMap::new(),
         }
     }
 
@@ -66,7 +63,6 @@ impl<DB, L1> AnchoredZoneDb<DB, L1> {
     /// Clears bookkeeping that is valid only for the current transaction attempt.
     pub(crate) fn reset_transaction_state(&mut self) {
         self.controller.reset();
-        self.packed_policy_slots.clear();
     }
 }
 
@@ -116,13 +112,6 @@ impl<E: DBErrorMarker> ZoneDbError<E> {
     }
 }
 
-// TODO(rusowsky): remove once TIP-1092 is implemented
-#[derive(Debug, Clone, Copy)]
-struct PackedPolicySlot {
-    local: U256,
-    l1: U256,
-}
-
 impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
     fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
         if let Some(anchor) = self.controller.current() {
@@ -156,7 +145,7 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
 
     /// Rejects writes to the L1-mirrored slots and removes the mirrored field from packed TIP-20 transitions.
     pub fn sanitize_state(
-        &self,
+        &mut self,
         state: &mut AddressMap<Account>,
     ) -> Result<(), ZoneDbError<DB::Error>> {
         if let Some(account) = state.get(&TIP403_REGISTRY_ADDRESS) {
@@ -181,26 +170,29 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
         }
 
         // TODO(rusowsky): remove once TIP-1092 is implemented
-        for ((address, slot), observed) in &self.packed_policy_slots {
-            let Some(value) = state
-                .get_mut(address)
-                .and_then(|account| account.storage.get_mut(slot))
-            else {
-                continue;
-            };
-            if storage::merge_transfer_policy_id(U256::ZERO, value.present_value)
-                != storage::merge_transfer_policy_id(U256::ZERO, observed.l1)
-            {
-                return Err(ZoneDbError::L1Write {
-                    address: *address,
-                    slot: *slot,
-                });
-            }
+        for (address, account) in state {
+            for (slot, value) in &mut account.storage {
+                if !storage::is_tip20_policy_id_slot(*address, *slot) {
+                    continue;
+                }
 
-            value.original_value =
-                storage::merge_transfer_policy_id(value.original_value, observed.local);
-            value.present_value =
-                storage::merge_transfer_policy_id(value.present_value, observed.local);
+                if storage::merge_transfer_policy_id(U256::ZERO, value.present_value)
+                    != storage::merge_transfer_policy_id(U256::ZERO, value.original_value)
+                {
+                    return Err(ZoneDbError::L1Write {
+                        address: *address,
+                        slot: *slot,
+                    });
+                }
+
+                let local = self
+                    .inner
+                    .storage(*address, *slot)
+                    .map_err(ZoneDbError::Inner)?;
+                value.original_value =
+                    storage::merge_transfer_policy_id(value.original_value, local);
+                value.present_value = storage::merge_transfer_policy_id(value.present_value, local);
+            }
         }
         Ok(())
     }
@@ -235,8 +227,6 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for AnchoredZoneDb<DB, L1> 
             .map_err(ZoneDbError::AnchorTransition)?;
 
         if storage::is_tip20_policy_id_slot(address, slot) {
-            self.packed_policy_slots
-                .insert((address, slot), PackedPolicySlot { local, l1 });
             Ok(storage::merge_transfer_policy_id(local, l1))
         } else {
             Ok(l1)
@@ -374,7 +364,37 @@ mod tests {
     }
 
     #[test]
-    fn transaction_reset_clears_anchor_and_packed_slot_observations() {
+    fn packed_policy_field_write_is_rejected() {
+        let (anchor, token, slot) = (42, PATH_USD_ADDRESS, tip20_slots::TRANSFER_POLICY_ID);
+        let offset = tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
+        let l1 = TestL1::default();
+        l1.insert(token, slot, anchor, U256::from(99) << offset);
+        let mut db = AnchoredZoneDb::new(test_db(anchor), l1);
+        let observed = db.storage(token, slot).unwrap();
+
+        let mut account = Account::default();
+        account.storage.insert(
+            slot,
+            EvmStorageSlot {
+                original_value: observed,
+                present_value: storage::merge_transfer_policy_id(
+                    observed,
+                    U256::from(100) << offset,
+                ),
+                ..Default::default()
+            },
+        );
+        let mut state = AddressMap::from_iter([(token, account)]);
+
+        assert!(matches!(
+            db.sanitize_state(&mut state),
+            Err(ZoneDbError::L1Write { address, slot: written_slot })
+                if address == token && written_slot == slot
+        ));
+    }
+
+    #[test]
+    fn transaction_reset_clears_anchor() {
         let (anchor, token, slot) = (42, PATH_USD_ADDRESS, tip20_slots::TRANSFER_POLICY_ID);
         let l1 = TestL1::default();
         l1.insert(token, slot, anchor, U256::from(7));
@@ -382,12 +402,10 @@ mod tests {
 
         db.storage(token, slot).unwrap();
         assert_eq!(db.controller().current(), Some(anchor));
-        assert_eq!(db.packed_policy_slots.len(), 1);
 
         db.reset_transaction_state();
 
         assert_eq!(db.controller().current(), None);
-        assert!(db.packed_policy_slots.is_empty());
     }
 
     #[test]

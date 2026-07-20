@@ -72,7 +72,7 @@ where
     ) -> Result<TempoResult, ZoneEvmError<DB::Error>> {
         let result = match execute(&mut self.inner) {
             Ok(mut result) => {
-                if let Err(error) = self.inner.db().sanitize_state(&mut result.state) {
+                if let Err(error) = self.inner.db_mut().sanitize_state(&mut result.state) {
                     Err(error.into_evm_error())
                 } else {
                     Ok(result)
