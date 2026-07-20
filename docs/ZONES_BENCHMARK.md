@@ -52,11 +52,27 @@ The two Tempo databases use separate restored Schelk volumes. The Zone datadir
 shares validator A's volume but not its database. The provisioner accepts
 `ZONES_BENCH_L1_A_CPUS`, `ZONES_BENCH_L1_B_CPUS`, and
 `ZONES_BENCH_ZONE_CPUS` overrides when a runner has a different CPU topology.
+That shared device is sufficient to exercise the complete topology, but it is
+not production-like I/O isolation: Zone writes and validator A writes can
+contend. A third benchmark device, passed through a future separate Zone state
+root, is required before treating storage-sensitive results as production
+comparable. The workflow records the runner CPU and block-device topology in
+its artifacts so this constraint is visible with each result.
+
 The pinned Tempo harness uses a `1,000,000,000,000` L1 gas limit; the provisioner
-sets that value in both genesis and each validator's payload builder. Override
-`ZONES_BENCH_L1_GAS_LIMIT` only when deliberately testing another Tempo setup.
+sets that value for both the block and general non-payment transaction gas
+limits in genesis and for each validator's payload builder. Override
+`ZONES_BENCH_L1_GAS_LIMIT` or `ZONES_BENCH_L1_GENERAL_GAS_LIMIT` only when
+deliberately testing another Tempo setup. Keeping the general limit explicit is
+important because bridge deposits are non-payment calls.
+
 The temporary bloat dump is also placed on validator A's benchmark volume, not
 the runner's root filesystem; `ZONES_BENCH_BLOAT_TMP_DIR` can override it.
+Before generating a nonzero dump, the provisioner applies Tempo's free-space
+rule: seven times the bloat size for each import plus a 51,200 MiB margin, with
+one additional dump size on validator A. The default 1,000 MiB run therefore
+requires 59,200 MiB free on A and 58,200 MiB on B, before additional Zone growth
+on A.
 
 Independent `bench send` phases use `txpool_status` for their drain check. The
 selected trusted RPC must expose the `txpool` module, or the benchmark must
@@ -522,18 +538,20 @@ job:
 1. restores the two isolated Schelk volumes and assigns unique state roots;
 2. checks out the exact Tempo revision and txgen commit
    `f1fe55ea308b7f44b81bbc2322992a71d4522a03`, then builds max-performance
-   Tempo and Zone binaries;
+   Tempo and Zone binaries with `-C target-cpu=native`;
 3. generates a fresh private 24-word mnemonic for the run;
-4. generates the two-validator L1, optionally imports the selected four-token
+4. applies the pinned Tempo benchmark host tuning and restores it during
+   teardown;
+5. generates the two-validator L1, optionally imports the selected four-token
    state bloat into both L1 databases, creates an unbloated real Zone, and
    starts all nodes;
-5. for `roundtrip`, performs the real control-to-sequencer bootstrap deposit and
+6. for `roundtrip`, performs the real control-to-sequencer bootstrap deposit and
    waits for its `DepositProcessed` and L1 `BatchSubmitted` events, configures
    the nonzero outbox fee, creates the short-lived sender-auth map, confirms
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
-6. for `deposit`, runs the independent preflight/generate/bench pipeline; and
-7. uploads rendered non-secret assets, JSON reports, and node logs before
+7. for `deposit`, runs the independent preflight/generate/bench pipeline; and
+8. uploads rendered non-secret assets, host/storage metadata, JSON reports, and node logs before
    stopping the nodes and restoring the benchmark volumes.
 
 Tempo and txgen are fetched from public repositories at exact commits, so no
@@ -585,6 +603,20 @@ not scrape the node metric endpoints and has no ClickHouse benchmark reporter.
 The workflow therefore uploads the scenario report and node logs without
 claiming the node-metric/ClickHouse reporting available to Tempo's existing
 single-chain benchmark harness.
+
+The pinned txgen scenario runtime currently serializes expiring-nonce activity
+submissions through one internal fee-uniqueness scheduling lane until each RPC
+accepts the transaction. This does not block the smoke or expected default rate
+of 10 journey starts per second, but it can cap higher-rate Zone activity and
+must be fixed upstream before interpreting that path as unconstrained
+throughput. Reverted withdrawals and rejected bridge outcomes also surface as
+step timeouts rather than immediate terminal classifications.
+
+The workflow pins disjoint CPU sets but runs two validators, one Zone, and the
+sender on one 32-logical-CPU host without the two-validator harness's 60 GiB
+per-process memory scopes. Combined with the shared Zone/validator-A device,
+this means results describe this explicit single-host topology rather than
+separate production hosts.
 
 Finally, the pinned txgen commit is on an unmerged branch. The branch must remain
 reachable until those changes merge and this workflow is repinned to a

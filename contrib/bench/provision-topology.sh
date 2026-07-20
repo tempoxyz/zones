@@ -54,6 +54,41 @@ require_uint() {
     [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be an unsigned integer"
 }
 
+available_mib() {
+    local path="$1"
+    df -Pm -- "$path" | awk 'NR == 2 { print $4 }'
+}
+
+check_bloat_free_space() {
+    local state_a_root="$1"
+    local state_b_root="$2"
+    local bloat_mib="$3"
+    (( bloat_mib > 0 )) || return 0
+
+    # Match pinned Tempo bench-e2e's allowance for the database, ETL, static
+    # file, and trie writes made while importing the binary dump.
+    local import_multiplier=7
+    local free_margin_mib=51200
+    local import_working_set_mib=$((bloat_mib * import_multiplier))
+    local required_a_mib=$((bloat_mib + import_working_set_mib + free_margin_mib))
+    local required_b_mib=$((import_working_set_mib + free_margin_mib))
+    local available_a_mib available_b_mib
+    available_a_mib="$(available_mib "$state_a_root")"
+    available_b_mib="$(available_mib "$state_b_root")"
+    [[ "$available_a_mib" =~ ^[0-9]+$ ]] \
+        || die "could not determine free space for $state_a_root"
+    [[ "$available_b_mib" =~ ^[0-9]+$ ]] \
+        || die "could not determine free space for $state_b_root"
+
+    echo "checking Tempo L1 bloat import free space"
+    echo "  validator A: available=$available_a_mib MiB required=$required_a_mib MiB"
+    echo "  validator B: available=$available_b_mib MiB required=$required_b_mib MiB"
+    (( available_a_mib >= required_a_mib )) \
+        || die "validator A bloat import needs at least $required_a_mib MiB, but $state_a_root has $available_a_mib MiB"
+    (( available_b_mib >= required_b_mib )) \
+        || die "validator B bloat import needs at least $required_b_mib MiB, but $state_b_root has $available_b_mib MiB"
+}
+
 rpc() {
     local url="$1"
     local method="$2"
@@ -267,8 +302,10 @@ write_env() {
 }
 
 provision_up() {
+    require_command awk
     require_command cast
     require_command curl
+    require_command df
     require_command forge
     require_command jq
     require_command taskset
@@ -289,6 +326,7 @@ provision_up() {
     local accounts="${ZONES_BENCH_ACCOUNTS:-100}"
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-1000000000000}"
+    local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
     local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-0}"
     local bloat_balance="${ZONES_BENCH_BLOAT_BALANCE:-18446744073709551615}"
     local rpc_timeout="${ZONES_BENCH_RPC_TIMEOUT_SECS:-300}"
@@ -299,13 +337,14 @@ provision_up() {
     ZONES_BENCH_ACCOUNTS="$accounts"
     ZONES_BENCH_L1_CHAIN_ID="$l1_chain_id"
     ZONES_BENCH_L1_GAS_LIMIT="$l1_gas_limit"
+    ZONES_BENCH_L1_GENERAL_GAS_LIMIT="$l1_general_gas_limit"
     ZONES_BENCH_BLOAT_MIB="$bloat_mib"
     ZONES_BENCH_BLOAT_BALANCE="$bloat_balance"
     ZONES_BENCH_RPC_TIMEOUT_SECS="$rpc_timeout"
     ZONES_BENCH_ZONE_TIMEOUT_SECS="$zone_timeout"
     for name in \
         ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_L1_CHAIN_ID \
-        ZONES_BENCH_L1_GAS_LIMIT \
+        ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
         ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE \
         ZONES_BENCH_RPC_TIMEOUT_SECS ZONES_BENCH_ZONE_TIMEOUT_SECS
     do
@@ -315,6 +354,7 @@ provision_up() {
     accounts=$((10#$accounts))
     l1_chain_id=$((10#$l1_chain_id))
     l1_gas_limit=$((10#$l1_gas_limit))
+    l1_general_gas_limit=$((10#$l1_general_gas_limit))
     bloat_mib=$((10#$bloat_mib))
     rpc_timeout=$((10#$rpc_timeout))
     zone_timeout=$((10#$zone_timeout))
@@ -322,6 +362,8 @@ provision_up() {
     (( account_start >= 5 )) || die "ZONES_BENCH_ACCOUNT_START must be at least 5; indices 0-4 are reserved for the factory owner, two validator identities, portal admin, and sequencer"
     (( l1_chain_id > 0 )) || die "ZONES_BENCH_L1_CHAIN_ID must be greater than zero"
     (( l1_gas_limit > 0 )) || die "ZONES_BENCH_L1_GAS_LIMIT must be greater than zero"
+    (( l1_general_gas_limit > 0 )) \
+        || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be greater than zero"
     (( rpc_timeout > 0 )) || die "ZONES_BENCH_RPC_TIMEOUT_SECS must be greater than zero"
     (( zone_timeout > 0 )) || die "ZONES_BENCH_ZONE_TIMEOUT_SECS must be greater than zero"
 
@@ -339,6 +381,7 @@ provision_up() {
     [[ ! -e "$state_a_root" ]] || die "state path already exists: $state_a_root"
     [[ ! -e "$state_b_root" ]] || die "state path already exists: $state_b_root"
     mkdir -p "$state_a_root" "$state_b_root"
+    check_bloat_free_space "$state_a_root" "$state_b_root" "$bloat_mib"
 
     local localnet_dir="$control_root/localnet"
     local raw_genesis="$localnet_dir/genesis.json"
@@ -377,6 +420,7 @@ provision_up() {
         --mnemonic "$ZONES_BENCH_MNEMONIC" \
         --chain-id "$l1_chain_id" \
         --gas-limit "$l1_gas_limit" \
+        --general-gas-limit "$l1_general_gas_limit" \
         --validators 127.0.0.2:8000,127.0.0.3:8100 \
         --seed 42
     rm -f -- "$mnemonic_file"
@@ -389,6 +433,8 @@ provision_up() {
         --output "$patched_genesis" \
         --owner "$owner_address" \
         --specs-out "$ZONES_ROOT/specs/ref-impls/out"
+    [[ "$(jq -er '.config.generalGasLimit' "$patched_genesis")" == "$l1_general_gas_limit" ]] \
+        || die "generated Tempo genesis does not contain generalGasLimit=$l1_general_gas_limit"
 
     mkdir -p "$l1_a_db" "$l1_b_db" "$zone_db" "$zone_dir"
     "$TEMPO_BIN" init --chain "$patched_genesis" --datadir "$l1_a_db"
@@ -579,6 +625,7 @@ provision_up() {
         ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID "$queried_zone_chain_id" \
         ZONES_BENCH_EXPECTED_ZONE_ID "$zone_id" \
         ZONES_BENCH_L1_GAS_LIMIT "$l1_gas_limit" \
+        ZONES_BENCH_L1_GENERAL_GAS_LIMIT "$l1_general_gas_limit" \
         ZONES_BENCH_TARGET_ID "$target_id" \
         ZONES_BENCH_ACCOUNT_START "$account_start" \
         ZONES_BENCH_ACCOUNTS "$accounts" \

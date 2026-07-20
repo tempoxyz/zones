@@ -177,8 +177,9 @@ bench_args=(
     -m "fixture_state=$ZONES_BENCH_FIXTURE_STATE"
 )
 
-if [[ -n "${GITHUB_SHA:-}" ]]; then
-    bench_args+=(-m "git-sha=$GITHUB_SHA")
+zones_revision="${ZONES_BENCH_ZONES_REF:-${GITHUB_SHA:-}}"
+if [[ -n "$zones_revision" ]]; then
+    bench_args+=(-m "git-sha=$zones_revision")
 fi
 if [[ -n "${GITHUB_RUN_ID:-}" ]]; then
     bench_args+=(-m "benchmark_id=zones-benchmark-$GITHUB_RUN_ID-${GITHUB_RUN_ATTEMPT:-1}")
