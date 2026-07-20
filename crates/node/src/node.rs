@@ -471,7 +471,10 @@ where
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+        self.l1_state_cache
+            .write()
+            .initialize_floor(tempo_block_number);
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
