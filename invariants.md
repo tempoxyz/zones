@@ -18,7 +18,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-CHAIN-ID-UNIQUE` | Each live zone uses the chain ID derived from its zone ID, and no two live zones share a chain ID | 🟡 | Cross-zone replay protection fails; signed transactions may be valid on more than one zone |
-| `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal and messenger pair | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
+| `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
 | `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash`, `genesisTempoBlockNumber`, and emitted zone creation parameters match the zone genesis file | 🔴 | The zone may prove batches from a different genesis state than the portal expects |
 | `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
@@ -38,7 +38,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-TOKEN-ENABLEMENT-APPEND-ONLY` | Once enabled, a token remains enabled and remains in the append-only enabled token list | 🔴 | Withdrawals can be disabled after deposits, breaking the non-custodial bridge guarantee |
 | `TEMPO-ZONE-TOKEN-DEPOSIT-PAUSE-ONLY` | Pausing a token only disables new deposits; withdrawals for enabled tokens remain requestable and processable | 🔴 | Admin can lock users inside the zone by pausing deposits |
-| `TEMPO-ZONE-MESSENGER-APPROVAL` | For every enabled token, the portal approves the zone messenger for callback withdrawals | 🟡 | Callback withdrawals can fail even when the portal holds enough funds |
+| `TEMPO-ZONE-MESSENGER-AUTH` | The shared messenger only relays when `msg.sender == ZoneFactory.zones(zoneId).portal` | 🟡 | A caller can spoof a source zone or invoke receiver callbacks outside the portal-controlled withdrawal path |
 | `TEMPO-ZONE-SUPPLY-SOLVENCY` | For each token, zone-side total supply equals accepted deposits plus withdrawal bounce-backs minus requested withdrawals minus deposit bounce-backs | 🔴 | The zone can mint unbacked tokens or burn user funds without matching L1 release |
 | `TEMPO-ZONE-PORTAL-SOLVENCY` | Portal token balance plus paid-out/parked refunds is sufficient for all unwithdrawn zone supply and pending withdrawals | 🔴 | Portal cannot honor exits, causing direct loss or insolvency |
 | `TEMPO-ZONE-MINT-BURN-AUTHORITY` | Only `ZoneInbox` can mint zone tokens and only `ZoneOutbox` can burn zone tokens | 🔴 | Unauthorized mint or burn breaks bridge accounting and can steal or destroy funds |
@@ -86,7 +86,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-WITHDRAWAL-POP-ONCE` | Each processed withdrawal is popped exactly once, whether transfer/callback succeeds or bounces back | 🔴 | Failed withdrawals can block the queue or successful withdrawals can be replayed |
 | `TEMPO-ZONE-WITHDRAWAL-FAIL-BOUNCEBACK` | Any failed user-facing transfer or callback enqueues exactly one withdrawal bounce-back deposit for `amount`, excluding fee | 🔴 | Failed withdrawals can lose funds or duplicate refunds |
 | `TEMPO-ZONE-WITHDRAWAL-FEE-LOCAL` | User withdrawal data does not include the fee, and `processWithdrawal` never pays a user withdrawal fee from portal escrow | 🔴 | A compromised sequencer can encode or redeem arbitrary fees from protected escrow |
-| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-CAP` | Deposit bounce-back fee is computed at processing time and capped at the bounced amount | 🟢 | Refund accounting can underflow or overpay the sequencer |
+| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-CAP` | Deposit bounce-back fee is computed from the configured `bouncebackGas` at processing time and capped at the bounced amount | 🟢 | Refund accounting can underflow or overpay the sequencer |
+| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-NONBLOCKING` | A failed deposit-bounce-back fee transfer never reverts `processWithdrawal`; processing completes and the sequencer keeps the fee only when its transfer succeeds | 🟡 | A fee-transfer failure can stall the withdrawal queue or block exits |
 | `TEMPO-ZONE-BOUNCEBACK-FUNDS-PRESERVED` | When a bounce-back's final transfer/mint reverts, funds are credited to `_refunds[token][recipient]` (portal-side for deposit bounce-backs, `ZoneInbox`-side for withdrawal bounce-backs) and `claimRefund` zeroes the balance before paying | 🔴 | Funds whose bounce-back fails can be lost, double-claimed, or stuck |
 | `TEMPO-ZONE-BOUNCEBACK-TERMINAL` | Internal bounce-backs are the only entries with `bouncebackRecipient == address(0)`, the `rejected` flag has no effect on them, and a failed bounce-back routes to the refund registry instead of re-bouncing | 🔴 | A bounce-back can re-bounce indefinitely, looping the deposit/withdrawal queues or stalling processing |
 

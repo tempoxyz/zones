@@ -12,6 +12,7 @@ pub mod dev;
 pub mod engine;
 pub mod genesis;
 pub mod node;
+mod replication;
 pub mod rpc;
 
 pub use engine::ZoneEngine;

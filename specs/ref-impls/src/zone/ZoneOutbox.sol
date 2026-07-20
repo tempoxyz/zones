@@ -67,32 +67,35 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
-    /// @notice Current withdrawal batch index (monotonically increasing)
-    uint64 public withdrawalBatchIndex;
+    /// @notice Last finalized withdrawal queue hash (slot 1, for proof access via state root)
+    bytes32 internal _withdrawalQueueHash;
 
-    /// @notice Last finalized batch parameters (for proof access via state root)
-    /// @dev Written on each finalizeWithdrawalBatch() call so proofs can read from state
-    ///      instead of parsing event logs
-    LastBatch internal _lastBatch;
-
-    /// @notice Pending withdrawals waiting to be batched
-    PendingWithdrawal[] internal _pendingWithdrawals;
-    uint256 internal _pendingWithdrawalsHead;
+    /// @notice Current withdrawal batch index (lower 8 bytes of slot 2, for proof access)
+    uint64 internal _withdrawalBatchIndex;
 
     /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
     /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
     ///      This limits the number of requestWithdrawal() calls per block, complementing
     ///      the gas fee mechanism which already provides economic rate-limiting.
-    uint256 public maxWithdrawalsPerBlock;
+    uint32 public maxWithdrawalsPerBlock;
 
     /// @notice Number of withdrawal requests in the current block
-    uint256 internal _withdrawalsThisBlock;
+    uint32 internal _withdrawalsThisBlock;
 
     /// @notice Block number for tracking per-block withdrawal count
-    uint256 internal _currentBlockNumber;
+    uint64 internal _currentBlockNumber;
 
     /// @notice Timestamp of the latest withdrawal batch finalization.
     uint64 public lastFinalizedTimestamp;
+
+    /// @notice Pending withdrawals waiting to be batched
+    PendingWithdrawal[] internal _pendingWithdrawals;
+
+    /// @notice Last nonce assigned to a user withdrawal fallback recipient
+    uint64 public lastFallbackNonce;
+
+    /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
+    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -139,11 +142,11 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
-    /// @param _maxWithdrawalsPerBlock The maximum number of requestWithdrawal() calls per block
-    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external {
+    /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
+    function setMaxWithdrawalsPerBlock(uint32 maxWithdrawals) external {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        maxWithdrawalsPerBlock = _maxWithdrawalsPerBlock;
-        emit MaxWithdrawalsPerBlockUpdated(_maxWithdrawalsPerBlock);
+        maxWithdrawalsPerBlock = maxWithdrawals;
+        emit MaxWithdrawalsPerBlockUpdated(maxWithdrawals);
     }
 
     /// @notice Calculate the fee for a withdrawal with the given callback gas limit
@@ -260,8 +263,9 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Enforce per-block withdrawal cap (0 = unlimited)
         if (maxWithdrawalsPerBlock > 0) {
-            if (block.number != _currentBlockNumber) {
-                _currentBlockNumber = block.number;
+            uint64 blockNumber = uint64(block.number);
+            if (blockNumber != _currentBlockNumber) {
+                _currentBlockNumber = blockNumber;
                 _withdrawalsThisBlock = 0;
             }
             if (_withdrawalsThisBlock >= maxWithdrawalsPerBlock) {
@@ -289,6 +293,8 @@ contract ZoneOutbox is IZoneOutbox {
         zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
+        uint64 fallbackNonce = ++lastFallbackNonce;
+        _fallbackRecipients[fallbackNonce] = fallbackRecipient;
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -298,7 +304,7 @@ contract ZoneOutbox is IZoneOutbox {
                 amount: amount,
                 memo: memo,
                 gasLimit: gasLimit,
-                fallbackRecipient: fallbackRecipient,
+                fallbackNonce: fallbackNonce,
                 callbackData: data,
                 revealTo: revealTo
             })
@@ -308,17 +314,7 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index,
-            msg.sender,
-            token,
-            to,
-            amount,
-            fee,
-            memo,
-            gasLimit,
-            fallbackRecipient,
-            data,
-            revealTo
+            index, msg.sender, token, to, amount, fee, memo, gasLimit, fallbackNonce, data, revealTo
         );
     }
 
@@ -342,7 +338,7 @@ contract ZoneOutbox is IZoneOutbox {
                 amount: amount,
                 memo: bytes32(0),
                 gasLimit: 0,
-                fallbackRecipient: address(0),
+                fallbackNonce: 0,
                 callbackData: "",
                 revealTo: ""
             })
@@ -350,18 +346,18 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint64 index = nextWithdrawalIndex++;
         emit WithdrawalRequested(
-            index,
-            address(0),
-            token,
-            bouncebackRecipient,
-            amount,
-            0,
-            bytes32(0),
-            0,
-            address(0),
-            "",
-            ""
+            index, address(0), token, bouncebackRecipient, amount, 0, bytes32(0), 0, 0, "", ""
         );
+    }
+
+    /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
+    /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
+    ///      in zone state. Only ZoneInbox may consume a mapping entry.
+    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+        if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
+        recipient = _fallbackRecipients[fallbackNonce];
+        if (recipient == address(0)) revert InvalidFallbackRecipient();
+        delete _fallbackRecipients[fallbackNonce];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -400,7 +396,7 @@ contract ZoneOutbox is IZoneOutbox {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
         if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
-        uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        uint256 pending = _pendingWithdrawals.length;
 
         if (count != pending) revert InvalidWithdrawalCount(count, pending);
         if (encryptedSenders.length != count) {
@@ -413,13 +409,10 @@ contract ZoneOutbox is IZoneOutbox {
         if (count > 0) {
             withdrawalQueueHash = EMPTY_SENTINEL;
 
-            uint256 start = _pendingWithdrawalsHead;
-            uint256 end = start + count;
-
-            for (uint256 i = end; i > start;) {
+            for (uint256 i = count; i > 0;) {
                 uint256 index = i - 1;
                 PendingWithdrawal memory pendingWithdrawal = _pendingWithdrawals[index];
-                bytes memory encryptedSender = encryptedSenders[index - start];
+                bytes memory encryptedSender = encryptedSenders[index];
                 _validateEncryptedSender(pendingWithdrawal.revealTo, encryptedSender);
 
                 Withdrawal memory w = Withdrawal({
@@ -431,7 +424,7 @@ contract ZoneOutbox is IZoneOutbox {
                     amount: pendingWithdrawal.amount,
                     memo: pendingWithdrawal.memo,
                     gasLimit: pendingWithdrawal.gasLimit,
-                    fallbackRecipient: pendingWithdrawal.fallbackRecipient,
+                    fallbackNonce: pendingWithdrawal.fallbackNonce,
                     callbackData: pendingWithdrawal.callbackData,
                     encryptedSender: encryptedSender
                 });
@@ -442,23 +435,15 @@ contract ZoneOutbox is IZoneOutbox {
                 }
             }
 
-            _pendingWithdrawalsHead = end;
-
-            if (_pendingWithdrawalsHead == _pendingWithdrawals.length) {
-                delete _pendingWithdrawals;
-                _pendingWithdrawalsHead = 0;
-            }
+            delete _pendingWithdrawals;
         }
 
         // Increment withdrawal batch index (matches Tempo portal's next expected withdrawal batch index)
-        withdrawalBatchIndex += 1;
-        uint64 currentWithdrawalBatchIndex = withdrawalBatchIndex;
+        _withdrawalBatchIndex += 1;
+        uint64 currentWithdrawalBatchIndex = _withdrawalBatchIndex;
 
-        // Write withdrawal batch parameters to state (for proof access via state root)
-        _lastBatch = LastBatch({
-            withdrawalQueueHash: withdrawalQueueHash,
-            withdrawalBatchIndex: currentWithdrawalBatchIndex
-        });
+        // Write the proof-facing queue hash; the index is already stored in packed slot 2.
+        _withdrawalQueueHash = withdrawalQueueHash;
         lastFinalizedTimestamp = uint64(block.timestamp);
 
         // Emit event for observability (proof reads from state, not events)
@@ -467,22 +452,15 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
-        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
-            return 0;
-        }
-        return _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        return _pendingWithdrawals.length;
     }
 
     /// @notice Pending withdrawals in FIFO order.
     function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
-        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
-            return pending;
-        }
-
-        uint256 count = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        uint256 count = _pendingWithdrawals.length;
         pending = new PendingWithdrawal[](count);
         for (uint256 i = 0; i < count;) {
-            pending[i] = _pendingWithdrawals[_pendingWithdrawalsHead + i];
+            pending[i] = _pendingWithdrawals[i];
             unchecked {
                 i++;
             }
@@ -491,7 +469,9 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory) {
-        return _lastBatch;
+        return LastBatch({
+            withdrawalQueueHash: _withdrawalQueueHash, withdrawalBatchIndex: _withdrawalBatchIndex
+        });
     }
 
     /// @notice Revert if a withdrawal callback gas limit exceeds the protocol cap

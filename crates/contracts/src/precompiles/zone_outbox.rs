@@ -21,7 +21,7 @@ crate::sol! {
             uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
-            address fallbackRecipient;
+            uint64 fallbackNonce;
             bytes callbackData;
             bytes revealTo;
         }
@@ -37,7 +37,7 @@ crate::sol! {
             uint128 fee,
             bytes32 memo,
             uint64 gasLimit,
-            address fallbackRecipient,
+            uint64 fallbackNonce,
             bytes data,
             bytes revealTo
         );
@@ -56,11 +56,12 @@ crate::sol! {
         // -- View functions --
 
         function lastBatch() external view returns (LastBatch memory);
-        function withdrawalBatchIndex() external view returns (uint64);
         function lastFinalizedTimestamp() external view returns (uint64);
         function nextWithdrawalIndex() external view returns (uint64);
+        function lastFallbackNonce() external view returns (uint64);
         function pendingWithdrawalsCount() external view returns (uint256);
         function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory);
+        function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
         function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 

@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 # tempo
-tempo-chainspec.workspace = true
 tempo-evm.workspace = true
 tempo-node.workspace = true
 tempo-payload-types.workspace = true
@@ -20,6 +19,7 @@ tempo-primitives.workspace = true
 tempo-revm.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
+zone-chainspec.workspace = true
 zone-l1.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 

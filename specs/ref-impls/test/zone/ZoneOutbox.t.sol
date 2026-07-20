@@ -84,7 +84,8 @@ contract ZoneOutboxTest is Test {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address,
+        /* fallbackRecipient */
         bytes memory callbackData
     )
         internal
@@ -98,7 +99,7 @@ contract ZoneOutboxTest is Test {
             amount: amount,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
+            fallbackNonce: uint64(txSequence),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -125,7 +126,7 @@ contract ZoneOutboxTest is Test {
 
         vm.expectEmit(true, true, false, true);
         emit IZoneOutbox.WithdrawalRequested(
-            0, address(0), address(zoneToken), bob, amount, 0, bytes32(0), 0, address(0), "", ""
+            0, address(0), address(zoneToken), bob, amount, 0, bytes32(0), 0, 0, "", ""
         );
 
         vm.prank(ZONE_INBOX);
@@ -138,7 +139,7 @@ contract ZoneOutboxTest is Test {
             amount: amount,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackNonce: 0,
             callbackData: "",
             encryptedSender: ""
         });
@@ -182,6 +183,38 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         assertEq(outbox.pendingWithdrawalsCount(), 2);
+    }
+
+    function test_requestWithdrawal_assignsMonotonicFallbackNonces() public {
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+        outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, alice, "");
+        outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, charlie, "");
+        vm.stopPrank();
+
+        PendingWithdrawal[] memory pending = outbox.getPendingWithdrawals();
+        assertEq(pending[0].fallbackNonce, 1);
+        assertEq(pending[1].fallbackNonce, 2);
+        assertEq(outbox.lastFallbackNonce(), 2);
+    }
+
+    function test_consumeFallbackRecipient_resolvesAndDeletesMapping() public {
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+        outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, charlie, "");
+        vm.stopPrank();
+
+        vm.prank(ZONE_INBOX);
+        assertEq(outbox.consumeFallbackRecipient(1), charlie);
+
+        vm.expectRevert(ZoneOutbox.InvalidFallbackRecipient.selector);
+        vm.prank(ZONE_INBOX);
+        outbox.consumeFallbackRecipient(1);
+    }
+
+    function test_consumeFallbackRecipient_revertsUnlessInbox() public {
+        vm.expectRevert(ZoneOutbox.OnlyZoneInbox.selector);
+        outbox.consumeFallbackRecipient(1);
     }
 
     function test_getPendingWithdrawals_returnsPendingInFifoOrder() public {
@@ -400,7 +433,10 @@ contract ZoneOutboxTest is Test {
         LastBatch memory batch = outbox.lastBatch();
         assertEq(batch.withdrawalQueueHash, expectedHash);
         assertEq(batch.withdrawalBatchIndex, 1);
-        assertEq(outbox.withdrawalBatchIndex(), batch.withdrawalBatchIndex);
+
+        // The proof system reads LastBatch directly from fixed storage slots.
+        assertEq(vm.load(address(outbox), bytes32(uint256(1))), expectedHash);
+        assertEq(uint64(uint256(vm.load(address(outbox), bytes32(uint256(2))))), 1);
     }
 
     function test_finalizeWithdrawalBatch_writesLastFinalizedTimestamp() public {
@@ -978,7 +1014,7 @@ contract ZoneOutboxTest is Test {
             expectedFee, // fee
             bytes32("memo"),
             50_000, // gasLimit
-            charlie, // fallbackRecipient
+            1, // fallbackNonce
             "data",
             ""
         );
@@ -1153,7 +1189,7 @@ contract ZoneOutboxTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
         outbox.finalizeWithdrawalBatch(0, uint64(block.number), encryptedSenders);
         assertEq(outbox.pendingWithdrawalsCount(), 1);
-        assertEq(outbox.withdrawalBatchIndex(), 0);
+        assertEq(outbox.lastBatch().withdrawalBatchIndex, 0);
     }
 
     /// @notice Zero gas limit withdrawals still store callback data in the hash.
