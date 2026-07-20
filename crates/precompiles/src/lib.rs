@@ -63,56 +63,6 @@ use alloc::sync::Arc;
 use alloy_evm::precompiles::DynPrecompile;
 use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
 
-impl AesGcmDecrypt {
-    /// Creates the AES-GCM precompile with the shared zone execution environment.
-    pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
-        execution::create_precompile(
-            "AesGcmDecrypt",
-            env,
-            execution::NoCallRules,
-            |data, caller| Self.call(data, caller),
-        )
-    }
-}
-
-impl ChaumPedersenVerify {
-    /// Creates the Chaum-Pedersen precompile with the shared zone execution environment.
-    pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
-        execution::create_precompile(
-            "ChaumPedersenVerify",
-            env,
-            execution::NoCallRules,
-            |data, caller| Self.call(data, caller),
-        )
-    }
-}
-
-impl TempoState {
-    /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
-    ///
-    /// System-only arbitrary L1 storage reads are delegated through `l1` at the stored checkpoint.
-    pub fn create<P: L1StorageReader>(l1: L1State<P>, env: &ZonePrecompileEnv) -> DynPrecompile {
-        execution::create_precompile(
-            "TempoState",
-            env,
-            execution::NoCallRules,
-            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
-        )
-    }
-}
-
-impl ZoneTokenFactory {
-    /// Creates the direct-call-only token factory with zone-local storage and execution.
-    pub fn create(env: &ZonePrecompileEnv) -> DynPrecompile {
-        execution::create_precompile(
-            "ZoneTokenFactory",
-            env,
-            execution::NoCallRules,
-            |data, caller| Self::new().call(data, caller),
-        )
-    }
-}
-
 /// Creates upstream TIP-403 execution with zone read-only rules and adapter-backed L1 reads.
 pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(

@@ -17,9 +17,10 @@
 mod dispatch;
 
 pub use IZoneTokenFactory::IZoneTokenFactoryErrors as ZoneTokenFactoryError;
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Address;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
+    PATH_USD_ADDRESS, Precompile as _, TIP20_FACTORY_ADDRESS,
     tip20::{ISSUER_ROLE, TIP20Token, tip20_slots},
 };
 use tempo_precompiles_macros::contract;
@@ -50,6 +51,16 @@ pub const ZONE_TIP20_FACTORY_ADDRESS: Address = TIP20_FACTORY_ADDRESS;
 pub struct ZoneTokenFactory {}
 
 impl ZoneTokenFactory {
+    /// Creates the direct-call-only token factory with zone-local storage and execution.
+    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "ZoneTokenFactory",
+            env,
+            crate::execution::NoCallRules,
+            |data, caller| Self::new().call(data, caller),
+        )
+    }
+
     /// Sets the contract bytecode (`0xef`) so the account is non-empty.
     ///
     /// Must be called once during genesis generation before any tokens are

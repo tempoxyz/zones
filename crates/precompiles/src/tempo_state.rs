@@ -7,6 +7,7 @@ use alloc::{format, string::ToString, vec::Vec};
 
 use crate::storage::{L1State, L1StorageReader};
 use alloy_consensus::BlockHeader;
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
@@ -36,6 +37,21 @@ pub struct TempoState {
 pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
 
 impl TempoState {
+    /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
+    ///
+    /// System-only arbitrary L1 storage reads are delegated through `l1` at the stored checkpoint.
+    pub fn create<P: L1StorageReader>(
+        l1: L1State<P>,
+        env: &crate::ZonePrecompileEnv,
+    ) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "TempoState",
+            env,
+            crate::execution::NoCallRules,
+            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
+        )
+    }
+
     /// Initializes the predeploy account code and checkpoint from the genesis Tempo header.
     pub fn initialize(&mut self, header_rlp: &[u8]) -> tempo_precompiles::Result<()> {
         self.__initialize()?;

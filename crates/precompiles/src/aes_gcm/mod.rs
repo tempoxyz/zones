@@ -15,7 +15,9 @@ use aes_gcm::{
 };
 mod dispatch;
 
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
+use tempo_precompiles::Precompile as _;
 
 /// AES-256-GCM Decrypt precompile address on Zone L2.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
@@ -47,6 +49,18 @@ pub use IAesGcmDecrypt::{decryptCall, decryptReturn};
 /// the GCM authentication tag. Returns `(plaintext, true)` on success or
 /// `(empty, false)` if tag verification fails.
 pub struct AesGcmDecrypt;
+
+impl AesGcmDecrypt {
+    /// Creates the AES-GCM precompile with the shared zone execution environment.
+    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "AesGcmDecrypt",
+            env,
+            crate::execution::NoCallRules,
+            |data, caller| Self.call(data, caller),
+        )
+    }
+}
 
 /// Decrypt AES-256-GCM ciphertext with tag verification.
 ///
