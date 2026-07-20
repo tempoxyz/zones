@@ -239,7 +239,7 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 
 The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal), initializes it with the shared [`ZoneMessenger`](#izonemessenger), and enables the initial token. The portal's `blockHash` is initialized to zero. Neither the zone genesis block hash nor an initial Tempo block hash or number is supplied at deployment: the zone genesis hash depends on the newly assigned `zoneId` through its chain ID, and anchoring zone creation to a Tempo block in the same transaction would create a circular dependency. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
 
-The first accepted proof bootstraps the portal from `blockHash == 0` to the canonical zone genesis block. The state transition function constructs the predefined genesis block for the assigned `zoneId` and rejects any other first block. All genesis fields are identical across zones except the chain ID.
+The first accepted proof bootstraps the portal from `blockHash == 0` to the last block hash of the first batch, which must start with the zone genesis block. The state transition function constructs the predefined genesis block for the assigned `zoneId` and rejects any other first block. All genesis fields are identical across zones except the chain ID.
 
 ### Chain ID
 
