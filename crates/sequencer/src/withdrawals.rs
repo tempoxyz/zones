@@ -499,7 +499,6 @@ impl WithdrawalProcessor {
             token = %withdrawal.token,
             to = %withdrawal.to,
             amount = %withdrawal.amount,
-            fee = %withdrawal.fee,
             has_callback = withdrawal.gasLimit > 0,
             "📤 Submitting withdrawal to L1"
         );
@@ -683,7 +682,6 @@ mod tests {
             senderTag: B256::repeat_byte(0x11),
             to,
             amount,
-            fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackNonce: 1,
@@ -725,7 +723,6 @@ mod tests {
             senderTag: B256::repeat_byte(0x22),
             to: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
             amount: 500_000,
-            fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackNonce: 1,

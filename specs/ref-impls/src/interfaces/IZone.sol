@@ -278,7 +278,6 @@ struct Withdrawal {
     bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
-    uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
@@ -292,7 +291,6 @@ struct PendingWithdrawal {
     bytes32 txHash; // hash of the zone transaction that requested the withdrawal
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
-    uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox

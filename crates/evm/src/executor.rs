@@ -97,7 +97,11 @@ where
         &mut self,
         tx: impl ExecutableTx<Self>,
     ) -> Result<Self::Result, BlockExecutionError> {
-        let (tx_env, recovered) = tx.into_parts();
+        let (mut tx_env, recovered) = tx.into_parts();
+        // Remove any prewarming-specific context that was added to the tx env.
+        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+            tempo_tx_env.expiring_nonce_idx = None;
+        }
 
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
@@ -140,6 +144,27 @@ mod tests {
         test_util::TIP20Setup,
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
+    use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+
+    #[test]
+    fn clears_only_prewarming_expiring_nonce_index() {
+        let mut tx_env = TempoTxEnv {
+            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
+                valid_before: Some(123),
+                expiring_nonce_idx: Some(3),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+            tempo_tx_env.expiring_nonce_idx = None;
+        }
+
+        let tempo_tx_env = tx_env.tempo_tx_env.unwrap();
+        assert_eq!(tempo_tx_env.expiring_nonce_idx, None);
+        assert_eq!(tempo_tx_env.valid_before, Some(123));
+    }
 
     /// Simulates the zone executor's per-tx validator token override and runs
     /// the full fee lifecycle across multiple TIP-20 tokens, verifying:
