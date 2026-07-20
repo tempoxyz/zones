@@ -1,0 +1,256 @@
+name: Zones benchmark phase
+
+on:
+  workflow_dispatch:
+    inputs:
+      phase:
+        description: Independent benchmark phase to run.
+        type: choice
+        required: true
+        options:
+          - deposit
+          - activity
+          - withdrawal
+      accounts:
+        description: Number of accounts in the benchmark pool.
+        type: string
+        required: true
+        default: "100"
+      account-start:
+        description: First BIP-44 account index in the benchmark pool.
+        type: string
+        required: true
+        default: "0"
+      count:
+        description: Number of measured transactions to generate.
+        type: string
+        required: true
+        default: "1000"
+      tps:
+        description: Target transactions per second.
+        type: string
+        required: true
+        default: "100"
+      max-concurrent:
+        description: Maximum concurrent sender requests.
+        type: string
+        required: true
+        default: "100"
+      deposit-amount:
+        description: Gross amount for each L1 deposit.
+        type: string
+        required: true
+        default: "1000000"
+      activity-amount:
+        description: Amount for each ordinary Zone TIP-20 transfer.
+        type: string
+        required: true
+        default: "1"
+      withdrawal-amount:
+        description: Net amount for each Zone withdrawal request.
+        type: string
+        required: true
+        default: "1000000"
+      drain-timeout:
+        description: Seconds bench waits for txpool drain; zero disables the check.
+        type: string
+        required: true
+        default: "300"
+      seed:
+        description: Optional txgen seed. Empty derives one from the workflow run ID and attempt.
+        type: string
+        required: false
+        default: ""
+      txgen-ref:
+        description: Exact tempoxyz/txgen revision to install.
+        type: string
+        required: true
+        default: 4a852e33965dce5e58c7aeb01d0b592f98159e53
+
+  # A newly added workflow_dispatch is unavailable until its file exists on the
+  # default branch. Same-repository draft PRs can opt into a protected test run
+  # by applying one of the zones-benchmark-* labels below.
+  pull_request:
+    types: [labeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zones-benchmark
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: full
+  RUSTC_WRAPPER: sccache
+
+jobs:
+  benchmark:
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.phase || github.event.label.name }}
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       contains(fromJSON('["zones-benchmark-deposit","zones-benchmark-activity","zones-benchmark-withdrawal"]'), github.event.label.name))
+    runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
+    timeout-minutes: 120
+    environment:
+      name: zones-benchmark
+    env:
+      L1_RPC_URL: ${{ secrets.ZONES_BENCH_L1_RPC_URL }}
+      ZONE_RPC_URL: ${{ secrets.ZONES_BENCH_ZONE_RPC_URL }}
+      ZONES_BENCH_MNEMONIC: ${{ secrets.ZONES_BENCH_MNEMONIC }}
+      ZONES_BENCH_TOKEN: ${{ vars.ZONES_BENCH_TOKEN }}
+      ZONES_BENCH_TARGET_ID: ${{ vars.ZONES_BENCH_TARGET_ID }}
+      L1_PORTAL_ADDRESS: ${{ vars.ZONES_BENCH_PORTAL }}
+      ZONES_BENCH_EXPECTED_L1_CHAIN_ID: ${{ vars.ZONES_BENCH_L1_CHAIN_ID }}
+      ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID: ${{ vars.ZONES_BENCH_ZONE_CHAIN_ID }}
+      ZONES_BENCH_EXPECTED_ZONE_ID: ${{ vars.ZONES_BENCH_ZONE_ID }}
+      ZONES_BENCH_L1_METRICS_URL: ${{ secrets.ZONES_BENCH_L1_METRICS_URL }}
+      ZONES_BENCH_ZONE_METRICS_URL: ${{ secrets.ZONES_BENCH_ZONE_METRICS_URL }}
+      TXGEN_GIT_TOKEN: ${{ secrets.DEREK_BENCH_TOKEN }}
+      INPUT_PHASE: ${{ inputs.phase }}
+      INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
+      INPUT_ACCOUNT_START: ${{ inputs.account-start || '0' }}
+      INPUT_COUNT: ${{ inputs.count || '1000' }}
+      INPUT_TPS: ${{ inputs.tps || '100' }}
+      INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
+      INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '1000000' }}
+      INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
+      INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
+      INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
+      INPUT_SEED: ${{ inputs.seed }}
+      INPUT_TXGEN_REF: ${{ inputs.txgen-ref || '4a852e33965dce5e58c7aeb01d0b592f98159e53' }}
+    steps:
+      - name: Resolve benchmark configuration
+        id: config
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_LABEL: ${{ github.event.label.name }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          phase="$INPUT_PHASE"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            phase="${EVENT_LABEL#zones-benchmark-}"
+          fi
+          case "$phase" in
+            deposit|activity|withdrawal) ;;
+            *) echo "::error::unsupported benchmark phase: $phase"; exit 1 ;;
+          esac
+          if [ -z "$INPUT_SEED" ]; then
+            INPUT_SEED=$((10#$RUN_ID * 100000 + 10#$RUN_ATTEMPT))
+          fi
+
+          for name in \
+            L1_RPC_URL ZONE_RPC_URL ZONES_BENCH_MNEMONIC ZONES_BENCH_TOKEN \
+            ZONES_BENCH_TARGET_ID L1_PORTAL_ADDRESS \
+            ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
+            ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_ID \
+            TXGEN_GIT_TOKEN
+          do
+            if [ -z "${!name:-}" ]; then
+              echo "::error::$name is not configured in the selected GitHub environment"
+              exit 1
+            fi
+          done
+          if ! [[ "$ZONES_BENCH_TARGET_ID" =~ ^[A-Za-z0-9._:/+-]+$ ]]; then
+            echo "::error::ZONES_BENCH_TARGET_ID contains unsupported characters"
+            exit 1
+          fi
+          for name in \
+            INPUT_ACCOUNTS INPUT_ACCOUNT_START INPUT_COUNT INPUT_TPS \
+            INPUT_MAX_CONCURRENT \
+            INPUT_DEPOSIT_AMOUNT INPUT_ACTIVITY_AMOUNT INPUT_WITHDRAWAL_AMOUNT \
+            INPUT_DRAIN_TIMEOUT INPUT_SEED \
+            ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
+            ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_ID
+          do
+            if ! [[ "${!name}" =~ ^[0-9]+$ ]]; then
+              echo "::error::$name must be an unsigned integer"
+              exit 1
+            fi
+          done
+          if ! [[ "$INPUT_TXGEN_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::txgen-ref must be an exact 40-character commit SHA"
+            exit 1
+          fi
+
+          echo "::add-mask::$L1_RPC_URL"
+          echo "::add-mask::$ZONE_RPC_URL"
+          echo "::add-mask::$ZONES_BENCH_MNEMONIC"
+          echo "phase=$phase" >> "$GITHUB_OUTPUT"
+          {
+            echo "ZONES_BENCH_PHASE=$phase"
+            echo "ZONES_BENCH_ACCOUNTS=$INPUT_ACCOUNTS"
+            echo "ZONES_BENCH_ACCOUNT_START=$INPUT_ACCOUNT_START"
+            echo "ZONES_BENCH_COUNT=$INPUT_COUNT"
+            echo "ZONES_BENCH_TPS=$INPUT_TPS"
+            echo "ZONES_BENCH_MAX_CONCURRENT=$INPUT_MAX_CONCURRENT"
+            echo "ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT=$INPUT_COUNT"
+            echo "ZONES_BENCH_DEPOSIT_AMOUNT=$INPUT_DEPOSIT_AMOUNT"
+            echo "ZONES_BENCH_ACTIVITY_AMOUNT=$INPUT_ACTIVITY_AMOUNT"
+            echo "ZONES_BENCH_WITHDRAWAL_AMOUNT=$INPUT_WITHDRAWAL_AMOUNT"
+            echo "ZONES_BENCH_DRAIN_TIMEOUT=$INPUT_DRAIN_TIMEOUT"
+            echo "ZONES_BENCH_SEED=$INPUT_SEED"
+            echo "ZONES_BENCH_TXGEN_REF=$INPUT_TXGEN_REF"
+            echo "ZONES_BENCH_OUTPUT=target/zones-benchmark/$phase"
+            echo "ZONES_BENCH_REPORT=target/zones-benchmark/report-$phase.json"
+          } >> "$GITHUB_ENV"
+
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          toolchain: stable
+
+      - name: Install pinned txgen
+        run: |
+          set -euo pipefail
+          cargo_bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
+          txgen_url="https://x-access-token:${TXGEN_GIT_TOKEN}@github.com/tempoxyz/txgen"
+          cargo install \
+            --git "$txgen_url" \
+            --rev "$ZONES_BENCH_TXGEN_REF" \
+            --locked \
+            txgen-tempo bench-cli
+          echo "$cargo_bin_dir" >> "$GITHUB_PATH"
+          echo "TXGEN_TEMPO_BIN=$cargo_bin_dir/txgen-tempo" >> "$GITHUB_ENV"
+          echo "TXGEN_BENCH_BIN=$cargo_bin_dir/bench" >> "$GITHUB_ENV"
+
+      - name: Build benchmark preflight
+        run: |
+          cargo build --profile release -p tempo-xtask
+          echo "ZONES_XTASK_BIN=$GITHUB_WORKSPACE/target/release/tempo-xtask" >> "$GITHUB_ENV"
+
+      - name: Run ${{ steps.config.outputs.phase }} phase
+        run: contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
+
+      - name: Write job summary
+        if: success()
+        run: |
+          {
+            echo "### Zones benchmark"
+            echo
+            echo "- Phase: \`$ZONES_BENCH_PHASE\`"
+            echo "- Transactions: \`$ZONES_BENCH_COUNT\`"
+            echo "- Target TPS: \`$ZONES_BENCH_TPS\`"
+            echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
+            echo "- Target: \`$ZONES_BENCH_TARGET_ID\`"
+            echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload specs, preflight, and report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zones-benchmark-${{ steps.config.outputs.phase }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/zones-benchmark/
+          if-no-files-found: warn
+          retention-days: 14

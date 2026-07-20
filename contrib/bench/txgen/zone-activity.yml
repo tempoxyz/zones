@@ -17,9 +17,7 @@ setup: { steps: [] }
 templates:
   tip20_transfer:
     type: tempo
-    from:
-      pool: users
-      select: random
+    from: { var: sender.ref }
     gas_limit: __ACTIVITY_GAS_LIMIT__
     fee_token: "__TOKEN__"
     expiring_nonce: true
@@ -29,11 +27,24 @@ templates:
       abi: TIP20
       function: "transfer(address,uint256)"
       args:
-        - pool:
-            pool: users
-            select: random
+        - { var: recipient.address }
         - __ACTIVITY_AMOUNT__
 
+sequences:
+  activity:
+    bindings:
+      sender:
+        account:
+          pool: users
+          select: random
+      recipient:
+        account:
+          pool: users
+          select: random
+    steps:
+      - name: transfer
+        template: tip20_transfer
+
 mix:
-  - template: tip20_transfer
+  - sequence: activity
     weight: 100

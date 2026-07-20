@@ -4,6 +4,7 @@
 //! transaction-generator inputs, but it never submits transactions or waits for bridge events.
 
 use alloy::{
+    eips::BlockNumberOrTag,
     primitives::{Address, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::{MnemonicBuilder, PrivateKeySigner},
@@ -21,6 +22,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
+use zone_primitives::constants::zone_chain_id as derive_zone_chain_id;
 use zone_rpc::{ZoneProvider, ZoneProviderConfig};
 
 use crate::zone_utils::ZoneMetadata;
@@ -87,6 +89,18 @@ pub(crate) struct BenchmarkPreflight {
     /// Optional expected portal address. The Zone config remains authoritative.
     #[arg(long, env = "L1_PORTAL_ADDRESS")]
     portal: Option<Address>,
+
+    /// Optional expected Tempo L1 chain ID. The RPC value remains authoritative.
+    #[arg(long, env = "ZONES_BENCH_EXPECTED_L1_CHAIN_ID")]
+    expected_l1_chain_id: Option<u64>,
+
+    /// Optional expected Zone chain ID. The RPC value remains authoritative.
+    #[arg(long, env = "ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID")]
+    expected_zone_chain_id: Option<u64>,
+
+    /// Optional expected on-chain Zone ID for the resolved portal.
+    #[arg(long, env = "ZONES_BENCH_EXPECTED_ZONE_ID")]
+    expected_zone_id: Option<u32>,
 
     /// Gross amount passed to ZonePortal.deposit (includes the deposit protocol fee).
     #[arg(long)]
@@ -189,6 +203,10 @@ struct PreflightReport {
     check_phase: CheckPhase,
     l1_chain_id: u64,
     zone_chain_id: u64,
+    l1_client_version: String,
+    zone_client_version: String,
+    l1_genesis_hash: String,
+    zone_genesis_hash: String,
     zone_id: u32,
     portal: String,
     outbox: String,
@@ -289,9 +307,42 @@ impl BenchmarkPreflight {
 
         // Both IDs are read from their RPCs. In particular, the Zone ID is never derived from
         // a portal ID or copied from zone.json.
-        let (l1_chain_id, zone_chain_id) =
-            tokio::try_join!(l1.get_chain_id(), zone_public.get_chain_id(),)
-                .wrap_err("failed querying L1 and Zone chain IDs")?;
+        let (
+            l1_chain_id,
+            zone_chain_id,
+            l1_client_version,
+            zone_client_version,
+            l1_genesis,
+            zone_genesis,
+        ) = tokio::try_join!(
+            l1.get_chain_id(),
+            zone_public.get_chain_id(),
+            l1.get_client_version(),
+            zone_public.get_client_version(),
+            l1.get_block_by_number(BlockNumberOrTag::Earliest),
+            zone_public.get_block_by_number(BlockNumberOrTag::Earliest),
+        )
+        .wrap_err("failed querying L1 and Zone identities")?;
+        let l1_genesis_hash = l1_genesis
+            .ok_or_else(|| eyre!("Tempo L1 RPC returned no genesis block"))?
+            .header
+            .hash;
+        let zone_genesis_hash = zone_genesis
+            .ok_or_else(|| eyre!("Zone RPC returned no genesis block"))?
+            .header
+            .hash;
+        if let Some(expected) = self.expected_l1_chain_id {
+            ensure!(
+                l1_chain_id == expected,
+                "Tempo L1 RPC returned chain ID {l1_chain_id}, expected {expected}"
+            );
+        }
+        if let Some(expected) = self.expected_zone_chain_id {
+            ensure!(
+                zone_chain_id == expected,
+                "Zone RPC returned chain ID {zone_chain_id}, expected {expected}"
+            );
+        }
 
         let zone_rpc_url: url::Url = self
             .zone_rpc_url
@@ -341,6 +392,17 @@ impl BenchmarkPreflight {
             .call()
             .await
             .wrap_err("failed querying portal zone ID")?;
+        if let Some(expected) = self.expected_zone_id {
+            ensure!(
+                zone_id == expected,
+                "portal {portal} returned Zone ID {zone_id}, expected {expected}"
+            );
+        }
+        let derived_zone_chain_id = derive_zone_chain_id(zone_id);
+        ensure!(
+            zone_chain_id == derived_zone_chain_id,
+            "Zone RPC chain ID {zone_chain_id} does not match chain ID {derived_zone_chain_id} derived from portal {portal} Zone ID {zone_id}"
+        );
 
         let zone = ZoneProvider::new(ZoneProviderConfig {
             signer: first_signer,
@@ -567,6 +629,10 @@ impl BenchmarkPreflight {
             check_phase: self.check_phase,
             l1_chain_id,
             zone_chain_id,
+            l1_client_version: l1_client_version.clone(),
+            zone_client_version: zone_client_version.clone(),
+            l1_genesis_hash: l1_genesis_hash.to_string(),
+            zone_genesis_hash: zone_genesis_hash.to_string(),
             zone_id,
             portal: portal.to_string(),
             outbox: outbox.to_string(),
@@ -603,6 +669,10 @@ impl BenchmarkPreflight {
         );
         println!("  L1 chain ID:       {l1_chain_id}");
         println!("  Zone chain ID:     {zone_chain_id}");
+        println!("  L1 client:         {l1_client_version}");
+        println!("  Zone client:       {zone_client_version}");
+        println!("  L1 genesis:        {l1_genesis_hash}");
+        println!("  Zone genesis:      {zone_genesis_hash}");
         println!("  Zone ID:           {zone_id}");
         println!("  Portal:            {portal}");
         println!("  Outbox:            {outbox}");
@@ -1058,6 +1128,10 @@ mod tests {
             check_phase: CheckPhase::All,
             l1_chain_id: 1,
             zone_chain_id: 2,
+            l1_client_version: "tempo/test".into(),
+            zone_client_version: "tempo-zone/test".into(),
+            l1_genesis_hash: alloy::primitives::B256::ZERO.to_string(),
+            zone_genesis_hash: alloy::primitives::B256::ZERO.to_string(),
             zone_id: 3,
             portal: Address::ZERO.to_string(),
             outbox: Address::ZERO.to_string(),
@@ -1157,6 +1231,7 @@ mod tests {
 
         let deposit = generate(&txgen, &output.join("deposit.yml"));
         assert_setup_approval(&deposit, config.token, config.portal);
+        assert_workload_inclusion_keys(&deposit);
         let deposits = workload_envelopes(&deposit);
         assert_eq!(deposits.len(), 2);
         let deposit = &deposits[0];
@@ -1178,6 +1253,7 @@ mod tests {
         assert_ne!(call.memo, second_call.memo);
 
         let activity = generate(&txgen, &output.join("zone-activity.yml"));
+        assert_workload_inclusion_keys(&activity);
         let activities = workload_envelopes(&activity);
         assert_eq!(activities.len(), 2);
         let activity = &activities[0];
@@ -1197,6 +1273,7 @@ mod tests {
 
         let withdrawal = generate(&txgen, &output.join("withdrawal.yml"));
         assert_setup_approval(&withdrawal, config.token, config.outbox);
+        assert_workload_inclusion_keys(&withdrawal);
         let withdrawals = workload_envelopes(&withdrawal);
         assert_eq!(withdrawals.len(), 2);
         let withdrawal = &withdrawals[0];
@@ -1290,6 +1367,17 @@ mod tests {
             .filter(|tx| tx["phase"] == "workload")
             .map(decode_envelope)
             .collect()
+    }
+
+    fn assert_workload_inclusion_keys(generated: &[serde_json::Value]) {
+        for transaction in generated.iter().filter(|tx| tx["phase"] == "workload") {
+            assert!(
+                transaction["inclusion_keys"]
+                    .as_array()
+                    .is_some_and(|keys| !keys.is_empty()),
+                "workload transaction must include receipt-tracking keys: {transaction}"
+            );
+        }
     }
 
     fn decode_envelope(tx: &serde_json::Value) -> TempoTxEnvelope {
