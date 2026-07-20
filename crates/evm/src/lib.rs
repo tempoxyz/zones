@@ -51,10 +51,11 @@ use tempo_evm::{
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
-    TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
-    storage::actions::StorageActions, storage_credits::NonCreditableSlots,
-    tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
+    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
+    account_keychain::AccountKeychain, nonce::NonceManager,
+    receive_policy_guard::ReceivePolicyGuard, storage::actions::StorageActions,
+    storage_credits::NonCreditableSlots, tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -120,6 +121,8 @@ where
                 Some(NonceManager::create_precompile(&tempo_env))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
                 Some(AccountKeychain::create_precompile(&tempo_env))
+            } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
+                Some(ReceivePolicyGuard::create_precompile(&tempo_env))
             } else {
                 None
             }
