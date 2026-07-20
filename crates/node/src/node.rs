@@ -471,7 +471,8 @@ where
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
-        self.l1_state_cache
+        self.l1_config
+            .l1_state_cache
             .write()
             .initialize_floor(tempo_block_number);
         info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");

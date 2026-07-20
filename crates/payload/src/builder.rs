@@ -48,6 +48,7 @@ use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTrans
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{PreparedL1Block, TempoStateExt};
+use zone_precompiles::storage::L1StorageError;
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
 

@@ -1,6 +1,5 @@
 //! Shared L1 reader fixtures for precompile and EVM integration tests.
-use crate::storage::L1StorageError;
-use crate::{L1StorageReader, SequencerExt};
+use crate::{L1StorageReader, SequencerExt, storage::L1StorageError};
 use alloy_primitives::{Address, B256, U256};
 use std::{
     collections::HashMap,
