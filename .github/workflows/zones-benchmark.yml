@@ -345,6 +345,7 @@ jobs:
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
           contrib/bench/provision-topology.sh up
           set -a
+          # shellcheck source=/dev/null
           source "$ZONES_BENCH_TOPOLOGY_ENV"
           set +a
           for name in \
@@ -361,6 +362,8 @@ jobs:
 
       - name: Write job summary
         if: success()
+        env:
+          SUMMARY_STATE_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
         run: |
           {
             echo "### Zones benchmark"
@@ -369,7 +372,7 @@ jobs:
             echo "- Transactions: \`$ZONES_BENCH_COUNT\`"
             echo "- Target TPS: \`$ZONES_BENCH_TPS\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
-            echo "- Tempo state bloat: \`${{ needs.authorize.outputs.state-bloat-gib }} GiB\`"
+            echo "- Tempo state bloat: \`$SUMMARY_STATE_BLOAT_GIB GiB\`"
             echo "- Target: \`$ZONES_BENCH_TARGET_ID\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
