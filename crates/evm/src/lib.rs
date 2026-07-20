@@ -18,7 +18,12 @@ pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
-    precompiles::{L1State, L1StorageReader, SequencerExt, extend_zone_precompiles},
+    precompiles::{
+        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+        L1State, L1StorageReader, SequencerExt, TIP403_REGISTRY_ADDRESS, TempoState,
+        ZONE_TIP20_FACTORY_ADDRESS, ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile,
+        create_tip403_precompile,
+    },
     tx_context::ZoneTxContext,
 };
 use alloy_evm::{
@@ -45,11 +50,16 @@ use tempo_evm::{
     evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
-use tempo_precompiles::{storage::actions::StorageActions, storage_credits::NonCreditableSlots};
+use tempo_precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
+    TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
+    storage::actions::StorageActions, storage_credits::NonCreditableSlots,
+    tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
+};
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
-use tempo_zone_contracts::ZONE_TX_CONTEXT_ADDRESS;
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 
@@ -77,16 +87,43 @@ where
     ) -> TempoEvm<AnchoredZoneDb<DB, L1>, I> {
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
-        let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_reader.clone());
-        extend_zone_precompiles(
-            precompiles,
-            &cfg,
-            l1,
-            sequencer,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
+        let actions = StorageActions::disabled();
+        let non_creditable_slots = Rc::new(RefCell::new(NonCreditableSlots::empty()));
+        let env = ZonePrecompileEnv::new(&cfg, actions.clone(), non_creditable_slots.clone());
+        precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
+            Some(TempoState::create(l1.clone(), &env))
+        });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
+        precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
+            Some(ChaumPedersenVerify::create(&env))
+        });
+        precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
+            Some(AesGcmDecrypt::create(&env))
+        });
+        precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
+            Some(ZoneTokenFactory::create(&env))
+        });
+        let tip403_env = env.clone();
+        precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
+            Some(create_tip403_precompile(&tip403_env))
+        });
+        let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_reader.clone());
+        let tempo_env = PrecompileEnv::new(&cfg, actions, non_creditable_slots);
+        precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
+            if is_tip20_prefix(*address) {
+                Some(create_tip20_precompile(*address, &env, sequencer.clone()))
+            } else if *address == TIP_FEE_MANAGER_ADDRESS {
+                Some(TipFeeManager::create_precompile(&tempo_env))
+            } else if *address == STABLECOIN_DEX_ADDRESS {
+                None
+            } else if *address == NONCE_PRECOMPILE_ADDRESS {
+                Some(NonceManager::create_precompile(&tempo_env))
+            } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+                Some(AccountKeychain::create_precompile(&tempo_env))
+            } else {
+                None
+            }
+        });
         evm
     }
 }
