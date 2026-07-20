@@ -18,10 +18,22 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use tempo_revm::{TempoStateAccess, TempoTxEnv, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 
 use crate::{ZoneEvm, tx_context};
+
+/// Removes context that is only valid for speculative transaction prewarming.
+///
+/// Tempo's payload iterator annotates expiring-nonce transactions with their
+/// position in the block so isolated prewarming touches the eventual nonce-ring
+/// slots. Serial block execution must use the state left by prior transactions
+/// instead.
+fn clear_prewarming_context(tx_env: &mut TempoTxEnv) {
+    if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+        tempo_tx_env.expiring_nonce_idx = None;
+    }
+}
 
 /// Simplified block executor for zone nodes.
 ///
@@ -97,7 +109,8 @@ where
         &mut self,
         tx: impl ExecutableTx<Self>,
     ) -> Result<Self::Result, BlockExecutionError> {
-        let (tx_env, recovered) = tx.into_parts();
+        let (mut tx_env, recovered) = tx.into_parts();
+        clear_prewarming_context(&mut tx_env);
 
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
@@ -133,6 +146,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::clear_prewarming_context;
     use alloy_primitives::{Address, U256};
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
@@ -140,6 +154,25 @@ mod tests {
         test_util::TIP20Setup,
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
+    use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+
+    #[test]
+    fn clears_only_prewarming_expiring_nonce_index() {
+        let mut tx_env = TempoTxEnv {
+            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
+                valid_before: Some(123),
+                expiring_nonce_idx: Some(3),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        clear_prewarming_context(&mut tx_env);
+
+        let tempo_tx_env = tx_env.tempo_tx_env.unwrap();
+        assert_eq!(tempo_tx_env.expiring_nonce_idx, None);
+        assert_eq!(tempo_tx_env.valid_before, Some(123));
+    }
 
     /// Simulates the zone executor's per-tx validator token override and runs
     /// the full fee lifecycle across multiple TIP-20 tokens, verifying:
