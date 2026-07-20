@@ -174,6 +174,10 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
                     });
                 }
             }
+            // A read-only overlay has identical original and present values, so it is not changed
+            // above, but committing the touched account could still persist that L1 value locally.
+            // Since every registry slot is mirrored and writes were rejected, drop the transition.
+            state.remove(&TIP403_REGISTRY_ADDRESS);
         }
 
         // TODO(rusowsky): remove once TIP-1092 is implemented
@@ -249,6 +253,7 @@ mod tests {
     use super::*;
     use revm::{
         database::{CacheDB, EmptyDB},
+        database_interface::DatabaseCommit,
         state::EvmStorageSlot,
     };
     use tempo_precompiles::{PATH_USD_ADDRESS, tip20::tip20_slots};
@@ -298,6 +303,40 @@ mod tests {
         );
         assert!(controller.begin_advance(anchor, anchor + 1).is_err());
         assert_eq!(reader.storage_requests().len(), 1);
+    }
+
+    #[test]
+    fn registry_overlay_is_removed_from_canonical_transition() {
+        let (anchor, slot) = (42, U256::from(7));
+        let (local, l1_value) = (U256::from(5), U256::from(99));
+        let l1 = TestL1::default();
+        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, l1_value);
+        let mut inner = test_db(anchor);
+        inner
+            .insert_account_storage(TIP403_REGISTRY_ADDRESS, slot, local)
+            .unwrap();
+        let mut db = AnchoredZoneDb::new(inner, l1);
+        let observed = db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap();
+        assert_eq!(observed, l1_value);
+
+        let mut account = Account::default();
+        account.mark_touch();
+        account.storage.insert(
+            slot,
+            EvmStorageSlot {
+                original_value: observed,
+                present_value: observed,
+                ..Default::default()
+            },
+        );
+        let mut state = AddressMap::from_iter([(TIP403_REGISTRY_ADDRESS, account)]);
+
+        db.sanitize_state(&mut state).unwrap();
+        assert!(!state.contains_key(&TIP403_REGISTRY_ADDRESS));
+
+        let mut inner = db.into_inner();
+        inner.commit(state);
+        assert_eq!(inner.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), local);
     }
 
     #[test]
