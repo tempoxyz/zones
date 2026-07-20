@@ -52,7 +52,28 @@ sol! {
         function messenger() external view returns (address);
         function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     }
+
+    /// `createZone` params of the native ZoneFactory precompile (TIP-1091).
+    /// Unlike the reference Solidity factory, the precompile has no `verifier`
+    /// field: the verifier and messenger are protocol constants.
+    struct NativeCreateZoneParams {
+        address initialToken;
+        address admin;
+        address sequencer;
+        ZoneParams zoneParams;
+        string rpcUrl;
+    }
+
+    #[sol(rpc)]
+    contract NativeZoneFactory {
+        function createZone(NativeCreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
+    }
 }
+
+/// Verifier protocol constant baked into the native ZoneFactory precompile.
+const NATIVE_ZONE_VERIFIER: Address = address!("0x5A56000000000000000000000000000000000000");
+/// Messenger protocol constant baked into the native ZoneFactory precompile.
+const NATIVE_ZONE_MESSENGER: Address = address!("0x5A4D000000000000000000000000000000000000");
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -118,10 +139,27 @@ impl CreateZone {
             .await?;
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
-        println!("Fetching verifier address from ZoneFactory...");
-        let verifier = Address::from(factory.verifier().call().await?.0);
+
+        // The native ZoneFactory precompile (TIP-1091) has no bytecode and no
+        // verifier()/messenger() getters: both are protocol constants.
+        let native = provider
+            .get_code_at(self.zone_factory)
+            .await
+            .wrap_err("failed fetching ZoneFactory code")?
+            .is_empty();
+        let (verifier, messenger) = if native {
+            println!(
+                "ZoneFactory at {} has no bytecode; using native precompile interface",
+                self.zone_factory
+            );
+            (NATIVE_ZONE_VERIFIER, NATIVE_ZONE_MESSENGER)
+        } else {
+            println!("Fetching verifier address from ZoneFactory...");
+            let verifier = Address::from(factory.verifier().call().await?.0);
+            let messenger = Address::from(factory.messenger().call().await?.0);
+            (verifier, messenger)
+        };
         println!("Verifier: {verifier}");
-        let messenger = Address::from(factory.messenger().call().await?.0);
         println!("Messenger: {messenger}");
 
         // Anchor before createZone so the zone replays the creation block and its
@@ -140,24 +178,37 @@ impl CreateZone {
         println!("Admin: {}", self.admin);
         println!("Sequencer: {}", self.sequencer);
 
-        let params = CreateZoneParams {
-            initialToken: self.initial_token,
-            admin: self.admin,
-            sequencer: self.sequencer,
-            verifier,
-            zoneParams: ZoneParams {
-                genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: anchor_hash,
-                genesisTempoBlockNumber: anchor_block_number,
-            },
-            rpcUrl: self.rpc_url.clone(),
+        let zone_params = ZoneParams {
+            genesisBlockHash: B256::ZERO,
+            genesisTempoBlockHash: anchor_hash,
+            genesisTempoBlockNumber: anchor_block_number,
         };
 
         println!(
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
         );
-        let receipt = factory.createZone(params).send_sync().await?;
+        let receipt = if native {
+            let native_factory = NativeZoneFactory::new(self.zone_factory, &provider);
+            let params = NativeCreateZoneParams {
+                initialToken: self.initial_token,
+                admin: self.admin,
+                sequencer: self.sequencer,
+                zoneParams: zone_params,
+                rpcUrl: self.rpc_url.clone(),
+            };
+            native_factory.createZone(params).send_sync().await?
+        } else {
+            let params = CreateZoneParams {
+                initialToken: self.initial_token,
+                admin: self.admin,
+                sequencer: self.sequencer,
+                verifier,
+                zoneParams: zone_params,
+                rpcUrl: self.rpc_url.clone(),
+            };
+            factory.createZone(params).send_sync().await?
+        };
         println!("Transaction confirmed in block {:?}", receipt.block_number);
         println!("Status: {}", receipt.status());
         println!("Gas used: {:?}", receipt.gas_used);
