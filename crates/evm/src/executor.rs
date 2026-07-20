@@ -101,12 +101,9 @@ where
     ) -> Result<Self::Result, BlockExecutionError> {
         let (tx_env, recovered) = tx.into_parts();
 
-        // System txs do not pay protocol fees. Resolving their validator token here could read L1
-        // policy state at N before `advanceTempo` moves the controller to N+1, causing the anchor
-        // advancement to fail. Thus, FeeAMM override is restricted to regular fee-paying txs.
-        if !tx_env.is_system_tx {
-            self.override_validator_token();
-        }
+        // Override the validator's fee token preference to match this
+        // transaction's resolved fee token, so the handler skips FeeAMM.
+        self.override_validator_token();
 
         let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
         let result = self
