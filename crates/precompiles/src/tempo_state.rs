@@ -232,12 +232,8 @@ impl TempoState {
 mod tests {
     use super::*;
 
-    use crate::{
-        storage::L1AnchorPhase,
-        test_utils::{
-            MockL1Reader, TestContext, call_precompile, test_context, test_env,
-            test_storage_provider,
-        },
+    use crate::test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
@@ -415,10 +411,7 @@ mod tests {
         )?;
 
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(
-            harness.controller.phase(),
-            L1AnchorPhase::Parent { anchor: 10 }
-        );
+        assert_eq!(harness.controller.current(), Some(10));
 
         let child = child_header(genesis_hash, 11);
         assert!(harness.finalize(ZONE_INBOX_ADDRESS, &child, false).is_err());
@@ -435,10 +428,7 @@ mod tests {
         let child = child_header(genesis_hash, 11);
         harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(
-            harness.controller.phase(),
-            L1AnchorPhase::Advanced { from: 10, to: 11 }
-        );
+        assert_eq!(harness.controller.current(), Some(11));
         assert!(
             reader
                 .storage_requests()

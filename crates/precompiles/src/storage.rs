@@ -34,124 +34,76 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
     ) -> core::result::Result<B256, L1StorageError>;
 }
 
-/// Invalid operation for the current anchor phase.
+/// Invalid selection of a transaction's Tempo L1 anchor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
-#[error("invalid anchor operation {operation:?} in phase {phase:?}")]
-pub struct L1AnchorError {
-    /// Attempted operation.
-    pub operation: L1AnchorOperation,
-    /// Phase in which the operation was attempted.
-    pub phase: L1AnchorPhase,
-}
-
-/// Operation applied to the execution-local anchor state machine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum L1AnchorOperation {
-    /// Observe external Tempo state at an anchor.
-    Read { anchor: u64 },
-    /// Advance from a parent Tempo block to its direct child.
-    Advance { from: u64, to: u64 },
-}
-
-/// Current execution-local Tempo anchor phase.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum L1AnchorPhase {
-    /// The selected Zone state's checkpoint has not been loaded yet.
-    #[default]
-    Uninitialized,
-    /// External Tempo state was read at the parent anchor.
-    Parent {
-        /// Parent Tempo block number.
-        anchor: u64,
+pub enum L1AnchorError {
+    /// An L1 read disagreed with the anchor already selected for this transaction.
+    #[error("Tempo L1 read at anchor {observed} conflicts with selected anchor {selected}")]
+    Read {
+        /// Anchor already selected for this transaction.
+        selected: u64,
+        /// Anchor requested by the new read.
+        observed: u64,
     },
-    /// The required system transaction advanced this execution to the child anchor.
-    Advanced {
+    /// Tempo advancement was non-contiguous or happened after an anchor was selected.
+    #[error("cannot advance Tempo L1 anchor from {from} to {to} after selecting {selected:?}")]
+    Advance {
+        /// Anchor already selected for this transaction, if any.
+        selected: Option<u64>,
         /// Parent Tempo block number.
         from: u64,
-        /// Child Tempo block number.
+        /// Requested child Tempo block number.
         to: u64,
     },
 }
 
-impl L1AnchorPhase {
-    /// Returns the anchor used by reads in this phase, if initialized.
-    pub const fn current(self) -> Option<u64> {
-        match self {
-            Self::Uninitialized => None,
-            Self::Parent { anchor } => Some(anchor),
-            Self::Advanced { to, .. } => Some(to),
-        }
-    }
-
-    fn apply(self, operation: L1AnchorOperation) -> Result<Self, L1AnchorError> {
-        let invalid = || L1AnchorError {
-            operation,
-            phase: self,
-        };
-
-        match operation {
-            L1AnchorOperation::Read { anchor: new } => match self {
-                Self::Uninitialized => Ok(Self::Parent { anchor: new }),
-                Self::Parent { anchor } if anchor == new => Ok(self),
-                Self::Advanced { to, .. } if to == new => Ok(self),
-                _ => Err(invalid()),
-            },
-            L1AnchorOperation::Advance { from, to } => {
-                if from.checked_add(1) == Some(to) && matches!(self, Self::Uninitialized) {
-                    Ok(Self::Advanced { from, to })
-                } else {
-                    Err(invalid())
-                }
-            }
-        }
-    }
-}
-
 /// The execution-local Tempo anchor used by the database adapter.
+/// The single Tempo L1 anchor selected for the current transaction attempt.
 #[derive(Clone, Default)]
-pub struct L1AnchorController {
-    state: Rc<Cell<L1AnchorPhase>>,
-}
+pub struct L1AnchorController(Rc<Cell<Option<u64>>>);
 
 impl fmt::Debug for L1AnchorController {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnchorController")
-            .field("phase", &self.phase())
+            .field("anchor", &self.current())
             .finish()
     }
 }
 
 impl L1AnchorController {
-    fn apply(&self, operation: L1AnchorOperation) -> Result<L1AnchorPhase, L1AnchorError> {
-        let next = self.state.get().apply(operation)?;
-        self.state.set(next);
-        Ok(next)
-    }
-
-    /// Returns the current phase.
-    pub fn phase(&self) -> L1AnchorPhase {
-        self.state.get()
-    }
-
-    /// Resets the controller for the next transaction attempt.
+    /// Resets the selected anchor for the next transaction attempt.
     pub fn reset(&self) {
-        self.state.set(L1AnchorPhase::Uninitialized);
+        self.0.set(None);
     }
 
-    /// Returns the anchor used by reads in the current phase, if initialized.
+    /// Returns the anchor selected for the current transaction, if any.
     pub fn current(&self) -> Option<u64> {
-        self.phase().current()
+        self.0.get()
     }
 
-    /// Validates the active anchor and records an external Tempo state read.
+    /// Validates the selected anchor and records an external Tempo state read.
     pub fn observe_read(&self, anchor: u64) -> Result<(), L1AnchorError> {
-        self.apply(L1AnchorOperation::Read { anchor })?;
-        Ok(())
+        match self.current() {
+            None => {
+                self.0.set(Some(anchor));
+                Ok(())
+            }
+            Some(selected) if selected == anchor => Ok(()),
+            Some(selected) => Err(L1AnchorError::Read {
+                selected,
+                observed: anchor,
+            }),
+        }
     }
 
-    /// Advances the execution-local anchor after `finalizeTempo` validates the next header.
+    /// Selects the child anchor after `finalizeTempo` validates a contiguous header.
     pub fn begin_advance(&self, from: u64, to: u64) -> Result<(), L1AnchorError> {
-        self.apply(L1AnchorOperation::Advance { from, to })?;
+        let selected = self.current();
+        if from.checked_add(1) != Some(to) || selected.is_some() {
+            return Err(L1AnchorError::Advance { selected, from, to });
+        }
+
+        self.0.set(Some(to));
         Ok(())
     }
 }
@@ -185,10 +137,7 @@ mod tests {
         let controller = L1AnchorController::default();
         controller.begin_advance(10, 11).unwrap();
         controller.observe_read(11).unwrap();
-        assert_eq!(
-            controller.phase(),
-            L1AnchorPhase::Advanced { from: 10, to: 11 }
-        );
+        assert_eq!(controller.current(), Some(11));
     }
 
     #[test]
@@ -203,5 +152,21 @@ mod tests {
         let controller = L1AnchorController::default();
         controller.begin_advance(10, 11).unwrap();
         assert!(controller.begin_advance(11, 12).is_err());
+    }
+
+    #[test]
+    fn controller_rejects_non_contiguous_advance() {
+        let controller = L1AnchorController::default();
+        assert!(controller.begin_advance(10, 12).is_err());
+        assert_eq!(controller.current(), None);
+    }
+
+    #[test]
+    fn controller_reset_allows_a_new_anchor() {
+        let controller = L1AnchorController::default();
+        controller.observe_read(10).unwrap();
+        controller.reset();
+        controller.begin_advance(10, 11).unwrap();
+        assert_eq!(controller.current(), Some(11));
     }
 }
