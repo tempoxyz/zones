@@ -25,6 +25,7 @@ readonly ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
 readonly PATH_USD="0x20C0000000000000000000000000000000000000"
 readonly TEMPO_STATE="0x1c00000000000000000000000000000000000000"
 readonly ZONE_CONFIG="0x1c00000000000000000000000000000000000003"
+readonly EIP2935_HISTORY_STORAGE="0x0000F90827F1C53a10cb7A02335B175320002935"
 readonly LOCALNET_SIGNING_SECRET="tempo-localnet-signing-key-secret"
 
 provision_succeeded=0
@@ -155,6 +156,29 @@ wait_for_chain_advance() {
         sleep 1
     done
     die "timed out waiting for $label chain to advance past block $start_block"
+}
+
+verify_history_storage() {
+    local url="$1"
+    local label="$2"
+    local code current_hex current_block probe_block probe_hex calldata expected observed
+
+    code="$(rpc "$url" eth_getCode "[\"$EIP2935_HISTORY_STORAGE\",\"latest\"]")"
+    [[ "$code" != "0x" ]] \
+        || die "$label is missing the EIP-2935 history storage contract"
+
+    current_hex="$(rpc "$url" eth_blockNumber)"
+    current_block="$(hex_to_dec "$current_hex")"
+    (( current_block > 0 )) \
+        || die "$label has not advanced far enough to verify EIP-2935 history"
+    probe_block=$((current_block - 1))
+    printf -v probe_hex '0x%x' "$probe_block"
+    printf -v calldata '0x%064x' "$probe_block"
+    expected="$(rpc "$url" eth_getBlockByNumber "[\"$probe_hex\",false]" | jq -er '.hash')"
+    observed="$(rpc "$url" eth_call \
+        "[{\"to\":\"$EIP2935_HISTORY_STORAGE\",\"data\":\"$calldata\"},\"latest\"]")"
+    [[ "${observed,,}" == "${expected,,}" ]] \
+        || die "$label EIP-2935 history mismatch for block $probe_block: expected $expected, got $observed"
 }
 
 process_matches() {
@@ -540,6 +564,8 @@ provision_up() {
     wait_for_peer "$l1_b_rpc" "Tempo validator B" "$rpc_timeout"
     wait_for_chain_advance "$l1_a_rpc" "Tempo validator A" "$rpc_timeout"
     wait_for_chain_advance "$l1_b_rpc" "Tempo validator B" "$rpc_timeout"
+    verify_history_storage "$l1_a_rpc" "Tempo validator A"
+    verify_history_storage "$l1_b_rpc" "Tempo validator B"
 
     local chain_a chain_b genesis_a genesis_b
     chain_a="$(hex_to_dec "$(rpc "$l1_a_rpc" eth_chainId)")"

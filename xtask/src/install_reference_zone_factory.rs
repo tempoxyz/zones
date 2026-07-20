@@ -1,5 +1,5 @@
-//! Installs the Solidity reference ZoneFactory at TIP-1091's canonical address in a Tempo
-//! genesis file.
+//! Installs the Solidity reference ZoneFactory and canonical EIP-2935 history contract in a
+//! Tempo genesis file.
 //!
 //! The reference factory's constructor cannot run at its protocol-managed address on an ordinary
 //! EVM chain. This command reproduces the constructor's code, nonce, and storage allocations so a
@@ -10,6 +10,7 @@ use alloy::{
     primitives::{Address, B256, Bytes, U256, address, keccak256},
     sol_types::SolValue,
 };
+use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
 use eyre::{WrapErr as _, ensure, eyre};
 use serde::Deserialize;
 use std::{
@@ -107,6 +108,7 @@ impl InstallReferenceZoneFactory {
             .wrap_err_with(|| format!("failed parsing genesis `{}`", self.genesis.display()))?;
 
         let artifacts = load_reference_artifacts(&self.specs_out)?;
+        install_eip2935_history_storage(&mut genesis)?;
         install_reference_zone_factory(&mut genesis, self.owner, artifacts)?;
 
         if let Some(parent) = self
@@ -134,9 +136,31 @@ impl InstallReferenceZoneFactory {
         println!("  ZoneFactory: {ZONE_FACTORY_ADDRESS}");
         println!("  Verifier:    {VERIFIER_ADDRESS}");
         println!("  Messenger:   {MESSENGER_ADDRESS}");
+        println!("  EIP-2935:    {HISTORY_STORAGE_ADDRESS}");
         println!("  Owner:       {}", self.owner);
         Ok(())
     }
+}
+
+/// Install the canonical EIP-2935 history contract for local chains that activate Prague at
+/// genesis. Production networks deploy this contract as part of the fork transition, but a
+/// genesis-active chain must include it in its initial allocation so per-block system calls can
+/// populate the block-hash ring buffer.
+fn install_eip2935_history_storage(genesis: &mut Genesis) -> eyre::Result<()> {
+    let expected = GenesisAccount::default()
+        .with_nonce(Some(1))
+        .with_code(Some(HISTORY_STORAGE_CODE.clone()));
+
+    if let Some(existing) = genesis.alloc.get(&HISTORY_STORAGE_ADDRESS) {
+        ensure!(
+            existing == &expected,
+            "refusing to replace conflicting EIP-2935 history allocation at {HISTORY_STORAGE_ADDRESS}"
+        );
+        return Ok(());
+    }
+
+    genesis.alloc.insert(HISTORY_STORAGE_ADDRESS, expected);
+    Ok(())
 }
 
 fn load_reference_artifacts(specs_out: &Path) -> eyre::Result<ReferenceArtifacts> {
@@ -328,6 +352,7 @@ mod tests {
     fn installs_constructor_equivalent_factory_state() {
         let owner = address!("0x0000000000000000000000000000000000001234");
         let mut genesis = Genesis::default();
+        install_eip2935_history_storage(&mut genesis).unwrap();
         install_reference_zone_factory(&mut genesis, owner, test_artifacts()).unwrap();
 
         let factory = &genesis.alloc[&ZONE_FACTORY_ADDRESS];
@@ -357,6 +382,40 @@ mod tests {
         assert_eq!(storage[&B256::with_last_byte(7)], B256::with_last_byte(3));
         assert_eq!(genesis.alloc[&VERIFIER_ADDRESS].nonce, Some(1));
         assert_eq!(genesis.alloc[&MESSENGER_ADDRESS].nonce, Some(1));
+        assert_eq!(
+            genesis.alloc[&HISTORY_STORAGE_ADDRESS],
+            GenesisAccount::default()
+                .with_nonce(Some(1))
+                .with_code(Some(HISTORY_STORAGE_CODE.clone()))
+        );
+    }
+
+    #[test]
+    fn accepts_existing_canonical_eip2935_history_storage() {
+        let expected = GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(HISTORY_STORAGE_CODE.clone()));
+        let mut genesis = Genesis::default();
+        genesis
+            .alloc
+            .insert(HISTORY_STORAGE_ADDRESS, expected.clone());
+
+        install_eip2935_history_storage(&mut genesis).unwrap();
+
+        assert_eq!(genesis.alloc[&HISTORY_STORAGE_ADDRESS], expected);
+    }
+
+    #[test]
+    fn rejects_conflicting_eip2935_history_storage() {
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            HISTORY_STORAGE_ADDRESS,
+            GenesisAccount::default().with_code(Some(Bytes::from_static(&[0x60, 0x00]))),
+        );
+
+        let error = install_eip2935_history_storage(&mut genesis).unwrap_err();
+
+        assert!(error.to_string().contains("conflicting EIP-2935"));
     }
 
     #[test]
