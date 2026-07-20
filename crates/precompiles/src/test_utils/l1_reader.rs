@@ -1,5 +1,5 @@
 //! Shared L1 reader fixtures for precompile and EVM integration tests.
-use crate::{L1StorageReader, SequencerExt, storage::L1StorageError};
+use crate::{L1StateError, L1StorageReader, SequencerExt};
 use alloy_primitives::{Address, B256, U256};
 use std::{
     collections::HashMap,
@@ -171,13 +171,18 @@ impl L1StorageReader for MockL1Reader {
         account: Address,
         slot: B256,
         block_number: u64,
-    ) -> Result<B256, L1StorageError> {
+    ) -> Result<B256, L1StateError> {
         self.storage_requests
             .lock()
             .unwrap()
             .push((account, slot, block_number));
         if self.fail_storage {
-            return Err(L1StorageError("RPC unavailable".into()));
+            return Err(L1StateError::StorageUnavailable {
+                account,
+                slot,
+                block_number,
+                reason: "RPC unavailable".into(),
+            });
         }
         if let Some(value) = self
             .slots
@@ -195,7 +200,12 @@ impl L1StorageReader for MockL1Reader {
             .lock()
             .unwrap()
             .sload(account, key)
-            .map_err(|err| L1StorageError(err.to_string()))?;
+            .map_err(|err| L1StateError::StorageUnavailable {
+                account,
+                slot,
+                block_number,
+                reason: err.to_string(),
+            })?;
         if value.is_zero() {
             Ok(self.fallback)
         } else {

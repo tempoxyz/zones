@@ -18,7 +18,7 @@ use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
-use zone_precompiles::{L1StorageReader, SequencerExt};
+use zone_precompiles::{L1StateError, L1StorageReader, SequencerExt};
 
 use super::cache::L1StateCache;
 use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
@@ -299,12 +299,14 @@ impl L1StorageReader for L1StateProvider {
         account: Address,
         slot: B256,
         block_number: u64,
-    ) -> std::result::Result<B256, zone_precompiles::storage::L1StorageError> {
-        self.get_storage(account, slot, block_number).map_err(|e| {
-            zone_precompiles::storage::L1StorageError(format!(
-                "L1 storage unavailable for account={account} slot={slot} block={block_number}: {e}"
-            ))
-        })
+    ) -> std::result::Result<B256, L1StateError> {
+        self.get_storage(account, slot, block_number)
+            .map_err(|error| L1StateError::StorageUnavailable {
+                account,
+                slot,
+                block_number,
+                reason: error.to_string(),
+            })
     }
 }
 

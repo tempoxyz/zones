@@ -48,7 +48,7 @@ use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTrans
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{PreparedL1Block, TempoStateExt};
-use zone_precompiles::storage::L1StorageError;
+use zone_precompiles::L1StateError;
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
 
@@ -459,7 +459,7 @@ where
             }
             Err(reth_evm::block::BlockExecutionError::Internal(
                 reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
-            )) if is_l1_storage_error(error.as_ref()) => {
+            )) if is_l1_storage_unavailable(error.as_ref()) => {
                 warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
             }
             Err(err) => return Err(PayloadBuilderError::evm(err)),
@@ -469,10 +469,13 @@ where
     Ok(PoolExecutionOutcome::Complete)
 }
 
-fn is_l1_storage_error(error: &(dyn Error + 'static)) -> bool {
+fn is_l1_storage_unavailable(error: &(dyn Error + 'static)) -> bool {
     let mut current = Some(error);
     while let Some(error) = current {
-        if error.is::<L1StorageError>() {
+        if error
+            .downcast_ref::<L1StateError>()
+            .is_some_and(L1StateError::is_storage_unavailable)
+        {
             return true;
         }
         current = error.source();

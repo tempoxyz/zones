@@ -18,7 +18,7 @@ pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
-    precompiles::{L1AnchorController, L1StorageReader, SequencerExt, extend_zone_precompiles},
+    precompiles::{L1State, L1StorageReader, SequencerExt, extend_zone_precompiles},
     tx_context::ZoneTxContext,
 };
 use alloy_evm::{
@@ -73,7 +73,7 @@ where
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>>(
         &self,
         mut evm: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
-        controller: L1AnchorController,
+        l1: L1State<L1>,
     ) -> TempoEvm<AnchoredZoneDb<DB, L1>, I> {
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
@@ -81,11 +81,10 @@ where
         extend_zone_precompiles(
             precompiles,
             &cfg,
-            self.l1_reader.clone(),
+            l1,
             sequencer,
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
-            controller,
         );
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         evm
@@ -111,9 +110,9 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let db = AnchoredZoneDb::new(db, self.l1_reader.clone());
-        let controller = db.controller().clone();
+        let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(self.register_precompiles(evm, controller))
+        ZoneEvm::new(self.register_precompiles(evm, l1))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -123,9 +122,9 @@ where
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let db = AnchoredZoneDb::new(db, self.l1_reader.clone());
-        let controller = db.controller().clone();
+        let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(self.register_precompiles(evm, controller))
+        ZoneEvm::new(self.register_precompiles(evm, l1))
     }
 }
 

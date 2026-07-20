@@ -17,7 +17,7 @@ use revm::{
 use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
-    storage::{self, L1AnchorController, L1AnchorError, L1StorageError, L1StorageReader},
+    storage::{self, L1State, L1StateError, L1StorageReader},
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -26,8 +26,7 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 /// operations to the caller-provided Zone database.
 pub struct AnchoredZoneDb<DB, L1> {
     inner: DB,
-    l1: L1,
-    controller: L1AnchorController,
+    l1: L1State<L1>,
 }
 
 impl<DB, L1> AnchoredZoneDb<DB, L1> {
@@ -35,8 +34,7 @@ impl<DB, L1> AnchoredZoneDb<DB, L1> {
     pub fn new(inner: DB, l1: L1) -> Self {
         Self {
             inner,
-            l1,
-            controller: L1AnchorController::default(),
+            l1: L1State::new(l1),
         }
     }
 
@@ -55,14 +53,14 @@ impl<DB, L1> AnchoredZoneDb<DB, L1> {
         self.inner
     }
 
-    /// Returns the execution-local anchor controller.
-    pub const fn controller(&self) -> &L1AnchorController {
-        &self.controller
+    /// Returns the execution-local L1 state shared with native precompiles.
+    pub const fn l1_state(&self) -> &L1State<L1> {
+        &self.l1
     }
 
     /// Clears bookkeeping that is valid only for the current transaction attempt.
     pub(crate) fn reset_transaction_state(&mut self) {
-        self.controller.reset();
+        self.l1.reset_anchor();
     }
 }
 
@@ -70,7 +68,7 @@ impl<DB: fmt::Debug, L1> fmt::Debug for AnchoredZoneDb<DB, L1> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AnchoredZoneDb")
             .field("inner", &self.inner)
-            .field("controller", &self.controller)
+            .field("l1", &self.l1)
             .finish_non_exhaustive()
     }
 }
@@ -84,18 +82,9 @@ pub enum ZoneDbError<E> {
     /// The selected Zone state contains an invalid Tempo anchor.
     #[error("invalid Tempo anchor (does not fit in u64): {0}")]
     AnchorOverflow(U256),
-    /// The execution-local anchor transition is inconsistent.
+    /// Execution-local Tempo L1 state could not be read or advanced consistently.
     #[error(transparent)]
-    AnchorTransition(#[from] L1AnchorError),
-    /// Exact anchored L1 storage was unavailable.
-    #[error("Tempo L1 storage unavailable address={address} slot={slot} block={anchor}: {source}")]
-    L1Read {
-        address: Address,
-        slot: B256,
-        anchor: u64,
-        #[source]
-        source: L1StorageError,
-    },
+    L1State(#[from] L1StateError),
     /// A transaction attempted to persist mirrored Tempo-owned state.
     #[error("write to mirrored Tempo storage address={address} slot={slot}")]
     L1Write { address: Address, slot: U256 },
@@ -114,7 +103,7 @@ impl<E: DBErrorMarker> ZoneDbError<E> {
 
 impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
     fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
-        if let Some(anchor) = self.controller.current() {
+        if let Some(anchor) = self.l1.get_anchor() {
             return Ok(anchor);
         }
 
@@ -134,13 +123,8 @@ impl<DB: Database, L1: L1StorageReader> AnchoredZoneDb<DB, L1> {
     ) -> Result<U256, ZoneDbError<DB::Error>> {
         self.l1
             .read_l1_storage(address, B256::from(slot), anchor)
-            .map(|value| value.into())
-            .map_err(|source| ZoneDbError::L1Read {
-                address,
-                slot: slot.into(),
-                anchor,
-                source,
-            })
+            .map(Into::into)
+            .map_err(ZoneDbError::L1State)
     }
 
     /// Rejects writes to the L1-mirrored slots and removes the mirrored field from packed TIP-20 transitions.
@@ -222,9 +206,6 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for AnchoredZoneDb<DB, L1> 
 
         let anchor = self.anchor()?;
         let l1 = self.l1_storage(address, slot, anchor)?;
-        self.controller
-            .observe_read(anchor)
-            .map_err(ZoneDbError::AnchorTransition)?;
 
         if storage::is_tip20_policy_id_slot(address, slot) {
             Ok(storage::merge_transfer_policy_id(local, l1))
@@ -270,7 +251,7 @@ mod tests {
         let mut db = AnchoredZoneDb::new(test_db(anchor), l1);
 
         assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
-        assert_eq!(db.controller().current(), Some(anchor));
+        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
     }
 
     #[test]
@@ -280,18 +261,21 @@ mod tests {
         let mut failing = AnchoredZoneDb::new(test_db(anchor), TestL1::failing_storage());
         assert!(matches!(
             failing.storage(TIP403_REGISTRY_ADDRESS, slot),
-            Err(ZoneDbError::L1Read { anchor: 42, .. })
+            Err(ZoneDbError::L1State(L1StateError::StorageUnavailable {
+                block_number: 42,
+                ..
+            }))
         ));
 
         let reader = TestL1::default();
         reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
         let mut db = AnchoredZoneDb::new(test_db(anchor), reader.clone());
-        let controller = db.controller().clone();
+        let l1 = db.l1_state().clone();
         assert_eq!(
             db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(),
             U256::ONE
         );
-        assert!(controller.begin_advance(anchor, anchor + 1).is_err());
+        assert!(l1.advance_anchor(anchor, anchor + 1).is_err());
         assert_eq!(reader.storage_requests().len(), 1);
     }
 
@@ -401,11 +385,11 @@ mod tests {
         let mut db = AnchoredZoneDb::new(test_db(anchor), l1);
 
         db.storage(token, slot).unwrap();
-        assert_eq!(db.controller().current(), Some(anchor));
+        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
 
         db.reset_transaction_state();
 
-        assert_eq!(db.controller().current(), None);
+        assert_eq!(db.l1_state().get_anchor(), None);
     }
 
     #[test]

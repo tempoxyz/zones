@@ -52,7 +52,7 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
-pub use storage::{L1AnchorController, L1StorageReader};
+pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
@@ -86,21 +86,16 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 pub fn extend_zone_precompiles<L1: L1StorageReader>(
     precompiles: &mut PrecompilesMap,
     cfg: &CfgEnv<TempoHardfork>,
-    l1_reader: L1,
+    l1: L1State<L1>,
     sequencer: Arc<dyn SequencerExt>,
     actions: StorageActions,
     non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
-    controller: L1AnchorController,
 ) {
     let env = ZonePrecompileEnv::new(cfg, actions.clone(), non_creditable_slots.clone());
     let tempo_env = PrecompileEnv::new(cfg, actions, non_creditable_slots);
 
     precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
-        Some(TempoState::create(
-            l1_reader.clone(),
-            controller.clone(),
-            &env,
-        ))
+        Some(TempoState::create(l1.clone(), &env))
     });
     precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
         Some(ChaumPedersenVerify::create(&env))
@@ -168,17 +163,13 @@ impl ChaumPedersenVerify {
 impl TempoState {
     /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
     ///
-    /// System-only arbitrary L1 storage reads are delegated to `reader` at the stored checkpoint.
-    pub fn create<P: L1StorageReader>(
-        reader: P,
-        controller: L1AnchorController,
-        env: &ZonePrecompileEnv,
-    ) -> DynPrecompile {
+    /// System-only arbitrary L1 storage reads are delegated through `l1` at the stored checkpoint.
+    pub fn create<P: L1StorageReader>(l1: L1State<P>, env: &ZonePrecompileEnv) -> DynPrecompile {
         execution::create_precompile(
             "TempoState",
             env,
             execution::NoCallRules,
-            move |data, caller| Self::new().call_with_provider(&reader, &controller, data, caller),
+            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
         )
     }
 }
