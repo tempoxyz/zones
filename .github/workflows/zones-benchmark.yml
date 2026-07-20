@@ -499,6 +499,20 @@ jobs:
             cp -R "$ZONES_BENCH_TOPOLOGY_DIR/logs" target/zones-benchmark/node-logs
           fi
 
+      - name: Collect invalid block diagnostics
+        if: ${{ failure() && !cancelled() }}
+        run: |
+          witness_dir="${ZONES_BENCH_STATE_A_ROOT:-}/zone/invalid_block_hooks/witness"
+          if [ -d "$witness_dir" ]; then
+            output_dir=target/zones-benchmark/invalid-block-diagnostics
+            mkdir -p "$output_dir"
+            find "$witness_dir" -maxdepth 1 -type f \( \
+              -name '*.bundle_state.original.json' -o \
+              -name '*.bundle_state.re_executed.json' -o \
+              -name '*.bundle_state.diff' \
+            \) -exec cp --target-directory="$output_dir" -- {} +
+          fi
+
       - name: Upload specs, logs, and reports
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -508,6 +522,7 @@ jobs:
             target/zones-benchmark/${{ needs.authorize.outputs.phase }}/
             target/zones-benchmark/*.json
             target/zones-benchmark/node-logs/
+            target/zones-benchmark/invalid-block-diagnostics/
           if-no-files-found: warn
           retention-days: 14
 

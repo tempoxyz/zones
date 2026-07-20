@@ -34,6 +34,7 @@ const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/bench/
 const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const AUTH_TOKEN_TTL_SECS: u64 = 300;
+const EXPIRING_NONCE_VALID_FOR_SECS: u64 = 25;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -271,6 +272,7 @@ struct PreflightReport {
     queried_zone_gas_price: u128,
     l1_max_fee_per_gas: u128,
     zone_max_fee_per_gas: u128,
+    approval_fee_bump: u128,
     activity_fee_bump: u128,
     activity_max_fee_per_gas: u128,
     transactions_per_account: u64,
@@ -623,6 +625,17 @@ impl BenchmarkPreflight {
         let activity_transaction_capacity = u64::from(self.accounts)
             .checked_mul(self.transactions_per_account)
             .ok_or_else(|| eyre!("activity transaction capacity overflows u64"))?;
+        let approval_fee_bump = u128::from(self.accounts);
+        let (l1_approval_max_fee_per_gas, _) = expiring_fee_caps(
+            l1_max_fee_per_gas,
+            l1_max_priority_fee_per_gas,
+            approval_fee_bump,
+        )?;
+        let (zone_approval_max_fee_per_gas, _) = expiring_fee_caps(
+            zone_max_fee_per_gas,
+            zone_max_priority_fee_per_gas,
+            approval_fee_bump,
+        )?;
         let activity_fee_bump = u128::from(activity_transaction_capacity);
         let (activity_max_fee_per_gas, _) = expiring_fee_caps(
             zone_max_fee_per_gas,
@@ -737,12 +750,12 @@ impl BenchmarkPreflight {
             })
             .collect();
 
-        let l1_approval_fee =
+        let l1_control_approval_fee =
             calc_gas_balance_spending(self.approval_gas_limit, l1_max_fee_per_gas);
         let l1_deposit_tx_fee =
             calc_gas_balance_spending(self.deposit_gas_limit, l1_max_fee_per_gas);
         let zone_approval_fee =
-            calc_gas_balance_spending(self.approval_gas_limit, zone_max_fee_per_gas);
+            calc_gas_balance_spending(self.approval_gas_limit, zone_approval_max_fee_per_gas);
         let zone_fee_config_fee =
             calc_gas_balance_spending(self.fee_config_gas_limit, zone_max_fee_per_gas);
         let all_sponsored_approval_fees = zone_approval_fee
@@ -783,7 +796,7 @@ impl BenchmarkPreflight {
                 .checked_add(l1_deposit_tx_fee)
                 .and_then(|value| {
                     value.checked_add(if control_needs_setup && !self.no_approval_setup {
-                        l1_approval_fee
+                        l1_control_approval_fee
                     } else {
                         U256::ZERO
                     })
@@ -831,6 +844,8 @@ impl BenchmarkPreflight {
             l1_max_fee_per_gas,
             zone_max_fee_per_gas,
             activity_max_fee_per_gas,
+            l1_approval_max_fee_per_gas,
+            zone_approval_max_fee_per_gas,
             self.deposit_gas_limit,
             self.activity_gas_limit,
             self.withdrawal_tx_gas_limit,
@@ -913,6 +928,7 @@ impl BenchmarkPreflight {
             queried_zone_gas_price,
             l1_max_fee_per_gas,
             zone_max_fee_per_gas,
+            approval_fee_bump,
             activity_fee_bump,
             activity_max_fee_per_gas,
             transactions_per_account: self.transactions_per_account,
@@ -961,6 +977,7 @@ impl BenchmarkPreflight {
         println!("  L1 gas estimate:    {queried_l1_gas_price}");
         println!("  Zone gas estimate:  {queried_zone_gas_price}");
         println!("  Zone max fee:       {zone_max_fee_per_gas}");
+        println!("  Approval fee bump: {approval_fee_bump}");
         println!("  Activity fee bump: {activity_fee_bump}");
         println!("  Bootstrap amount:  {}", self.bootstrap_deposit_amount);
         println!("  Bootstrap minimum: {bootstrap_minimum_deposit_amount}");
@@ -1047,11 +1064,11 @@ fn expiring_fee_caps(
     max_priority: u128,
     maximum_bump: u128,
 ) -> eyre::Result<(u128, u128)> {
-    let max_fee = max_fee.checked_add(maximum_bump).ok_or_else(|| {
-        eyre!("Zone maxFeePerGas overflows the txgen expiring-nonce uniqueness bump")
-    })?;
+    let max_fee = max_fee
+        .checked_add(maximum_bump)
+        .ok_or_else(|| eyre!("maxFeePerGas overflows the txgen expiring-nonce uniqueness bump"))?;
     let max_priority = max_priority.checked_add(maximum_bump).ok_or_else(|| {
-        eyre!("Zone maxPriorityFeePerGas overflows the txgen expiring-nonce uniqueness bump")
+        eyre!("maxPriorityFeePerGas overflows the txgen expiring-nonce uniqueness bump")
     })?;
     Ok((max_fee, max_priority))
 }
@@ -1072,6 +1089,8 @@ fn validate_account_capacity(
     l1_max_fee_per_gas: u128,
     zone_max_fee_per_gas: u128,
     zone_activity_max_fee_per_gas: u128,
+    l1_approval_max_fee_per_gas: u128,
+    zone_approval_max_fee_per_gas: u128,
     deposit_gas_limit: u64,
     activity_gas_limit: u64,
     withdrawal_tx_gas_limit: u64,
@@ -1083,8 +1102,10 @@ fn validate_account_capacity(
         calc_gas_balance_spending(activity_gas_limit, zone_activity_max_fee_per_gas);
     let zone_withdrawal_tx_fee =
         calc_gas_balance_spending(withdrawal_tx_gas_limit, zone_max_fee_per_gas);
-    let l1_approval_fee = calc_gas_balance_spending(approval_gas_limit, l1_max_fee_per_gas);
-    let zone_approval_fee = calc_gas_balance_spending(approval_gas_limit, zone_max_fee_per_gas);
+    let l1_approval_fee =
+        calc_gas_balance_spending(approval_gas_limit, l1_approval_max_fee_per_gas);
+    let zone_approval_fee =
+        calc_gas_balance_spending(approval_gas_limit, zone_approval_max_fee_per_gas);
 
     if phase.roundtrip() {
         let deposit_net = U256::from(
@@ -1326,6 +1347,7 @@ fn render_all_specs(
                 config.portal,
                 true,
                 false,
+                true,
             )
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -1340,6 +1362,7 @@ fn render_all_specs(
                 config.outbox,
                 false,
                 false,
+                true,
             )
         })
         .collect::<eyre::Result<Vec<_>>>()?;
@@ -1352,6 +1375,7 @@ fn render_all_specs(
                 config,
                 config.portal,
                 true,
+                false,
                 false,
             )
         })
@@ -1397,6 +1421,7 @@ fn render_all_specs(
                     config,
                     config.outbox,
                     false,
+                    true,
                     true,
                 )
             })
@@ -1511,6 +1536,7 @@ fn approval_step(
     spender: Address,
     l1: bool,
     sponsored: bool,
+    expiring_nonce: bool,
 ) -> eyre::Result<Value> {
     let (max_fee, max_priority) = if l1 {
         (
@@ -1545,6 +1571,10 @@ fn approval_step(
             "pool": "sponsor",
             "select": { "index": 0 },
         });
+    }
+    if expiring_nonce {
+        transaction["expiring_nonce"] = serde_json::json!(true);
+        transaction["valid_for_secs"] = serde_json::json!(EXPIRING_NONCE_VALID_FOR_SECS);
     }
     serde_yaml::to_value(serde_json::json!({
         "id": format!("approve_{}_account_{account_index}", if l1 { "portal" } else { "outbox" }),
@@ -1828,6 +1858,7 @@ mod tests {
             queried_zone_gas_price: 1,
             l1_max_fee_per_gas: 1,
             zone_max_fee_per_gas: 1,
+            approval_fee_bump: 1,
             activity_fee_bump: 1,
             activity_max_fee_per_gas: 2,
             transactions_per_account: 1,
@@ -1881,6 +1912,11 @@ mod tests {
         let deposit: Value =
             serde_yaml::from_str(&fs::read_to_string(output.join("deposit.yml")).unwrap()).unwrap();
         assert_eq!(deposit["setup"]["steps"].as_sequence().unwrap().len(), 2);
+        assert_eq!(deposit["setup"]["steps"][0]["tx"]["expiring_nonce"], true);
+        assert_eq!(
+            deposit["setup"]["steps"][0]["tx"]["valid_for_secs"],
+            EXPIRING_NONCE_VALID_FOR_SECS
+        );
         assert_eq!(
             deposit["templates"]["deposit"]["call"]["function"],
             "deposit(address,address,uint128,bytes32,address)"
@@ -1906,6 +1942,10 @@ mod tests {
                 .is_none()
         );
         assert_eq!(
+            withdrawal["setup"]["steps"][0]["tx"]["expiring_nonce"],
+            true
+        );
+        assert_eq!(
             withdrawal["templates"]["request_withdrawal"]["call"]["function"],
             "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
         );
@@ -1917,6 +1957,11 @@ mod tests {
         assert_eq!(bootstrap["accounts"]["control"]["range"][0], 0);
         assert_eq!(bootstrap["accounts"]["control"]["range"][1], 1);
         assert_eq!(bootstrap["setup"]["steps"].as_sequence().unwrap().len(), 1);
+        assert!(
+            bootstrap["setup"]["steps"][0]["tx"]
+                .get("expiring_nonce")
+                .is_none()
+        );
         assert_eq!(
             bootstrap["templates"]["bootstrap_deposit"]["call"]["args"][1],
             config.sequencer.to_string()
@@ -1927,6 +1972,11 @@ mod tests {
                 .unwrap();
         let sponsored_approval = &zone_roundtrip["setup"]["steps"][0]["tx"];
         assert_eq!(sponsored_approval["sponsor"]["pool"], "sponsor");
+        assert_eq!(sponsored_approval["expiring_nonce"], true);
+        assert_eq!(
+            sponsored_approval["valid_for_secs"],
+            EXPIRING_NONCE_VALID_FOR_SECS
+        );
         assert_eq!(sponsored_approval["call"]["function"], "approve");
         assert_eq!(
             zone_roundtrip["templates"]["request_withdrawal"]["call"]["function"],
@@ -2011,7 +2061,7 @@ mod tests {
 
         let output = temp_output("generate");
         let config = local_render_config();
-        render_all_specs(&output, &config, true, &[0], &[0]).unwrap();
+        render_all_specs(&output, &config, true, &[0, 1], &[0, 1]).unwrap();
         let pool_addresses =
             derive_signers(TEST_MNEMONIC, config.account_start, config.account_end)
                 .unwrap()
@@ -2020,7 +2070,14 @@ mod tests {
                 .collect::<Vec<_>>();
 
         let deposit = generate(&txgen, &output.join("deposit.yml"));
-        assert_setup_approval(&deposit, config.token, config.portal);
+        assert_setup_approvals(
+            &deposit,
+            config.token,
+            config.portal,
+            true,
+            2,
+            config.l1_max_fee_per_gas,
+        );
         assert_workload_inclusion_keys(&deposit);
         let deposits = workload_envelopes(&deposit);
         assert_eq!(deposits.len(), 2);
@@ -2062,7 +2119,14 @@ mod tests {
         assert!(pool_addresses.contains(&call.to));
 
         let withdrawal = generate(&txgen, &output.join("withdrawal.yml"));
-        assert_setup_approval(&withdrawal, config.token, config.outbox);
+        assert_setup_approvals(
+            &withdrawal,
+            config.token,
+            config.outbox,
+            true,
+            2,
+            config.zone_max_fee_per_gas,
+        );
         assert_workload_inclusion_keys(&withdrawal);
         let withdrawals = workload_envelopes(&withdrawal);
         assert_eq!(withdrawals.len(), 2);
@@ -2087,7 +2151,14 @@ mod tests {
         assert_ne!(call.memo, second_call.memo);
 
         let bootstrap = generate(&txgen, &output.join("bootstrap-deposit.yml"));
-        assert_setup_approval(&bootstrap, config.token, config.portal);
+        assert_setup_approvals(
+            &bootstrap,
+            config.token,
+            config.portal,
+            false,
+            1,
+            config.l1_max_fee_per_gas,
+        );
         assert_workload_inclusion_keys(&bootstrap);
         let bootstrap_transactions = workload_envelopes(&bootstrap);
         assert_eq!(bootstrap_transactions.len(), 2);
@@ -2099,7 +2170,14 @@ mod tests {
         assert_ne!(call.memo, alloy::primitives::B256::ZERO);
 
         let zone_roundtrip = generate(&txgen, &output.join("zone-roundtrip.yml"));
-        assert_setup_approval(&zone_roundtrip, config.token, config.outbox);
+        assert_setup_approvals(
+            &zone_roundtrip,
+            config.token,
+            config.outbox,
+            true,
+            2,
+            config.zone_max_fee_per_gas,
+        );
         let setup = zone_roundtrip
             .iter()
             .find(|tx| tx["phase"] == "setup")
@@ -2224,16 +2302,45 @@ mod tests {
         (target, input)
     }
 
-    fn assert_setup_approval(generated: &[serde_json::Value], token: Address, spender: Address) {
+    fn assert_setup_approvals(
+        generated: &[serde_json::Value],
+        token: Address,
+        spender: Address,
+        expiring: bool,
+        expected: usize,
+        base_max_fee_per_gas: u128,
+    ) {
         let setup = generated
             .iter()
-            .find(|tx| tx["phase"] == "setup")
-            .expect("approval setup transaction must be generated");
-        let envelope = decode_envelope(setup);
-        let (target, input) = only_call(&envelope);
-        assert_eq!(target, token);
-        let call = ITIP20::approveCall::abi_decode(input).unwrap();
-        assert_eq!(call.spender, spender);
-        assert_eq!(call.amount, U256::MAX);
+            .filter(|tx| tx["phase"] == "setup")
+            .collect::<Vec<_>>();
+        assert_eq!(setup.len(), expected);
+
+        let mut submission_keys = std::collections::HashSet::new();
+        let mut shared_inclusion_key = None;
+        for (index, setup) in setup.into_iter().enumerate() {
+            let tx_submission_keys = setup["submission_keys"].as_array().unwrap();
+            assert_eq!(tx_submission_keys.len(), 1);
+            assert!(submission_keys.insert(tx_submission_keys[0].as_str().unwrap()));
+
+            let inclusion_keys = setup["inclusion_keys"].as_array().unwrap();
+            assert_eq!(inclusion_keys.len(), 1);
+            let inclusion_key = inclusion_keys[0].as_str().unwrap();
+            assert_eq!(
+                *shared_inclusion_key.get_or_insert(inclusion_key),
+                inclusion_key
+            );
+
+            let envelope = decode_envelope(setup);
+            assert_eq!(envelope.is_expiring_nonce(), expiring);
+            let uniqueness_bump = if expiring { index as u128 + 1 } else { 0 };
+            let expected_max_fee = base_max_fee_per_gas + uniqueness_bump;
+            assert_eq!(envelope.max_fee_per_gas(), expected_max_fee);
+            let (target, input) = only_call(&envelope);
+            assert_eq!(target, token);
+            let call = ITIP20::approveCall::abi_decode(input).unwrap();
+            assert_eq!(call.spender, spender);
+            assert_eq!(call.amount, U256::MAX);
+        }
     }
 }

@@ -109,7 +109,8 @@ performs a real, untimed bootstrap before starting measured journeys:
 4. Roundtrip preflight verifies the ready state and renders one user-signed
    outbox approval per benchmark account. The sequencer sponsors the Zone fees
    for those approvals, so benchmark users can start with zero Zone balance.
-   Scenario initialization confirms the approvals before measurement begins.
+   The runner submits the independent expiring-nonce approvals concurrently and
+   confirms every receipt before measurement begins.
 5. `txgen-tempo auth-token-map` derives a short-lived authorization token for
    every benchmark sender. The measured scenario submits Zone transactions to
    the authenticated private RPC on port 8544 while chain, nonce, checkpoint,
@@ -233,8 +234,8 @@ an upstream Tempo environment- or file-based mnemonic option.
   configuration and sponsored user approvals;
 - renders the independent specs, bootstrap and roundtrip workloads, both
   scenario documents, and the minimal event ABIs;
-- injects required portal approvals and sequencer-sponsored outbox approvals as
-  untimed txgen setup transactions; and
+- injects required per-user portal approvals and sequencer-sponsored outbox
+  approvals as untimed expiring-nonce txgen setup transactions; and
 - writes a non-secret `preflight.json` report.
 
 It does not create a Zone, fund an account, submit an approval or workload
@@ -326,15 +327,18 @@ its default is one. The roundtrip scenario uses leased accounts and requires
 `--max-in-flight` not to exceed the account pool; budget the maximum number of
 journeys that can reuse any one account. Independent phase specs select senders
 randomly, so the phase runner conservatively budgets the full transaction count
-for every account. For expiring Zone activity, preflight also budgets txgen's
-monotonic fee-cap uniqueness bump through the configured capacity.
+for every account. For expiring Zone activity and approval setup, preflight also
+budgets txgen's monotonic fee-cap uniqueness bump through the configured
+capacity.
 
-When an approval is needed, the rendered workload includes it as a txgen setup
-transaction. Scenario initialization or `bench send` submits setup transactions
-and confirms them before measurement starts. Roundtrip outbox approvals are
-signed by each benchmark user and fee-sponsored by the bootstrapped sequencer.
-Keep `--rpc` on independent `txgen-tempo generate` commands so regular-nonce
-setup transactions start from the account's current protocol nonce.
+When a per-user approval is needed, the rendered workload includes it as a
+txgen setup transaction. Scenario initialization or `bench send` submits setup
+transactions and confirms them before measurement starts. Roundtrip outbox
+approvals are signed by each benchmark user and fee-sponsored by the
+bootstrapped sequencer. These approvals use 25-second expiring nonces and must
+be generated immediately before submission rather than saved for later replay.
+The single control-account approval in the bootstrap remains a regular-nonce
+transaction.
 
 ## Run the full roundtrip
 
@@ -358,11 +362,13 @@ contrib/bench/run-roundtrip.sh
 The runner calculates `ceil(count / accounts)` for preflight's per-account
 journey capacity, refuses more concurrent journeys than leased accounts, keeps
 the mnemonic and sequencer key out of argv, validates both scenario reports,
-and deletes its authorization map on exit. While the measured scenario runs, it
-prints the number of successful terminal `WithdrawalProcessed` events observed
-on L1 every 30 seconds. On this fresh topology that is the externally visible
-completion count; txgen's authoritative journey report is still checked at the
-end.
+and deletes its authorization map on exit. It renders approval-only streams,
+submits each account's expiring-nonce approval concurrently, logs receipt-wait
+heartbeats and completion counts, then reruns preflight with setup disabled to
+verify every allowance. While the measured scenario runs, it prints the number
+of successful terminal `WithdrawalProcessed` events observed on L1 every 30
+seconds. On this fresh topology that is the externally visible completion
+count; txgen's authoritative journey report is still checked at the end.
 
 The equivalent stages are described below for diagnosis or controlled manual
 execution.
