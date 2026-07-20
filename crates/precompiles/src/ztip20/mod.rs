@@ -36,7 +36,7 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
 ];
 
 fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck) -> CallCheck {
-    match C::abi_decode_raw_validate(args) {
+    match C::abi_decode_raw(args) {
         Ok(decoded) => check(decoded),
         Err(_) => CallCheck::Continue,
     }
@@ -305,6 +305,31 @@ mod tests {
         assert_allowed(&rules, role.clone(), owner);
         assert_allowed(&rules, role.clone(), sequencer);
         assert_unauthorized(&rules, role, outsider);
+    }
+
+    #[test]
+    fn non_canonical_address_padding_cannot_bypass_read_privacy() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new()?;
+        let mut calldata = ITIP20::balanceOfCall {
+            account: harness.alice,
+        }
+        .abi_encode();
+
+        calldata[4] = 1;
+        assert!(ITIP20::balanceOfCall::abi_decode_raw_validate(&calldata[4..]).is_err());
+        assert_eq!(
+            ITIP20::balanceOfCall::abi_decode_raw(&calldata[4..])?.account,
+            harness.alice
+        );
+
+        let allowed = harness.call(harness.alice, calldata.clone().into(), 100_000, true)?;
+        assert!(allowed.is_success());
+
+        let blocked = harness.call(harness.bob, calldata.into(), 100_000, true)?;
+        assert!(blocked.is_revert());
+        assert_eq!(blocked.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
     }
 
     #[test]
