@@ -140,13 +140,14 @@ impl CreateZone {
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
 
-        // The native ZoneFactory precompile (TIP-1091) has no bytecode and no
+        // The native ZoneFactory precompile (TIP-1091) has no real bytecode
+        // (only the 0xef stub Tempo places at precompile addresses) and no
         // verifier()/messenger() getters: both are protocol constants.
-        let native = provider
+        let factory_code = provider
             .get_code_at(self.zone_factory)
             .await
-            .wrap_err("failed fetching ZoneFactory code")?
-            .is_empty();
+            .wrap_err("failed fetching ZoneFactory code")?;
+        let native = factory_code.is_empty() || factory_code.as_ref() == [0xef];
         let (verifier, messenger) = if native {
             println!(
                 "ZoneFactory at {} has no bytecode; using native precompile interface",
