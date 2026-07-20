@@ -109,7 +109,6 @@ async fn fetch_submit_batch_call(
 /// 6. Spawn sequencer while the zone is still far behind L1.
 /// 7. Assert a `BatchSubmitted` event appears.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "slow: mines >16k L1 blocks and replays zone history, run with --ignored or in nightly CI"]
 async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
