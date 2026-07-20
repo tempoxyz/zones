@@ -1,16 +1,27 @@
 //! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
 //! and the native `TempoState` precompile.
 
-use alloc::rc::Rc;
+use alloc::{rc::Rc, string::String};
 use core::{cell::Cell, fmt};
 
 use alloy_primitives::{Address, B256, U256};
-use revm::precompile::PrecompileError;
+use revm::{context::result::AnyError, precompile::PrecompileError};
 use tempo_precompiles::tip20::tip20_slots;
 use tempo_primitives::TempoAddressExt;
 use thiserror::Error;
 
 pub(crate) use tempo_precompiles::storage::*;
+
+/// Failure to read storage from Tempo L1.
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("{0}")]
+pub struct L1StorageError(pub String);
+
+impl From<L1StorageError> for PrecompileError {
+    fn from(error: L1StorageError) -> Self {
+        Self::FatalAny(AnyError::new(error))
+    }
+}
 
 /// L1 storage access needed by the anchored Zone database and `TempoState` reads.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
@@ -20,7 +31,7 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
         account: Address,
         slot: B256,
         block_number: u64,
-    ) -> core::result::Result<B256, PrecompileError>;
+    ) -> core::result::Result<B256, L1StorageError>;
 }
 
 /// Invalid operation for the current anchor phase.

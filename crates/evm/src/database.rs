@@ -11,14 +11,13 @@ use revm::{
         result::{AnyError, EVMError},
     },
     database_interface::Database as RevmDatabase,
-    precompile::PrecompileError,
     primitives::{AddressMap, StorageKey, StorageValue},
     state::{Account, AccountInfo, Bytecode},
 };
 use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
-    storage::{self, L1AnchorController, L1AnchorError, L1StorageReader},
+    storage::{self, L1AnchorController, L1AnchorError, L1StorageError, L1StorageReader},
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
@@ -99,7 +98,7 @@ pub enum ZoneDbError<E> {
         slot: B256,
         anchor: u64,
         #[source]
-        source: PrecompileError,
+        source: L1StorageError,
     },
     /// A transaction attempted to persist mirrored Tempo-owned state.
     #[error("write to mirrored Tempo storage address={address} slot={slot}")]

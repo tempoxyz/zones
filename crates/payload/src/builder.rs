@@ -37,7 +37,7 @@ use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool, ValidPoolTransaction,
     error::InvalidPoolTransactionError,
 };
-use std::{sync::Arc, time::Instant};
+use std::{error::Error, sync::Arc, time::Instant};
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
@@ -458,7 +458,7 @@ where
             }
             Err(reth_evm::block::BlockExecutionError::Internal(
                 reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
-            )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
+            )) if is_l1_storage_error(error.as_ref()) => {
                 warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
             }
             Err(err) => return Err(PayloadBuilderError::evm(err)),
@@ -466,6 +466,17 @@ where
     }
 
     Ok(PoolExecutionOutcome::Complete)
+}
+
+fn is_l1_storage_error(error: &(dyn Error + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.is::<L1StorageError>() {
+            return true;
+        }
+        current = error.source();
+    }
+    false
 }
 
 /// Finalize withdrawals when the block started with pending requests or reaches a batch boundary.

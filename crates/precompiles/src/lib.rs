@@ -62,7 +62,7 @@ use alloc::{rc::Rc, sync::Arc};
 use core::cell::RefCell;
 
 use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
-use revm::{context::CfgEnv, precompile::PrecompileError};
+use revm::context::CfgEnv;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _, PrecompileEnv,
@@ -217,21 +217,6 @@ pub(crate) fn create_tip20_precompile(
         ztip20::TIP20Rules::new(sequencer),
         move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
     )
-}
-
-const ZONE_RPC_ERROR_PREFIX: &str = "[zone rpc]";
-
-/// Create a [`PrecompileError::Fatal`] for transient L1 RPC errors.
-///
-/// Fatal errors propagate out of the EVM as `Err` (instead of a revert),
-/// allowing the builder to skip the pool transaction rather than charging gas.
-pub fn zone_rpc_error(msg: impl core::fmt::Display) -> PrecompileError {
-    PrecompileError::Fatal(alloc::format!("{ZONE_RPC_ERROR_PREFIX} {msg}"))
-}
-
-/// Returns `true` if the error chain contains a failure produced by [`zone_rpc_error`].
-pub fn is_zone_rpc_error(err: &str) -> bool {
-    err.contains(ZONE_RPC_ERROR_PREFIX)
 }
 
 #[cfg(any(test, feature = "test-utils"))]

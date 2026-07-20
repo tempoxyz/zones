@@ -13470,7 +13470,6 @@ dependencies = [
  "reth-storage-api",
  "reth-tasks",
  "reth-transaction-pool",
- "revm",
  "serde",
  "serde_json",
  "tempo-alloy",

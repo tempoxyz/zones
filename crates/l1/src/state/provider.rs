@@ -299,9 +299,9 @@ impl L1StorageReader for L1StateProvider {
         account: Address,
         slot: B256,
         block_number: u64,
-    ) -> std::result::Result<B256, revm::precompile::PrecompileError> {
+    ) -> std::result::Result<B256, zone_precompiles::storage::L1StorageError> {
         self.get_storage(account, slot, block_number).map_err(|e| {
-            zone_precompiles::zone_rpc_error(format!(
+            zone_precompiles::storage::L1StorageError(format!(
                 "L1 storage unavailable for account={account} slot={slot} block={block_number}: {e}"
             ))
         })
