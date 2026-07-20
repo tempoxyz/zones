@@ -15,12 +15,15 @@ use tempo_precompiles::{
     error::{Result, TempoPrecompileError},
     mutate_void,
     storage::{ContractStorage, Handler, Mapping, StorageCtx, evm::EvmPrecompileStorageProvider},
-    tip20::{ITIP20, TIP20Token, validate_usd_currency},
+    tip20::{ITIP20, TIP20Token},
     tip403_registry::AuthRole as TempoAuthRole,
     view,
 };
 use tempo_precompiles_macros::contract;
-use tempo_zone_contracts::{IZoneFeeManager, PORTAL_TOKEN_CONFIGS_SLOT, ZONE_FEE_MANAGER_ADDRESS};
+use tempo_zone_contracts::{
+    IZoneFeeManager, PORTAL_ENABLED_TOKENS_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
+    ZONE_FEE_MANAGER_ADDRESS,
+};
 use zone_primitives::policy::AuthRole;
 
 use crate::{
@@ -32,6 +35,16 @@ use crate::{
 pub trait ZoneConfigReader: L1StorageReader {
     /// Address of the ZonePortal whose registry backs ZoneConfig.
     fn zone_portal_address(&self) -> Address;
+
+    /// Read `_enabledTokens[0]`, the immutable default selected when the zone was created.
+    fn first_enabled_token(
+        &self,
+        block_number: u64,
+    ) -> core::result::Result<Address, PrecompileError> {
+        let slot = keccak256(PORTAL_ENABLED_TOKENS_SLOT);
+        let value = self.read_l1_storage(self.zone_portal_address(), slot, block_number)?;
+        Ok(Address::from_slice(&value[12..]))
+    }
 
     /// Apply the same `_tokenConfigs[token].enabled` lookup as `ZoneConfig.isEnabledToken`.
     fn is_enabled_token(
@@ -46,14 +59,8 @@ pub trait ZoneConfigReader: L1StorageReader {
 }
 
 /// Zone fee manager storage.
-///
-/// The first three slots retain Tempo's fee-manager shape so shared tooling can
-/// resolve user preferences without maintaining a second storage decoder. Zones
-/// do not use validator preferences, so slot zero remains empty.
 #[contract(addr = ZONE_FEE_MANAGER_ADDRESS)]
 pub struct ZoneFeeManager {
-    _validator_tokens: Mapping<Address, Address>,
-    user_tokens: Mapping<Address, Address>,
     collected_fees: Mapping<Address, Mapping<Address, U256>>,
 }
 
@@ -86,34 +93,23 @@ impl ZoneFeeManager {
         Ok(())
     }
 
-    /// Returns the fee token preference stored for `user`.
-    pub fn user_token(&self, user: Address) -> Result<Address> {
-        self.user_tokens[user].read()
+    /// Returns the zone's default fee token from the portal's creation-time token list.
+    pub fn default_fee_token<P: ZoneConfigReader>(&self, provider: &P) -> Result<Address> {
+        let block_number = TempoState::new().finalized_block_number()?;
+        let token = provider
+            .first_enabled_token(block_number)
+            .map_err(Self::map_reader_error)?;
+        if token.is_zero() {
+            return Err(
+                tempo_precompiles::tip_fee_manager::FeeManagerError::invalid_token().into(),
+            );
+        }
+        Ok(token)
     }
 
     /// Returns fees accrued to `sequencer` in `token`.
     pub fn collected_fees(&self, sequencer: Address, token: Address) -> Result<U256> {
         self.collected_fees[sequencer][token].read()
-    }
-
-    /// Stores a user's zone fee token preference after registry and currency validation.
-    pub fn set_user_token<P: ZoneConfigReader>(
-        &mut self,
-        provider: &P,
-        sender: Address,
-        token: Address,
-    ) -> Result<()> {
-        self.ensure_enabled(provider, token)?;
-        validate_usd_currency(token)?;
-
-        if self.user_tokens[sender].read()? == token {
-            return Ok(());
-        }
-        self.user_tokens[sender].write(token)?;
-        self.emit_event(IZoneFeeManager::UserTokenSet {
-            user: sender,
-            token,
-        })
     }
 
     /// Collects the maximum fee before execution without consulting FeeAMM state.
@@ -292,14 +288,10 @@ impl ZoneFeeManager {
 
         dispatch!(calldata, |call| match call {
             IZoneFeeManager::IZoneFeeManagerCalls {
-                userTokens(call) => view(call, |call| self.user_token(call.user)),
                 collectedFees(call) => view(call, |call| {
                     self.collected_fees(call.sequencer, call.token)
                 }),
                 isEnabledToken(call) => view(call, |call| self.is_enabled(provider, call.token)),
-                setUserToken(call) => mutate_void(call, msg_sender, |sender, call| {
-                    self.set_user_token(provider, sender, call.token)
-                }),
                 distributeFees(call) => mutate_void(call, msg_sender, |_, call| {
                     self.distribute_fees(registry, call.sequencer, call.token)
                 }),
@@ -342,12 +334,36 @@ mod tests {
             assert_eq!(account, self.portal);
             assert_eq!(block_number, 0);
 
+            if slot == keccak256(PORTAL_ENABLED_TOKENS_SLOT) {
+                let token = self.enabled.first().copied().unwrap_or_default();
+                let mut value = [0u8; 32];
+                value[12..].copy_from_slice(token.as_slice());
+                return Ok(B256::new(value));
+            }
+
             let enabled = self
                 .enabled
                 .iter()
                 .any(|token| keccak256((*token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode()) == slot);
             Ok(B256::from(U256::from(enabled as u8).to_be_bytes()))
         }
+    }
+
+    #[test]
+    fn defaults_to_first_token_enabled_at_zone_creation() -> TestResult {
+        let mut storage = HashMapStorageProvider::new(1);
+        let first = Address::random();
+        let second = Address::random();
+        let provider = MockZoneConfig {
+            portal: Address::random(),
+            enabled: vec![first, second],
+            authorized: true,
+        };
+
+        StorageCtx::enter(&mut storage, || {
+            assert_eq!(ZoneFeeManager::new().default_fee_token(&provider)?, first);
+            Ok(())
+        })
     }
 
     impl ZoneConfigReader for MockZoneConfig {

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { StdTokens } from "tempo-std/StdTokens.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
@@ -21,6 +20,7 @@ import {
     IZonePortal,
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_ENABLED_TOKENS_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
@@ -190,21 +190,6 @@ contract ZonePortalProxyStorageTest is Test {
     function test_proxyMetadataIsReadFromPortalStorage() public {
         address initialToken = makeAddr("initial token");
         vm.mockCall(
-            StdTokens.PATH_USD_ADDRESS,
-            abi.encodeWithSelector(ITIP20.name.selector),
-            abi.encode("pathUSD")
-        );
-        vm.mockCall(
-            StdTokens.PATH_USD_ADDRESS,
-            abi.encodeWithSelector(ITIP20.symbol.selector),
-            abi.encode("pathUSD")
-        );
-        vm.mockCall(
-            StdTokens.PATH_USD_ADDRESS,
-            abi.encodeWithSelector(ITIP20.currency.selector),
-            abi.encode("USD")
-        );
-        vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
         );
         vm.mockCall(
@@ -256,9 +241,12 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
         assertEq(ZonePortal(proxyA).verifier(), verifierA);
         assertEq(ZonePortal(proxyA).genesisTempoBlockNumber(), 100);
-        assertTrue(ZonePortal(proxyA).isTokenEnabled(StdTokens.PATH_USD_ADDRESS));
         assertTrue(ZonePortal(proxyA).isTokenEnabled(initialToken));
-        assertEq(ZonePortal(proxyA).enabledTokenCount(), 2);
+        assertEq(ZonePortal(proxyA).enabledTokenCount(), 1);
+        assertEq(ZonePortal(proxyA).enabledTokenAt(0), initialToken);
+        bytes32 firstEnabledToken =
+            vm.load(proxyA, keccak256(abi.encode(PORTAL_ENABLED_TOKENS_SLOT)));
+        assertEq(address(uint160(uint256(firstEnabledToken))), initialToken);
 
         assertEq(ZonePortal(proxyB).zoneId(), 2);
         assertEq(ZonePortal(proxyB).messenger(), messengerB);

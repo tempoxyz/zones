@@ -158,7 +158,7 @@ This creates `generated/my-zone/` containing:
 - **`genesis.json`** — Zone L2 genesis state (system contracts, fee token, etc.)
 - **`zone.json`** — Deployment metadata (portal address, zone ID, anchor block, `zoneFactory`, public `admin` / `sequencer` addresses, and optional saved keys/router metadata)
 
-This initial token controls the first L1 TIP-20 the portal accepts and mirrors onto the zone. The zone's fee token in genesis remains `pathUSD`.
+This initial token is the first L1 TIP-20 the portal accepts and mirrors onto the zone. It is also the default zone gas token when a Tempo transaction omits `feeToken`; users select a different enabled token per transaction rather than storing an account preference.
 
 You can also run the xtask directly for more control:
 
@@ -389,7 +389,7 @@ just set-supply-cap <token-address> 1000000000000
 
 ### Enable a Token on the Zone
 
-To deposit a custom token into the zone, it must be enabled on the ZonePortal. By default the portal starts with `pathUSD`, or whichever TIP-20 you selected with `just create-zone <name> <token>` or `just deploy-zone <name> <token>`. Additional tokens must exist on L1 and be enabled by the portal admin.
+To deposit a custom token into the zone, it must be enabled on the ZonePortal. The portal starts with the TIP-20 selected at creation (pathUSD by default). Additional tokens must exist on L1 and be enabled by the portal admin.
 
 ```bash
 # Enable a token by address (requires ADMIN_KEY, L1_RPC_URL, L1_PORTAL_ADDRESS)
@@ -530,7 +530,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | TIP-20 tokens | `0x20C0…` prefix | **Replaced** — routed through `ZoneTip20Token`, which adds privacy (caller-scoped reads), fixed gas for transfers, bridge-auth for mint/burn, and TIP-403 policy enforcement via the L1-synced cache. |
 | TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
 | TIP403Registry | `0x403C…0000` | **Replaced** — read-only `ZoneTip403ProxyRegistry` serves authorization queries from a cache-first, L1-RPC-fallback provider. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert — policy state is managed on L1. |
-| TipFeeManager | `0xfeec…0000` | **Replaced** — `ZoneFeeManager` accepts any portal-enabled fee token and accounts fees in the token paid, without validator-token preferences or FeeAMM routing. |
+| TipFeeManager | `0xfeec…0000` | **Replaced** — `ZoneFeeManager` uses the transaction's explicit `feeToken`, or the portal's creation-time token by default, and accounts fees in that token without account preferences or FeeAMM routing. |
 | StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
 | NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
 | ValidatorConfig (legacy) | `0xCCCC…0000` | **Not registered** — zones do not run validators, so the precompile is not loaded. |

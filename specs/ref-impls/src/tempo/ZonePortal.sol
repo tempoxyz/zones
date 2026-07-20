@@ -25,7 +25,6 @@ import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "../libraries/EncryptedDeposit.
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "../libraries/WithdrawalQueueLib.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
-import { StdTokens } from "tempo-std/StdTokens.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
@@ -167,11 +166,8 @@ contract ZonePortal is IZonePortal {
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
         rpcUrl = _rpcUrl;
 
-        // Zones fall back to pathUSD when a user has not selected a fee token.
-        _enableTokenInternal(StdTokens.PATH_USD_ADDRESS);
-        if (_initialToken != StdTokens.PATH_USD_ADDRESS) {
-            _enableTokenInternal(_initialToken);
-        }
+        // The creation-time token remains `_enabledTokens[0]` and is the zone fee default.
+        _enableTokenInternal(_initialToken);
     }
 
     /*//////////////////////////////////////////////////////////////

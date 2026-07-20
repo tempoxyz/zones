@@ -37,8 +37,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-FEE-TOKEN-ENABLED` | Every nonzero gas fee is paid in a token enabled by the portal registry at the zone's finalized Tempo checkpoint | 🔴 | The zone can create unbacked demand or accept an asset outside its configured trust domain |
+| `TEMPO-ZONE-FEE-TOKEN-SELECTION` | Fee-token resolution uses the transaction's explicit `feeToken`, or immutable `portal.enabledTokenAt(0)` when omitted; no account preference or call-based inference changes it | 🟡 | Pool admission and execution can disagree on the charged asset, or a prior transaction can change later fee behavior |
 | `TEMPO-ZONE-FEE-NO-SWAP` | Zone fee settlement credits the sequencer in exactly the token paid by the user and never reads or mutates FeeAMM pool state | 🟡 | Fee accounting can depend on unavailable liquidity or diverge between execution and proving |
-
 | `TEMPO-ZONE-TOKEN-ENABLEMENT-APPEND-ONLY` | Once enabled, a token remains enabled and remains in the append-only enabled token list | 🔴 | Withdrawals can be disabled after deposits, breaking the non-custodial bridge guarantee |
 | `TEMPO-ZONE-TOKEN-DEPOSIT-PAUSE-ONLY` | Pausing a token only disables new deposits; withdrawals for enabled tokens remain requestable and processable | 🔴 | Admin can lock users inside the zone by pausing deposits |
 | `TEMPO-ZONE-MESSENGER-AUTH` | The shared messenger only relays when `msg.sender == ZoneFactory.zones(zoneId).portal` | 🟡 | A caller can spoof a source zone or invoke receiver callbacks outside the portal-controlled withdrawal path |

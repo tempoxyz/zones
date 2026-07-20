@@ -511,11 +511,10 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
     Ok(())
 }
 
-/// Create pathUSD as the default fee token at its reserved TIP20 address.
+/// Pre-provision pathUSD at its reserved TIP-20 address.
 ///
-/// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
-/// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
-/// Without this, user transactions on the zone revert with `InvalidFeeToken`.
+/// pathUSD is the default `create-zone` initial token. Fee-token selection itself
+/// comes from the portal's creation-time token, not from this genesis allocation.
 fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
@@ -555,7 +554,7 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
         },
     )?;
 
-    println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
+    println!("Created pathUSD token at {PATH_USD_ADDRESS}");
     Ok(())
 }
 

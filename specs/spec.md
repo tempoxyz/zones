@@ -276,7 +276,7 @@ Each zone has five system contracts deployed at genesis at fixed addresses:
 
 `ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
-`ZoneFeeManager` replaces Tempo's `TipFeeManager` for protocol fee collection. Before execution it requires the resolved fee token to be enabled in the portal registry at the finalized `TempoState` checkpoint and escrows the maximum fee. After execution it refunds unused gas and credits the actual spend to the block sequencer in the same token. Zones never inspect FeeAMM pools, select a validator token, or swap gas fees.
+`ZoneFeeManager` replaces Tempo's `TipFeeManager` for protocol fee collection. A transaction uses its explicit Tempo `feeToken` when present; otherwise it uses the portal's first enabled token, which is fixed when the zone is created. There are no user or validator fee-token preferences. Before execution the manager requires the selected token to be enabled in the portal registry at the finalized `TempoState` checkpoint and escrows the maximum fee. After execution it refunds unused gas and credits the actual spend to the block sequencer in the same token. Zones never inspect FeeAMM pools or swap gas fees.
 
 ### Zone Token Model
 
@@ -301,7 +301,7 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The creation-time initial token is always `enabledTokens[0]` and is the default gas token when a Tempo transaction omits `feeToken`. The admin can halt deposits but cannot disable withdrawals for an enabled token. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Gas Rate Configuration
 
@@ -1443,7 +1443,7 @@ Each enabled TIP-20 token is deployed as a precompile at the same address as on 
 |---|---|
 | **Address** | `0xfeEC000000000000000000000000000000000000` |
 
-The zone EVM invokes this precompile's deterministic fee hooks before and after every charged transaction. It accepts a fee token only when the portal's `_tokenConfigs[token].enabled` value is true at the block number finalized in `TempoState`. The pre-transaction hook escrows the maximum fee. The post-transaction hook refunds the unused portion and credits the actual spend to the sequencer under the same token. It never reads or modifies FeeAMM pools.
+The zone EVM invokes this precompile's deterministic fee hooks before and after every charged transaction. The selected token is `tx.feeToken` when specified, or the portal's `_enabledTokens[0]` otherwise; no account preference is stored or inferred from the transaction's calls. It accepts the selected token only when the portal's `_tokenConfigs[token].enabled` value is true at the block number finalized in `TempoState`. The pre-transaction hook escrows the maximum fee. The post-transaction hook refunds the unused portion and credits the actual spend to the sequencer under the same token. It never reads or modifies FeeAMM pools.
 
 ### Chaum-Pedersen Verify
 
@@ -2057,9 +2057,7 @@ Address: `0xfeEC000000000000000000000000000000000000`
 
 ```solidity
 interface IZoneFeeManager {
-    function userTokens(address user) external view returns (address);
     function collectedFees(address sequencer, address token) external view returns (uint256);
-    function setUserToken(address token) external;
     function distributeFees(address sequencer, address token) external;
     function isEnabledToken(address token) external view returns (bool);
 }

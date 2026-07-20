@@ -467,7 +467,7 @@ where
             .await?
             .erased();
 
-        self.resolve_and_seed_tokens(&l1_provider).await?;
+        let default_fee_token = self.resolve_and_seed_tokens(&l1_provider).await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
         if p2p_role == Some(Role::Follower) {
             // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
@@ -479,7 +479,7 @@ where
         } else {
             self.spawn_l1_subscriber(&ctx);
         }
-        self.spawn_policy_tasks(&l1_provider, &ctx);
+        self.spawn_policy_tasks(&l1_provider, &ctx, default_fee_token);
 
         let task_executor = ctx.node.task_executor().clone();
         if let Some(config) = self.p2p_config.take() {
@@ -619,7 +619,7 @@ where
     async fn resolve_and_seed_tokens(
         &mut self,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<Option<Address>> {
         let portal = self.portal_address;
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
@@ -639,7 +639,7 @@ where
                         %portal,
                         "Failed to discover enabled tokens from L1 for policy cache seeding; continuing without initial token policy seed"
                     );
-                    return Ok(());
+                    return Ok(None);
                 }
             };
             info!(
@@ -651,6 +651,7 @@ where
             );
             tokens
         };
+        let default_fee_token = tracked_tokens.first().copied();
 
         if let Err(err) = self
             .policy_cache
@@ -664,10 +665,10 @@ where
                 %portal,
                 "Failed to seed token policies from L1; continuing with RPC fallback"
             );
-            return Ok(());
+            return Ok(default_fee_token);
         }
         info!(target: "reth::cli", "Seeded token policies from L1");
-        Ok(())
+        Ok(default_fee_token)
     }
 
     /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
@@ -686,6 +687,7 @@ where
         &self,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
         ctx: &AddOnsContext<'_, N>,
+        default_fee_token: Option<Address>,
     ) {
         let policy_task_handle = spawn_policy_resolution_task(
             self.policy_cache.clone(),
@@ -697,6 +699,7 @@ where
         spawn_pool_prefetch_task(
             ctx.node.pool().clone(),
             policy_task_handle,
+            default_fee_token,
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");

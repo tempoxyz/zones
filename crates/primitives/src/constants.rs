@@ -77,6 +77,13 @@ pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = {
     B256::new(bytes)
 };
 
+/// ZonePortal storage slot 9: `_enabledTokens` dynamic array.
+pub const PORTAL_ENABLED_TOKENS_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 9;
+    B256::new(bytes)
+};
+
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
 // ---------------------------------------------------------------------------

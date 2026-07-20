@@ -9,10 +9,10 @@
 
 use std::collections::HashSet;
 
-use alloy_primitives::TxKind;
+use alloy_primitives::{Address, TxKind};
 use alloy_sol_types::SolCall;
 use reth_transaction_pool::TransactionPool;
-use tempo_contracts::precompiles::{DEFAULT_FEE_TOKEN, ITIP20};
+use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::tip20::is_tip20_prefix;
 use tempo_revm::TempoTx;
 use tempo_transaction_pool::transaction::TempoPooledTransaction;
@@ -26,8 +26,8 @@ use super::{AuthRole, task::PolicyTaskHandle};
 /// For every incoming transaction the task warms three categories of cache entries:
 ///
 /// 1. **Fee payer** — the address paying gas fees, resolved as `AuthRole::Sender`
-///    against the transaction's fee token (defaults to pathUSD). AA transactions
-///    may specify a different fee token or delegate fee payment to another address.
+///    against the transaction's explicit fee token, or the zone's creation-time
+///    default. AA transactions may delegate fee payment to another address.
 /// 2. **Transfer sender** — for TIP-20 transfer calls, the sender is resolved
 ///    against the transfer token. For `transferFrom*`, this is the decoded `from`
 ///    address rather than the transaction sender.
@@ -46,17 +46,21 @@ use super::{AuthRole, task::PolicyTaskHandle};
 pub fn spawn_pool_prefetch_task<Pool>(
     pool: Pool,
     handle: PolicyTaskHandle,
+    default_fee_token: Option<Address>,
     task_executor: reth_tasks::Runtime,
 ) where
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + 'static,
 {
     task_executor.spawn_task(Box::pin(async move {
-        run_pool_prefetch(pool, handle).await;
+        run_pool_prefetch(pool, handle, default_fee_token).await;
     }));
 }
 
-async fn run_pool_prefetch<Pool>(pool: Pool, handle: PolicyTaskHandle)
-where
+async fn run_pool_prefetch<Pool>(
+    pool: Pool,
+    handle: PolicyTaskHandle,
+    default_fee_token: Option<Address>,
+) where
     Pool: TransactionPool<Transaction = TempoPooledTransaction>,
 {
     let mut new_txs = pool.new_transactions_listener();
@@ -65,13 +69,8 @@ where
         let tx = &tx_event.transaction;
         let sender = tx.sender();
 
-        // Resolve the fee token for this transaction (AA txs may specify one,
-        // otherwise falls back to DEFAULT_FEE_TOKEN / pathUSD).
-        let fee_token = tx
-            .transaction
-            .inner()
-            .fee_token()
-            .unwrap_or(DEFAULT_FEE_TOKEN);
+        // Resolve the explicit fee token or fall back to the portal's first token.
+        let fee_token = tx.transaction.inner().fee_token().or(default_fee_token);
 
         // Resolve the fee payer (may differ from sender for AA txs with delegated fees)
         let fee_payer = tx.transaction.inner().fee_payer(sender).unwrap_or(sender);
@@ -79,7 +78,9 @@ where
         let mut prefetched = HashSet::new();
 
         // Pre-fetch fee payer authorization for the fee token (every tx pays fees)
-        if prefetched.insert((fee_token, fee_payer, AuthRole::Sender)) {
+        if let Some(fee_token) = fee_token
+            && prefetched.insert((fee_token, fee_payer, AuthRole::Sender))
+        {
             debug!(%fee_token, %fee_payer, "Pre-fetching TIP-403 fee token authorization");
             let _ = handle.send_resolve_policy(fee_token, fee_payer, AuthRole::Sender);
         }
