@@ -15,7 +15,7 @@ use alloy_sol_types::SolEvent;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::{constants::zone_chain_id, portal_creation_anchor};
 use zone_sequencer::register_encryption_key;
 
 /// Provisioning options for [`provision_zone`].
@@ -52,7 +52,7 @@ pub struct ProvisionedZone {
     pub factory: Address,
     /// `ZonePortal` address on L1.
     pub portal: Address,
-    /// L1 anchor block number immediately before `createZone`.
+    /// Confirmed L1 block immediately before the portal-creation block.
     pub anchor_block_number: u64,
     /// Zone genesis anchored to the L1.
     pub genesis: Genesis,
@@ -63,8 +63,8 @@ pub struct ProvisionedZone {
 /// Funds the dev account via `tempo_fundAddress` when needed, verifies TIP-1091's
 /// `ZoneFactory`, calls `createZone` with the dev account as
 /// both admin and sequencer, registers the sequencer encryption key on the portal, and
-/// builds a genesis anchored immediately before `createZone` so the zone replays the
-/// portal's initial `TokenEnabled` event.
+/// builds a genesis anchored to the confirmed block before portal creation so the zone
+/// replays the portal's initial `TokenEnabled` event.
 pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<ProvisionedZone> {
     let ProvisionConfig {
         l1_rpc_url,
@@ -104,16 +104,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
          {dev_address}; use the standard Tempo dev key or transfer factory ownership before \
          provisioning"
     );
-    // Anchor before createZone so the L1 subscriber replays the creation block,
-    // including the initial TokenEnabled event emitted by the portal constructor.
-    let anchor_block_number = provider.get_block_number().await?;
-    let anchor_header = provider
-        .get_header_by_number(anchor_block_number.into())
-        .await?
-        .ok_or_else(|| eyre::eyre!("anchor header {anchor_block_number} not found"))?
-        .inner
-        .inner;
-
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
@@ -131,6 +121,13 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .get_receipt()
         .await?;
     eyre::ensure!(receipt.status(), "createZone reverted");
+    let creation_block_number = receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("createZone receipt is missing its block number"))?;
+    // Replay the confirmed portal-creation block, including the constructor's initial
+    // TokenEnabled event. A pre-submit head is not sufficient because inclusion may be delayed.
+    let anchor_block_number = portal_creation_anchor(creation_block_number)
+        .ok_or_else(|| eyre::eyre!("createZone cannot be included in L1 genesis block"))?;
 
     let zone_created = receipt
         .inner
@@ -144,8 +141,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
 
     register_encryption_key(&provider, portal, &dev_key).await?;
 
-    let (mut genesis, anchor_block_number) =
-        crate::genesis::l1_anchored_genesis(&anchor_header, portal, initial_token)?;
+    let mut genesis = crate::genesis::l1_anchored_genesis(portal, initial_token)?;
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {

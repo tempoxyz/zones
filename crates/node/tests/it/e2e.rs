@@ -644,15 +644,15 @@ async fn test_tempo_state_advances_with_l1_blocks() -> eyre::Result<()> {
 
     let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
 
-    // Before injecting any blocks, tempoBlockNumber should be 0 (genesis)
+    // Before the first import, both Tempo checkpoint fields are zero.
     let initial_number = tempo_state.tempoBlockNumber().call().await?;
     assert_eq!(initial_number, 0, "initial tempoBlockNumber should be 0");
 
     let initial_hash = tempo_state.tempoBlockHash().call().await?;
-    assert_ne!(
+    assert_eq!(
         initial_hash,
         B256::ZERO,
-        "initial tempoBlockHash should be non-zero (genesis hash)"
+        "initial tempoBlockHash should be zero"
     );
 
     // Inject 3 empty L1 blocks

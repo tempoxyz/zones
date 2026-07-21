@@ -37,7 +37,6 @@ use tempo_precompiles::{
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
 };
-use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneOutbox as NativeZoneOutbox,
@@ -70,11 +69,6 @@ pub(crate) struct GenerateZoneGenesis {
     /// Canonical fee token used when a zone transaction omits `fee_token`.
     #[arg(long, default_value_t = PATH_USD_ADDRESS)]
     pub(crate) default_fee_token: Address,
-
-    /// RLP-encoded Tempo genesis header. Defaults to `TempoHeader::default()`.
-    #[arg(long)]
-    pub(crate) tempo_genesis_header_rlp: Option<String>,
-
     #[arg(long)]
     pub(crate) admin: Address,
 
@@ -115,13 +109,6 @@ impl GenerateZoneGenesis {
             return Err(eyre!("--admin must not be the zero address"));
         }
 
-        let header_rlp = match &self.tempo_genesis_header_rlp {
-            Some(header_rlp) => {
-                const_hex::decode(header_rlp).wrap_err("failed to decode hex string")?
-            }
-            None => alloy_rlp::encode(TempoHeader::default()),
-        };
-
         let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
 
         evm.db_mut().insert_account_info(
@@ -147,7 +134,7 @@ impl GenerateZoneGenesis {
 
         let mut nonce = 0u64;
 
-        initialize_tempo_state(&mut evm, &header_rlp)?;
+        initialize_tempo_state(&mut evm)?;
         initialize_zone_outbox(&mut evm)?;
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
@@ -440,11 +427,8 @@ fn deploy_permit2(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Initialize the native TempoState precompile storage from the L1 genesis header.
-fn initialize_tempo_state(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    header_rlp: &[u8],
-) -> eyre::Result<()> {
+/// Initialize the native TempoState precompile with an empty checkpoint.
+fn initialize_tempo_state(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -452,7 +436,7 @@ fn initialize_tempo_state(
         &ctx.cfg,
         &ctx.tx,
         StorageActions::disabled(),
-        || NativeTempoState::new().initialize(header_rlp),
+        || NativeTempoState::new().initialize(),
     )?;
     println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
     Ok(())

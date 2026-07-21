@@ -1,21 +1,16 @@
 //! Zone genesis template and L1 anchoring.
 //!
 //! The bundled template ships the zone predeploys compiled from `specs/ref-impls`.
-//! It is standalone: TempoState is anchored at block 0 with a zero block hash and the
-//! `tempoPortal` immutables are `Address::ZERO`. [`l1_anchored_genesis`] patches the
-//! template so the zone follows a real L1.
+//! It is standalone: `TempoState` starts with an empty checkpoint and the `tempoPortal`
+//! immutables are `Address::ZERO`. [`l1_anchored_genesis`] binds the portal address.
 
-use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, U256, address};
-use tempo_primitives::TempoHeader;
-use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, tempo_state, zone_fee_manager};
+use alloy_primitives::{Address, B256, address};
+use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, zone_fee_manager};
 
 /// Bundled zone dev genesis artifact.
 pub const GENESIS_TEMPLATE_JSON: &str = include_str!("../assets/zone-dev-genesis.json");
 
-/// TempoState predeploy address.
-const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 /// ZoneInbox predeploy address.
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 /// ZoneConfig predeploy address.
@@ -30,52 +25,27 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
     serde_json::from_str(GENESIS_TEMPLATE_JSON).map_err(Into::into)
 }
 
-/// Builds a zone genesis anchored to a real L1 block.
+/// Builds a zone genesis bound to a portal.
 ///
-/// Applies three patches to the [template](genesis_template):
+/// Applies two patches to the [template](genesis_template):
 ///
-/// 1. **TempoState storage**: `tempoBlockHash` and `tempoBlockNumber` must reflect the
-///    L1 block that serves as the zone's genesis anchor. Without this, `finalizeTempo`
-///    rejects the first L1 block for parent hash mismatch.
-///
-/// 2. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and
+/// 1. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and
 ///    ZoneConfig deployed bytecode as `PUSH32` immutables. The template is compiled with
 ///    `Address::ZERO`; without this patch, `readTempoStorageSlot` reads L1 state from
 ///    `Address::ZERO` instead of the portal.
 ///
-/// 3. **Default fee token**: ZoneFeeManager stores the portal's creation-time token in canonical
+/// 2. **Default fee token**: ZoneFeeManager stores the portal's creation-time token in canonical
 ///    Zone state so fee resolution does not depend on node-local L1 cache state.
 ///
-/// Returns `(genesis, genesis_block_number)`.
+/// `TempoState` keeps the template's empty checkpoint: the first import establishes the anchor,
+/// so no L1 header is needed here. Callers track the backfill start themselves.
 pub fn l1_anchored_genesis(
-    l1_header: &TempoHeader,
     portal_address: Address,
     default_fee_token: Address,
-) -> eyre::Result<(Genesis, u64)> {
-    let genesis_block_number = l1_header.inner.number;
-
-    let l1_genesis_hash = l1_header.hash_slow();
-
+) -> eyre::Result<Genesis> {
     let mut genesis = genesis_template()?;
 
-    // Patch 1: TempoState storage.
-    let tempo_state_account = genesis
-        .alloc
-        .get_mut(&TEMPO_STATE_ADDRESS)
-        .ok_or_else(|| eyre::eyre!("TempoState not found in genesis alloc"))?;
-    let storage = tempo_state_account
-        .storage
-        .get_or_insert_with(Default::default);
-    storage.insert(
-        B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-        l1_genesis_hash,
-    );
-    storage.insert(
-        B256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
-        B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
-    );
-
-    // Patch 2: portal address immutables in ZoneInbox and ZoneConfig.
+    // Patch 1: portal address immutables in ZoneInbox and ZoneConfig.
     if !portal_address.is_zero() {
         let needle = [0u8; 32]; // Address::ZERO left-padded to 32 bytes
         let mut replacement = [0u8; 32];
@@ -104,7 +74,7 @@ pub fn l1_anchored_genesis(
         }
     }
 
-    // Patch 3: canonical default fee token.
+    // Patch 2: canonical default fee token.
     let fee_manager_account = genesis
         .alloc
         .get_mut(&ZONE_FEE_MANAGER_ADDRESS)
@@ -117,7 +87,7 @@ pub fn l1_anchored_genesis(
             B256::left_padding_from(default_fee_token.as_slice()),
         );
 
-    Ok((genesis, genesis_block_number))
+    Ok(genesis)
 }
 
 /// Replaces all non-overlapping occurrences of `needle` with `replacement` in `buf`.
@@ -167,23 +137,22 @@ mod tests {
         );
     }
 
+    /// TempoState predeploy address.
+    const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
+
     #[test]
-    fn anchored_genesis_patches_state_and_immutables() {
-        let l1_header = TempoHeader::default();
+    fn anchored_genesis_keeps_empty_checkpoint_and_patches_immutables() {
         let portal = address!("0x00000000000000000000000000000000deadbeef");
         let default_fee_token = address!("0x20c0000000000000000000000000000000001234");
 
-        let (genesis, genesis_block_number) =
-            l1_anchored_genesis(&l1_header, portal, default_fee_token).unwrap();
-        assert_eq!(genesis_block_number, l1_header.inner.number);
+        let genesis = l1_anchored_genesis(portal, default_fee_token).unwrap();
 
-        let storage = genesis.alloc[&TEMPO_STATE_ADDRESS]
-            .storage
-            .as_ref()
-            .unwrap();
-        assert_eq!(
-            storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes())],
-            l1_header.hash_slow(),
+        assert!(
+            genesis.alloc[&TEMPO_STATE_ADDRESS]
+                .storage
+                .as_ref()
+                .is_none_or(|storage| storage.is_empty()),
+            "TempoState must start with no checkpoint"
         );
 
         let fee_manager_storage = genesis.alloc[&ZONE_FEE_MANAGER_ADDRESS]

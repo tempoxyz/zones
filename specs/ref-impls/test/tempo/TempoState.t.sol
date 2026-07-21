@@ -7,8 +7,6 @@ import { Test, stdJson } from "forge-std/Test.sol";
 
 contract TempoStateRlpHarness is TempoState {
 
-    constructor(bytes memory genesisHeader) TempoState(genesisHeader) { }
-
     function decodeUint256(bytes memory data) external pure returns (uint256) {
         return _decodeUint256Mem(data, 0);
     }
@@ -55,41 +53,45 @@ contract TempoStateTest is Test {
         );
         genesisBlockHash = keccak256(genesisHeader);
 
-        tempoState = new TempoState(genesisHeader);
-        rlpHarness = new TempoStateRlpHarness(genesisHeader);
+        tempoState = new TempoState();
+        rlpHarness = new TempoStateRlpHarness();
+
+        vm.prank(zoneInbox);
+        tempoState.finalizeTempo(genesisHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
                           CONSTRUCTOR TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_constructor_initializesState() public view {
-        assertEq(tempoState.tempoBlockHash(), genesisBlockHash);
-        assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER);
+    function test_constructor_initializesEmptyCheckpoint() public {
+        TempoState fresh = new TempoState();
+        assertEq(fresh.tempoBlockHash(), bytes32(0));
+        assertEq(fresh.tempoBlockNumber(), 0);
     }
 
-    function test_constructor_revertsOnTrailingBytesAfterOuterList() public {
-        _expectConstructorRejectsMalformedHeader(".trailingBytesAfterOuterList");
+    function test_firstImport_revertsOnTrailingBytesAfterOuterList() public {
+        _expectFirstImportRejectsMalformedHeader(".trailingBytesAfterOuterList");
     }
 
-    function test_constructor_revertsOnOuterListLengthMismatch() public {
-        _expectConstructorRejectsMalformedHeader(".outerListLengthMismatch");
+    function test_firstImport_revertsOnOuterListLengthMismatch() public {
+        _expectFirstImportRejectsMalformedHeader(".outerListLengthMismatch");
     }
 
-    function test_constructor_revertsOnOuterListLongLengthLeadingZero() public {
-        _expectConstructorRejectsMalformedHeader(".outerListLongLengthLeadingZero");
+    function test_firstImport_revertsOnOuterListLongLengthLeadingZero() public {
+        _expectFirstImportRejectsMalformedHeader(".outerListLongLengthLeadingZero");
     }
 
-    function test_constructor_revertsOnDifficultyNonCanonicalShortString() public {
-        _expectConstructorRejectsMalformedHeader(".difficultyNonCanonicalShortString");
+    function test_firstImport_revertsOnDifficultyNonCanonicalShortString() public {
+        _expectFirstImportRejectsMalformedHeader(".difficultyNonCanonicalShortString");
     }
 
-    function test_constructor_revertsOnBlockNumberLeadingZero() public {
-        _expectConstructorRejectsMalformedHeader(".blockNumberLeadingZero");
+    function test_firstImport_revertsOnBlockNumberLeadingZero() public {
+        _expectFirstImportRejectsMalformedHeader(".blockNumberLeadingZero");
     }
 
-    function test_constructor_revertsOnExtraDataLongLengthBelowShortThreshold() public {
-        _expectConstructorRejectsMalformedHeader(".extraDataLongLengthBelowShortThreshold");
+    function test_firstImport_revertsOnExtraDataLongLengthBelowShortThreshold() public {
+        _expectFirstImportRejectsMalformedHeader(".extraDataLongLengthBelowShortThreshold");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -453,11 +455,13 @@ contract TempoStateTest is Test {
         return vm.readFile(string.concat(vm.projectRoot(), MALFORMED_TEMPO_HEADERS_FIXTURE_PATH));
     }
 
-    function _expectConstructorRejectsMalformedHeader(string memory key) internal {
+    function _expectFirstImportRejectsMalformedHeader(string memory key) internal {
         bytes memory malformedHeader = _malformedTempoHeadersFixtureJson().readBytes(key);
+        TempoState fresh = new TempoState();
 
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidRlpData.selector);
-        new TempoState(malformedHeader);
+        fresh.finalizeTempo(malformedHeader);
     }
 
     /// @notice Finalization rejects a later header with the wrong parent hash.

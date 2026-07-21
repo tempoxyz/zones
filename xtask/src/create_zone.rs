@@ -4,12 +4,11 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, address, keccak256},
-    providers::{Provider, ProviderBuilder},
+    primitives::{Address, address},
+    providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
     sol_types::SolEvent,
 };
-use alloy_rlp::Encodable;
 use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
@@ -19,7 +18,7 @@ use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_zone_contracts::{
     ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
 };
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::{constants::zone_chain_id, portal_creation_anchor};
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
@@ -190,19 +189,6 @@ impl CreateZone {
             ));
         }
 
-        // Anchor before createZone so the zone replays the creation block and its
-        // initial TokenEnabled event during L1 backfill.
-        let anchor_block_number = provider.get_block_number().await?;
-        let anchor_header = provider
-            .get_header_by_number(anchor_block_number.into())
-            .await?
-            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
-            .inner
-            .inner;
-        let mut genesis_header_rlp = Vec::new();
-        anchor_header.encode(&mut genesis_header_rlp);
-        let anchor_hash = keccak256(&genesis_header_rlp);
-
         println!("Admin: {}", self.admin);
         println!("Sequencers: {:?}", self.sequencers);
         println!("Threshold: {}", self.threshold);
@@ -240,6 +226,13 @@ impl CreateZone {
                 receipt.transaction_hash
             ));
         }
+        let creation_block_number = receipt
+            .block_number
+            .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
+        // Replay the confirmed portal-creation block, including the constructor's initial
+        // TokenEnabled event. A pre-submit head is not sufficient because inclusion may be delayed.
+        let anchor_block_number = portal_creation_anchor(creation_block_number)
+            .ok_or_else(|| eyre!("createZone cannot be included in L1 genesis block"))?;
 
         let event = receipt
             .inner
@@ -273,13 +266,6 @@ impl CreateZone {
         let sequencer_set_version = portal_contract.sequencerSetVersion().call().await?;
         println!("Sequencer set version: {sequencer_set_version}");
 
-        println!(
-            "Using pre-creation block {} (hash: {anchor_hash}) as genesis anchor",
-            anchor_header.inner.number
-        );
-
-        let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
-
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id,
@@ -287,7 +273,6 @@ impl CreateZone {
             gas_limit: self.gas_limit,
             tempo_portal: portal,
             default_fee_token: self.initial_token,
-            tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
             sequencer: Some(leader),
             specs_out: self.specs_out.clone(),
@@ -313,7 +298,7 @@ impl CreateZone {
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "sequencerThreshold": self.threshold,
             "sequencerSetVersion": sequencer_set_version,
-            "tempoAnchorBlock": anchor_header.inner.number,
+            "tempoAnchorBlock": anchor_block_number,
             "zoneFactory": format!("{}", self.zone_factory),
             "rpcUrl": self.rpc_url,
         });
@@ -340,7 +325,7 @@ impl CreateZone {
         if !self.rpc_url.is_empty() {
             println!("  RPC URL: {}", self.rpc_url);
         }
-        println!("  Tempo anchor block: {}", anchor_header.inner.number);
+        println!("  Tempo anchor block: {anchor_block_number}");
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()

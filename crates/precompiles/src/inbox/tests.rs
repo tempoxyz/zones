@@ -1,7 +1,7 @@
 use super::*;
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{Bytes, address, keccak256};
+use alloy_primitives::{Bytes, address};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
@@ -13,7 +13,7 @@ use tempo_precompiles::{
     zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
-use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
+use zone_primitives::constants::{PORTAL_ADMIN_SLOT, ZONE_OUTBOX_ADDRESS};
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
@@ -48,12 +48,11 @@ impl Harness {
 
     fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
         let mut ctx = test_context();
-        let genesis_rlp = encode_header(&TempoHeader::default());
-        let genesis_hash = keccak256(&genesis_rlp);
+        let genesis_hash = B256::ZERO;
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                TempoState::new().initialize(&genesis_rlp)?;
+                TempoState::new().initialize()?;
                 ZoneInbox::new().initialize()?;
                 ZoneOutbox::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
@@ -65,6 +64,7 @@ impl Harness {
             })?;
         }
 
+        l1.set_u256(PORTAL, PORTAL_ADMIN_SLOT.into(), 1, U256::ONE);
         l1.seed_active_sequencer(PORTAL, 1, SEQUENCER);
         let l1_state = L1State::new(l1.clone(), PORTAL);
         let env = test_env(&ctx);

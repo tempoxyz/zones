@@ -494,6 +494,16 @@ where
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
+        // A fresh zero-genesis node has not imported an L1 header yet, so its on-chain
+        // checkpoint is zero even when the configured replay cursor is later. Seed the
+        // registry from the newest snapshot represented by either source. On restart, the
+        // imported checkpoint naturally takes precedence over the original genesis cursor.
+        let token_snapshot_block = self
+            .l1_config
+            .genesis_tempo_block_number
+            .map_or(tempo_block_number, |genesis| {
+                genesis.max(tempo_block_number)
+            });
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
@@ -502,7 +512,7 @@ where
             .await?
             .erased();
 
-        self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
+        self.resolve_and_seed_tokens(&l1_provider, token_snapshot_block)
             .await?;
 
         self.spawn_l1_subscriber(&ctx);

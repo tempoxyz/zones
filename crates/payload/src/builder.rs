@@ -398,6 +398,19 @@ fn validate_l1_continuity(
     let stored_l1 = state_provider
         .tempo_num_hash()
         .map_err(|err| PayloadBuilderError::Internal(err.into()))?;
+
+    // The first Tempo import bootstraps an empty checkpoint and may start at any
+    // finalized block whose state proves that the zone portal already exists.
+    // TempoState performs that portal-existence check while executing advanceTempo.
+    if stored_l1.hash.is_zero() {
+        info!(
+            target: "zone::payload",
+            tempo_block_number = prepared.header.inner.number,
+            "Allowing first Tempo block to bootstrap the empty checkpoint"
+        );
+        return Ok(());
+    }
+
     let expected_block_number = stored_l1.number + 1;
 
     info!(

@@ -24,13 +24,8 @@ contract TempoState is ITempoState {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Initialize with genesis Tempo block
-    /// @param _genesisHeader RLP-encoded genesis Tempo header
-    constructor(bytes memory _genesisHeader) {
-        (,, uint64 blockNumber) = _decodeHeader(_genesisHeader);
-        tempoBlockHash = keccak256(_genesisHeader);
-        tempoBlockNumber = blockNumber;
-    }
+    /// @notice Initializes with an empty checkpoint. The first import establishes the anchor.
+    constructor() { }
 
     /*//////////////////////////////////////////////////////////////
                             TEMPO FINALIZATION
@@ -50,10 +45,14 @@ contract TempoState is ITempoState {
         uint64 prevBlockNumber = tempoBlockNumber;
 
         (bytes32 parentHash, bytes32 stateRoot, uint64 blockNumber) = _decodeHeader(header);
-        // TODO: basically check if 0 and if so, then check if portal exists or something but not parent hash and
-        // dont init with genesis parent hash
-        if (parentHash != prevBlockHash) revert InvalidParentHash();
-        if (blockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
+        if (prevBlockHash != bytes32(0)) {
+            if (parentHash != prevBlockHash) revert InvalidParentHash();
+            if (blockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
+        }
+
+        // The native TempoState implementation additionally proves on the first import that the
+        // portal's admin slot is non-zero against this header's state root. The Solidity
+        // reference cannot perform native Tempo-state reads and models only the checkpoint rules.
 
         tempoBlockHash = keccak256(header);
         tempoBlockNumber = blockNumber;

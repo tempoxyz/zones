@@ -905,6 +905,12 @@ fn validate_l1_checkpoint_transition(
     local_hash: B256,
     zone_block_number: u64,
 ) -> eyre::Result<()> {
+    // Zero hash denotes an uninitialized checkpoint. The first finalized Tempo header may be
+    // any height and parent because a zero-genesis zone deliberately carries no L1 commitment.
+    if local_hash.is_zero() {
+        return Ok(());
+    }
+
     if l1_header.number() != local_number.saturating_add(1) {
         eyre::bail!(
             "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
@@ -1260,6 +1266,10 @@ mod tests {
             super::validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7)
                 .unwrap_err();
         assert!(wrong_parent.to_string().contains("does not extend"));
+
+        // A zero-genesis follower has no local L1 commitment, so it accepts the leader's first
+        // finalized header regardless of its height or parent.
+        super::validate_l1_checkpoint_transition(&header, 0, B256::ZERO, 7).unwrap();
     }
 
     #[tokio::test]

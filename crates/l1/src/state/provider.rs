@@ -7,22 +7,32 @@
 //!
 //! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
 //! ([`L1StateProvider::get_storage_async`]) entry point are provided. The synchronous variant is
-//! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
-//! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
+//! intended for use inside EVM precompiles where async is unavailable — it retries with backoff
+//! until the read succeeds, so an L1 RPC outage stalls block production rather than deciding
+//! block validity from one node's endpoint health.
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
-use alloy_transport::layers::RetryBackoffLayer;
+use alloy_transport::{TransportError, layers::RetryBackoffLayer};
 use eyre::Result;
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use super::cache::L1StateCache;
 use crate::rpc::rpc_connection_config;
+
+/// Upper bound on the delay between synchronous cache-miss attempts.
+///
+/// A sustained outage settles into a steady low-rate poll instead of spinning against an endpoint
+/// that may already be rate-limiting us.
+const MAX_SYNC_RETRY_BACKOFF: Duration = Duration::from_secs(2);
+
+/// Largest exponent applied to the initial backoff, keeping the shift well clear of overflow.
+const MAX_SYNC_BACKOFF_SHIFT: u32 = 20;
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -90,6 +100,8 @@ pub struct L1StateProvider {
     runtime_handle: tokio::runtime::Handle,
     /// Optional finite attempt limit for synchronous cache-miss fallback.
     max_sync_attempts: Option<NonZeroU32>,
+    /// Base delay for the synchronous cache-miss wait, shared with the transport retry layer.
+    initial_backoff_ms: u64,
 }
 
 impl L1StateProvider {
@@ -138,6 +150,7 @@ impl L1StateProvider {
             provider,
             runtime_handle,
             max_sync_attempts: config.max_sync_attempts,
+            initial_backoff_ms: config.initial_backoff_ms,
         })
     }
 
@@ -157,16 +170,33 @@ impl L1StateProvider {
             provider,
             runtime_handle,
             max_sync_attempts: config.max_sync_attempts,
+            initial_backoff_ms: config.initial_backoff_ms,
         }
     }
 
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
-    /// On cache miss it retries the RPC call indefinitely until the value is fetched. The
-    /// transport layer handles backoff internally via [`RetryBackoffLayer`], so retries here
-    /// are immediate. This ensures a transient L1 RPC outage stalls block production rather
-    /// than bricking the chain with a hard precompile error.
+    ///
+    /// # Why failures stall instead of erroring
+    ///
+    /// An RPC outcome must never decide block validity. Whether a read succeeds depends on the
+    /// health and sync state of one node's endpoint, so converting a failure into a precompile
+    /// error — which is fatal, not a revert — lets two honest nodes disagree about the same block.
+    /// A node whose gateway returns 502 would reject a block its peers accept. On cache miss this
+    /// therefore retries until the value is fetched, stalling block production rather than failing
+    /// closed.
+    ///
+    /// Rejecting a read that consensus can prove is out of range is a separate, sound check, but
+    /// it belongs *before* the request, compared against in-consensus state — not after it, by
+    /// classifying whatever the endpoint happened to return. That bound is tracked as follow-up.
+    ///
+    /// [`RetryBackoffLayer`] is the single retry policy: it classifies and backs off per request.
+    /// This loop adds no classification of its own, only a capped delay between attempts so a
+    /// sustained outage polls at a steady low rate instead of spinning.
+    ///
+    /// `max_sync_attempts` bounds the wait for callers that must fail finitely — tests and the
+    /// no-L1 CLI fallback. Production leaves it unset.
     ///
     /// # Panics
     ///
@@ -211,10 +241,22 @@ impl L1StateProvider {
                             "L1 storage RPC fetch failed after {attempt} attempts for address={address} slot={slot} block={block_number}: {rpc_err}"
                         ));
                     }
-                    warn!(%address, %slot, block_number, %rpc_err, ?elapsed, attempt, "L1 storage RPC fetch failed, retrying");
+                    let backoff = self.sync_retry_backoff(attempt);
+                    warn!(%address, %slot, block_number, %rpc_err, ?elapsed, attempt, ?backoff, "L1 storage RPC fetch failed, stalling before retry");
+                    std::thread::sleep(backoff);
                 }
             }
         }
+    }
+
+    /// Delay before the next synchronous cache-miss attempt.
+    ///
+    /// Grows exponentially from the transport's initial backoff and saturates at
+    /// [`MAX_SYNC_RETRY_BACKOFF`], so a long outage keeps polling without hammering the endpoint.
+    fn sync_retry_backoff(&self, attempt: u32) -> Duration {
+        let shift = attempt.saturating_sub(1).min(MAX_SYNC_BACKOFF_SHIFT);
+        Duration::from_millis(self.initial_backoff_ms.saturating_mul(1u64 << shift))
+            .min(MAX_SYNC_RETRY_BACKOFF)
     }
 
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
@@ -247,13 +289,22 @@ impl L1StateProvider {
     }
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
-    async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
+    async fn fetch_slot(
+        &self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> std::result::Result<B256, TransportError> {
         let key = U256::from_be_bytes(slot.0);
         let block_id = BlockId::number(block_number);
-        let value: U256 = self.provider.get_storage_at(address, key).block_id(block_id).await.map_err(|e| {
-            warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
-            eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
-        })?;
+        let value: U256 = self
+            .provider
+            .get_storage_at(address, key)
+            .block_id(block_id)
+            .await
+            .inspect_err(
+                |error| warn!(%address, %slot, block_number, %error, "eth_getStorageAt RPC call failed"),
+            )?;
 
         let result = B256::from(value.to_be_bytes());
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
@@ -282,23 +333,44 @@ impl L1StorageReader for L1StateProvider {
 mod tests {
     use super::*;
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn finite_sync_attempt_limit_returns_diagnostic_error() {
-        let config = L1StateProviderConfig {
-            max_sync_attempts: Some(NonZeroU32::MIN),
-            ..Default::default()
-        };
+    async fn test_reader(config: L1StateProviderConfig) -> L1StateProvider {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect("http://127.0.0.1:1")
             .await
             .expect("HTTP transport construction is lazy")
             .erased();
-        let reader = L1StateProvider::new_raw(
+        L1StateProvider::new_raw(
             config,
             L1StateCache::default(),
             provider,
             tokio::runtime::Handle::current(),
-        );
+        )
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sync_retry_backoff_grows_then_saturates() {
+        let reader = test_reader(L1StateProviderConfig {
+            initial_backoff_ms: 20,
+            ..Default::default()
+        })
+        .await;
+
+        assert_eq!(reader.sync_retry_backoff(1), Duration::from_millis(20));
+        assert_eq!(reader.sync_retry_backoff(2), Duration::from_millis(40));
+        assert_eq!(reader.sync_retry_backoff(3), Duration::from_millis(80));
+
+        // A long outage settles at the cap rather than growing without bound or overflowing.
+        assert_eq!(reader.sync_retry_backoff(20), MAX_SYNC_RETRY_BACKOFF);
+        assert_eq!(reader.sync_retry_backoff(u32::MAX), MAX_SYNC_RETRY_BACKOFF);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finite_sync_attempt_limit_returns_diagnostic_error() {
+        let reader = test_reader(L1StateProviderConfig {
+            max_sync_attempts: Some(NonZeroU32::MIN),
+            ..Default::default()
+        })
+        .await;
 
         let err =
             tokio::task::spawn_blocking(move || reader.get_storage(Address::ZERO, B256::ZERO, 7))
