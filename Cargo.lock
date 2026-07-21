@@ -11571,6 +11571,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-zone-spf"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rlp",
+ "alloy-rpc-types-eth",
+ "alloy-sol-types",
+ "clap",
+ "const-hex",
+ "eyre",
+ "futures",
+ "serde",
+ "serde_json",
+ "tempo-alloy",
+ "tempo-chainspec",
+ "tempo-primitives",
+ "tempo-zone-contracts",
+ "tokio",
+ "zone-chainspec",
+ "zone-precompiles",
+ "zone-primitives",
+ "zone-spf",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13725,6 +13754,10 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-sol-types",
+ "reth-chainspec",
+ "reth-evm",
+ "reth-primitives-traits",
+ "reth-storage-api",
  "reth-trie-common",
  "reth-trie-sparse",
  "revm",

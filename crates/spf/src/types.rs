@@ -3,33 +3,28 @@
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
+use tempo_primitives::TempoHeader;
 use zone_chainspec::ZoneChainSpec;
 
 pub use tempo_zone_contracts::{
     BlockTransition, ChaumPedersenProof, DecryptionData, DepositQueueTransition, DepositType,
     EnabledToken, QueuedDeposit,
 };
-pub use zone_primitives::ZoneHeader;
-
 /// Trusted network configuration for Zone execution.
 ///
 /// This is deliberately separate from [`BatchWitness`]: it is selected by the
 /// verifier for the network it serves, not supplied by the prover. The zone
-/// chain specification provides the parent Tempo hard-fork schedule, while
-/// `block_gas_limit` is the fixed Zone block limit. Simplified Zone headers do
-/// not carry a gas limit, so it must be fixed by the network configuration.
+/// chain specification provides the parent Tempo hard-fork schedule. Block gas
+/// limits and other inherited execution fields come from the canonical parent
+/// Tempo header carried by the witness.
 #[derive(Debug, Clone)]
 pub struct SpfConfig {
     pub zone_chain_spec: Arc<ZoneChainSpec>,
-    pub block_gas_limit: u64,
 }
 
 impl SpfConfig {
-    pub fn new(zone_chain_spec: Arc<ZoneChainSpec>, block_gas_limit: u64) -> Self {
-        Self {
-            zone_chain_spec,
-            block_gas_limit,
-        }
+    pub fn new(zone_chain_spec: Arc<ZoneChainSpec>) -> Self {
+        Self { zone_chain_spec }
     }
 }
 
@@ -40,8 +35,6 @@ impl SpfConfig {
 pub struct PublicInputs {
     /// Zone identifier from which the SPF derives the EVM chain ID.
     pub zone_id: u32,
-    /// Block hash committed by the previous batch.
-    pub prev_block_hash: B256,
     /// Tempo block number committed by the submitted batch.
     pub tempo_block_number: u64,
     /// Tempo block number used to anchor this batch.
@@ -61,9 +54,9 @@ pub struct PublicInputs {
 pub struct BatchWitness {
     /// Values committed by the verifier.
     pub public_inputs: PublicInputs,
-    /// Parent of the first Zone block. Its state root anchors the initial Zone
-    /// state witness.
-    pub parent_header: ZoneHeader,
+    /// Canonical Tempo header of the first Zone block's parent. Its hash and
+    /// state root anchor the batch and its execution fields seed replay.
+    pub parent_header: TempoHeader,
     /// Zone blocks in execution order.
     pub zone_blocks: Vec<ZoneBlock>,
     /// Stateless witness for the Zone state at the start of the batch.
@@ -84,7 +77,6 @@ pub struct ZoneBlock {
     pub parent_hash: B256,
     pub timestamp: u64,
     pub beneficiary: Address,
-    pub protocol_version: u64,
     /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`, when the
     /// block imports a new Tempo checkpoint.
     pub tempo_header_rlp: Option<Bytes>,

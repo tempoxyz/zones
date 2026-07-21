@@ -4,14 +4,15 @@
 //! execution. It is presently a normal Rust verifier rather than a `no_std`
 //! proving guest.
 
-use alloy_consensus::{
-    BlockHeader as _, TxReceipt,
-    proofs::{calculate_receipt_root, calculate_transaction_root},
-};
-use alloy_primitives::{B256, U256, keccak256};
+use alloy_consensus::{BlockHeader as _, Sealable as _};
+use alloy_primitives::{B256, Bloom, U256, keccak256};
 use alloy_rlp::Decodable as _;
+use reth_evm::execute::BlockAssemblerInput;
+use reth_primitives_traits::SealedHeader;
+use reth_storage_api::noop::NoopProvider;
 use revm::{Database as _, database::State, database_interface::bal::EvmDatabaseError};
-use tempo_primitives::TempoHeader;
+use tempo_evm::{TempoBlockAssembler, TempoEvmConfig};
+use tempo_primitives::{TempoHeader, TempoPrimitives};
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
 use zone_primitives::constants::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_INBOX_PROCESSED_HASH_SLOT,
@@ -36,12 +37,8 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
     // state root selects the initial Zone state.
-    let previous_header_hash = witness.parent_header.hash();
-    if previous_header_hash != witness.public_inputs.prev_block_hash {
-        return Err(Error::PreviousBlockHashMismatch {
-            expected: witness.public_inputs.prev_block_hash,
-            actual: previous_header_hash,
-        });
+    if witness.parent_header.inner.logs_bloom != Bloom::ZERO {
+        return Err(Error::ParentHeaderLogsBloom);
     }
     if witness.zone_blocks.is_empty() {
         return Err(Error::EmptyZoneBatch);
@@ -51,7 +48,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     // state proven by the witness, while writes remain in REVM's overlay.
     let zone_database = WitnessDatabase::from_zone_state_witness(
         witness.zone_state_witness,
-        witness.parent_header.state_root,
+        witness.parent_header.state_root(),
     )?;
     let mut zone_state = State::builder()
         .with_database(zone_database)
@@ -104,13 +101,14 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         });
     }
 
-    // Each block is checked against the header produced by its predecessor.
-    // After execution, the post-state, transaction, and receipt roots form a
-    // new simplified Zone header that becomes the next block's parent.
+    // Each block is checked against the canonical Tempo header produced by its
+    // predecessor. Replay feeds the execution result through Tempo's block
+    // assembler with the Zone aggregate bloom fixed to zero.
+    let initial_parent_hash = witness.parent_header.hash_slow();
     let mut previous_header = witness.parent_header.clone();
     let block_count = witness.zone_blocks.len();
     for (block_index, block) in witness.zone_blocks.iter().enumerate() {
-        let expected_parent_hash = previous_header.hash();
+        let expected_parent_hash = previous_header.hash_slow();
         if block.parent_hash != expected_parent_hash {
             return Err(Error::BlockParentHashMismatch {
                 expected: expected_parent_hash,
@@ -119,7 +117,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         }
 
         let expected_number = previous_header
-            .number
+            .number()
             .checked_add(1)
             .ok_or(Error::BlockNumberOverflow)?;
         if block.number != expected_number {
@@ -128,9 +126,9 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
                 actual: block.number,
             });
         }
-        if block.timestamp < previous_header.timestamp {
+        if block.timestamp < previous_header.timestamp() {
             return Err(Error::BlockTimestampRegression {
-                previous: previous_header.timestamp,
+                previous: previous_header.timestamp(),
                 actual: block.timestamp,
             });
         }
@@ -145,38 +143,52 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         // The EVM environment uses the verifier-selected fork schedule at this
         // block's timestamp. An imported Tempo header changes the L1 reader
         // used by the subsequent system and user execution in this block.
-        let env = execution::evm::ZoneEvmEnv::new(config, witness.public_inputs.zone_id, block);
         if let Some(header) = &block.tempo_header_rlp {
             tempo_database = tempo_database.with_imported_checkpoint(header)?;
         }
         let executed_block = execution::evm::execute_zone_block(
-            &env,
             config,
             &mut zone_state,
             &tempo_database,
-            block_index,
-            witness.public_inputs.sequencer,
+            execution::evm::BlockReplayContext {
+                parent: &previous_header,
+                block_index,
+                zone_id: witness.public_inputs.zone_id,
+                sequencer: witness.public_inputs.sequencer,
+            },
             block,
         )?;
 
         let state_root = zone_state.database.state_root(&zone_state.bundle_state)?;
-        let transactions_root = calculate_transaction_root(&executed_block.transactions);
-        let receipts_with_bloom = executed_block
-            .receipts
-            .iter()
-            .map(TxReceipt::with_bloom_ref)
-            .collect::<Vec<_>>();
-        let receipts_root = calculate_receipt_root(&receipts_with_bloom);
-        previous_header = ZoneHeader {
-            parent_hash: expected_parent_hash,
-            beneficiary: block.beneficiary,
-            state_root,
-            transactions_root,
-            receipts_root,
-            number: block.number,
-            timestamp: block.timestamp,
-            protocol_version: block.protocol_version,
-        };
+        let gas_limit = executed_block.evm_env.block_env.inner.gas_limit;
+        let execution_context = execution::evm::next_block_execution_context(
+            config.zone_chain_spec.as_ref(),
+            block,
+            gas_limit,
+        );
+        let state_provider = NoopProvider::<tempo_chainspec::TempoChainSpec, TempoPrimitives>::new(
+            config.zone_chain_spec.inner.clone(),
+        );
+        let sealed_parent = SealedHeader::new_unhashed(previous_header.clone());
+        let assembled = TempoBlockAssembler::new(config.zone_chain_spec.inner.clone())
+            .assemble_block(
+                BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(
+                    executed_block.evm_env,
+                    execution_context,
+                    &sealed_parent,
+                    executed_block.transactions,
+                    &executed_block.output,
+                    &zone_state.bundle_state,
+                    &state_provider,
+                    state_root,
+                    None,
+                ),
+                None,
+                None,
+                Some(Bloom::ZERO),
+            )
+            .map_err(|_| Error::BlockAssembly { block_index })?;
+        previous_header = assembled.header;
     }
 
     // These reads see the final execution overlay rather than just the parent
@@ -252,8 +264,8 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
     }
     Ok(BatchOutput {
         block_transition: BlockTransition {
-            prevBlockHash: witness.public_inputs.prev_block_hash,
-            nextBlockHash: previous_header.hash(),
+            prevBlockHash: initial_parent_hash,
+            nextBlockHash: previous_header.hash_slow(),
         },
         deposit_queue_transition: DepositQueueTransition {
             prevProcessedHash: previous_processed_hash,
@@ -396,9 +408,9 @@ pub enum Error {
     /// A read against the provided state witness failed.
     #[error(transparent)]
     WitnessDatabase(#[from] WitnessDatabaseError),
-    /// The previous header does not hash to the committed previous block hash.
-    #[error("previous block hash mismatch: expected {expected:?}, got {actual:?}")]
-    PreviousBlockHashMismatch { expected: B256, actual: B256 },
+    /// Zone headers must use the privacy-preserving zero aggregate bloom.
+    #[error("parent Zone header has a non-zero aggregate logs bloom")]
+    ParentHeaderLogsBloom,
     /// A batch must execute at least one Zone block.
     #[error("zone batch contains no blocks")]
     EmptyZoneBatch,
@@ -490,6 +502,12 @@ pub enum Error {
     /// Production block post-execution changes could not be finalized.
     #[error("failed to finalize execution of zone block {block_index}")]
     BlockPostExecution { block_index: usize },
+    /// The canonical Tempo block header could not be assembled.
+    #[error("failed to assemble canonical header for zone block {block_index}")]
+    BlockAssembly { block_index: usize },
+    /// The production Tempo EVM environment could not be constructed.
+    #[error("failed to construct Zone EVM environment")]
+    EvmEnvironment,
     /// An internal post-execution state read unexpectedly hit BAL state.
     #[error("unexpected balanced access while reading {address:?} slot {slot:?}")]
     UnexpectedBalancedAccess {
@@ -556,30 +574,25 @@ mod tests {
     use zone_precompiles::L1StorageReader as _;
 
     fn test_config() -> SpfConfig {
-        SpfConfig::new(
-            Arc::new(zone_chainspec::ZoneChainSpec::from(
-                tempo_chainspec::spec::MODERATO.clone(),
-            )),
-            30_000_000,
-        )
+        SpfConfig::new(Arc::new(zone_chainspec::ZoneChainSpec::from(
+            tempo_chainspec::spec::MODERATO.clone(),
+        )))
     }
 
     fn minimal_batch_witness() -> BatchWitness {
-        let parent_header = ZoneHeader {
-            parent_hash: B256::ZERO,
-            beneficiary: Address::ZERO,
-            state_root: EMPTY_ROOT_HASH,
-            transactions_root: B256::ZERO,
-            receipts_root: B256::ZERO,
-            number: 0,
-            timestamp: 0,
-            protocol_version: 0,
+        let parent_header = TempoHeader {
+            inner: Header {
+                state_root: EMPTY_ROOT_HASH,
+                gas_limit: 30_000_000,
+                ..Default::default()
+            },
+            shared_gas_limit: 30_000_000,
+            ..Default::default()
         };
 
         BatchWitness {
             public_inputs: PublicInputs {
                 zone_id: 1,
-                prev_block_hash: parent_header.hash(),
                 tempo_block_number: 2,
                 anchor_block_number: 2,
                 anchor_block_hash: B256::ZERO,
@@ -677,17 +690,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_previous_header_not_bound_to_public_inputs() {
+    fn rejects_a_parent_header_with_a_non_zero_logs_bloom() {
         let mut witness = minimal_batch_witness();
-        witness.public_inputs.prev_block_hash = B256::ZERO;
-        assert_ne!(witness.parent_header.hash(), B256::ZERO);
+        witness.parent_header.inner.logs_bloom = Bloom::repeat_byte(1);
 
         assert_eq!(
             prove_zone_batch(&test_config(), witness),
-            Err(Error::PreviousBlockHashMismatch {
-                expected: B256::ZERO,
-                actual: minimal_batch_witness().parent_header.hash(),
-            })
+            Err(Error::ParentHeaderLogsBloom)
         );
     }
 
@@ -878,14 +887,13 @@ mod tests {
     }
 
     #[test]
-    fn prepares_a_zone_block_execution_environment() {
+    fn prepares_zone_next_block_attributes() {
         let witness = minimal_batch_witness();
         let block = ZoneBlock {
             number: 1,
-            parent_hash: witness.parent_header.hash(),
+            parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: witness.public_inputs.sequencer,
-            protocol_version: 0,
             tempo_header_rlp: None,
             deposits: Vec::new(),
             decryptions: Vec::new(),
@@ -895,16 +903,23 @@ mod tests {
             transactions: Vec::new(),
         };
 
-        let env =
-            execution::evm::ZoneEvmEnv::new(&test_config(), witness.public_inputs.zone_id, &block);
+        let config = test_config();
+        let attributes = execution::evm::next_block_env_attributes(
+            config.zone_chain_spec.as_ref(),
+            &witness.parent_header,
+            &block,
+        )
+        .unwrap();
 
+        assert_eq!(attributes.timestamp, 0);
+        assert_eq!(attributes.suggested_fee_recipient, Address::ZERO);
+        assert_eq!(attributes.gas_limit, 30_000_000);
+        assert_eq!(attributes.general_gas_limit, 0);
         assert_eq!(
-            env.cfg.chain_id,
-            zone_primitives::constants::zone_chain_id(1)
+            attributes.shared_gas_limit,
+            witness.parent_header.inner.gas_limit
         );
-        assert_eq!(env.block.number, U256::from(1));
-        assert_eq!(env.block.beneficiary, Address::ZERO);
-        assert_eq!(env.block.timestamp, U256::ZERO);
+        assert_eq!(attributes.timestamp_millis_part, 0);
     }
 
     #[test]
@@ -912,10 +927,9 @@ mod tests {
         let witness = minimal_batch_witness();
         let block = ZoneBlock {
             number: 1,
-            parent_hash: witness.parent_header.hash(),
+            parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: witness.public_inputs.sequencer,
-            protocol_version: 0,
             tempo_header_rlp: None,
             deposits: Vec::new(),
             decryptions: Vec::new(),
@@ -936,10 +950,9 @@ mod tests {
         let mut witness = minimal_batch_witness();
         witness.zone_blocks.push(ZoneBlock {
             number: 1,
-            parent_hash: witness.parent_header.hash(),
+            parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: witness.public_inputs.sequencer,
-            protocol_version: 0,
             tempo_header_rlp: None,
             deposits: Vec::new(),
             decryptions: Vec::new(),
@@ -965,10 +978,9 @@ mod tests {
         let mut witness = minimal_batch_witness();
         witness.zone_blocks.push(ZoneBlock {
             number: 1,
-            parent_hash: witness.parent_header.hash(),
+            parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: witness.public_inputs.sequencer,
-            protocol_version: 0,
             tempo_header_rlp: Some(Bytes::from([0x01])),
             deposits: Vec::new(),
             decryptions: Vec::new(),
