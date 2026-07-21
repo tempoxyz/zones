@@ -1,12 +1,12 @@
 //! Deploy and configure the non-secret L1 fixtures used by the private-Zone benchmark.
 
 use alloy::{
-    network::{EthereumWallet, TransactionBuilder},
+    network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
     primitives::{Address, Bytes, U256, Uint},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::{SolCall, SolValue},
+    sol_types::{SolCall, SolConstructor, SolValue},
 };
 use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
@@ -74,6 +74,10 @@ alloy::sol! {
     interface ClosedLoopZoneGatewayRoutes {
         function setDepositRoute(address inputToken, address swapper) external;
         function setRedeemRoute(address outputToken, address swapper) external;
+    }
+
+    contract FixtureSimple4626Vault {
+        constructor(address asset_, string name_, string symbol_, uint8 decimals_);
     }
 }
 
@@ -173,13 +177,13 @@ impl DeployNeobankFixtures {
             &deployer_provider,
             with_constructor(
                 load_bytecode(&self.specs_out, "Simple4626Vault.sol/Simple4626Vault")?,
-                (
-                    self.pathusd,
-                    "Neobank benchmark vault".to_owned(),
-                    "nbVAULT".to_owned(),
-                    U256::from(6),
-                )
-                    .abi_encode(),
+                FixtureSimple4626Vault::constructorCall {
+                    asset_: self.pathusd,
+                    name_: "Neobank benchmark vault".to_owned(),
+                    symbol_: "nbVAULT".to_owned(),
+                    decimals_: 6,
+                }
+                .abi_encode(),
             ),
             "Simple4626Vault",
         )
@@ -409,7 +413,13 @@ async fn deploy<P: Provider<TempoNetwork>>(
         .get_receipt()
         .await
         .wrap_err_with(|| format!("failed waiting for {label} deployment receipt"))?;
-    check(&receipt, label)?;
+    if !receipt.status() {
+        return Err(eyre!(
+            "{label} reverted after using {} gas (transaction {})",
+            receipt.gas_used(),
+            receipt.transaction_hash(),
+        ));
+    }
     receipt
         .contract_address
         .ok_or_else(|| eyre!("{label} deployment receipt did not contain a contract address"))
