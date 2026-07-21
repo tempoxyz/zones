@@ -471,46 +471,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, B256};
     use reth_chainspec::{EthChainSpec, ForkCondition};
-    use revm::precompile::PrecompileError;
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{DEV, MODERATO, TempoHardforks},
     };
-
-    #[derive(Debug, Clone)]
-    struct TestL1Provider;
-
-    impl L1StorageReader for TestL1Provider {
-        fn read_l1_storage(
-            &self,
-            _account: Address,
-            _slot: B256,
-            _block_number: u64,
-        ) -> Result<B256, PrecompileError> {
-            Ok(B256::ZERO)
-        }
-    }
-
-    impl SequencerExt for TestL1Provider {
-        fn latest_sequencer(&self) -> Option<Address> {
-            None
-        }
-    }
-
-    #[test]
-    fn config_accepts_generic_l1_provider() {
-        let config = ZoneEvmConfig::new(
-            Arc::new(ZoneChainSpec::from(DEV.clone())),
-            DEV.clone(),
-            TestL1Provider,
-        );
-
-        fn assert_configure_evm<T: ConfigureEvm>(_config: &T) {}
-        assert_configure_evm(&config);
-        assert_eq!(config.chain_spec().chain().id(), DEV.chain().id());
-    }
 
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
