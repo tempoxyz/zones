@@ -649,7 +649,8 @@ jobs:
             find "$witness_dir" -maxdepth 1 -type f \( \
               -name '*.bundle_state.original.json' -o \
               -name '*.bundle_state.re_executed.json' -o \
-              -name '*.bundle_state.diff' \
+              -name '*.bundle_state.diff' -o \
+              -name '*.header_state_root.diff' \
             \) -exec cp --target-directory="$output_dir" -- {} +
           fi
 
