@@ -36,9 +36,10 @@ is the gateway fixture and the only terminal off-ramp recipient is the bridge
 wallet fixture. No authorization map, mnemonic, private key, encryption
 payload, or bearer token belongs in rendered output or an uploaded artifact.
 
-Each composable request uses the exact eight-argument withdrawal overload,
-nonzero callback gas, an empty `revealTo`, an account fallback recipient, and a
-random action ID used both as the withdrawal memo and callback correlation key.
+Each composable request uses the exact eight-argument withdrawal overload, a
+10,000,000-gas callback budget, an empty `revealTo`, an account fallback
+recipient, and a random action ID used both as the withdrawal memo and callback
+correlation key.
 The terminal matcher requires all of: request transaction hash, sender tag,
 queue/deposit hash, action ID, token, recipient, amount, and receipt-scoped
 event. Balance polling is not a completion signal.
