@@ -325,42 +325,40 @@ interface IZoneTxContext {
 //////////////////////////////////////////////////////////////*/
 
 // ZonePortal storage layout:
-//   slot 0: sequencer (address)
-//   slot 1: admin (address)
-//   slot 2: pendingSequencer (address)
-//   slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-//   slot 4: blockHash (bytes32)
-//   slot 5: currentDepositQueueHash (bytes32)
-//   slot 6: depositCount (uint64) + lastProcessedDepositNumber (uint64) + lastSyncedTempoBlockNumber (uint64) [packed]
-//   slot 7: _encryptionKeys (EncryptionKeyEntry[])
-//   slot 8: _tokenConfigs (mapping(address => TokenConfig))
-//   slot 9: _enabledTokens (address[])
-//   slot 10: refunds (mapping(address => mapping(address => uint128)))
-//   slot 11: _withdrawalQueue.head
-//   slot 12: _withdrawalQueue.tail
-//   slot 13: _withdrawalQueue.slots (mapping(uint256 => bytes32))
-//   slot 14: rpcUrl (string)
-//   slot 15: pendingAdmin (address)
-//   slot 16: _withdrawalReentrancyStatus (uint256)
-//   slot 17: zoneId (uint32) + messenger (address) [packed]
-//   slot 18: verifier (address) + _initialized (bool) + sequencerSetVersion (uint64)
+//   slot 0: admin (address)
+//   slot 1: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+//   slot 2: blockHash (bytes32)
+//   slot 3: currentDepositQueueHash (bytes32)
+//   slot 4: depositCount (uint64) + lastProcessedDepositNumber (uint64)
+//           + lastSyncedTempoBlockNumber (uint64) + bouncebackGas (uint64) [packed]
+//   slot 5: _encryptionKeys (EncryptionKeyEntry[])
+//   slot 6: _tokenConfigs (mapping(address => TokenConfig))
+//   slot 7: _enabledTokens (address[])
+//   slot 8: refunds (mapping(address => mapping(address => uint128)))
+//   slot 9: _withdrawalQueue.head
+//   slot 10: _withdrawalQueue.tail
+//   slot 11: _withdrawalQueue.slots (mapping(uint256 => bytes32))
+//   slot 12: rpcUrl (string)
+//   slot 13: pendingAdmin (address)
+//   slot 14: _withdrawalReentrancyStatus (uint256)
+//   slot 15: zoneId (uint32) + messenger (address) [packed]
+//   slot 16: verifier (address) + _initialized (bool) + sequencerSetVersion (uint64)
 //            + sequencerThreshold (uint8) [packed]
-//   slot 19: zoneHeight (uint256)
-//   slot 20: _sequencers (address[])
-//   slot 21: isSequencer (mapping(address => bool))
+//   slot 17: zoneHeight (uint256)
+//   slot 18: _sequencers (address[])
+//   slot 19: isSequencer (mapping(address => bool))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
 // TempoState.readTempoStorageSlot(). If the portal layout changes,
 // update these constants and the vm.load regression tests will catch mismatches.
-bytes32 constant PORTAL_SEQUENCER_SLOT = bytes32(uint256(0));
-bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(1));
-bytes32 constant PORTAL_PENDING_SEQUENCER_SLOT = bytes32(uint256(2));
-bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
-bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
-bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(8));
-bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(9));
-bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(15));
+bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(0));
+bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
+bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(5));
+bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
+bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
+bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
+bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -538,14 +536,6 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
-    /// @notice Emitted when an active sequencer updates the block-producer representative.
-    /// @dev Retained for ABI compatibility. This does not change active-set membership.
-    event SequencerTransferStarted(
-        address indexed currentSequencer, address indexed pendingSequencer
-    );
-    /// @notice Emitted when the pending legacy representative accepts the update.
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
-
     /// @notice Emitted when the current admin nominates a new admin (two-step transfer).
     /// @dev A `newAdmin` of address(0) signals cancellation of a pending transfer.
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
@@ -611,7 +601,6 @@ interface IZonePortal {
     error NotFactory();
     error AlreadyInitialized();
     error MustDelegateCall();
-    error NotPendingSequencer();
     error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
@@ -662,11 +651,7 @@ interface IZonePortal {
 
     function messenger() external view returns (address);
 
-    function sequencer() external view returns (address);
-
     function admin() external view returns (address);
-
-    function pendingSequencer() external view returns (address);
 
     function pendingAdmin() external view returns (address);
 
@@ -746,14 +731,6 @@ interface IZonePortal {
     /// @notice Update the zone's public RPC endpoint. Only callable by sequencer.
     /// @param rpcUrl The new RPC URL (may be empty to clear it)
     function setRpcUrl(string calldata rpcUrl) external;
-
-    /// @notice Update the pending block-producer representative. Only callable by an active sequencer.
-    /// @dev Retained for ABI compatibility. This does not change active-set membership.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept an update to the legacy representative field.
-    /// @dev Retained for ABI compatibility. This does not change active-set membership.
-    function acceptSequencer() external;
 
     /// @notice Atomically replace the sequencer set and settlement threshold. Only callable by admin.
     /// @dev Signers must be nonzero, unique, and sorted in strictly ascending address order.
@@ -1229,7 +1206,7 @@ interface IZoneOutbox {
 /// @title IZoneConfig
 /// @notice Interface for zone configuration and L1 state access
 /// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
-///      Provides centralized access to zone metadata and reads sequencer from L1.
+///      Provides centralized access to zone metadata and reads the sequencer set from L1.
 interface IZoneConfig {
 
     error NotSequencer();
@@ -1241,18 +1218,11 @@ interface IZoneConfig {
     /// @notice TempoState predeploy for L1 reads
     function tempoState() external view returns (ITempoState);
 
-    /// @notice Get current sequencer by reading from L1 ZonePortal
-    /// @dev Reads from finalized Tempo state. L1 is single source of truth.
-    function sequencer() external view returns (address);
-
-    /// @notice Get pending sequencer by reading from L1 ZonePortal
-    function pendingSequencer() external view returns (address);
-
     /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
     /// @dev Used for encrypted deposits (ECIES).
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
-    /// @notice Check if an address is the current sequencer
+    /// @notice Check if an address belongs to the active sequencer set.
     function isSequencer(address account) external view returns (bool);
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal

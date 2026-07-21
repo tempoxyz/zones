@@ -5,6 +5,7 @@ import {
     IZoneOutbox,
     IZonePortal,
     LastBatch,
+    PORTAL_IS_SEQUENCER_SLOT,
     PendingWithdrawal,
     Withdrawal,
     ZONE_INBOX,
@@ -56,7 +57,9 @@ contract ZoneOutboxTest is Test {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         config = new ZoneConfig(mockPortal, address(tempoState));
         tempoState.setMockStorageValue(
-            mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+            mockPortal,
+            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            bytes32(uint256(1))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
@@ -494,8 +497,12 @@ contract ZoneOutboxTest is Test {
         outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);
         vm.stopPrank();
 
-        // Sequencer should succeed
-        bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
+        // Any additional active member has the same authority.
+        tempoState.setMockStorageValue(
+            mockPortal, keccak256(abi.encode(bob, PORTAL_IS_SEQUENCER_SLOT)), bytes32(uint256(1))
+        );
+        vm.prank(bob);
+        bytes32 hash = outbox.finalizeWithdrawalBatch(1, uint64(block.number), encryptedSenders);
         assertTrue(hash != bytes32(0));
     }
 
@@ -1058,7 +1065,7 @@ contract ZoneOutboxTest is Test {
 
     function test_immutableGetters() public view {
         assertEq(address(outbox.config()), address(config));
-        assertEq(config.sequencer(), sequencer);
+        assertTrue(config.isSequencer(sequencer));
     }
 
     /*//////////////////////////////////////////////////////////////

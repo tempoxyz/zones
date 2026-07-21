@@ -159,7 +159,6 @@ impl CreateZone {
             with_createx: true,
             with_safe_deployer: true,
             with_create2_factory: true,
-            with_zone_factory_bytecode: false,
         };
         genesis_cmd.run().await?;
 

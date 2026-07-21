@@ -21,6 +21,7 @@ import {
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     Withdrawal,
     ZONE_INBOX,
@@ -31,7 +32,6 @@ import {
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -104,7 +104,6 @@ contract ZoneBridgeTest is BaseTest {
                               L1 CONTRACTS
     //////////////////////////////////////////////////////////////*/
 
-    ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
 
     /*//////////////////////////////////////////////////////////////
@@ -153,7 +152,7 @@ contract ZoneBridgeTest is BaseTest {
         super.setUp();
 
         // === Deploy L1 Contracts ===
-        l1Factory = _deployZoneFactory(); // Keep factory for verifier only
+        _installSharedZoneRuntimes();
         withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Deploy zone token FIRST (used for both L1 escrow and zone-side operations).
@@ -208,10 +207,12 @@ contract ZoneBridgeTest is BaseTest {
         l2TempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
 
-        // Zone config (reads sequencer from L1 portal via Tempo state)
+        // Zone config (reads sequencer membership from L1 portal via Tempo state)
         l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
-            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+            address(l1Portal),
+            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            bytes32(uint256(1))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
 

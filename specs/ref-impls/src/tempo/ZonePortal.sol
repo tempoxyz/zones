@@ -80,15 +80,8 @@ contract ZonePortal is IZonePortal {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Legacy representative retained for storage and ABI compatibility.
-    /// @dev This address has no permissions distinct from the sequencer set.
-    address public sequencer;
-
     /// @notice Governance admin address
     address public admin;
-
-    /// @notice Pending legacy representative retained for storage and ABI compatibility.
-    address public pendingSequencer;
 
     /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
@@ -114,19 +107,19 @@ contract ZonePortal is IZonePortal {
     uint64 public lastSyncedTempoBlockNumber;
 
     /// @notice Gas amount used to price a failed-deposit bounce-back on Tempo.
-    /// @dev Packed into the unused bytes in slot 6. Defaults to zero.
+    /// @dev Packed into the unused bytes in slot 4. Defaults to zero.
     uint64 public bouncebackGas;
 
     /// @notice Historical encryption keys with activation blocks
     /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
-    ///      Stored at slot 7 in the ZonePortal storage layout.
+    ///      Stored at slot 5 in the ZonePortal storage layout.
     EncryptionKeyEntry[] internal _encryptionKeys;
 
-    /// @notice Per-token configuration (stored at slot 8)
+    /// @notice Per-token configuration (stored at slot 6)
     /// @dev TokenConfig.enabled is permanent (write-once true); depositsActive can be toggled.
     mapping(address => TokenConfig) internal _tokenConfigs;
 
-    /// @notice Append-only list of enabled tokens (stored at slot 9)
+    /// @notice Append-only list of enabled tokens (stored at slot 7)
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
@@ -225,32 +218,6 @@ contract ZonePortal is IZonePortal {
         _withdrawalReentrancyStatus = 0;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Update the pending block-producer representative. Only callable by an active sequencer.
-    /// @dev Retained for ABI compatibility. This does not change active-set membership.
-    function transferSequencer(address newSequencer) external onlySequencer {
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept an update to the legacy representative field.
-    /// @dev Retained for ABI compatibility. This does not change active-set membership.
-    /// @dev The explicit `pendingSequencer == address(0)` check because it is technically
-    ///      possible to make a system tx on L1 with msg.sender == 0.
-    ///      The Sequencer key can only be rotated, never renounced.
-    function acceptSequencer() external {
-        if (pendingSequencer == address(0) || msg.sender != pendingSequencer) {
-            revert NotPendingSequencer();
-        }
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
-    }
-
     /// @inheritdoc IZonePortal
     function setSequencerSet(
         address[] calldata newSequencers,
@@ -312,12 +279,10 @@ contract ZonePortal is IZonePortal {
             isSequencer[signer] = true;
         }
 
-        // Expose the block-producer representative without granting it distinct permissions.
-        sequencer = newSequencers[0];
         sequencerThreshold = newThreshold;
-        uint64 version = sequencerSetVersion;
-        if (rejectUnchanged) version = ++sequencerSetVersion;
-        emit SequencerSetUpdated(version, newThreshold, newSequencers);
+        uint64 nonce = sequencerSetVersion;
+        if (rejectUnchanged) nonce = ++sequencerSetVersion;
+        emit SequencerSetUpdated(nonce, newThreshold, newSequencers);
     }
 
     /// @inheritdoc IZonePortal

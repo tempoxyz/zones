@@ -82,7 +82,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             "ZoneFactory must use TIP-1091 address {ZONE_FACTORY_ADDRESS}, got {address}"
         );
     }
-    let factory_address = deploy_zone_factory(&l1_rpc_url, wallet).await?;
+    let factory_address = native_zone_factory(&l1_rpc_url, wallet).await?;
 
     let factory = ZoneFactory::new(factory_address, &provider);
     // Anchor before createZone so the L1 subscriber replays the creation block,
@@ -192,7 +192,7 @@ async fn fund_dev_account<P: Provider<TempoNetwork>>(
 }
 
 /// Returns TIP-1091's fixed `ZoneFactory` address after verifying it is installed on L1.
-pub async fn deploy_zone_factory(
+pub async fn native_zone_factory(
     l1_rpc_url: &str,
     wallet: EthereumWallet,
 ) -> eyre::Result<Address> {

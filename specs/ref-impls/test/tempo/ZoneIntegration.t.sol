@@ -12,6 +12,7 @@ import {
     IZoneFactory,
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     Withdrawal,
     ZONE_MESSENGER_ADDRESS,
@@ -19,7 +20,6 @@ import {
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -75,7 +75,6 @@ contract MockZoneFactoryForIntegrationMessenger {
 contract ZoneIntegrationTest is BaseTest {
 
     // L1 contracts
-    ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
 
     // L2 contracts
@@ -96,7 +95,7 @@ contract ZoneIntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        l1Factory = _deployZoneFactory(); // Keep for verifier only
+        _installSharedZoneRuntimes();
         receiver = new TrackingReceiver();
 
         // Deploy zone token FIRST
@@ -149,7 +148,9 @@ contract ZoneIntegrationTest is BaseTest {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
-            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+            address(l1Portal),
+            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            bytes32(uint256(1))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
         l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));

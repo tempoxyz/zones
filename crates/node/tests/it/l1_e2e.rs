@@ -49,7 +49,7 @@ async fn setup_same_zone_swap_fixture() -> eyre::Result<SameZoneSwapFixture> {
     l1.mint_tip20(alpha, l1.dev_address(), mint_amount).await?;
     l1.mint_tip20(beta, l1.dev_address(), mint_amount).await?;
 
-    let factory = l1.deploy_zone_factory().await?;
+    let factory = l1.native_zone_factory().await?;
     let portal_address = l1.create_zone(factory).await?;
     let router = l1
         .deploy_router_with_dex(factory, STABLECOIN_DEX_ADDRESS)
@@ -189,7 +189,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
 
 /// Full deposit + withdrawal flow with a real L1:
 /// 1. Start L1 dev node.
-/// 2. Deploy ZoneFactory on L1 and create a zone (deploys ZonePortal).
+/// 2. Create a zone through the native ZoneFactory (installs ZonePortal).
 /// 3. Start zone node connected to L1 with the portal address.
 /// 4. Deposit pathUSD on the ZonePortal to the dev account.
 /// 5. Verify the zone mints the corresponding pathUSD balance on L2.
@@ -197,8 +197,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
 /// 7. Request a withdrawal on L2 (approve + requestWithdrawal on ZoneOutbox).
 /// 8. Wait for the batch to be submitted and the withdrawal to be processed on L1.
 ///
-/// NOTE: This test requires the Foundry-compiled ZoneFactory artifact
-/// at `specs/ref-impls/out/ZoneFactory.sol/ZoneFactory.json`.
+/// NOTE: This test requires the Foundry-compiled shared runtime artifacts.
 /// Run `forge build` in `specs/ref-impls/` first.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_deposit_via_real_l1() -> eyre::Result<()> {
@@ -274,7 +273,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
 /// Cross-zone withdrawal via the SwapAndDepositRouter:
 ///
 ///  1. Start L1 dev node.
-///  2. Deploy ZoneFactory, create zone_a and zone_b, deploy SwapAndDepositRouter.
+///  2. Create zone_a and zone_b through the native factory, then deploy SwapAndDepositRouter.
 ///  3. Start both zone nodes connected to L1.
 ///  4. Deposit pathUSD into zone_a.
 ///  5. Withdraw from zone_a with a callback that deposits into zone_b via the router.
@@ -291,7 +290,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
 ///    |<-- deposit 0.2 ----|                 |
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory + SwapAndDepositRouter artifacts.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -846,7 +845,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
 ///
 ///  1. Start L1 dev node.
 ///  2. Create a second TIP-20 token ("ZoneUSD") on L1.
-///  3. Deploy ZoneFactory, create a zone with pathUSD as initial token.
+///  3. Create a zone with pathUSD through the native ZoneFactory.
 ///  4. Enable ZoneUSD on the portal.
 ///  5. Start zone node connected to L1 (ZoneUSD is auto-initialized via TokenEnabled event).
 ///  6. Deposit pathUSD and ZoneUSD into the zone.
@@ -861,7 +860,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
 ///    |<-- withdraw ZoneUSD --------|  ✓ ZoneUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -980,7 +979,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 
 /// Full encrypted deposit + withdrawal flow:
 ///
-///  1. Start L1 dev node, deploy ZoneFactory + create zone.
+///  1. Start L1 dev node and create a zone through the native ZoneFactory.
 ///  2. Generate sequencer encryption key, start zone with sequencer key.
 ///  3. Register encryption key on the portal via `setSequencerEncryptionKey`.
 ///  4. Fund depositor, call `depositEncrypted` on the portal — encrypting
@@ -1015,7 +1014,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///   │            → tokens to L1              │
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

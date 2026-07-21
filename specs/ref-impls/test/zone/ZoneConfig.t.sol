@@ -3,14 +3,11 @@ pragma solidity ^0.8.13;
 
 import {
     IZoneConfig,
-    IZoneFactory,
     IZonePortal,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_PENDING_SEQUENCER_SLOT,
-    PORTAL_SEQUENCER_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT
 } from "../../src/interfaces/IZone.sol";
-import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -19,7 +16,6 @@ import { Vm } from "forge-std/Vm.sol";
 
 contract ZoneConfigTest is BaseTest {
 
-    ZoneFactory public zoneFactory;
     ZonePortal public portal;
     ZoneConfig public config;
     MockTempoState public tempoState;
@@ -31,27 +27,18 @@ contract ZoneConfigTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        zoneFactory = _deployZoneFactory();
         genesisTempoBlockNumber = uint64(block.number);
         address[] memory sequencers = new address[](1);
         sequencers[0] = sequencer;
 
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: sequencers,
-            threshold: 1,
-            rpcUrl: "https://rpc.test-zone.example"
-        });
-
-        (, address portalAddr) = zoneFactory.createZone(params);
-        portal = ZonePortal(portalAddr);
+        portal = _createZonePortal(
+            1, address(pathUSD), admin, sequencers, 1, "https://rpc.test-zone.example"
+        );
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         config = new ZoneConfig(address(portal), address(tempoState));
 
-        _syncPortalSlot(PORTAL_SEQUENCER_SLOT);
-        _syncPortalSlot(PORTAL_PENDING_SEQUENCER_SLOT);
+        _syncSequencer(sequencer);
         _syncTokenConfig(address(pathUSD));
     }
 
@@ -61,6 +48,11 @@ contract ZoneConfigTest is BaseTest {
 
     function _syncTokenConfig(address token) internal {
         bytes32 slot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
+        tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
+    }
+
+    function _syncSequencer(address account) internal {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
         tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
     }
 
@@ -95,12 +87,7 @@ contract ZoneConfigTest is BaseTest {
         revert("no key with requested parity");
     }
 
-    /// @notice Verifies the config reads the current sequencer from the portal.
-    function test_sequencer_returnsPortalSequencer() public view {
-        assertEq(config.sequencer(), portal.sequencer());
-    }
-
-    /// @notice Verifies sequencer membership is true for the portal sequencer and false otherwise.
+    /// @notice Verifies sequencer membership is true for active members and false otherwise.
     function test_isSequencer_trueAndFalse() public view {
         assertTrue(config.isSequencer(sequencer));
         assertFalse(config.isSequencer(alice));
@@ -151,35 +138,17 @@ contract ZoneConfigTest is BaseTest {
         assertEq(storedYParity, yParity);
     }
 
-    /// @notice Verifies membership is false for an address strictly greater than the sequencer.
-    /// @dev Guards the `==` check against `>=`/`>` mutants: the max address compares greater
-    ///      than any real sequencer, so an ordering operator would wrongly report membership.
-    function test_isSequencer_falseForAddressAboveSequencer() public view {
-        assertTrue(uint160(address(type(uint160).max)) > uint160(config.sequencer()));
-        assertFalse(config.isSequencer(address(type(uint160).max)));
-    }
+    /// @notice Verifies membership follows active-set replacement through the mapping slot.
+    function test_storageSlotRegression_readsUpdatedSequencerSet() public {
+        address[] memory updated = new address[](1);
+        updated[0] = alice;
+        vm.prank(admin);
+        portal.setSequencerSet(updated, 1);
+        _syncSequencer(sequencer);
+        _syncSequencer(alice);
 
-    /// @notice Verifies the config reads the pending sequencer from portal storage.
-    function test_pendingSequencer() public {
-        vm.prank(sequencer);
-        portal.transferSequencer(alice);
-        _syncPortalSlot(PORTAL_PENDING_SEQUENCER_SLOT);
-
-        assertEq(config.pendingSequencer(), alice);
-    }
-
-    /// @notice Verifies sequencer slot reads stay correct after sequencer rotation.
-    function test_storageSlotRegression_readsSequencerAfterRotation() public {
-        vm.prank(sequencer);
-        portal.transferSequencer(alice);
-        vm.prank(alice);
-        portal.acceptSequencer();
-        _syncPortalSlot(PORTAL_SEQUENCER_SLOT);
-        _syncPortalSlot(PORTAL_PENDING_SEQUENCER_SLOT);
-
-        assertEq(portal.sequencer(), alice);
-        assertEq(config.sequencer(), portal.sequencer());
-        assertEq(config.pendingSequencer(), address(0));
+        assertFalse(config.isSequencer(sequencer));
+        assertTrue(config.isSequencer(alice));
     }
 
 }

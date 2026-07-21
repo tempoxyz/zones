@@ -1,4 +1,7 @@
-use alloy::{primitives::Address, providers::ProviderBuilder};
+use alloy::{
+    primitives::{Address, U256},
+    providers::ProviderBuilder,
+};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZoneFactory, ZonePortal};
@@ -63,8 +66,11 @@ impl ZoneInfoCmd {
         // Query live portal state
         let portal = ZonePortal::new(info.portal, &provider);
 
-        let sequencer = portal.sequencer().call().await?;
-        let pending = portal.pendingSequencer().call().await?;
+        let sequencer_count = portal.sequencerCount().call().await?.to::<usize>();
+        let mut sequencers = Vec::with_capacity(sequencer_count);
+        for index in 0..sequencer_count {
+            sequencers.push(portal.sequencerAt(U256::from(index)).call().await?);
+        }
         let gas_rate = portal.zoneGasRate().call().await?;
         let batch_index = portal.withdrawalBatchIndex().call().await?;
         let block_hash = portal.blockHash().call().await?;
@@ -72,10 +78,7 @@ impl ZoneInfoCmd {
         let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
 
         println!("\nPortal State");
-        println!("  Sequencer (live):      {sequencer}");
-        if pending != Address::ZERO {
-            println!("  Pending Sequencer:     {pending}");
-        }
+        println!("  Active Sequencers:     {sequencers:?}");
         println!("  Zone Gas Rate:         {gas_rate}");
         println!("  Withdrawal Batch:      {batch_index}");
         println!("  Block Hash:            {block_hash}");

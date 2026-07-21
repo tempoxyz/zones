@@ -54,7 +54,7 @@ use tempo_precompiles::{
     },
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
@@ -141,7 +141,7 @@ where
 }
 
 fn portal_token_config_slot(token: Address) -> B256 {
-    let portal_token_configs_slot = B256::with_last_byte(8);
+    let portal_token_configs_slot = B256::with_last_byte(6);
     keccak256((token, portal_token_configs_slot).abi_encode())
 }
 
@@ -208,13 +208,13 @@ fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Byt
     ))
 }
 
-fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
+fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
     use tempo_zone_contracts::{
         ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
     };
 
-    // ZoneFactory packs `uint32 nextZoneId`, `address owner`, and the lock flag
-    // into slot 0. Mirror that layout when installing the reference runtime.
+    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot 0 packs
+    // `uint32 nextZoneId`, `address owner`, and the implementation lock flag.
     let packed_factory_config: U256 = U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32);
     let mut factory_storage = BTreeMap::new();
     factory_storage.insert(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()));
@@ -223,7 +223,7 @@ fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre
         ZONE_FACTORY_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("ZoneFactory")?))
+            .with_code(Some(vec![0xef].into()))
             .with_storage(Some(factory_storage)),
     );
     genesis.alloc.insert(
@@ -1188,12 +1188,12 @@ impl L1TestNode {
             .erased()
     }
 
-    /// Deploy the ZoneFactory and create a zone in one step.
+    /// Create a zone through the native ZoneFactory.
     ///
-    /// Combines [`deploy_zone_factory`](Self::deploy_zone_factory) and
+    /// Combines [`native_zone_factory`](Self::native_zone_factory) and
     /// [`create_zone`](Self::create_zone). Returns the portal address.
     pub(crate) async fn deploy_zone(&self) -> eyre::Result<Address> {
-        let factory = self.deploy_zone_factory().await?;
+        let factory = self.native_zone_factory().await?;
         self.create_zone(factory).await
     }
 
@@ -1334,9 +1334,9 @@ impl L1TestNode {
             .await?)
     }
 
-    /// Install the ZoneFactory at TIP-1091's fixed address.
-    pub(crate) async fn deploy_zone_factory(&self) -> eyre::Result<Address> {
-        zone_node::dev::deploy_zone_factory(
+    /// Verify and return the native ZoneFactory at TIP-1091's fixed address.
+    pub(crate) async fn native_zone_factory(&self) -> eyre::Result<Address> {
+        zone_node::dev::native_zone_factory(
             self.http_url.as_str(),
             alloy_network::EthereumWallet::from(self.dev_signer()),
         )
@@ -1451,7 +1451,7 @@ impl L1TestNode {
         sequencer_a: alloy_signer_local::PrivateKeySigner,
         sequencer_b: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<(Address, Address, Address)> {
-        let factory = self.deploy_zone_factory().await?;
+        let factory = self.native_zone_factory().await?;
         let portal_a = self
             .create_zone_with_admin_and_sequencer(
                 factory,
@@ -1893,7 +1893,7 @@ impl L1TestNode {
         let genesis: serde_json::Value =
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
         let mut genesis = serde_json::from_value(genesis)?;
-        install_reference_zone_factory(&mut genesis, l1_dev_signer().address())?;
+        install_native_zone_factory(&mut genesis, l1_dev_signer().address())?;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
@@ -3572,8 +3572,10 @@ impl L1Fixture {
         num_blocks: u64,
     ) {
         let mut cache = cache_handle.write();
-        let deposit_queue_hash_slot = B256::with_last_byte(5);
-        let refunds_slot = B256::with_last_byte(10);
+        let deposit_queue_hash_slot = B256::with_last_byte(3);
+        let refunds_slot = B256::with_last_byte(8);
+        let sequencer_membership_slot =
+            keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
         let outbox_receive_policy_slot =
@@ -3589,15 +3591,13 @@ impl L1Fixture {
         );
 
         for block in 0..=num_blocks {
-            let mut sequencer_bytes = [0u8; 32];
-            sequencer_bytes[12..].copy_from_slice(sequencer.as_slice());
             cache.set(
                 portal_address,
-                B256::ZERO,
+                sequencer_membership_slot,
                 block,
-                B256::new(sequencer_bytes),
+                B256::with_last_byte(1),
             );
-            // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
+            // Deposit queue hash slot (3) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
@@ -3797,7 +3797,6 @@ impl L1Fixture {
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
-            ..Default::default()
         };
         queue.enqueue(header, events);
     }

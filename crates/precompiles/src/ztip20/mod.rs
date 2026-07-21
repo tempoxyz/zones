@@ -42,25 +42,25 @@ fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck)
     }
 }
 
-/// Capability trait for resolving the active zone sequencer.
+/// Capability trait for resolving active zone sequencer membership.
 ///
 /// The zone runtime implements this for its L1 state provider so rules can authorize
 /// sequencer-visible reads without depending on the concrete provider type.
-pub trait SequencerExt: Send + Sync {
-    /// Return the latest known active sequencer.
-    fn latest_sequencer(&self) -> Option<Address>;
+pub trait SequencerSetExt: Send + Sync {
+    /// Return whether an account belongs to the latest known active sequencer set.
+    fn is_active_sequencer(&self, account: Address) -> Option<bool>;
 }
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
 pub(crate) struct TIP20Rules {
     /// Sequencer-capable backend used to authorize private reads for the active sequencer.
-    sequencer: Arc<dyn SequencerExt>,
+    sequencers: Arc<dyn SequencerSetExt>,
 }
 
 impl TIP20Rules {
-    pub(crate) fn new(sequencer: Arc<dyn SequencerExt>) -> Self {
-        Self { sequencer }
+    pub(crate) fn new(sequencers: Arc<dyn SequencerSetExt>) -> Self {
+        Self { sequencers }
     }
 }
 
@@ -124,9 +124,7 @@ impl TIP20Rules {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> bool {
-        self.sequencer
-            .latest_sequencer()
-            .is_some_and(|s| s == caller)
+        self.sequencers.is_active_sequencer(caller).unwrap_or(false)
     }
 }
 
@@ -151,19 +149,19 @@ mod tests {
     };
 
     #[derive(Clone, Copy)]
-    struct MockSequencer {
-        address: Option<Address>,
+    struct MockSequencerSet {
+        member: Option<Address>,
     }
 
-    impl SequencerExt for MockSequencer {
-        fn latest_sequencer(&self) -> Option<Address> {
-            self.address
+    impl SequencerSetExt for MockSequencerSet {
+        fn is_active_sequencer(&self, account: Address) -> Option<bool> {
+            Some(self.member == Some(account))
         }
     }
 
     fn rules(sequencer: Address) -> TIP20Rules {
-        TIP20Rules::new(Arc::new(MockSequencer {
-            address: Some(sequencer),
+        TIP20Rules::new(Arc::new(MockSequencerSet {
+            member: Some(sequencer),
         }))
     }
 
@@ -227,8 +225,8 @@ mod tests {
             let precompile = crate::create_tip20_precompile(
                 token,
                 &env,
-                Arc::new(MockSequencer {
-                    address: Some(sequencer),
+                Arc::new(MockSequencerSet {
+                    member: Some(sequencer),
                 }),
             );
 
@@ -377,8 +375,11 @@ mod tests {
         let to = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
         let env = test_env(&ctx);
-        let precompile =
-            crate::create_tip20_precompile(token, &env, Arc::new(MockSequencer { address: None }));
+        let precompile = crate::create_tip20_precompile(
+            token,
+            &env,
+            Arc::new(MockSequencerSet { member: None }),
+        );
         let calldata: Bytes = ITIP20::transferCall {
             to,
             amount: U256::from(1u64),

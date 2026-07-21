@@ -23,7 +23,7 @@ build binary extra_args="":
     {{cargo_build_binary}} build {{extra_args}} --bin {{binary}}
 
 [group('zone')]
-[doc('Regenerates the bundled zone dev genesis and ZoneFactory bytecode from the current Solidity artifacts')]
+[doc('Regenerates the bundled zone dev genesis from the current Solidity artifacts')]
 regen-zone-dev-genesis:
     #!/bin/bash
     set -euo pipefail
@@ -37,8 +37,7 @@ regen-zone-dev-genesis:
         --specs-out specs/ref-impls/out \
         --with-createx \
         --with-safe-deployer \
-        --with-create2-factory \
-        --with-zone-factory-bytecode
+        --with-create2-factory
     mv {{zone_dev_genesis_tmp}}/genesis.json crates/node/assets/zone-dev-genesis.json
     rm -rf {{zone_dev_genesis_tmp}}
 

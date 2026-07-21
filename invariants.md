@@ -30,7 +30,6 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-ADMIN-NONZERO` | Portal `admin != address(0)` for every zone | 🟡 | Token governance can become permanently unavailable |
 | `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can call `enableToken`, `pauseDeposits`, and `resumeDeposits` | 🟡 | A sequencer or user can enable malicious assets or reopen paused deposits |
 | `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set gas rates, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
-| `TEMPO-ZONE-SEQUENCER-TWO-STEP` | Sequencer changes only complete when `pendingSequencer` accepts, and acceptance clears `pendingSequencer` | 🟡 | Sequencer control can be accidentally or maliciously transferred |
 | `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `tempoGasRate` never exceed `MAX_GAS_FEE_RATE` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
 
 ### Token Registry and Supply

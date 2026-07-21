@@ -862,7 +862,7 @@ mod tests {
                 to_raw(&json!({
                     "zoneId": "0x1",
                     "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
-                    "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
+                    "sequencers": [format!("{:#x}", Address::repeat_byte(0x22))],
                     "chainId": "0x2a",
                     "tempoBlockNumber": "0x7",
                 }))
@@ -969,7 +969,7 @@ mod tests {
             format!("{:#x}", Address::repeat_byte(0x11))
         );
         assert_eq!(
-            body["sequencer"],
+            body["sequencers"][0],
             format!("{:#x}", Address::repeat_byte(0x22))
         );
         assert_eq!(body["chainId"], "0x2a");

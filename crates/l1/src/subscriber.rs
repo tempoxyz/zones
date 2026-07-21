@@ -385,7 +385,6 @@ impl L1Subscriber {
                 sealed.parent_hash(),
                 &invalidated,
             );
-            self.apply_portal_state_events(block_number, &events);
             self.deposit_queue.enqueue_sealed(sealed, events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
@@ -461,13 +460,11 @@ impl L1Subscriber {
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, (tip_events, tip_invalidated))) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — update the L1 state anchor, apply events, and
-                    // flush to the queue.
+                    // Confirmed — update the L1 state anchor and flush to the queue.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
                     self.update_l1_state_anchor(tip_number, tip_hash, tip_parent, &tip_invalidated);
-                    self.apply_portal_state_events(tip_number, &tip_events);
                     match self.deposit_queue.try_enqueue(tip_header, tip_events) {
                         EnqueueOutcome::Accepted => {
                             self.subscriber_metrics.blocks_enqueued.increment(1);
@@ -558,18 +555,10 @@ impl L1Subscriber {
     fn record_portal_event_metrics(&self, portal_events: &L1PortalEvents) {
         let mut regular = 0u64;
         let mut encrypted = 0u64;
-        let mut transfer_started = 0u64;
-        let mut transferred = 0u64;
         for deposit in &portal_events.deposits {
             match deposit {
                 L1Deposit::Regular(_) => regular += 1,
                 L1Deposit::Encrypted(_) => encrypted += 1,
-            }
-        }
-        for event in &portal_events.sequencer_events {
-            match event {
-                L1SequencerEvent::TransferStarted { .. } => transfer_started += 1,
-                L1SequencerEvent::Transferred { .. } => transferred += 1,
             }
         }
         if regular > 0 {
@@ -587,32 +576,6 @@ impl L1Subscriber {
                 .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
         }
-        if transfer_started > 0 {
-            self.subscriber_metrics
-                .sequencer_transfer_started_events
-                .increment(transfer_started);
-        }
-        if transferred > 0 {
-            self.subscriber_metrics
-                .sequencer_transferred_events
-                .increment(transferred);
-        }
-    }
-
-    /// Write decoded portal state changes into the shared L1 cache at the
-    /// confirmed block height.
-    fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
-            return;
-        }
-
-        let mut cache = self.config.l1_state_cache.write();
-        apply_sequencer_events_to_cache(
-            &mut cache,
-            self.config.portal_address,
-            block_number,
-            &portal_events.sequencer_events,
-        );
     }
 
     /// Update the L1 state cache anchor. Detects reorgs by comparing
@@ -704,32 +667,4 @@ pub(crate) fn verify_receipts(
         );
     }
     Ok(())
-}
-
-pub(crate) fn apply_sequencer_events_to_cache(
-    cache: &mut L1StateCacheInner,
-    portal_address: Address,
-    block_number: u64,
-    sequencer_events: &[L1SequencerEvent],
-) {
-    let mut set_cache_slot = |slot, value| cache.set(portal_address, slot, block_number, value);
-
-    for event in sequencer_events {
-        match *event {
-            L1SequencerEvent::TransferStarted {
-                current_sequencer,
-                pending_sequencer,
-            } => {
-                set_cache_slot(PORTAL_SEQUENCER_SLOT, current_sequencer.into_word());
-                set_cache_slot(PORTAL_PENDING_SEQUENCER_SLOT, pending_sequencer.into_word());
-            }
-            L1SequencerEvent::Transferred {
-                previous_sequencer: _,
-                new_sequencer,
-            } => {
-                set_cache_slot(PORTAL_SEQUENCER_SLOT, new_sequencer.into_word());
-                set_cache_slot(PORTAL_PENDING_SEQUENCER_SLOT, B256::ZERO);
-            }
-        }
-    }
 }

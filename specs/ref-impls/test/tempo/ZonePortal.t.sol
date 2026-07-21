@@ -15,21 +15,18 @@ import {
     EncryptionKeyEntry,
     IVerifier,
     IWithdrawalReceiver,
-    IZoneFactory,
     IZoneMessenger,
     IZonePortal,
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
-    PORTAL_PENDING_SEQUENCER_SLOT,
-    PORTAL_SEQUENCER_SLOT,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS,
-    ZONE_VERIFIER_ADDRESS,
-    ZoneInfo
+    ZONE_VERIFIER_ADDRESS
 } from "../../src/interfaces/IZone.sol";
 import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
@@ -39,7 +36,6 @@ import {
     WithdrawalQueueLib
 } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -294,21 +290,21 @@ contract ZonePortalProxyStorageTest is Test {
     }
 
     function _assertTip1091Storage(address target, address initialSequencer) internal view {
-        bytes32 slot18 = vm.load(target, bytes32(uint256(18)));
-        assertEq(uint8(uint256(slot18) >> 160), 1, "slot 18: initialized mismatch");
-        assertEq(uint64(uint256(slot18) >> 168), 0, "slot 18: nonce mismatch");
-        assertEq(uint8(uint256(slot18) >> 232), 1, "slot 18: threshold mismatch");
-        assertEq(uint256(vm.load(target, bytes32(uint256(19)))), 0, "slot 19: height mismatch");
-        assertEq(uint256(vm.load(target, bytes32(uint256(20)))), 1, "slot 20: length mismatch");
+        bytes32 slot16 = vm.load(target, bytes32(uint256(16)));
+        assertEq(uint8(uint256(slot16) >> 160), 1, "slot 16: initialized mismatch");
+        assertEq(uint64(uint256(slot16) >> 168), 0, "slot 16: nonce mismatch");
+        assertEq(uint8(uint256(slot16) >> 232), 1, "slot 16: threshold mismatch");
+        assertEq(uint256(vm.load(target, bytes32(uint256(17)))), 0, "slot 17: height mismatch");
+        assertEq(uint256(vm.load(target, bytes32(uint256(18)))), 1, "slot 18: length mismatch");
 
-        bytes32 sequencerDataSlot = keccak256(abi.encode(uint256(20)));
+        bytes32 sequencerDataSlot = keccak256(abi.encode(uint256(18)));
         assertEq(
             address(uint160(uint256(vm.load(target, sequencerDataSlot)))),
             initialSequencer,
-            "slot 20: sequencer mismatch"
+            "slot 18: sequencer mismatch"
         );
-        bytes32 membershipSlot = keccak256(abi.encode(initialSequencer, uint256(21)));
-        assertEq(uint256(vm.load(target, membershipSlot)), 1, "slot 21: membership mismatch");
+        bytes32 membershipSlot = keccak256(abi.encode(initialSequencer, uint256(19)));
+        assertEq(uint256(vm.load(target, membershipSlot)), 1, "slot 19: membership mismatch");
     }
 
 }
@@ -327,7 +323,6 @@ contract ZonePortalTest is BaseTest {
     uint256 internal constant SIGNER_B_KEY = 3;
     uint256 internal constant SIGNER_C_KEY = 1;
 
-    ZoneFactory public zoneFactory;
     ZonePortal public portal;
     ZoneMessenger public messenger;
     MockWithdrawalReceiver public withdrawalReceiver;
@@ -343,7 +338,6 @@ contract ZonePortalTest is BaseTest {
         super.setUp();
 
         // Deploy zone infrastructure
-        zoneFactory = _deployZoneFactory();
         withdrawalReceiver = new MockWithdrawalReceiver();
         gasConsumingReceiver = new GasConsumingReceiver();
         successfulReceiver = new SuccessfulReceiver();
@@ -362,17 +356,15 @@ contract ZonePortalTest is BaseTest {
         // Create a zone
         address[] memory initialSequencers = new address[](1);
         initialSequencers[0] = sequencer;
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: initialSequencers,
-            threshold: 1,
-            rpcUrl: "https://rpc.test-zone.example"
-        });
-
-        address portalAddr;
-        (testZoneId, portalAddr) = zoneFactory.createZone(params);
-        portal = ZonePortal(portalAddr);
+        testZoneId = 1;
+        portal = _createZonePortal(
+            testZoneId,
+            address(pathUSD),
+            admin,
+            initialSequencers,
+            1,
+            "https://rpc.test-zone.example"
+        );
 
         // Get the shared messenger
         messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
@@ -487,7 +479,6 @@ contract ZonePortalTest is BaseTest {
     function test_zoneCreation() public view {
         assertEq(portal.zoneId(), testZoneId);
         assertTrue(portal.isTokenEnabled(address(pathUSD)));
-        assertEq(portal.sequencer(), sequencer);
         assertEq(portal.admin(), admin);
         assertEq(portal.verifier(), ZONE_VERIFIER_ADDRESS);
         assertEq(portal.blockHash(), bytes32(0));
@@ -498,19 +489,6 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.sequencerSetVersion(), 0);
         assertEq(portal.sequencerThreshold(), 1);
         assertTrue(portal.isSequencer(sequencer));
-    }
-
-    function test_zoneFactoryTracksZones() public view {
-        assertEq(zoneFactory.nextZoneId(), 2);
-        assertTrue(zoneFactory.isZonePortal(address(portal)));
-
-        ZoneInfo memory info = zoneFactory.zones(testZoneId);
-        assertEq(info.zoneId, testZoneId);
-        assertEq(info.portal, address(portal));
-        assertEq(info.admin, admin);
-        assertEq(info.sequencers.length, 1);
-        assertEq(info.sequencers[0], sequencer);
-        assertEq(info.threshold, 1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -726,9 +704,6 @@ contract ZonePortalTest is BaseTest {
         portal.setSequencerEncryptionKey(bytes32(uint256(1)), 0x02, 27, bytes32(0), bytes32(0));
 
         vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.transferSequencer(alice);
-
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.submitBatch(
             uint64(block.number),
             0,
@@ -864,16 +839,6 @@ contract ZonePortalTest is BaseTest {
         portal.acceptAdmin();
         assertEq(portal.admin(), bob);
         assertEq(portal.pendingAdmin(), address(0));
-    }
-
-    function test_acceptSequencer_revertsWhenNoPendingSequencer() public {
-        // With no pending sequencer, acceptSequencer must always revert so the role can
-        // never be handed to (or accepted as) address(0). Guards against the theoretical
-        // zero-sender system-transaction path on the portal.
-        assertEq(portal.pendingSequencer(), address(0));
-        vm.prank(alice);
-        vm.expectRevert(IZonePortal.NotPendingSequencer.selector);
-        portal.acceptSequencer();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1923,9 +1888,10 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        portal.transferSequencer(address(receiver));
-        vm.prank(address(receiver));
-        portal.acceptSequencer();
+        address[] memory receiverSet = new address[](1);
+        receiverSet[0] = address(receiver);
+        vm.prank(admin);
+        portal.setSequencerSet(receiverSet, 1);
 
         uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
         vm.prank(address(receiver));
@@ -2796,7 +2762,6 @@ contract ZonePortalTest is BaseTest {
 
     function test_metadataGetters() public view {
         assertEq(portal.zoneId(), testZoneId);
-        assertEq(portal.sequencer(), sequencer);
         assertEq(portal.verifier(), ZONE_VERIFIER_ADDRESS);
         assertEq(portal.blockHash(), bytes32(0));
     }
@@ -3368,126 +3333,110 @@ contract ZonePortalTest is BaseTest {
     ///      numbers drift from the actual layout, the zone reads garbage data.
     ///
     ///      Slot layout:
-    ///        slot 0: sequencer (address)
-    ///        slot 1: admin (address)
-    ///        slot 2: pendingSequencer (address)
-    ///        slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-    ///        slot 4: blockHash (bytes32)
-    ///        slot 5: currentDepositQueueHash (bytes32)
-    ///        slot 6: deposit counters + bouncebackGas (uint64) [packed]
-    ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
-    ///        slot 17: zoneId (uint32) + messenger (address) [packed]
-    ///        slot 18: verifier + _initialized + sequencerSetVersion + threshold [packed]
-    ///        slot 19: zoneHeight
-    ///        slot 20: _sequencers.length
-    ///        slot 21: isSequencer mapping
+    ///        slot 0: admin (address)
+    ///        slot 1: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+    ///        slot 2: blockHash (bytes32)
+    ///        slot 3: currentDepositQueueHash (bytes32)
+    ///        slot 4: deposit counters + bouncebackGas (uint64) [packed]
+    ///        slot 5: _encryptionKeys.length (EncryptionKeyEntry[])
+    ///        slot 15: zoneId (uint32) + messenger (address) [packed]
+    ///        slot 16: verifier + _initialized + sequencerSetVersion + threshold [packed]
+    ///        slot 17: zoneHeight
+    ///        slot 18: _sequencers.length
+    ///        slot 19: isSequencer mapping
     function test_storageLayout_slotPositions() public {
-        // --- Slot 0: sequencer ---
-        bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
-        assertEq(address(uint160(uint256(slot0))), portal.sequencer(), "slot 0: sequencer mismatch");
-
-        // --- Slot 1: admin ---
+        // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
-        assertEq(address(uint160(uint256(adminFromSlot))), portal.admin(), "slot 1: admin mismatch");
+        assertEq(address(uint160(uint256(adminFromSlot))), portal.admin(), "slot 0: admin mismatch");
 
-        // --- Slot 2: pendingSequencer ---
-        // Transfer sequencer to get a non-zero pendingSequencer
-        portal.transferSequencer(alice);
-        bytes32 slot1 = vm.load(address(portal), bytes32(uint256(2)));
-        assertEq(
-            address(uint160(uint256(slot1))),
-            portal.pendingSequencer(),
-            "slot 2: pendingSequencer mismatch"
-        );
-
-        // --- Slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
+        // --- Slot 1: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
         uint128 testRate = 42;
         portal.setZoneGasRate(testRate);
-        bytes32 slot2 = vm.load(address(portal), bytes32(uint256(3)));
+        bytes32 slot1 = vm.load(address(portal), bytes32(uint256(1)));
         // zoneGasRate is at the lowest 128 bits (uint128), withdrawalBatchIndex at bits 128-191
-        uint128 loadedRate = uint128(uint256(slot2));
-        assertEq(loadedRate, testRate, "slot 3: zoneGasRate mismatch");
+        uint128 loadedRate = uint128(uint256(slot1));
+        assertEq(loadedRate, testRate, "slot 1: zoneGasRate mismatch");
 
-        // --- Slot 4: blockHash ---
-        bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
-        assertEq(slot4, portal.blockHash(), "slot 4: blockHash mismatch");
+        // --- Slot 2: blockHash ---
+        bytes32 slot2 = vm.load(address(portal), bytes32(uint256(2)));
+        assertEq(slot2, portal.blockHash(), "slot 2: blockHash mismatch");
 
-        // --- Slot 5: currentDepositQueueHash ---
-        bytes32 slot5 = vm.load(address(portal), bytes32(uint256(5)));
+        // --- Slot 3: currentDepositQueueHash ---
+        bytes32 slot3 = vm.load(address(portal), bytes32(uint256(3)));
         assertEq(
-            slot5, portal.currentDepositQueueHash(), "slot 5: currentDepositQueueHash mismatch"
+            slot3, portal.currentDepositQueueHash(), "slot 3: currentDepositQueueHash mismatch"
         );
 
-        // --- Slot 6: deposit counters + bouncebackGas (uint64) packed ---
+        // --- Slot 4: deposit counters + bouncebackGas (uint64) packed ---
         uint64 testBouncebackGas = 43;
         portal.setBouncebackGas(testBouncebackGas);
-        bytes32 slot6 = vm.load(address(portal), bytes32(uint256(6)));
+        bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
         assertEq(
-            uint64(uint256(slot6) >> 128),
+            uint64(uint256(slot4) >> 128),
             portal.lastSyncedTempoBlockNumber(),
-            "slot 6: lastSyncedTempoBlockNumber mismatch"
+            "slot 4: lastSyncedTempoBlockNumber mismatch"
         );
-        assertEq(uint64(uint256(slot6) >> 192), testBouncebackGas, "slot 6: bouncebackGas mismatch");
+        assertEq(uint64(uint256(slot4) >> 192), testBouncebackGas, "slot 4: bouncebackGas mismatch");
 
-        // --- Slot 7: _encryptionKeys array length ---
+        // --- Slot 5: _encryptionKeys array length ---
         // Before adding keys, length should be 0
-        bytes32 slot7keys = vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT);
-        assertEq(uint256(slot7keys), 0, "slot 7: _encryptionKeys length should be 0 initially");
+        bytes32 slot5keys = vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT);
+        assertEq(uint256(slot5keys), 0, "slot 5: _encryptionKeys length should be 0 initially");
 
-        // --- Slot 15: pendingAdmin ---
-        // Nominate a new admin to get a non-zero pendingAdmin (rpcUrl at slot 14 is short,
+        // --- Slot 13: pendingAdmin ---
+        // Nominate a new admin to get a non-zero pendingAdmin (rpcUrl at slot 12 is short,
         // so it stays inline and pendingAdmin lands at the next slot).
         vm.prank(admin);
         portal.transferAdmin(bob);
-        bytes32 slot15 = vm.load(address(portal), PORTAL_PENDING_ADMIN_SLOT);
+        bytes32 slot13 = vm.load(address(portal), PORTAL_PENDING_ADMIN_SLOT);
         assertEq(
-            address(uint160(uint256(slot15))),
+            address(uint160(uint256(slot13))),
             portal.pendingAdmin(),
-            "slot 15: pendingAdmin mismatch"
+            "slot 13: pendingAdmin mismatch"
         );
 
-        // --- Slot 17: zoneId (uint32) + messenger (address) packed ---
-        bytes32 slot17 = vm.load(address(portal), bytes32(uint256(17)));
-        assertEq(uint32(uint256(slot17)), portal.zoneId(), "slot 17: zoneId mismatch");
+        // --- Slot 15: zoneId (uint32) + messenger (address) packed ---
+        bytes32 slot15 = vm.load(address(portal), bytes32(uint256(15)));
+        assertEq(uint32(uint256(slot15)), portal.zoneId(), "slot 15: zoneId mismatch");
         assertEq(
-            address(uint160(uint256(slot17) >> 32)),
+            address(uint160(uint256(slot15) >> 32)),
             portal.messenger(),
-            "slot 17: messenger mismatch"
+            "slot 15: messenger mismatch"
         );
 
-        // --- Slot 18: verifier + initialized + sequencer version + threshold packed ---
-        bytes32 slot18 = vm.load(address(portal), bytes32(uint256(18)));
-        assertEq(address(uint160(uint256(slot18))), portal.verifier(), "slot 18: verifier mismatch");
-        assertEq(uint8(uint256(slot18) >> 160), 1, "slot 18: initialized mismatch");
+        // --- Slot 16: verifier + initialized + sequencer version + threshold packed ---
+        bytes32 slot16 = vm.load(address(portal), bytes32(uint256(16)));
+        assertEq(address(uint160(uint256(slot16))), portal.verifier(), "slot 16: verifier mismatch");
+        assertEq(uint8(uint256(slot16) >> 160), 1, "slot 16: initialized mismatch");
         assertEq(
-            uint64(uint256(slot18) >> 168),
+            uint64(uint256(slot16) >> 168),
             portal.sequencerSetVersion(),
-            "slot 18: sequencerSetVersion mismatch"
+            "slot 16: sequencerSetVersion mismatch"
         );
         assertEq(
-            uint8(uint256(slot18) >> 232),
+            uint8(uint256(slot16) >> 232),
             portal.sequencerThreshold(),
-            "slot 18: threshold mismatch"
+            "slot 16: threshold mismatch"
         );
 
-        // --- Slot 19: zoneHeight ---
-        bytes32 slot19 = vm.load(address(portal), bytes32(uint256(19)));
-        assertEq(uint256(slot19), portal.zoneHeight(), "slot 19: zoneHeight mismatch");
+        // --- Slot 17: zoneHeight ---
+        bytes32 slot17 = vm.load(address(portal), bytes32(uint256(17)));
+        assertEq(uint256(slot17), portal.zoneHeight(), "slot 17: zoneHeight mismatch");
 
-        // --- Slot 20: _sequencers dynamic array ---
-        bytes32 slot20 = vm.load(address(portal), bytes32(uint256(20)));
-        assertEq(uint256(slot20), portal.sequencerCount(), "slot 20: sequencer count mismatch");
-        bytes32 sequencerDataSlot = keccak256(abi.encode(uint256(20)));
+        // --- Slot 18: _sequencers dynamic array ---
+        bytes32 slot18 = vm.load(address(portal), bytes32(uint256(18)));
+        assertEq(uint256(slot18), portal.sequencerCount(), "slot 18: sequencer count mismatch");
+        bytes32 sequencerDataSlot = keccak256(abi.encode(uint256(18)));
         assertEq(
             address(uint160(uint256(vm.load(address(portal), sequencerDataSlot)))),
             portal.sequencerAt(0),
-            "slot 20: first sequencer mismatch"
+            "slot 18: first sequencer mismatch"
         );
 
-        // --- Slot 21: isSequencer mapping ---
-        bytes32 isSequencerSlot = keccak256(abi.encode(sequencer, uint256(21)));
+        // --- Slot 19: isSequencer mapping ---
+        bytes32 isSequencerSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
-            uint256(vm.load(address(portal), isSequencerSlot)), 1, "slot 21: membership mismatch"
+            uint256(vm.load(address(portal), isSequencerSlot)), 1, "slot 19: membership mismatch"
         );
     }
 
@@ -3556,20 +3505,12 @@ contract ZonePortalTest is BaseTest {
 
         // Use the shared constants from IZone.sol (single source of truth)
 
-        // Verify sequencer slot (used by ZoneConfig)
-        bytes32 seqFromSlot = vm.load(address(portal), PORTAL_SEQUENCER_SLOT);
+        // Verify sequencer membership slot (used by ZoneConfig)
+        bytes32 membershipSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
-            address(uint160(uint256(seqFromSlot))),
-            portal.sequencer(),
-            "PORTAL_SEQUENCER_SLOT reads wrong data"
-        );
-
-        // Verify pendingSequencer slot (used by ZoneConfig)
-        bytes32 pendingFromSlot = vm.load(address(portal), PORTAL_PENDING_SEQUENCER_SLOT);
-        assertEq(
-            address(uint160(uint256(pendingFromSlot))),
-            portal.pendingSequencer(),
-            "PORTAL_PENDING_SEQUENCER_SLOT reads wrong data"
+            uint256(vm.load(address(portal), membershipSlot)),
+            1,
+            "PORTAL_IS_SEQUENCER_SLOT reads wrong data"
         );
 
         // Verify currentDepositQueueHash slot (used by ZoneInbox)
@@ -3580,7 +3521,7 @@ contract ZonePortalTest is BaseTest {
             "PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT reads wrong data"
         );
 
-        // Verify encryption keys array length from slot 6
+        // Verify encryption keys array length from slot 5
         bytes32 arrayLenRaw = vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT);
         assertEq(
             uint256(arrayLenRaw),

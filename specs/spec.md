@@ -346,9 +346,8 @@ unique, sorted in strictly increasing address order, and no more than eight. A r
 increments `sequencerSetVersion`, including a threshold-only change, so certificates collected
 under the previous configuration cannot be replayed. The initial configuration uses nonce `0`.
 
-The `sequencer()` getter and two-step transfer functions expose the current single block-producer
-representative used by zone-side components. They do not grant that representative authority
-distinct from active-set membership on Tempo.
+The active set has no distinguished lead. Zone-side components authorize sequencers exclusively
+through active-set membership.
 
 ### Admin Transfer
 
@@ -1717,8 +1716,6 @@ interface IZonePortal {
         uint128 amount, uint128 bouncebackFee
     );
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
@@ -1731,7 +1728,6 @@ interface IZonePortal {
 
     error NotSequencer();
     error NotAdmin();
-    error NotPendingSequencer();
     error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
@@ -1817,10 +1813,6 @@ interface IZonePortal {
     ///         underlying TIP-20 transfer reverts (e.g. policy still forbids the recipient).
     function claimRefund(address token) external returns (uint128 amount);
 
-    // Block-producer representative management. These functions do not change active membership.
-    function transferSequencer(address newSequencer) external;
-    function acceptSequencer() external;
-
     // Active sequencer-set management
     function setSequencerSet(address[] calldata sequencers, uint8 threshold) external;
     function sequencerSetVersion() external view returns (uint64);
@@ -1850,9 +1842,7 @@ interface IZonePortal {
     // State
     function zoneId() external view returns (uint32);
     function messenger() external view returns (address);
-    function sequencer() external view returns (address); // block-producer representative
     function admin() external view returns (address);
-    function pendingSequencer() external view returns (address);
     function pendingAdmin() external view returns (address);
     
     function verifier() external view returns (address);
@@ -2049,14 +2039,13 @@ Address: `0x1c00000000000000000000000000000000000003`
 
 ```solidity
 interface IZoneConfig {
-    function sequencer() external view returns (address);
     function isSequencer(address account) external view returns (bool);
     function isEnabledToken(address token) external view returns (bool);
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 }
 ```
 
-Reads the sequencer address, token registry, and encryption key from the portal on Tempo via `TempoState` storage reads.
+Reads sequencer membership, the token registry, and the encryption key from the portal on Tempo via `TempoState` storage reads.
 
 ### TIP-403 Registry
 

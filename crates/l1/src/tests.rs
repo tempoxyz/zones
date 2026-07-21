@@ -1,5 +1,5 @@
 use super::*;
-use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
+use crate::abi::DepositType;
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, FixedBytes, address};
 use alloy_rpc_types_eth::TransactionReceipt;
@@ -479,22 +479,6 @@ fn confirm_shared(queue: &DepositQueue) -> L1BlockDeposits {
     queue.confirm(num_hash).expect("confirm mismatch")
 }
 
-fn make_portal_log<E: SolEvent>(portal_address: Address, event: E) -> Log {
-    Log {
-        inner: alloy_primitives::Log {
-            address: portal_address,
-            data: event.encode_log_data(),
-        },
-        block_hash: None,
-        block_number: None,
-        block_timestamp: None,
-        transaction_hash: None,
-        transaction_index: None,
-        log_index: None,
-        removed: false,
-    }
-}
-
 #[tokio::test]
 async fn test_resolve_start_block_reads_live_local_state_each_time() {
     let subscriber = test_subscriber(
@@ -571,152 +555,6 @@ fn test_push_log_decodes_bounce_back_as_regular_deposit() {
         deposit.memo,
         B256::ZERO,
         "bounce-back deposits should clear memo"
-    );
-}
-
-#[test]
-fn test_push_log_decodes_sequencer_transfer_started() {
-    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let current_sequencer = address!("0x00000000000000000000000000000000000000A1");
-    let pending_sequencer = address!("0x00000000000000000000000000000000000000B2");
-    let event = SequencerTransferStarted {
-        currentSequencer: current_sequencer,
-        pendingSequencer: pending_sequencer,
-    };
-    let log = make_portal_log(portal_address, event);
-
-    let mut events = L1PortalEvents::default();
-    events
-        .push_log(&log, 123)
-        .expect("sequencer transfer start should decode");
-
-    assert_eq!(
-        events.sequencer_events,
-        vec![L1SequencerEvent::TransferStarted {
-            current_sequencer,
-            pending_sequencer,
-        }]
-    );
-    assert!(events.deposits.is_empty());
-    assert!(events.enabled_tokens.is_empty());
-}
-
-#[test]
-fn test_push_log_decodes_sequencer_transferred() {
-    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let previous_sequencer = address!("0x00000000000000000000000000000000000000A1");
-    let new_sequencer = address!("0x00000000000000000000000000000000000000B2");
-    let event = SequencerTransferred {
-        previousSequencer: previous_sequencer,
-        newSequencer: new_sequencer,
-    };
-    let log = make_portal_log(portal_address, event);
-
-    let mut events = L1PortalEvents::default();
-    events
-        .push_log(&log, 123)
-        .expect("sequencer transferred should decode");
-
-    assert_eq!(
-        events.sequencer_events,
-        vec![L1SequencerEvent::Transferred {
-            previous_sequencer,
-            new_sequencer,
-        }]
-    );
-    assert!(events.deposits.is_empty());
-    assert!(events.enabled_tokens.is_empty());
-}
-
-#[test]
-fn test_apply_sequencer_events_to_cache_sets_pending_sequencer() {
-    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let current_sequencer = address!("0x00000000000000000000000000000000000000A1");
-    let pending_sequencer = address!("0x00000000000000000000000000000000000000B2");
-    let mut cache = L1StateCacheInner::new(HashSet::from([portal_address]));
-
-    apply_sequencer_events_to_cache(
-        &mut cache,
-        portal_address,
-        42,
-        &[L1SequencerEvent::TransferStarted {
-            current_sequencer,
-            pending_sequencer,
-        }],
-    );
-
-    assert_eq!(
-        cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 42),
-        Some(current_sequencer.into_word())
-    );
-    assert_eq!(
-        cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 42),
-        Some(pending_sequencer.into_word())
-    );
-}
-
-#[test]
-fn test_apply_sequencer_events_to_cache_accept_clears_pending_sequencer() {
-    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let previous_sequencer = address!("0x00000000000000000000000000000000000000A1");
-    let new_sequencer = address!("0x00000000000000000000000000000000000000B2");
-    let mut cache = L1StateCacheInner::new(HashSet::from([portal_address]));
-
-    apply_sequencer_events_to_cache(
-        &mut cache,
-        portal_address,
-        43,
-        &[L1SequencerEvent::Transferred {
-            previous_sequencer,
-            new_sequencer,
-        }],
-    );
-
-    assert_eq!(
-        cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 43),
-        Some(new_sequencer.into_word())
-    );
-    assert_eq!(
-        cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 43),
-        Some(B256::ZERO)
-    );
-}
-
-#[test]
-fn test_apply_sequencer_events_to_cache_preserves_in_block_event_order() {
-    let portal_address = address!("0x0000000000000000000000000000000000000ABC");
-    let sequencer_a = address!("0x00000000000000000000000000000000000000A1");
-    let sequencer_b = address!("0x00000000000000000000000000000000000000B2");
-    let sequencer_c = address!("0x00000000000000000000000000000000000000C3");
-    let mut cache = L1StateCacheInner::new(HashSet::from([portal_address]));
-
-    apply_sequencer_events_to_cache(
-        &mut cache,
-        portal_address,
-        44,
-        &[
-            L1SequencerEvent::TransferStarted {
-                current_sequencer: sequencer_a,
-                pending_sequencer: sequencer_b,
-            },
-            L1SequencerEvent::Transferred {
-                previous_sequencer: sequencer_a,
-                new_sequencer: sequencer_b,
-            },
-            L1SequencerEvent::TransferStarted {
-                current_sequencer: sequencer_b,
-                pending_sequencer: sequencer_c,
-            },
-        ],
-    );
-
-    assert_eq!(
-        cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 44),
-        Some(sequencer_b.into_word())
-    );
-    assert_eq!(
-        cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 44),
-        Some(sequencer_c.into_word())
     );
 }
 

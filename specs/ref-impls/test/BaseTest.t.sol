@@ -13,8 +13,8 @@ import {
 } from "../src/interfaces/IZone.sol";
 import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/tempo/Verifier.sol";
-import { ZoneFactory } from "../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../src/tempo/ZoneMessenger.sol";
+import { ZonePortal } from "../src/tempo/ZonePortal.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -146,19 +146,39 @@ contract BaseTest is Test {
         );
     }
 
-    /// @notice Installs the deployable reference factory at TIP-1091's fixed precompile address.
-    function _deployZoneFactory() internal returns (ZoneFactory zoneFactory) {
-        vm.etch(ZONE_FACTORY_ADDRESS, type(ZoneFactory).runtimeCode);
+    /// @notice Installs the shared runtimes managed by the native TIP-1091 factory.
+    function _installSharedZoneRuntimes() internal {
         vm.etch(ZONE_VERIFIER_ADDRESS, type(Verifier).runtimeCode);
         vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
-        vm.setNonce(ZONE_FACTORY_ADDRESS, 1);
-        vm.store(
-            ZONE_FACTORY_ADDRESS,
-            bytes32(uint256(0)),
-            bytes32((uint256(uint160(address(this))) << 32) | 1)
-        );
+    }
 
-        zoneFactory = ZoneFactory(ZONE_FACTORY_ADDRESS);
+    /// @notice Creates a direct portal fixture with native-factory-equivalent storage.
+    /// @dev Native ZoneFactory behavior is tested in Tempo. Solidity behavior tests use a direct
+    ///      implementation because vanilla Forge cannot execute the Rust precompile.
+    function _createZonePortal(
+        uint32 zoneId,
+        address initialToken,
+        address portalAdmin,
+        address[] memory sequencers,
+        uint8 threshold,
+        string memory rpcUrl
+    )
+        internal
+        returns (ZonePortal portal)
+    {
+        _installSharedZoneRuntimes();
+        portal = new ZonePortal();
+        vm.prank(ZONE_FACTORY_ADDRESS);
+        portal.initialize(
+            zoneId,
+            initialToken,
+            ZONE_MESSENGER_ADDRESS,
+            portalAdmin,
+            sequencers,
+            threshold,
+            ZONE_VERIFIER_ADDRESS,
+            rpcUrl
+        );
     }
 
     function _singleWithdrawal(Withdrawal memory withdrawal)

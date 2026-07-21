@@ -1,5 +1,5 @@
 //! Shared L1 reader fixtures for precompile and EVM integration tests.
-use crate::{L1StateError, L1StorageReader, SequencerExt};
+use crate::{L1StateError, L1StorageReader, SequencerSetExt};
 use alloy_primitives::{Address, B256, U256};
 use std::{
     collections::HashMap,
@@ -159,9 +159,9 @@ impl MockL1Reader {
     }
 }
 
-impl SequencerExt for MockL1Reader {
-    fn latest_sequencer(&self) -> Option<Address> {
-        None
+impl SequencerSetExt for MockL1Reader {
+    fn is_active_sequencer(&self, _account: Address) -> Option<bool> {
+        Some(false)
     }
 }
 

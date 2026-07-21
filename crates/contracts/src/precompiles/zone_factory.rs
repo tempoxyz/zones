@@ -1,4 +1,4 @@
-//! `ZoneFactory` — deployed on Tempo L1.
+//! Native TIP-1091 `ZoneFactory` precompile ABI.
 
 use alloy_primitives::{Address, FixedBytes, address, fixed_bytes};
 

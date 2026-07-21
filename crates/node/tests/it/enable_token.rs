@@ -91,7 +91,6 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     let events = L1PortalEvents {
         deposits: vec![L1Deposit::Regular(deposit)],
         enabled_tokens: vec![enabled],
-        ..Default::default()
     };
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
@@ -141,7 +140,6 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
                 symbol: "ppUSD".to_string(),
                 currency: "USD".to_string(),
             }],
-            ..Default::default()
         },
     );
 
@@ -196,7 +194,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///  1. Start L1 dev node.
 ///  2. Create a second TIP-20 token ("AlphaUSD" / "aUSD") on L1.
 ///  3. Mint AlphaUSD to the dev account.
-///  4. Deploy ZoneFactory + create zone.
+///  4. Create a zone through the native ZoneFactory.
 ///  5. Start zone node connected to L1.
 ///  6. Enable AlphaUSD on the portal (emits `TokenEnabled` event) — must
 ///     happen AFTER zone startup so the live L1 subscriber picks it up
@@ -216,7 +214,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///    |<-- withdraw AlphaUSD -----------|  ✓ AlphaUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
