@@ -88,6 +88,7 @@ unknown-registry = "warn"
 unknown-git = "deny"
 unused-allowed-source = "allow"
 allow-git = [
+  "https://github.com/alloy-rs/evm",
   "https://github.com/commonwarexyz/monorepo",
   "https://github.com/foundry-rs/foundry",
   "https://github.com/paradigmxyz/reth",

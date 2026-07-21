@@ -330,6 +330,10 @@ cast rpc zone_getAuthorizationTokenInfo \
   --rpc-url http://localhost:8544 \
   --rpc-headers "X-Authorization-Token: $TOKEN"
 
+cast rpc zone_getEncryptionKey \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+
 cast rpc eth_blockNumber \
   --rpc-url http://localhost:8544 \
   --rpc-headers "X-Authorization-Token: $TOKEN"
@@ -527,9 +531,9 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Precompile | Address | Zone Behavior |
 |------------|---------|---------------|
 | Standard EVM (ecrecover, SHA-256, etc.) | `0x01`–`0x0a`, `0x0100` on T1C+ | **Unchanged** — standard Ethereum precompiles inherited from Tempo's active hardfork (Prague pre-T1C, Osaka at T1C+) are available as-is. |
-| TIP-20 tokens | `0x20C0…` prefix | **Replaced** — routed through `ZoneTip20Token`, which adds privacy (caller-scoped reads), fixed gas for transfers, bridge-auth for mint/burn, and TIP-403 policy enforcement via the L1-synced cache. |
+| TIP-20 tokens | `0x20C0…` prefix | **Adapted** — upstream Tempo TIP-20 business logic runs over zone-local token state and exact-block L1 policy state, with zone privacy (caller-scoped reads), fixed gas for transfers, and bridge authorization for mint/burn. |
 | TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
-| TIP403Registry | `0x403C…0000` | **Replaced** — read-only `ZoneTip403ProxyRegistry` serves authorization queries from a cache-first, L1-RPC-fallback provider. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert — policy state is managed on L1. |
+| TIP403Registry | `0x403C…0000` | **Adapted** — the upstream Tempo registry executes read-only against raw L1 storage at the exact finalized block recorded in `TempoState`. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert because policy state is managed on L1. |
 | TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
 | StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
 | NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |

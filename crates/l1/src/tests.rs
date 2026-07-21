@@ -399,6 +399,44 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
+fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
+    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
+        Some(0),
+    );
+    let slot = B256::with_last_byte(1);
+    let value = B256::with_last_byte(2);
+    subscriber
+        .config
+        .l1_state_cache
+        .write()
+        .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
+
+    let hash_10 = B256::with_last_byte(10);
+    subscriber.update_l1_state_anchor(10, hash_10, B256::ZERO, &HashSet::new());
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .read()
+            .get(TIP403_REGISTRY_ADDRESS, slot, 10),
+        Some(value)
+    );
+
+    subscriber.update_l1_state_anchor(
+        11,
+        B256::with_last_byte(11),
+        hash_10,
+        &HashSet::from([TIP403_REGISTRY_ADDRESS]),
+    );
+    let cache = subscriber.config.l1_state_cache.read();
+    assert_eq!(cache.anchor().number, 11);
+    assert_eq!(cache.get(TIP403_REGISTRY_ADDRESS, slot, 11), None);
+}
+
+#[test]
 fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
     use crate::state::tip403::AuthRole;
     use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
@@ -412,7 +450,7 @@ fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
 
     let old_header = make_test_header(10);
     let old_hash = header_hash(&old_header);
-    subscriber.update_l1_state_anchor(10, old_hash, old_header.inner.parent_hash);
+    subscriber.update_l1_state_anchor(10, old_hash, old_header.inner.parent_hash, &HashSet::new());
     {
         let mut cache = subscriber.config.policy_cache.write();
         cache.set_token_policy(token, 10, 2);
@@ -423,7 +461,12 @@ fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
 
     let replacement_parent = B256::with_last_byte(0x44);
     let replacement_header = make_chained_header(11, replacement_parent);
-    subscriber.update_l1_state_anchor(11, header_hash(&replacement_header), replacement_parent);
+    subscriber.update_l1_state_anchor(
+        11,
+        header_hash(&replacement_header),
+        replacement_parent,
+        &HashSet::new(),
+    );
     subscriber.apply_policy_events(
         11,
         &[
@@ -443,6 +486,7 @@ fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
         ],
     );
 
+    assert_eq!(subscriber.config.l1_state_cache.read().block_floor(), 11);
     let cache = subscriber.config.policy_cache.read();
     assert!(cache.policies().get(&2).is_none());
     assert_eq!(
@@ -636,11 +680,11 @@ fn test_apply_sequencer_events_to_cache_sets_pending_sequencer() {
 
     assert_eq!(
         cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 42),
-        Some(address_to_storage_value(current_sequencer))
+        Some(current_sequencer.into_word())
     );
     assert_eq!(
         cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 42),
-        Some(address_to_storage_value(pending_sequencer))
+        Some(pending_sequencer.into_word())
     );
 }
 
@@ -663,7 +707,7 @@ fn test_apply_sequencer_events_to_cache_accept_clears_pending_sequencer() {
 
     assert_eq!(
         cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 43),
-        Some(address_to_storage_value(new_sequencer))
+        Some(new_sequencer.into_word())
     );
     assert_eq!(
         cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 43),
@@ -701,11 +745,11 @@ fn test_apply_sequencer_events_to_cache_preserves_in_block_event_order() {
 
     assert_eq!(
         cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 44),
-        Some(address_to_storage_value(sequencer_b))
+        Some(sequencer_b.into_word())
     );
     assert_eq!(
         cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 44),
-        Some(address_to_storage_value(sequencer_c))
+        Some(sequencer_c.into_word())
     );
 }
 

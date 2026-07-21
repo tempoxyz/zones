@@ -41,10 +41,9 @@ use reth_transaction_pool::{
     blobstore::InMemoryBlobStore,
     error::{InvalidPoolTransactionError, PoolTransactionError},
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoEvmConfig;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -299,6 +298,17 @@ impl ZoneNode {
         self
     }
 
+    /// Bound L1 state-provider retries for callers that must fail finitely on cache misses.
+    pub fn with_l1_state_provider_retry_limits(
+        mut self,
+        transport_retries: u32,
+        sync_attempts: NonZeroU32,
+    ) -> Self {
+        self.l1_state_provider_config.max_retries = transport_retries;
+        self.l1_state_provider_config.max_sync_attempts = Some(sync_attempts);
+        self
+    }
+
     /// Set the number of zone blocks between empty withdrawal batch
     /// finalization.
     pub fn with_withdrawal_batch_interval_blocks(mut self, interval_blocks: u64) -> Self {
@@ -468,7 +478,11 @@ where
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+        self.l1_config
+            .l1_state_cache
+            .write()
+            .initialize_floor(tempo_block_number);
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -910,7 +924,6 @@ where
         let executor_builder = ZoneExecutorBuilder::new(
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
-            self.policy_cache.clone(),
         );
         let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
@@ -974,20 +987,17 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
 pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: L1StateCache,
-    policy_cache: PolicyCache,
 }
 
 impl ZoneExecutorBuilder {
-    /// Create a zone executor builder with the shared L1 state/policy caches.
+    /// Create a zone executor builder with the shared L1 state cache.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: L1StateCache,
-        policy_cache: PolicyCache,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
-            policy_cache,
         }
     }
 }
@@ -1011,20 +1021,8 @@ where
         let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
         // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider);
-
-        // Create PolicyProvider for the TIP-403 proxy precompile.
-        let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_with_config(
-                &self.l1_state_provider_config.l1_rpc_url,
-                rpc_connection_config(self.l1_state_provider_config.retry_connection_interval),
-            )
-            .await?
-            .erased();
-
-        let policy_provider = PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
-        evm_config = evm_config.with_policy_provider(policy_provider);
-        info!(target: "reth::cli", "Zone EVM initialized with TempoState + TIP-403 proxy precompiles");
+        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider);
+        info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)
     }
@@ -1103,7 +1101,7 @@ impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type Pool = TempoTransactionPool<Node::Provider>;
+    type Pool = TempoTransactionPool<Node::Provider, ZoneEvmConfig>;
 
     async fn build_pool(
         self,
@@ -1116,23 +1114,20 @@ where
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
-        let tempo_evm_config = TempoEvmConfig::new(evm_config.tempo_chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
-        let mut validator = TransactionValidationTaskExecutor::eth_builder(
-            ctx.provider().clone(),
-            tempo_evm_config,
-        )
-        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-        .with_local_transactions_config(pool_config.local_transactions_config.clone())
-        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
-        .disable_balance_check()
-        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-        .with_custom_tx_type(TempoTxType::AA as u8)
-        .no_eip4844()
-        .build::<TempoPooledTransaction, _>(blob_store.clone());
+        let mut validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+                .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
+                .disable_balance_check()
+                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+                .with_custom_tx_type(TempoTxType::AA as u8)
+                .no_eip4844()
+                .build::<TempoPooledTransaction, _>(blob_store.clone());
 
         validator.set_additional_stateless_validation(|_origin, tx| {
             zone_evm::validate_transaction(

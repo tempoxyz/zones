@@ -257,6 +257,8 @@ crate::sol! {
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+            external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
     }
 }

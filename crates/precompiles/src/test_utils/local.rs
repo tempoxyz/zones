@@ -1,17 +1,91 @@
-//! Shared test utilities for precompile tests.
-
+use alloy_evm::{
+    EvmInternals,
+    precompiles::{DynPrecompile, Precompile as _, PrecompileInput},
+};
 use alloy_primitives::{Address, B256, U256};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
     elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint},
 };
+use revm::{
+    Context,
+    context::{BlockEnv, CfgEnv, TxEnv},
+    database::{CacheDB, EmptyDB},
+    precompile::PrecompileResult,
+};
+use std::{cell::RefCell, rc::Rc};
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_precompiles::{
+    storage::{actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    storage_credits::NonCreditableSlots,
+};
 
 use crate::{
+    ZonePrecompileEnv,
     chaum_pedersen::{challenge_hash, recover_point},
     ecies::DecryptedDeposit,
 };
 
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
+
+/// EVM context used by local precompile unit tests.
+pub(crate) type TestContext = Context<BlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+
+/// Create an empty test EVM context at the default Tempo hardfork.
+pub(crate) fn test_context() -> TestContext {
+    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
+}
+
+/// Create an EVM-backed precompile storage provider over `ctx`.
+pub(crate) fn test_storage_provider(
+    ctx: &mut TestContext,
+    gas_limit: u64,
+    is_static: bool,
+) -> EvmPrecompileStorageProvider<'_> {
+    let cfg = ctx.cfg.clone();
+    EvmPrecompileStorageProvider::new(
+        EvmInternals::from_context(ctx),
+        gas_limit,
+        0,
+        cfg.spec,
+        cfg.enable_amsterdam_eip8037,
+        is_static,
+        cfg.gas_params,
+    )
+}
+
+/// Create the ordinary precompile environment for a local unit test.
+pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
+    ZonePrecompileEnv::new(
+        &ctx.cfg,
+        StorageActions::disabled(),
+        Rc::new(RefCell::new(NonCreditableSlots::empty())),
+    )
+}
+
+/// Call a dynamic precompile with test defaults for value and reservoir.
+pub(crate) fn call_precompile(
+    ctx: &mut TestContext,
+    precompile: &DynPrecompile,
+    caller: Address,
+    data: &[u8],
+    gas: u64,
+    is_static: bool,
+    target: Address,
+    bytecode_address: Address,
+) -> PrecompileResult {
+    precompile.call(PrecompileInput {
+        data,
+        gas,
+        reservoir: 0,
+        caller,
+        value: U256::ZERO,
+        target_address: target,
+        is_static,
+        bytecode_address,
+        internals: EvmInternals::from_context(ctx),
+    })
+}
 
 /// Assert that the Chaum-Pedersen proof inside a [`DecryptedDeposit`] is valid.
 pub(crate) fn assert_cp_proof_valid(
