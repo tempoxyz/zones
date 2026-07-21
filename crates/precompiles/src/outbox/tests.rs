@@ -4,7 +4,6 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::PrecompileResult;
-use std::{cell::Cell, rc::Rc};
 use tempo_precompiles::{storage::FromWord, test_util::TIP20Setup};
 use tempo_zone_contracts::{
     ILegacyZoneOutbox, IZoneOutbox as ZoneOutboxAbi, portal_token_config_slot,
@@ -15,6 +14,7 @@ use crate::{
     test_utils::{
         MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     },
+    tx_context,
 };
 
 const GAS: u64 = 10_000_000;
@@ -29,7 +29,6 @@ const FEE_PAYER: Address = address!("0x00000000000000000000000000000000000000d4"
 struct Harness {
     ctx: TestContext,
     precompile: DynPrecompile,
-    transaction_context: Rc<Cell<Option<(B256, Address)>>>,
     l1: MockL1Reader,
     token: Address,
 }
@@ -75,15 +74,11 @@ impl Harness {
         }
 
         let env = test_env(&ctx);
-        let transaction_context = Rc::new(Cell::new(None));
-        let context = transaction_context.clone();
-        let precompile =
-            create_outbox_precompile(L1State::new(l1.clone()), &env, move || context.get());
+        let precompile = create_outbox_precompile(PORTAL, L1State::new(l1.clone()), &env);
 
         Ok(Self {
             ctx,
             precompile,
-            transaction_context,
             l1,
             token,
         })
@@ -91,12 +86,10 @@ impl Harness {
 
     #[rustfmt::skip]
     fn call_inner(&mut self, caller: Address, fee_payer: Address, data: impl AsRef<[u8]>, with_context: bool, is_static: bool) -> PrecompileResult {
-        self.transaction_context.set(with_context.then_some((TX_HASH, fee_payer)));
-        let result = call_precompile(
+        let _guard = with_context.then(|| tx_context::set_current_transaction(TX_HASH, fee_payer));
+        call_precompile(
             &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
-        );
-        self.transaction_context.set(None);
-        result
+        )
     }
 
     fn call_without_hash(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {

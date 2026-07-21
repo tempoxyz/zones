@@ -16,7 +16,6 @@ type Shared<T> = Arc<Mutex<T>>;
 /// In-memory exact-block L1 reader shared by EVM and precompile tests.
 #[derive(Clone)]
 pub struct MockL1Reader {
-    portal_address: Address,
     slots: Shared<HashMap<L1Slot, B256>>,
     registry_storage: Shared<HashMapStorageProvider>,
     storage_requests: Shared<Vec<L1Slot>>,
@@ -28,7 +27,6 @@ pub struct MockL1Reader {
 impl Default for MockL1Reader {
     fn default() -> Self {
         Self {
-            portal_address: Address::repeat_byte(0x77),
             slots: Default::default(),
             registry_storage: Arc::new(Mutex::new(HashMapStorageProvider::new(1))),
             storage_requests: Default::default(),
@@ -168,10 +166,6 @@ impl SequencerExt for MockL1Reader {
 }
 
 impl L1StorageReader for MockL1Reader {
-    fn portal_address(&self) -> Address {
-        self.portal_address
-    }
-
     fn read_l1_storage(
         &self,
         account: Address,

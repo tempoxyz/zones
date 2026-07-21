@@ -21,9 +21,9 @@ use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::L1StorageReader;
+use zone_precompiles::{L1StorageReader, tx_context};
 
-use crate::{L1OverlayDB, ZoneEvm, tx_context};
+use crate::{L1OverlayDB, ZoneEvm};
 
 /// Simplified block executor for zone nodes.
 ///

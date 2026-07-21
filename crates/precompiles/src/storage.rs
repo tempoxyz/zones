@@ -14,9 +14,6 @@ pub(crate) use tempo_precompiles::storage::*;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
-    /// ZonePortal account whose configuration is mirrored from Tempo L1.
-    fn portal_address(&self) -> Address;
-
     /// Read `account[slot]` at `block_number` on Tempo L1.
     fn read_l1_storage(
         &self,
@@ -102,11 +99,6 @@ impl<P> L1State<P> {
 }
 
 impl<P: L1StorageReader> L1State<P> {
-    /// Returns the ZonePortal address associated with this L1 provider.
-    pub fn portal_address(&self) -> Address {
-        self.provider.portal_address()
-    }
-
     /// Reads L1 storage after selecting or validating `block_number` as this transaction's anchor.
     pub fn read_l1_storage(
         &self,

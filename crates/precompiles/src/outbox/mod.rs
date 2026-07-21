@@ -59,27 +59,27 @@ impl ZoneOutbox {
     fn read_portal_slot<P: L1StorageReader>(
         &self,
         l1: &L1State<P>,
+        portal_address: Address,
         slot: B256,
     ) -> ZoneResult<U256> {
         let anchor = StorageCtx::default().sload(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)?;
         let anchor = u64::try_from(anchor).map_err(|_| {
             TempoPrecompileError::Fatal("Tempo block number does not fit in u64".into())
         })?;
-        Ok(l1
-            .read_l1_storage(l1.portal_address(), slot, anchor)?
-            .into())
+        Ok(l1.read_l1_storage(portal_address, slot, anchor)?.into())
     }
 
     fn ensure_sequencer<P: L1StorageReader>(
         &self,
         l1: &L1State<P>,
+        portal_address: Address,
         caller: Address,
     ) -> ZoneResult<()> {
         if caller == Address::ZERO {
             return Ok(());
         }
         let sequencer = self
-            .read_portal_slot(l1, PORTAL_SEQUENCER_SLOT)?
+            .read_portal_slot(l1, portal_address, PORTAL_SEQUENCER_SLOT)?
             .into_address();
         if caller != sequencer {
             return Err(ZoneOutboxError::only_sequencer().into());
@@ -90,9 +90,10 @@ impl ZoneOutbox {
     fn ensure_token_enabled<P: L1StorageReader>(
         &self,
         l1: &L1State<P>,
+        portal_address: Address,
         token: Address,
     ) -> ZoneResult<()> {
-        let value = self.read_portal_slot(l1, portal_token_config_slot(token))?;
+        let value = self.read_portal_slot(l1, portal_address, portal_token_config_slot(token))?;
         if value.byte(0) == 0 {
             return Err(ZonePortalError::token_not_enabled().into());
         }
@@ -150,13 +151,14 @@ impl ZoneOutbox {
     fn request_withdrawal<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
+        portal_address: Address,
         caller: Address,
         fee_payer: Address,
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
         check_withdrawal_request(&call)?;
-        self.ensure_token_enabled(l1, call.token)?;
+        self.ensure_token_enabled(l1, portal_address, call.token)?;
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
         }
@@ -246,10 +248,11 @@ impl ZoneOutbox {
     fn finalize_withdrawal_batch<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
+        portal_address: Address,
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(l1, portal_address, caller)?;
         if call.blockNumber != self.storage.block_number() {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }
@@ -298,10 +301,11 @@ impl ZoneOutbox {
     fn set_tempo_gas_rate<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
+        portal_address: Address,
         caller: Address,
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(l1, portal_address, caller)?;
         if call._tempoGasRate > MAX_GAS_FEE_RATE {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
@@ -313,10 +317,11 @@ impl ZoneOutbox {
     fn set_max_withdrawals_per_block<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
+        portal_address: Address,
         caller: Address,
         call: IZoneOutbox::setMaxWithdrawalsPerBlockCall,
     ) -> ZoneResult<()> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(l1, portal_address, caller)?;
         self.max_withdrawals_per_block
             .write(call._maxWithdrawalsPerBlock)?;
         self.emit_event(ZoneOutboxEvent::max_withdrawals_per_block_updated(

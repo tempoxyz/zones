@@ -2,8 +2,7 @@
 //!
 //! The zone outbox needs the real hash and effective fee payer of the currently executing user
 //! transaction. The block executor publishes both into a thread-local context before EVM
-//! execution. The native outbox receives them through its factory, while the transaction-context
-//! precompile continues to expose the hash at its fixed system address.
+//! execution. The native outbox and transaction-context precompile read the same context.
 
 use std::{cell::RefCell, thread_local};
 
@@ -29,7 +28,7 @@ struct TransactionContext {
 }
 
 /// Guard that clears the current transaction context when dropped.
-pub(crate) struct TransactionContextGuard;
+pub struct TransactionContextGuard;
 
 impl Drop for TransactionContextGuard {
     fn drop(&mut self) {
@@ -38,10 +37,7 @@ impl Drop for TransactionContextGuard {
 }
 
 /// Publish the current transaction hash and effective fee payer for EVM execution.
-pub(crate) fn set_current_transaction(
-    tx_hash: B256,
-    fee_payer: Address,
-) -> TransactionContextGuard {
+pub fn set_current_transaction(tx_hash: B256, fee_payer: Address) -> TransactionContextGuard {
     CURRENT_TRANSACTION.with(|slot| {
         *slot.borrow_mut() = Some(TransactionContext { tx_hash, fee_payer });
     });
@@ -62,10 +58,11 @@ fn current_tx_hash() -> Option<B256> {
 }
 
 /// `DynPrecompile` implementation that returns the currently executing zone transaction hash.
-pub(crate) struct ZoneTxContext;
+pub struct ZoneTxContext;
 
 impl ZoneTxContext {
-    pub(crate) fn create() -> DynPrecompile {
+    /// Creates the native transaction-context precompile.
+    pub fn create() -> DynPrecompile {
         DynPrecompile::new_stateful(PrecompileId::Custom("ZoneTxContext".into()), move |input| {
             if !input.is_direct_call() {
                 warn!(

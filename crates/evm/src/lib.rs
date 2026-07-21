@@ -10,21 +10,17 @@
 mod database;
 mod executor;
 pub mod precompiles;
-mod tx_context;
 mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
-use crate::{
-    precompiles::{
-        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        L1State, L1StorageReader, SequencerExt, TIP403_REGISTRY_ADDRESS, TempoState,
-        ZONE_TIP20_FACTORY_ADDRESS, ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile,
-        create_tip403_precompile,
-    },
-    tx_context::ZoneTxContext,
+use crate::precompiles::{
+    AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+    L1State, L1StorageReader, SequencerExt, TIP403_REGISTRY_ADDRESS, TempoState,
+    ZONE_TIP20_FACTORY_ADDRESS, ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile,
+    create_tip403_precompile, tx_context::ZoneTxContext,
 };
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
@@ -33,6 +29,7 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
 };
+use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
@@ -71,15 +68,19 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
     l1_reader: L1,
+    portal_address: Address,
 }
 
 impl<L1> ZoneEvmFactory<L1>
 where
     L1: L1StorageReader + SequencerExt,
 {
-    /// Create a new factory with the given L1 state reader.
-    pub fn new(l1_reader: L1) -> Self {
-        Self { l1_reader }
+    /// Create a new factory with the given L1 state reader and ZonePortal address.
+    pub fn new(l1_reader: L1, portal_address: Address) -> Self {
+        Self {
+            l1_reader,
+            portal_address,
+        }
     }
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>>(
@@ -98,11 +99,12 @@ where
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         let outbox_env = env.clone();
         let outbox_l1 = l1.clone();
+        let outbox_portal = self.portal_address;
         precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, move |_| {
             Some(create_outbox_precompile(
+                outbox_portal,
                 outbox_l1.clone(),
                 &outbox_env,
-                tx_context::current_transaction,
             ))
         });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
@@ -253,13 +255,18 @@ where
         zone_chain_spec: Arc<ZoneChainSpec>,
         tempo_chain_spec: Arc<TempoChainSpec>,
         l1_provider: L1,
+        portal_address: Address,
     ) -> Self {
         let chain_spec = compose_chain_spec(&zone_chain_spec, &tempo_chain_spec);
-        Self::from_chain_spec(chain_spec, l1_provider)
+        Self::from_chain_spec(chain_spec, l1_provider, portal_address)
     }
 
-    fn from_chain_spec(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_provider);
+    fn from_chain_spec(
+        chain_spec: Arc<ZoneChainSpec>,
+        l1_provider: L1,
+        portal_address: Address,
+    ) -> Self {
+        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
         let block_assembler = ZoneBlockAssembler::new(chain_spec.clone());
@@ -300,7 +307,7 @@ impl ZoneEvmConfig {
             ..Default::default()
         };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::from_chain_spec(chain_spec, l1_provider)
+        Self::from_chain_spec(chain_spec, l1_provider, Address::ZERO)
     }
 }
 

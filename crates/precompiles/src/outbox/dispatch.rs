@@ -18,6 +18,7 @@ impl ZoneOutbox {
     pub(crate) fn call_with_transaction<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
+        portal_address: Address,
         calldata: &[u8],
         msg_sender: Address,
         tx_hash: B256,
@@ -45,18 +46,19 @@ impl ZoneOutbox {
                 WITHDRAWAL_BASE_GAS(_) => metadata::<IZoneOutbox::WITHDRAWAL_BASE_GASCall>(|| Ok(WITHDRAWAL_BASE_GAS)),
                 REVEAL_TO_KEY_LENGTH(_) => metadata::<IZoneOutbox::REVEAL_TO_KEY_LENGTHCall>(|| Ok(U256::from(COMPRESSED_PUBLIC_KEY_SIZE))),
                 AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH(_) => metadata::<IZoneOutbox::AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTHCall>(|| Ok(U256::from(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE))),
-                setTempoGasRate(call) => mutate_void(call, msg_sender, |sender, call| self.set_tempo_gas_rate(l1, sender, call)),
-                setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(l1, sender, call)),
+                setTempoGasRate(call) => mutate_void(call, msg_sender, |sender, call| self.set_tempo_gas_rate(l1, portal_address, sender, call)),
+                setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(l1, portal_address, sender, call)),
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| {
-                    self.request_withdrawal(l1, sender, fee_payer, tx_hash, call)
+                    self.request_withdrawal(l1, portal_address, sender, fee_payer, tx_hash, call)
                 }),
                 enqueueDepositBounceBack(call) => mutate_void(call, msg_sender, |sender, call| self.enqueue_deposit_bounce_back(sender, call)),
                 consumeFallbackRecipient(call) => mutate(call, msg_sender, |sender, call| self.consume_fallback_recipient(sender, call.fallbackNonce)),
-                finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(l1, sender, call)),
+                finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(l1, portal_address, sender, call)),
             }
             ILegacyZoneOutbox::ILegacyZoneOutboxCalls {
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| self.request_withdrawal(
                     l1,
+                    portal_address,
                     sender,
                     fee_payer,
                     tx_hash,

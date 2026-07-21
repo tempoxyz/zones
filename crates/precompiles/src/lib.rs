@@ -33,6 +33,7 @@ pub use error::{Result, ZonePrecompileError, ZoneResult};
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
+#[cfg(feature = "std")]
 pub mod outbox;
 
 /// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
@@ -49,10 +50,13 @@ pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
 pub mod tip403_proxy;
+#[cfg(feature = "std")]
+pub mod tx_context;
 pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
+#[cfg(feature = "std")]
 pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
@@ -63,26 +67,34 @@ pub use ztip20::SequencerExt;
 use alloc::sync::Arc;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::Address;
 use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
 
 /// Creates the native ZoneOutbox over ordinary Zone storage and direct finalized portal reads.
-pub fn create_outbox_precompile<P, F>(
+#[cfg(feature = "std")]
+pub fn create_outbox_precompile<P>(
+    portal_address: Address,
     l1: L1State<P>,
     env: &ZonePrecompileEnv,
-    current_transaction: F,
 ) -> DynPrecompile
 where
     P: L1StorageReader,
-    F: Fn() -> Option<(B256, Address)> + 'static,
 {
     execution::create_precompile(
         "ZoneOutbox",
         env,
         execution::NoCallRules,
         move |data, caller| {
-            let (tx_hash, fee_payer) = current_transaction().unwrap_or((B256::ZERO, caller));
-            ZoneOutbox::new().call_with_transaction(&l1, data, caller, tx_hash, fee_payer)
+            let (tx_hash, fee_payer) =
+                tx_context::current_transaction().unwrap_or((Default::default(), caller));
+            ZoneOutbox::new().call_with_transaction(
+                &l1,
+                portal_address,
+                data,
+                caller,
+                tx_hash,
+                fee_payer,
+            )
         },
     )
 }
@@ -99,7 +111,7 @@ pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
 
 /// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
 pub fn create_tip20_precompile(
-    address: alloy_primitives::Address,
+    address: Address,
     env: &ZonePrecompileEnv,
     sequencer: Arc<dyn SequencerExt>,
 ) -> DynPrecompile {

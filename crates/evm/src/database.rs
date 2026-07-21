@@ -149,6 +149,7 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             }
             // A read-only overlay has identical original and present values, so it is not changed
             // above, but committing the touched account could still persist that L1 value locally.
+            // Since every registry slot is mirrored and writes were rejected, drop the transition.
             state.remove(&TIP403_REGISTRY_ADDRESS);
         }
 
@@ -251,22 +252,6 @@ mod tests {
 
         assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
         assert_eq!(db.l1_state().get_anchor(), Some(anchor));
-    }
-
-    #[test]
-    fn portal_storage_is_not_routed_through_the_database_overlay() {
-        let (anchor, slot) = (42, U256::from(8));
-        let (local, l1_value) = (U256::from(5), U256::from(99));
-        let l1 = TestL1::default();
-        let portal = l1.portal_address();
-        l1.insert(portal, slot, anchor, l1_value);
-        let mut inner = test_db(anchor);
-        inner.insert_account_storage(portal, slot, local).unwrap();
-        let mut db = L1OverlayDB::new(inner, l1.clone());
-
-        assert_eq!(db.storage(portal, slot).unwrap(), local);
-        assert!(l1.storage_requests().is_empty());
-        assert_eq!(db.l1_state().get_anchor(), None);
     }
 
     #[test]
