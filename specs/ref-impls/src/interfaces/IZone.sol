@@ -268,8 +268,8 @@ interface IAesGcmDecrypt {
 }
 
 // Maximum callback gas a withdrawal may request.
-// The processor adds fixed overhead plus an EIP-150 cushion, so this value
-// keeps the outer `processWithdrawal` transaction well below a 30M gas L1 block
+// The processor adds fixed overhead, so this value keeps the outer
+// `processWithdrawal` transaction well below a 30M gas L1 block
 // limit.
 uint64 constant MAX_WITHDRAWAL_CALLBACK_GAS = 10_000_000;
 
@@ -278,7 +278,6 @@ struct Withdrawal {
     bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
-    uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
@@ -292,7 +291,6 @@ struct PendingWithdrawal {
     bytes32 txHash; // hash of the zone transaction that requested the withdrawal
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
-    uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
@@ -612,6 +610,7 @@ interface IZonePortal {
     error NotAdmin();
     error NotFactory();
     error AlreadyInitialized();
+    error MustDelegateCall();
     error NotPendingSequencer();
     error NotPendingAdmin();
     error InvalidProof();
@@ -1132,9 +1131,6 @@ interface IZoneOutbox {
 
     /// @notice Resolve and delete a fallback recipient. Only callable by ZoneInbox.
     function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
-
-    /// @notice Current withdrawal batch index (monotonically increasing)
-    function withdrawalBatchIndex() external view returns (uint64);
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory);

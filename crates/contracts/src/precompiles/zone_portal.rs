@@ -19,7 +19,6 @@ crate::sol! {
             bytes32 senderTag;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
@@ -379,7 +378,6 @@ impl Withdrawal {
             senderTag: sender_tag,
             to: event.to,
             amount: event.amount,
-            fee: event.fee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackNonce: event.fallbackNonce,

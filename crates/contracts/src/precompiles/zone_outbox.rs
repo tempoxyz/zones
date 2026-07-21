@@ -18,7 +18,6 @@ crate::sol! {
             bytes32 txHash;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
@@ -56,7 +55,6 @@ crate::sol! {
         // -- View functions --
 
         function lastBatch() external view returns (LastBatch memory);
-        function withdrawalBatchIndex() external view returns (uint64);
         function lastFinalizedTimestamp() external view returns (uint64);
         function nextWithdrawalIndex() external view returns (uint64);
         function lastFallbackNonce() external view returns (uint64);

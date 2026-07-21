@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use alloy_primitives::Address as EthereumAddress;
 use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
@@ -44,6 +44,43 @@ impl P2pNetworkId {
 pub(crate) type Network = lookup::Network<commonware_runtime::tokio::Context, PrivateKey>;
 pub(crate) type Oracle = lookup::Oracle<PublicKey>;
 
+/// Builds the synchronized Commonware configuration for the Zone's small, trusted peer set.
+///
+/// Start from Commonware's production defaults and override only the settings required by the
+/// Zone's controlled 3-5 sequencer topology.
+fn setup_commonware_config(
+    ed25519_private_key: PrivateKey,
+    namespace: &[u8],
+    listen: SocketAddr,
+    bypass_ip_check: bool,
+) -> lookup::Config<PrivateKey> {
+    let mut config =
+        lookup::Config::recommended(ed25519_private_key, namespace, listen, MAX_MESSAGE_SIZE);
+
+    // Sequencers communicate over private pod or VPC addresses in a multi-AZ deployment.
+    config.allow_private_ips = true;
+    // Stable DNS names allow sequencer addresses to survive pod and node replacement.
+    config.allow_dns = true;
+    // DNS peers lack fixed egress IPs; network policy must restrict access to the P2P port.
+    config.bypass_ip_check = bypass_ip_check;
+    // Five seconds is ample cross-AZ while bounding unauthenticated resource use.
+    config.handshake_timeout = Duration::from_secs(5);
+    // Trusted peers retry quickly instead of waiting Commonware's 60-second public default.
+    config.peer_connection_cooldown = Duration::from_secs(1);
+    // At most four legitimate remote peers are expected, so 32 leaves generous rollout headroom.
+    config.max_concurrent_handshakes = NZU32!(32);
+    // Eight attempts per second permits fast restarts while limiting a single source IP.
+    config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(8));
+    // Thirty-two attempts per second handles the whole small peer set restarting together.
+    config.allowed_handshake_rate_per_subnet = Quota::per_second(NZU32!(32));
+    // Ten-second pings detect idle broken connections with negligible overhead.
+    config.ping_frequency = Duration::from_secs(10);
+    // One dial per 250 ms reconnects a full five-node mesh in about one second per node.
+    config.dial_frequency = Duration::from_millis(250);
+
+    config
+}
+
 pub(crate) fn instantiate(
     context: commonware_runtime::tokio::Context,
     manifest: &ZoneManifest,
@@ -53,18 +90,7 @@ pub(crate) fn instantiate(
     network_id: P2pNetworkId,
 ) -> eyre::Result<(Network, Oracle, Map<PublicKey, Address>)> {
     let namespace = namespace(manifest.zone_id(), network_id);
-    let mut config = if listen.ip().is_loopback() {
-        lookup::Config::local(ed25519_private_key, &namespace, listen, MAX_MESSAGE_SIZE)
-    } else {
-        lookup::Config::recommended(ed25519_private_key, &namespace, listen, MAX_MESSAGE_SIZE)
-    };
-
-    // Zone P2P peers commonly use pod/private addresses. Membership remains
-    // authenticated by the Ed25519 identities in the manifest.
-    config.allow_private_ips = true;
-    // This is a network-wide Commonware setting, so it must be an explicit
-    // operator choice.
-    config.bypass_ip_check = bypass_ip_check;
+    let config = setup_commonware_config(ed25519_private_key, &namespace, listen, bypass_ip_check);
 
     let peers = manifest
         .nodes()

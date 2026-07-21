@@ -97,7 +97,6 @@ contract ZoneOutboxTest is Test {
             senderTag: _senderTag(sender, txSequence),
             to: to,
             amount: amount,
-            fee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackNonce: uint64(txSequence),
@@ -138,7 +137,6 @@ contract ZoneOutboxTest is Test {
             senderTag: keccak256(abi.encodePacked(address(0), bytes32(0))),
             to: bob,
             amount: amount,
-            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackNonce: 0,
@@ -435,11 +433,10 @@ contract ZoneOutboxTest is Test {
         LastBatch memory batch = outbox.lastBatch();
         assertEq(batch.withdrawalQueueHash, expectedHash);
         assertEq(batch.withdrawalBatchIndex, 1);
-        assertEq(outbox.withdrawalBatchIndex(), batch.withdrawalBatchIndex);
 
         // The proof system reads LastBatch directly from fixed storage slots.
         assertEq(vm.load(address(outbox), bytes32(uint256(1))), expectedHash);
-        assertEq(uint256(vm.load(address(outbox), bytes32(uint256(2)))), 1);
+        assertEq(uint64(uint256(vm.load(address(outbox), bytes32(uint256(2))))), 1);
     }
 
     function test_finalizeWithdrawalBatch_writesLastFinalizedTimestamp() public {
@@ -1192,7 +1189,7 @@ contract ZoneOutboxTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
         outbox.finalizeWithdrawalBatch(0, uint64(block.number), encryptedSenders);
         assertEq(outbox.pendingWithdrawalsCount(), 1);
-        assertEq(outbox.withdrawalBatchIndex(), 0);
+        assertEq(outbox.lastBatch().withdrawalBatchIndex, 0);
     }
 
     /// @notice Zero gas limit withdrawals still store callback data in the hash.

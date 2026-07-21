@@ -59,6 +59,9 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @dev The fixed account holding the shared portal logic contract runtime.
+    address internal constant ZONE_PORTAL_LOGIC_ADDRESS =
+        0x5AD1000000000000000000000000000000000000;
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -152,6 +155,7 @@ contract ZonePortal is IZonePortal {
         string calldata _rpcUrl
     )
         external
+        onlyDelegateCall
     {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
@@ -173,6 +177,12 @@ contract ZonePortal is IZonePortal {
     /*//////////////////////////////////////////////////////////////
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev Initialization is valid only in a portal proxy's storage context.
+    modifier onlyDelegateCall() {
+        if (address(this) == ZONE_PORTAL_LOGIC_ADDRESS) revert MustDelegateCall();
+        _;
+    }
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
@@ -709,8 +719,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    /// @dev Fee transfer to the sequencer is best-effort.
-    ///      On withdrawal failure, only the amount (not fee) is bounced back.
+    /// @dev On withdrawal failure, only the withdrawal amount is bounced back.
     ///      The token to transfer is read from the withdrawal struct.
     function processWithdrawal(
         Withdrawal calldata withdrawal,
@@ -728,13 +737,6 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
-        }
-
-        // Transfer fee to sequencer.
-        if (withdrawal.fee > 0) {
-            // Fee transfer can fail for e.g. TIP-403 blacklist. The sequencer
-            // forgoes the fee so the withdrawal itself does not stall.
-            _tryTransfer(_token, sequencer, withdrawal.fee);
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {

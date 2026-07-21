@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_primitives::Address as EthereumAddress;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{
     AddressableManager as _, Receiver as _, Recipients, Sender as _, authenticated::lookup,
@@ -17,7 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{
     P2pNetworkId, Role, ZoneManifest,
-    identity::Ed25519Identity,
+    identity::{Ed25519Identity, Secp256k1Identity},
     network::{
         self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
         MAX_MESSAGE_SIZE,
@@ -128,6 +129,8 @@ struct P2pReceivers {
 pub struct P2pConfig {
     manifest: Arc<ZoneManifest>,
     ed25519_identity: Ed25519Identity,
+    // This individual node key will be used to sign zone blocks for the on-chain quorum.
+    secp256k1_identity: Secp256k1Identity,
     listen: SocketAddr,
     bypass_ip_check: bool,
     role: Role,
@@ -139,22 +142,26 @@ impl P2pConfig {
     pub fn load(
         manifest_path: impl AsRef<Path>,
         ed25519_key_path: impl AsRef<Path>,
+        secp256k1_key_path: impl AsRef<Path>,
         listen: SocketAddr,
         bypass_ip_check: bool,
         expected_zone_id: u32,
         asserted_role: Option<Role>,
     ) -> eyre::Result<Self> {
         let ed25519_identity = Ed25519Identity::read_from_file(ed25519_key_path)?;
+        let secp256k1_identity = Secp256k1Identity::read_from_file(secp256k1_key_path)?;
         let manifest = ZoneManifest::read_from_file(manifest_path)?;
         validate_ip_check_configuration(&manifest, bypass_ip_check)?;
         let role = manifest.validate_node(
             expected_zone_id,
             &ed25519_identity.ed25519_public_key(),
+            secp256k1_identity.address(),
             asserted_role,
         )?;
         Ok(Self {
             manifest: Arc::new(manifest),
             ed25519_identity,
+            secp256k1_identity,
             listen,
             bypass_ip_check,
             role,
@@ -171,6 +178,11 @@ impl P2pConfig {
         self.ed25519_identity.ed25519_public_key()
     }
 
+    /// This node's address derived from its individual secp256k1 key.
+    pub fn secp256k1_address(&self) -> EthereumAddress {
+        self.secp256k1_identity.address()
+    }
+
     /// Local socket bound by Commonware.
     pub const fn listen(&self) -> SocketAddr {
         self.listen
@@ -182,6 +194,7 @@ impl std::fmt::Debug for P2pConfig {
         f.debug_struct("P2pConfig")
             .field("zone_id", &self.manifest.zone_id())
             .field("ed25519_public_key", &self.ed25519_public_key())
+            .field("secp256k1_address", &self.secp256k1_address())
             .field("listen", &self.listen)
             .field("bypass_ip_check", &self.bypass_ip_check)
             .field("role", &self.role)
@@ -700,7 +713,11 @@ mod tests {
         BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, spawn_p2p,
         validate_ip_check_configuration,
     };
-    use crate::{P2pNetworkId, ZoneManifest, identity::Ed25519Identity, network::MAX_MESSAGE_SIZE};
+    use crate::{
+        P2pNetworkId, ZoneManifest,
+        identity::{Ed25519Identity, Secp256k1Identity},
+        network::MAX_MESSAGE_SIZE,
+    };
 
     fn available_address() -> SocketAddr {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -710,6 +727,10 @@ mod tests {
     fn ed25519_identity(seed: u64) -> Ed25519Identity {
         let key = PrivateKey::from_seed(seed);
         Ed25519Identity::from_hex(&const_hex::encode_prefixed(key.encode().as_ref())).unwrap()
+    }
+
+    fn secp256k1_identity(seed: u64) -> Secp256k1Identity {
+        Secp256k1Identity::from_hex(&format!("0x{seed:064x}")).unwrap()
     }
 
     #[test]
@@ -784,9 +805,11 @@ mod tests {
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, identity) in identities.iter().enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 1);
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"node-{index}.zone.local:9200\"\n",
-                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref())
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"node-{index}.zone.local:9200\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
             ));
         }
         let manifest = ZoneManifest::parse(&input).unwrap();
@@ -813,9 +836,11 @@ mod tests {
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
         for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 1);
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
-                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref())
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
@@ -824,14 +849,22 @@ mod tests {
         let mut handles = identities
             .into_iter()
             .zip(addresses)
-            .map(|(identity, listen)| {
+            .enumerate()
+            .map(|(index, (identity, listen))| {
+                let secp256k1_identity = secp256k1_identity(index as u64 + 1);
                 let role = manifest
-                    .validate_node(9, &identity.ed25519_public_key(), None)
+                    .validate_node(
+                        9,
+                        &identity.ed25519_public_key(),
+                        secp256k1_identity.address(),
+                        None,
+                    )
                     .unwrap();
                 spawn_p2p(
                     P2pConfig {
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
+                        secp256k1_identity,
                         listen,
                         bypass_ip_check: false,
                         role,
