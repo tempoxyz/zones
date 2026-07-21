@@ -6,7 +6,7 @@ use alloy::{
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::{SolCall, SolConstructor, SolValue},
+    sol_types::{SolCall, SolConstructor},
 };
 use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
@@ -78,6 +78,28 @@ alloy::sol! {
 
     contract FixtureSimple4626Vault {
         constructor(address asset_, string name_, string symbol_, uint8 decimals_);
+    }
+
+    contract FixtureERC4626Engine {
+        constructor(address vault_, address owner_, string nameOverride_, string symbolOverride_);
+    }
+
+    contract FixtureTestERC1967Proxy {
+        constructor(address implementation, bytes initialization);
+    }
+
+    contract FixtureStablecoinDexSwapper {
+        constructor(address stablecoinDex_);
+    }
+
+    contract FixtureClosedLoopZoneGateway {
+        constructor(
+            address vaultAdapter_,
+            address defaultSwapper_,
+            address zonePortal_,
+            address zoneMessenger_,
+            address owner_
+        );
     }
 }
 
@@ -168,7 +190,10 @@ impl DeployNeobankFixtures {
                     &self.specs_out,
                     "TempoStablecoinDexStableSwapAdapter.sol/TempoStablecoinDexStableSwapAdapter",
                 )?,
-                (crate::zone_utils::STABLECOIN_DEX_ADDRESS,).abi_encode(),
+                FixtureStablecoinDexSwapper::constructorCall {
+                    stablecoinDex_: crate::zone_utils::STABLECOIN_DEX_ADDRESS,
+                }
+                .abi_encode(),
             ),
             "TempoStablecoinDexStableSwapAdapter",
         )
@@ -192,7 +217,13 @@ impl DeployNeobankFixtures {
             &deployer_provider,
             with_constructor(
                 load_bytecode(&self.specs_out, "ERC4626Engine.sol/ERC4626Engine")?,
-                (vault, deployer_address, String::new(), String::new()).abi_encode(),
+                FixtureERC4626Engine::constructorCall {
+                    vault_: vault,
+                    owner_: deployer_address,
+                    nameOverride_: String::new(),
+                    symbolOverride_: String::new(),
+                }
+                .abi_encode(),
             ),
             "ERC4626Engine",
         )
@@ -214,7 +245,11 @@ impl DeployNeobankFixtures {
             &deployer_provider,
             with_constructor(
                 load_bytecode(&self.specs_out, "TestERC1967Proxy.sol/TestERC1967Proxy")?,
-                (adapter_implementation, Bytes::from(initialization)).abi_encode(),
+                FixtureTestERC1967Proxy::constructorCall {
+                    implementation: adapter_implementation,
+                    initialization: Bytes::from(initialization),
+                }
+                .abi_encode(),
             ),
             "TestERC1967Proxy",
         )
@@ -251,14 +286,14 @@ impl DeployNeobankFixtures {
                     &self.specs_out,
                     "ClosedLoopZoneGateway.sol/ClosedLoopZoneGateway",
                 )?,
-                (
-                    vault_adapter,
-                    swapper,
-                    self.portal,
-                    messenger,
-                    deployer_address,
-                )
-                    .abi_encode(),
+                FixtureClosedLoopZoneGateway::constructorCall {
+                    vaultAdapter_: vault_adapter,
+                    defaultSwapper_: swapper,
+                    zonePortal_: self.portal,
+                    zoneMessenger_: messenger,
+                    owner_: deployer_address,
+                }
+                .abi_encode(),
             ),
             "ClosedLoopZoneGateway",
         )
@@ -420,9 +455,14 @@ async fn deploy<P: Provider<TempoNetwork>>(
             receipt.transaction_hash(),
         ));
     }
-    receipt
+    let contract = receipt
         .contract_address
-        .ok_or_else(|| eyre!("{label} deployment receipt did not contain a contract address"))
+        .ok_or_else(|| eyre!("{label} deployment receipt did not contain a contract address"))?;
+    println!(
+        "Deployed {label}: {contract} (gas used: {})",
+        receipt.gas_used()
+    );
+    Ok(contract)
 }
 
 fn with_constructor(mut bytecode: Vec<u8>, constructor: Vec<u8>) -> Vec<u8> {
