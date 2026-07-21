@@ -3068,7 +3068,7 @@ contract ZonePortalTest is BaseTest {
         uint128 depositAmount = 1000e6;
         uint128 expectedFee = uint128(100_000) * 1; // FIXED_DEPOSIT_GAS * zoneGasRate
         uint256 aliceBefore = pathUSD.balanceOf(alice);
-        uint256 seqBefore = pathUSD.balanceOf(sequencer);
+        uint256 adminBefore = pathUSD.balanceOf(admin);
         uint256 portalBefore = pathUSD.balanceOf(address(portal));
 
         vm.startPrank(alice);
@@ -3077,7 +3077,7 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         assertEq(pathUSD.balanceOf(alice), aliceBefore - depositAmount);
-        assertEq(pathUSD.balanceOf(sequencer), seqBefore + expectedFee);
+        assertEq(pathUSD.balanceOf(admin), adminBefore + expectedFee);
         assertEq(pathUSD.balanceOf(address(portal)), portalBefore + depositAmount - expectedFee);
     }
 

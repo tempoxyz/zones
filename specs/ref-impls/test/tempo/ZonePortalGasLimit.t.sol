@@ -39,8 +39,8 @@ contract MockPortalToken {
 
 contract ZonePortalGasLimitTest is Test {
 
-    uint256 internal constant WITHDRAWAL_QUEUE_TAIL_SLOT = 12;
-    uint256 internal constant WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT = 13;
+    uint256 internal constant WITHDRAWAL_QUEUE_TAIL_SLOT = 10;
+    uint256 internal constant WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT = 11;
 
     ZonePortal public portal;
     MockPortalToken public token;
@@ -120,7 +120,7 @@ contract ZonePortalGasLimitTest is Test {
         emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), bouncebackFee);
+        assertEq(token.balanceOf(admin), bouncebackFee);
         assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
@@ -131,7 +131,7 @@ contract ZonePortalGasLimitTest is Test {
     {
         _configureBouncebackFee();
         token.mint(address(portal), 1000e6);
-        token.setBlockedRecipient(address(this), true);
+        token.setBlockedRecipient(admin, true);
 
         uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 refundAmount = 1000e6 - bouncebackFee;
@@ -143,7 +143,7 @@ contract ZonePortalGasLimitTest is Test {
         emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), 0);
+        assertEq(token.balanceOf(admin), 0);
         assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(token.balanceOf(address(portal)), bouncebackFee);
         assertEq(portal.withdrawalQueueHead(), 1);
@@ -166,7 +166,7 @@ contract ZonePortalGasLimitTest is Test {
         );
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), bouncebackFee);
+        assertEq(token.balanceOf(admin), bouncebackFee);
         assertEq(token.balanceOf(recipient), 0);
         assertEq(portal.refunds(address(token), recipient), refundAmount);
 

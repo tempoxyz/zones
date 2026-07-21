@@ -296,9 +296,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Set zone gas rate. Only callable by sequencer.
-    /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
-    ///      If actual zone gas is higher, sequencer covers the difference.
-    ///      If actual zone gas is lower, sequencer keeps the surplus.
+    /// @dev Sequencers publish the operational rate; collected deposit fees are paid to the admin.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
@@ -622,7 +620,9 @@ contract ZonePortal is IZonePortal {
 
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
-        _distributeSequencerFee(_token, fee);
+        if (fee > 0) {
+            ITIP20(_token).transfer(admin, fee);
+        }
     }
 
     function _recordDeposit(bytes32 newCurrentDepositQueueHash)
@@ -634,7 +634,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
-    /// @dev Fee is deducted from amount and paid to sequencer in the same token.
+    /// @dev Fee is deducted from amount and paid to the admin in the same token.
     ///      The token must be enabled and deposits must be active.
     /// @param _token The TIP-20 token to deposit
     /// @param to Recipient address on the zone
@@ -657,7 +657,7 @@ contract ZonePortal is IZonePortal {
         _validateDepositPolicy(_token, to, bouncebackRecipient);
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
-        // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
+        // Build deposit struct with net amount (fee already paid to the admin on Tempo)
         Deposit memory depositData = Deposit({
             token: _token,
             sender: msg.sender,
@@ -884,7 +884,8 @@ contract ZonePortal is IZonePortal {
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
-            _distributeSequencerFee(_token, bouncebackFee);
+            // A recipient-policy failure must not block deposits or withdrawals.
+            _tryTransfer(_token, admin, bouncebackFee);
         }
 
         bool success = _tryTransfer(_token, withdrawal.to, refundAmount);
@@ -925,18 +926,6 @@ contract ZonePortal is IZonePortal {
             return ok;
         } catch {
             return false;
-        }
-    }
-
-    function _distributeSequencerFee(address token, uint128 fee) internal {
-        if (fee == 0) return;
-
-        uint256 length = _sequencers.length;
-        uint128 share = fee / uint128(length);
-        if (share == 0) return;
-        for (uint256 i = 0; i < length; ++i) {
-            // A recipient-policy failure must not block deposits or withdrawals.
-            _tryTransfer(token, _sequencers[i], share);
         }
     }
 
