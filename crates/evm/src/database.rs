@@ -73,7 +73,7 @@ impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
     }
 }
 
-/// Database error produced by [`AnchoredZoneDb`].
+/// Database error produced by [`L1OverlayDB`].
 #[derive(Debug, Error)]
 pub enum ZoneDbError<E> {
     /// Error from the caller-provided database.

@@ -94,25 +94,25 @@ incremental = false
 
 [workspace.dependencies]
 # tempo (from upstream)
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714" }
-tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
-tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false, features = [
+tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3" }
+tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
+tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false, features = [
   "serde",
 ] }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
-tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714" }
-tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
-tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714" }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false, features = [
+tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
+tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3" }
+tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
+tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
+tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3" }
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false, features = [
   "reth",
   "serde",
   "serde-bincode-compat",
   "reth-codec",
 ] }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
-tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "d1507111c1437fe352f6ad74b6d2035f878a5714", default-features = false }
+tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
+tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "03ec682ef8ecb7d98ad42d4edf087ce1b8dfe4d3", default-features = false }
 
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }

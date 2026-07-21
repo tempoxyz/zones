@@ -41,7 +41,6 @@ use reth_transaction_pool::{
 use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoEvmConfig;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -1058,7 +1057,7 @@ impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type Pool = TempoTransactionPool<Node::Provider>;
+    type Pool = TempoTransactionPool<Node::Provider, ZoneEvmConfig>;
 
     async fn build_pool(
         self,
@@ -1071,23 +1070,20 @@ where
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
-        let tempo_evm_config = TempoEvmConfig::new(evm_config.tempo_chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
-        let mut validator = TransactionValidationTaskExecutor::eth_builder(
-            ctx.provider().clone(),
-            tempo_evm_config,
-        )
-        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-        .with_local_transactions_config(pool_config.local_transactions_config.clone())
-        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
-        .disable_balance_check()
-        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-        .with_custom_tx_type(TempoTxType::AA as u8)
-        .no_eip4844()
-        .build::<TempoPooledTransaction, _>(blob_store.clone());
+        let mut validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+                .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
+                .disable_balance_check()
+                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+                .with_custom_tx_type(TempoTxType::AA as u8)
+                .no_eip4844()
+                .build::<TempoPooledTransaction, _>(blob_store.clone());
 
         validator.set_additional_stateless_validation(|_origin, tx| {
             zone_evm::validate_transaction(
