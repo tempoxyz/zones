@@ -67,26 +67,6 @@ pub struct ZoneInbox {
     refunds: Mapping<Address, Mapping<Address, u128>>,
 }
 
-/// A queue entry whose nested ABI payload has been validated before execution begins.
-enum DecodedQueuedDeposit {
-    Regular(Deposit),
-    Encrypted(EncryptedDeposit),
-}
-
-impl DecodedQueuedDeposit {
-    fn hash_with_tail(&self, tail: B256) -> tempo_precompiles::Result<B256> {
-        let encoded = match self {
-            Self::Regular(deposit) => {
-                (DepositType::Regular, deposit.clone(), tail).abi_encode_params()
-            }
-            Self::Encrypted(deposit) => {
-                (DepositType::Encrypted, deposit.clone(), tail).abi_encode_params()
-            }
-        };
-        StorageCtx::default().keccak256(&encoded)
-    }
-}
-
 impl ZoneInbox {
     /// Initialize the precompile account marker without changing protocol storage.
     pub fn initialize(&mut self) -> tempo_precompiles::Result<()> {
@@ -166,19 +146,21 @@ impl ZoneInbox {
         P: L1StorageReader,
         O: InboxOutbox,
     {
-        // Match Solidity ABI decoding: malformed nested payloads revert before any state or L1 read.
-        let deposits = Self::decode_deposits(call.deposits)?;
+        let deposit_count = u64::try_from(call.deposits.len())
+            .map_err(|_| TempoPrecompileError::under_overflow())?;
+        let deposits = decode_deposits(call.deposits)?;
 
+        let portal = l1.portal_address();
         let mut tempo_state = TempoState::new();
         let previous_block_number = tempo_state.tempo_block_number()?;
 
         if !caller.is_zero() {
-            let sequencer_word = l1.read_before_advance(
-                l1.portal_address(),
+            let sequencer = Address::from_word(l1.read_l1_storage_unanchored(
+                portal,
                 PORTAL_SEQUENCER_SLOT,
                 previous_block_number,
-            )?;
-            let sequencer = Address::from_slice(&sequencer_word.as_slice()[12..]);
+            )?);
+
             if caller != sequencer {
                 return Err(ZoneInboxError::only_sequencer().into());
             }
@@ -191,7 +173,6 @@ impl ZoneInbox {
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
         let mut current_hash = self.processed_deposit_queue_hash.read()?;
         let mut decryptions = call.decryptions.into_iter();
-        let deposit_count = deposits.len();
 
         for queued in deposits {
             current_hash = queued.hash_with_tail(current_hash)?;
@@ -204,10 +185,11 @@ impl ZoneInbox {
                     let Some(decryption) = decryptions.next() else {
                         return Err(ZoneInboxError::missing_decryption_data().into());
                     };
-                    let key = self.read_encryption_key(l1, tempo_block_number, deposit.keyIndex)?;
+                    let key =
+                        read_encryption_key(l1, portal, tempo_block_number, deposit.keyIndex)?;
                     self.process_deposit_encrypted(
                         outbox,
-                        l1.portal_address(),
+                        portal,
                         current_hash,
                         deposit,
                         decryption,
@@ -222,7 +204,7 @@ impl ZoneInbox {
         }
 
         let tempo_current_hash = l1.read_l1_storage(
-            l1.portal_address(),
+            portal,
             PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
             tempo_block_number,
         )?;
@@ -232,10 +214,8 @@ impl ZoneInbox {
 
         self.processed_deposit_queue_hash.write(current_hash)?;
         let previous_number = self.processed_deposit_number.read()?;
-        let added =
-            u64::try_from(deposit_count).map_err(|_| TempoPrecompileError::under_overflow())?;
         let processed_number = previous_number
-            .checked_add(added)
+            .checked_add(deposit_count)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.processed_deposit_number.write(processed_number)?;
         self.emit_event(ZoneInboxEvent::tempo_advanced(
@@ -249,23 +229,6 @@ impl ZoneInbox {
         Ok(())
     }
 
-    fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
-        deposits
-            .into_iter()
-            .map(|queued| {
-                let decoded = match queued.depositType {
-                    DepositType::Regular => {
-                        Deposit::abi_decode(&queued.depositData).map(DecodedQueuedDeposit::Regular)
-                    }
-                    DepositType::Encrypted => EncryptedDeposit::abi_decode(&queued.depositData)
-                        .map(DecodedQueuedDeposit::Encrypted),
-                    _ => return Err(ZonePrecompileError::MalformedCalldata),
-                };
-                decoded.map_err(|_| ZonePrecompileError::MalformedCalldata)
-            })
-            .collect()
-    }
-
     fn enable_tokens(&mut self, tokens: Vec<EnabledToken>) -> ZoneResult<()> {
         for token in tokens {
             ZoneTokenFactory::new().enable_token(enableTokenCall {
@@ -274,12 +237,7 @@ impl ZoneInbox {
                 symbol: token.symbol.clone(),
                 currency: token.currency.clone(),
             })?;
-            self.emit_event(ZoneInboxEvent::token_enabled(
-                token.token,
-                token.name,
-                token.symbol,
-                token.currency,
-            ))?;
+            self.emit_event(token.enabled_event())?;
         }
         Ok(())
     }
@@ -295,33 +253,18 @@ impl ZoneInbox {
         }
 
         if self.try_mint(deposit.token, deposit.to, deposit.amount)? {
-            self.emit_event(ZoneInboxEvent::deposit_processed(
-                current_hash,
-                deposit.sender,
-                deposit.to,
-                deposit.token,
-                deposit.amount,
-                deposit.memo,
-            ))?;
+            self.emit_event(deposit.processed_event(current_hash))?;
         } else {
             outbox.enqueue_deposit_bounce_back(
                 deposit.token,
                 deposit.amount,
                 deposit.bouncebackRecipient,
             )?;
-            self.emit_event(ZoneInboxEvent::deposit_failed(
-                current_hash,
-                deposit.sender,
-                deposit.to,
-                deposit.token,
-                deposit.amount,
-                deposit.bouncebackRecipient,
-            ))?;
+            self.emit_event(deposit.failed_event(current_hash))?;
         }
         Ok(())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn process_deposit_encrypted<O: InboxOutbox>(
         &mut self,
         outbox: &mut O,
@@ -329,90 +272,19 @@ impl ZoneInbox {
         current_hash: B256,
         deposit: EncryptedDeposit,
         decryption: DecryptionData,
-        (sequencer_x, sequencer_y_parity): (B256, u8),
+        key: EncryptionKey,
     ) -> ZoneResult<()> {
-        ChaumPedersenVerify::charge_gas()?;
-        let proof_valid = ChaumPedersenVerify::verify(
-            &deposit.encrypted.ephemeralPubkeyX.0,
-            deposit.encrypted.ephemeralPubkeyYParity,
-            &decryption.sharedSecret.0,
-            decryption.sharedSecretYParity,
-            &sequencer_x.0,
-            sequencer_y_parity,
-            &decryption.cpProof.s.0,
-            &decryption.cpProof.c.0,
-        );
-
-        let decrypted = if proof_valid {
-            let info = hkdf_info(
-                &portal,
-                &deposit.keyIndex,
-                &deposit.encrypted.ephemeralPubkeyX,
-            );
-            let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
-            AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
-            let (plaintext, valid) = AesGcmDecrypt::decrypt(
-                &key,
-                &deposit.encrypted.nonce.0,
-                &deposit.encrypted.ciphertext,
-                &[],
-                &deposit.encrypted.tag.0,
-            );
-            valid
-                .then_some(plaintext)
-                .filter(|plaintext| plaintext.len() == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE)
-        } else {
-            None
-        };
-
-        let Some(plaintext) = decrypted else {
+        let Some((to, memo)) = recover_encrypted_payload(portal, &deposit, &decryption, key)?
+        else {
             return self.fail_encrypted_deposit(outbox, current_hash, deposit);
         };
-        let to = Address::from_slice(&plaintext[..20]);
-        let memo = B256::from_slice(&plaintext[20..52]);
 
         if self.try_mint(deposit.token, to, deposit.amount)? {
-            self.emit_event(ZoneInboxEvent::encrypted_deposit_processed(
-                current_hash,
-                deposit.sender,
-                to,
-                deposit.token,
-                deposit.amount,
-                memo,
-            ))?;
+            self.emit_event(deposit.processed_event(current_hash, to, memo))?;
             Ok(())
         } else {
             self.fail_encrypted_deposit(outbox, current_hash, deposit)
         }
-    }
-
-    fn read_encryption_key<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        tempo_block_number: u64,
-        key_index: U256,
-    ) -> ZoneResult<(B256, u8)> {
-        let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
-        let offset = key_index
-            .checked_mul(U256::from(2))
-            .ok_or_else(TempoPrecompileError::under_overflow)?;
-        let slot_x = base
-            .checked_add(offset)
-            .ok_or_else(TempoPrecompileError::under_overflow)?;
-        let slot_meta = slot_x
-            .checked_add(U256::ONE)
-            .ok_or_else(TempoPrecompileError::under_overflow)?;
-        let portal = l1.portal_address();
-        let x = l1.read_l1_storage(portal, B256::from(slot_x.to_be_bytes()), tempo_block_number)?;
-        if x.is_zero() {
-            return Err(ZoneInboxError::invalid_shared_secret_proof().into());
-        }
-        let meta = l1.read_l1_storage(
-            portal,
-            B256::from(slot_meta.to_be_bytes()),
-            tempo_block_number,
-        )?;
-        Ok((x, meta.as_slice()[31]))
     }
 
     fn fail_encrypted_deposit<O: InboxOutbox>(
@@ -426,12 +298,7 @@ impl ZoneInbox {
             deposit.amount,
             deposit.bouncebackRecipient,
         )?;
-        self.emit_event(ZoneInboxEvent::encrypted_deposit_failed(
-            current_hash,
-            deposit.sender,
-            deposit.token,
-            deposit.amount,
-        ))?;
+        self.emit_event(deposit.failed_event(current_hash))?;
         Ok(())
     }
 
@@ -447,22 +314,14 @@ impl ZoneInbox {
         );
         let recipient = outbox.consume_fallback_recipient(fallback_nonce)?;
         if self.try_mint(deposit.token, recipient, deposit.amount)? {
-            self.emit_event(ZoneInboxEvent::withdrawal_bounce_back_processed(
-                recipient,
-                deposit.token,
-                deposit.amount,
-            ))?;
+            self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {
             let previous = self.refunds[deposit.token][recipient].read()?;
             let Some(refund) = previous.checked_add(deposit.amount) else {
                 return Err(TempoPrecompileError::under_overflow().into());
             };
             self.refunds[deposit.token][recipient].write(refund)?;
-            self.emit_event(ZoneInboxEvent::withdrawal_bounce_back_pending(
-                recipient,
-                deposit.token,
-                deposit.amount,
-            ))?;
+            self.emit_event(deposit.withdrawal_bounce_back_pending_event(recipient))?;
         }
         Ok(())
     }
@@ -485,24 +344,16 @@ impl ZoneInbox {
                 checkpoint.commit();
                 Ok(true)
             }
-            Err(TempoPrecompileError::Fatal(message)) => {
-                drop(checkpoint);
-                Err(TempoPrecompileError::Fatal(message).into())
+            Err(error @ (TempoPrecompileError::Fatal(_) | TempoPrecompileError::OutOfGas)) => {
+                Err(error.into())
             }
-            Err(TempoPrecompileError::OutOfGas) => {
-                drop(checkpoint);
-                Err(TempoPrecompileError::OutOfGas.into())
-            }
-            Err(_) => {
-                drop(checkpoint);
-                Ok(false)
-            }
+            Err(_) => Ok(false),
         }
     }
 
     fn claim_refund(&mut self, caller: Address, token: Address) -> ZoneResult<u128> {
         let amount = self.refunds[token][caller].read()?;
-        self.refunds[token][caller].write(0)?;
+        self.refunds[token][caller].delete()?;
         TIP20Token::from_address(token)?.mint(
             ZONE_INBOX_ADDRESS,
             ITIP20::mintCall {
@@ -513,4 +364,123 @@ impl ZoneInbox {
         self.emit_event(ZoneInboxEvent::refund_claimed(caller, token, amount))?;
         Ok(amount)
     }
+}
+
+/// A queue entry whose nested ABI payload has been validated before execution begins.
+enum DecodedQueuedDeposit {
+    Regular(Deposit),
+    Encrypted(EncryptedDeposit),
+}
+
+impl DecodedQueuedDeposit {
+    fn hash_with_tail(&self, tail: B256) -> tempo_precompiles::Result<B256> {
+        let encoded = match self {
+            Self::Regular(deposit) => {
+                (DepositType::Regular, deposit.clone(), tail).abi_encode_params()
+            }
+            Self::Encrypted(deposit) => {
+                (DepositType::Encrypted, deposit.clone(), tail).abi_encode_params()
+            }
+        };
+        StorageCtx::default().keccak256(&encoded)
+    }
+}
+
+impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
+    type Error = ZonePrecompileError;
+
+    fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
+        match queued.depositType {
+            DepositType::Regular => Deposit::abi_decode(&queued.depositData).map(Self::Regular),
+            DepositType::Encrypted => {
+                EncryptedDeposit::abi_decode(&queued.depositData).map(Self::Encrypted)
+            }
+            _ => return Err(ZonePrecompileError::MalformedCalldata),
+        }
+        .map_err(|_| ZonePrecompileError::MalformedCalldata)
+    }
+}
+
+fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {
+    deposits.into_iter().map(TryInto::try_into).collect()
+}
+
+#[derive(Clone, Copy)]
+struct EncryptionKey {
+    x: B256,
+    y_parity: u8,
+}
+
+fn recover_encrypted_payload(
+    portal: Address,
+    deposit: &EncryptedDeposit,
+    decryption: &DecryptionData,
+    key: EncryptionKey,
+) -> ZoneResult<Option<(Address, B256)>> {
+    ChaumPedersenVerify::charge_gas()?;
+    if !ChaumPedersenVerify::verify(
+        &deposit.encrypted.ephemeralPubkeyX.0,
+        deposit.encrypted.ephemeralPubkeyYParity,
+        &decryption.sharedSecret.0,
+        decryption.sharedSecretYParity,
+        &key.x.0,
+        key.y_parity,
+        &decryption.cpProof.s.0,
+        &decryption.cpProof.c.0,
+    ) {
+        return Ok(None);
+    }
+
+    let info = hkdf_info(
+        &portal,
+        &deposit.keyIndex,
+        &deposit.encrypted.ephemeralPubkeyX,
+    );
+    let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
+    AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
+    let (plaintext, valid) = AesGcmDecrypt::decrypt(
+        &key,
+        &deposit.encrypted.nonce.0,
+        &deposit.encrypted.ciphertext,
+        &[],
+        &deposit.encrypted.tag.0,
+    );
+    if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
+        return Ok(None);
+    }
+
+    Ok(Some((
+        Address::from_slice(&plaintext[..20]),
+        B256::from_slice(&plaintext[20..52]),
+    )))
+}
+
+fn read_encryption_key<P: L1StorageReader>(
+    l1: &L1State<P>,
+    portal: Address,
+    tempo_block_number: u64,
+    key_index: U256,
+) -> ZoneResult<EncryptionKey> {
+    let read_l1_portal_slot =
+        |slot: U256| l1.read_l1_storage(portal, slot.into(), tempo_block_number);
+
+    let base: U256 = keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).into();
+    let slot_x = key_index
+        .checked_mul(U256::from(2))
+        .and_then(|offset| base.checked_add(offset))
+        .ok_or_else(TempoPrecompileError::under_overflow)?;
+
+    let x = read_l1_portal_slot(slot_x)?;
+    if x.is_zero() {
+        return Err(ZoneInboxError::invalid_shared_secret_proof().into());
+    }
+    let meta = read_l1_portal_slot(
+        slot_x
+            .checked_add(U256::ONE)
+            .ok_or_else(TempoPrecompileError::under_overflow)?,
+    )?;
+    Ok(EncryptionKey {
+        x,
+        y_parity: meta.as_slice()[31],
+    })
 }

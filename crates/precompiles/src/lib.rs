@@ -18,6 +18,7 @@
 //!
 //! ## Policy/token precompiles
 //!
+//! - **Zone Inbox** ([`inbox`]) — advances Tempo state and processes the deposit queue.
 //! - **TIP-20 Factory** ([`tip20_factory`]) — zone-side TIP-20 token factory.
 //! - **TIP-403 Registry** ([`tip403_proxy`]) — upstream registry over finalized L1 state.
 //! - **Zone TIP-20** ([`ztip20`]) — upstream TIP-20 with zone call rules.
@@ -46,6 +47,7 @@ pub mod dispatch {
 
 mod execution;
 pub use execution::ZonePrecompileEnv;
+pub mod inbox;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
@@ -56,6 +58,7 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
+pub use inbox::ZoneInbox;
 #[cfg(feature = "std")]
 pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};

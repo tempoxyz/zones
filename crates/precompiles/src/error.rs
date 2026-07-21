@@ -3,7 +3,7 @@
 use alloy_sol_types::{SolError, SolInterface};
 use revm::precompile::{PrecompileOutput, PrecompileResult};
 use tempo_precompiles::IntoPrecompileResult;
-use tempo_zone_contracts::{ZoneOutboxError, ZonePortalError};
+use tempo_zone_contracts::{TempoStateError, ZoneInboxError, ZoneOutboxError, ZonePortalError};
 
 use crate::{
     storage::L1StateError, tip20_factory::ZoneTokenFactoryError, tip403_proxy::ReadOnlyRegistry,
@@ -34,6 +34,15 @@ pub enum ZonePrecompileError {
     /// Error from the ZoneOutbox.
     #[error("ZoneOutbox error: {0:?}")]
     Outbox(ZoneOutboxError),
+    /// Error from TempoState checkpoint validation.
+    #[error("TempoState error: {0:?}")]
+    TempoState(TempoStateError),
+    /// Error from the ZoneInbox.
+    #[error("ZoneInbox error: {0:?}")]
+    Inbox(ZoneInboxError),
+    /// Malformed nested ABI data, matching Solidity's empty revert.
+    #[error("malformed ABI calldata")]
+    MalformedCalldata,
     /// Error from the zone TIP-20 factory.
     #[error("Zone TIP-20 factory error: {0:?}")]
     ZoneTokenFactory(ZoneTokenFactoryError),
@@ -49,6 +58,9 @@ impl IntoPrecompileResult for ZonePrecompileError {
             Self::L1State(error) => return Err(error.into()),
             Self::Portal(error) => error.abi_encode(),
             Self::Outbox(error) => error.abi_encode(),
+            Self::TempoState(error) => error.abi_encode(),
+            Self::Inbox(error) => error.abi_encode(),
+            Self::MalformedCalldata => Default::default(),
             Self::ZoneTokenFactory(error) => error.abi_encode(),
             Self::Zone403Registry(error) => error.abi_encode(),
         };

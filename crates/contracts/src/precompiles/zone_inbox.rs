@@ -5,6 +5,8 @@ pub use ZoneInbox::{
     ZoneInboxErrors as ZoneInboxError, ZoneInboxEvents as ZoneInboxEvent,
 };
 
+use alloy_primitives::{Address, B256};
+
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
     contract ZoneInbox {
@@ -125,5 +127,58 @@ crate::sol! {
             DecryptionData[] calldata decryptions,
             EnabledToken[] calldata enabledTokens
         ) external;
+    }
+}
+
+impl EnabledToken {
+    /// Build the event emitted after enabling this token on the zone.
+    pub fn enabled_event(self) -> ZoneInboxEvent {
+        ZoneInboxEvent::token_enabled(self.token, self.name, self.symbol, self.currency)
+    }
+}
+
+impl Deposit {
+    /// Build the event emitted after a successful regular deposit.
+    pub fn processed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
+        ZoneInboxEvent::deposit_processed(
+            deposit_hash,
+            self.sender,
+            self.to,
+            self.token,
+            self.amount,
+            self.memo,
+        )
+    }
+
+    /// Build the event emitted after a failed regular deposit.
+    pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
+        ZoneInboxEvent::deposit_failed(
+            deposit_hash,
+            self.sender,
+            self.to,
+            self.token,
+            self.amount,
+            self.bouncebackRecipient,
+        )
+    }
+
+    /// Build the event emitted after processing a withdrawal bounce-back.
+    pub fn withdrawal_bounce_back_processed_event(
+        &self,
+        fallback_recipient: Address,
+    ) -> ZoneInboxEvent {
+        ZoneInboxEvent::withdrawal_bounce_back_processed(
+            fallback_recipient,
+            self.token,
+            self.amount,
+        )
+    }
+
+    /// Build the event emitted after parking a failed withdrawal bounce-back.
+    pub fn withdrawal_bounce_back_pending_event(
+        &self,
+        fallback_recipient: Address,
+    ) -> ZoneInboxEvent {
+        ZoneInboxEvent::withdrawal_bounce_back_pending(fallback_recipient, self.token, self.amount)
     }
 }

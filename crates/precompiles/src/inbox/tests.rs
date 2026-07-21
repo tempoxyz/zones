@@ -280,6 +280,24 @@ fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()>
 }
 
 #[test]
+fn advance_rejects_a_preselected_anchor_before_sequencer_read() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness
+        .l1_state
+        .read_l1_storage(Address::ZERO, B256::ZERO, 0)?;
+    let request_count = harness.l1.storage_requests().len();
+
+    let result = harness.call(
+        SEQUENCER,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    );
+
+    assert!(result.is_err());
+    assert_eq!(harness.l1.storage_requests().len(), request_count);
+    Ok(())
+}
+
+#[test]
 fn wrong_sequencer_reverts_before_checkpoint_advancement() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let output = harness.call(
