@@ -349,7 +349,6 @@ jobs:
           repository: tempoxyz/earn
           ref: ${{ steps.earn.outputs.revision }}
           path: _benchmark-earn
-          token: ${{ secrets.DEREK_BENCH_TOKEN }}
           persist-credentials: false
           submodules: recursive
 
