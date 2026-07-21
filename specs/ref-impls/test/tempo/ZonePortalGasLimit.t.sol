@@ -217,4 +217,13 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), _withdrawalQueueSlot(0), keccak256(abi.encode(w, EMPTY_SENTINEL)));
     }
 
+    function _singleWithdrawal(Withdrawal memory withdrawal)
+        internal
+        pure
+        returns (Withdrawal[] memory withdrawals)
+    {
+        withdrawals = new Withdrawal[](1);
+        withdrawals[0] = withdrawal;
+    }
+
 }

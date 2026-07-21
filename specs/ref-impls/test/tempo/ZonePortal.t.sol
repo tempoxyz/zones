@@ -2140,7 +2140,7 @@ contract ZonePortalTest is BaseTest {
             address(gasConsumingReceiver), w.senderTag, address(pathUSD), 500e6, false
         );
         (bool success,) = address(portal).call{ gas: processorGasLimit }(
-            abi.encodeCall(IZonePortal.processWithdrawal, (w, bytes32(0)))
+            abi.encodeCall(IZonePortal.processWithdrawals, (_singleWithdrawal(w), bytes32(0)))
         );
 
         assertTrue(success);
