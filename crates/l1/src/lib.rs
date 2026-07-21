@@ -70,7 +70,7 @@ use crate::{
     abi::{
         EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
-        PORTAL_SEQUENCER_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
+        PORTAL_SEQUENCER_SLOT,
         ZonePortal::{
             self, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
             SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
@@ -102,6 +102,5 @@ pub(crate) use event::EnqueueOutcome;
 pub(crate) use queue::PendingDeposits;
 #[cfg(test)]
 pub(crate) use subscriber::{
-    LocalTempoCheckpointReader, address_to_storage_value, apply_enabled_tokens_to_cache,
-    apply_sequencer_events_to_cache, verify_receipts,
+    LocalTempoCheckpointReader, apply_sequencer_events_to_cache, verify_receipts,
 };

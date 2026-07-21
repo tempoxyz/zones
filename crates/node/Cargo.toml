@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 # tempo
 tempo-chainspec.workspace = true
-tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
 tempo-primitives.workspace = true
 tempo-revm.workspace = true
@@ -108,6 +107,7 @@ reth-tracing.workspace = true
 reqwest.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
+tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 thiserror.workspace = true

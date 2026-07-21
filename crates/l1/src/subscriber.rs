@@ -1,7 +1,11 @@
 use super::*;
+use std::collections::HashSet;
+use tempo_primitives::is_tip20_prefix;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+type L1ProcessedEvents = (L1PortalEvents, Vec<PolicyEvent>, HashSet<Address>);
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -398,11 +402,16 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, policy_events) = self.extract_events(block_number, &receipts);
+            let (events, policy_events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
+            self.update_l1_state_anchor(
+                block_number,
+                sealed.hash(),
+                sealed.parent_hash(),
+                &invalidated,
+            );
             self.apply_policy_events(block_number, &policy_events);
             self.apply_portal_state_events(block_number, &events);
             self.deposit_queue
@@ -466,11 +475,7 @@ impl L1Subscriber {
         // A block is only flushed to the deposit queue once the NEXT block
         // arrives with a matching parent hash, proving the buffered block
         // is on the canonical chain.
-        let mut unconfirmed_tip: Option<(
-            SealedHeader<TempoHeader>,
-            L1PortalEvents,
-            Vec<PolicyEvent>,
-        )> = None;
+        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, L1ProcessedEvents)> = None;
 
         loop {
             let stream_wait_start = std::time::Instant::now();
@@ -483,18 +488,20 @@ impl L1Subscriber {
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let (events, policy_events) = self.extract_events(block_number, &receipts);
+            let (events, policy_events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
+            if let Some((tip_header, (tip_events, tip_policy_events, tip_invalidated))) =
+                unconfirmed_tip.take()
+            {
                 if sealed.parent_hash() == tip_header.hash() {
                     // Confirmed — update the L1 state anchor, apply events, and
                     // flush to the queue.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
-                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
+                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent, &tip_invalidated);
                     self.apply_policy_events(tip_number, &tip_policy_events);
                     self.apply_portal_state_events(tip_number, &tip_events);
                     match self
@@ -529,36 +536,42 @@ impl L1Subscriber {
                         new_parent = %sealed.parent_hash(),
                         "Discarding unconfirmed L1 block (reorg)"
                     );
-                    self.config.l1_state_cache.write().clear();
+                    let mut cache = self.config.l1_state_cache.write();
+                    let confirmed_anchor = cache.anchor().number;
+                    cache.clear();
+                    cache.initialize_floor(confirmed_anchor);
+                    drop(cache);
                     self.config.policy_cache.write().clear();
                 }
             }
 
             // Buffer the new block as unconfirmed tip.
-            unconfirmed_tip = Some((sealed, events, policy_events));
+            unconfirmed_tip = Some((sealed, (events, policy_events, invalidated)));
         }
 
         warn!("L1 block subscription stream ended");
         Ok(())
     }
 
-    /// Extract portal and policy events from pre-fetched receipts (no RPC).
+    /// Extract portal and policy events plus raw-cache mutation barriers from fetched receipts.
     fn extract_events(
         &mut self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> (L1PortalEvents, Vec<PolicyEvent>) {
+    ) -> L1ProcessedEvents {
         use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut policy_events = Vec::new();
+        let mut invalidated = HashSet::new();
 
         for receipt in receipts {
             for log in receipt.logs() {
                 let addr = log.address();
 
                 if addr == portal_address {
+                    invalidated.insert(addr);
                     let prev_len = portal_events.enabled_tokens.len();
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
@@ -571,20 +584,25 @@ impl L1Subscriber {
                         }
                     }
                 } else if addr == TIP403_REGISTRY_ADDRESS {
+                    invalidated.insert(addr);
                     if let Some(event) = PolicyEvent::decode_registry(log) {
                         policy_events.push(event);
                     }
-                } else if self.tracked_tokens.contains(&addr)
+                } else if is_tip20_prefix(addr)
                     && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
-                    && let Some(event) = PolicyEvent::decode_tip20(log)
                 {
-                    policy_events.push(event);
+                    invalidated.insert(addr);
+                    if self.tracked_tokens.contains(&addr)
+                        && let Some(event) = PolicyEvent::decode_tip20(log)
+                    {
+                        policy_events.push(event);
+                    }
                 }
             }
         }
 
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, policy_events)
+        (portal_events, policy_events, invalidated)
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -686,7 +704,13 @@ impl L1Subscriber {
     /// Update the L1 state cache anchor. Detects reorgs by comparing
     /// `parent_hash` against the current anchor and clears the cache when they
     /// diverge.
-    pub(crate) fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
+    pub(crate) fn update_l1_state_anchor(
+        &self,
+        number: u64,
+        hash: B256,
+        parent_hash: B256,
+        invalidated_accounts: &HashSet<Address>,
+    ) {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
         if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
@@ -698,8 +722,15 @@ impl L1Subscriber {
                 "Reorg detected, clearing L1 state cache"
             );
             guard.clear();
+            // Receipt coverage before the replacement block is no longer trustworthy. Rebase the
+            // non-advancing floor so later historical reads cannot repopulate stale baselines.
+            guard.initialize_floor(number);
             self.config.policy_cache.write().clear();
         }
+        for &address in invalidated_accounts {
+            guard.invalidate(address, number);
+        }
+        // Publish receipt coverage only after every mutation barrier from this block is visible.
         guard.update_anchor(NumHash::new(number, hash));
     }
 }
@@ -782,48 +813,24 @@ pub(crate) fn apply_sequencer_events_to_cache(
     block_number: u64,
     sequencer_events: &[L1SequencerEvent],
 ) {
+    let mut set_cache_slot = |slot, value| cache.set(portal_address, slot, block_number, value);
+
     for event in sequencer_events {
         match *event {
             L1SequencerEvent::TransferStarted {
                 current_sequencer,
                 pending_sequencer,
             } => {
-                cache.set(
-                    portal_address,
-                    PORTAL_SEQUENCER_SLOT,
-                    block_number,
-                    address_to_storage_value(current_sequencer),
-                );
-                cache.set(
-                    portal_address,
-                    PORTAL_PENDING_SEQUENCER_SLOT,
-                    block_number,
-                    address_to_storage_value(pending_sequencer),
-                );
+                set_cache_slot(PORTAL_SEQUENCER_SLOT, current_sequencer.into_word());
+                set_cache_slot(PORTAL_PENDING_SEQUENCER_SLOT, pending_sequencer.into_word());
             }
             L1SequencerEvent::Transferred {
                 previous_sequencer: _,
                 new_sequencer,
             } => {
-                cache.set(
-                    portal_address,
-                    PORTAL_SEQUENCER_SLOT,
-                    block_number,
-                    address_to_storage_value(new_sequencer),
-                );
-                cache.set(
-                    portal_address,
-                    PORTAL_PENDING_SEQUENCER_SLOT,
-                    block_number,
-                    B256::ZERO,
-                );
+                set_cache_slot(PORTAL_SEQUENCER_SLOT, new_sequencer.into_word());
+                set_cache_slot(PORTAL_PENDING_SEQUENCER_SLOT, B256::ZERO);
             }
         }
     }
-}
-
-pub(crate) fn address_to_storage_value(address: Address) -> B256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..].copy_from_slice(address.as_slice());
-    B256::new(bytes)
 }

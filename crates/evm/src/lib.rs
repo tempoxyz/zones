@@ -1,18 +1,20 @@
 //! Zone-specific EVM configuration.
 //!
-//! Wraps [`TempoEvmConfig`] with a custom [`ZoneEvmFactory`] that registers
-//! zone-specific native precompiles.
+//! Wraps [`TempoEvmConfig`] with a [`ZoneEvmFactory`] that installs the L1-anchored database,
+//! registers Zone-native precompiles, and preserves the original database at the [`Evm`] boundary.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
 
+mod database;
 mod executor;
 mod fee_manager;
 pub mod precompiles;
 mod tx_context;
 mod zone_evm;
 
+pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
@@ -20,9 +22,9 @@ use crate::{
     fee_manager::ZoneProtocolFeeManager,
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
-        ZoneConfigReader, ZoneFeeManager, ZoneTip20Token, ZoneTip403ProxyRegistry,
-        ZoneTokenFactory,
+        L1State, SequencerExt, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_TIP20_FACTORY_ADDRESS,
+        ZoneConfigReader, ZoneFeeManager, ZoneFeePolicy, ZonePrecompileEnv, ZoneTokenFactory,
+        create_tip20_precompile, create_tip403_precompile,
     },
     tx_context::ZoneTxContext,
 };
@@ -41,7 +43,7 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use std::{cell::RefCell, fmt, rc::Rc, sync::Arc};
+use std::{cell::RefCell, fmt, num::NonZeroU32, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
@@ -51,9 +53,10 @@ use tempo_evm::{
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
-    account_keychain::AccountKeychain, nonce::NonceManager, storage::actions::StorageActions,
-    storage_credits::NonCreditableSlots, tip20::is_tip20_prefix,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
+    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, account_keychain::AccountKeychain,
+    nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
+    storage::actions::StorageActions, storage_credits::NonCreditableSlots, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -66,8 +69,7 @@ use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, Polic
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
-/// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
-/// zone-native precompiles.
+/// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
     l1_reader: L1,
@@ -86,28 +88,29 @@ where
         }
     }
 
-    /// Set the policy provider for the TIP-403 proxy precompile.
+    /// Set the policy provider used to validate fee-token transfers.
     pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
         self.policy_provider = Some(policy_provider);
         self
     }
 
-    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
+    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>>(
         &self,
-        evm: TempoEvm<DB, I>,
-    ) -> TempoEvm<DB, I> {
+        evm: TempoEvm<L1OverlayDB<DB, L1>, I>,
+        l1: L1State<L1>,
+    ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
         let cfg = evm.ctx().cfg.clone();
-        let registry = self
-            .policy_provider
-            .clone()
-            .map(ZoneTip403ProxyRegistry::new);
+        let registry = self.policy_provider.clone().map(ZoneFeePolicy::new);
         let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new(
             self.l1_reader.clone(),
             registry.clone(),
         ));
         let (_, _, precompiles) = evm.components_mut();
+        let actions = StorageActions::disabled();
+        let non_creditable_slots = Rc::new(RefCell::new(NonCreditableSlots::empty()));
+        let env = ZonePrecompileEnv::new(&cfg, actions.clone(), non_creditable_slots.clone());
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
-            Some(TempoState::create(self.l1_reader.clone(), &cfg))
+            Some(TempoState::create(l1.clone(), &env))
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, |_| {
@@ -118,53 +121,33 @@ where
             ))
         });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
-            Some(ChaumPedersenVerify::create(&cfg))
+            Some(ChaumPedersenVerify::create(&env))
         });
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
-            Some(AesGcmDecrypt::create(&cfg))
+            Some(AesGcmDecrypt::create(&env))
         });
         precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
-            Some(ZoneTokenFactory::create(&cfg))
+            Some(ZoneTokenFactory::create(&env))
+        });
+        let tip403_env = env.clone();
+        precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
+            Some(create_tip403_precompile(&tip403_env))
         });
         let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_reader.clone());
-
-        if let Some(provider) = self.policy_provider.clone() {
-            precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
-                Some(ZoneTip403ProxyRegistry::create(provider.clone(), &cfg))
-            });
-        }
-
-        // Override the TIP-20 precompile lookup so that all TIP-20 token
-        // calls go through ZoneTip20Token. When a live policy provider is
-        // available, the wrapper also enforces TIP-403 policy checks; without
-        // one, it still applies privacy, fixed-gas, and bridge-auth rules.
-        //
-        // This replaces the upstream `extend_tempo_precompiles` lookup, so we
-        // must also handle the non-TIP-20 Tempo precompiles that are zone-relevant
-        // (NonceManager, AccountKeychain). The upstream FeeManager lookup is
-        // disabled because ZoneFeeManager occupies the same address in the static map.
-        // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
-        // static map via `apply_precompile` and take priority over this.
-        let zone_cfg = cfg.clone();
-        let zone_env = PrecompileEnv::new(
-            &cfg,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
+        let tempo_env = PrecompileEnv::new(&cfg, actions, non_creditable_slots);
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
-                Some(ZoneTip20Token::create(
-                    *address,
-                    &zone_cfg,
-                    registry.clone(),
-                    sequencer.clone(),
-                ))
-            } else if *address == ZONE_FEE_MANAGER_ADDRESS || *address == STABLECOIN_DEX_ADDRESS {
+                Some(create_tip20_precompile(*address, &env, sequencer.clone()))
+            } else if *address == ZONE_FEE_MANAGER_ADDRESS {
+                None
+            } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                Some(NonceManager::create_precompile(&zone_env))
+                Some(NonceManager::create_precompile(&tempo_env))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                Some(AccountKeychain::create_precompile(&zone_env))
+                Some(AccountKeychain::create_precompile(&tempo_env))
+            } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
+                Some(ReceivePolicyGuard::create_precompile(&tempo_env))
             } else {
                 None
             }
@@ -177,8 +160,8 @@ impl<L1> EvmFactory for ZoneEvmFactory<L1>
 where
     L1: ZoneConfigReader + SequencerExt,
 {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I>;
-    type Context<DB: Database> = TempoCtx<DB>;
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I, L1>;
+    type Context<DB: Database> = TempoCtx<L1OverlayDB<DB, L1>>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
     type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
     type HaltReason = TempoHaltReason;
@@ -191,8 +174,10 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
+        let db = L1OverlayDB::new(db, self.l1_reader.clone());
+        let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
-        ZoneEvm::new(self.register_precompiles(evm))
+        ZoneEvm::new(self.register_precompiles(evm, l1))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -201,12 +186,14 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
+        let db = L1OverlayDB::new(db, self.l1_reader.clone());
+        let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        ZoneEvm::new(self.register_precompiles(evm))
+        ZoneEvm::new(self.register_precompiles(evm, l1))
     }
 }
 
-/// Assembler for Zone blocks — delegates to [`TempoBlockAssembler`] after converting input types.
+/// Assembler for Zone blocks - delegates to [`TempoBlockAssembler`] after converting input types.
 #[derive(Debug, Clone)]
 pub struct ZoneBlockAssembler {
     inner: TempoBlockAssembler,
@@ -299,12 +286,6 @@ where
         }
     }
 
-    /// Set the policy provider for the TIP-403 proxy precompile.
-    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
-        self.zone_factory = self.zone_factory.with_policy_provider(policy_provider);
-        self
-    }
-
     /// Returns the Zone chain specification.
     pub fn chain_spec(&self) -> &Arc<ZoneChainSpec> {
         &self.chain_spec
@@ -315,12 +296,18 @@ where
         self.inner.chain_spec()
     }
 
+    /// Set the policy provider used to validate fee-token transfers.
+    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
+        self.zone_factory = self.zone_factory.with_policy_provider(policy_provider);
+        self
+    }
+
     /// Returns the L1 provider used for portal-backed configuration reads.
     pub fn l1_provider(&self) -> &L1 {
         &self.zone_factory.l1_reader
     }
 
-    /// Returns the L1-backed TIP-403 policy provider, when configured.
+    /// Returns the policy provider used for fee-token checks, when configured.
     pub fn policy_provider(&self) -> Option<&PolicyProvider> {
         self.zone_factory.policy_provider.as_ref()
     }
@@ -339,7 +326,10 @@ impl ZoneEvmConfig {
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
-        let config = L1StateProviderConfig::default();
+        let config = L1StateProviderConfig {
+            max_sync_attempts: Some(NonZeroU32::MIN),
+            ..Default::default()
+        };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
         Self::from_chain_spec(chain_spec, l1_provider)
     }
@@ -364,7 +354,8 @@ where
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
     type TxExecutionResult = EthTxResult<TempoHaltReason, TempoTxType>;
-    type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<DB>>> = ZoneBlockExecutor<'a, DB, I>;
+    type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>> =
+        ZoneBlockExecutor<'a, DB, I, L1>;
 
     fn evm_factory(&self) -> &Self::EvmFactory {
         &self.zone_factory
@@ -372,12 +363,12 @@ where
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: ZoneEvm<DB, I>,
+        evm: ZoneEvm<DB, I, L1>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> Self::Executor<'a, DB, I>
     where
         DB: StateDB,
-        I: Inspector<TempoCtx<DB>>,
+        I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
     {
         ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
     }

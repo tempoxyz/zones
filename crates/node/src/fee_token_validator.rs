@@ -10,7 +10,7 @@ use tempo_transaction_pool::validator::{
 };
 use tempo_zone_contracts::ZONE_FEE_MANAGER_ADDRESS;
 use zone_l1::TempoStateExt;
-use zone_precompiles::{ZoneConfigReader, ZoneTip403ProxyRegistry, policy::PolicyCheck};
+use zone_precompiles::{ZoneConfigReader, ZoneFeePolicy, policy::PolicyCheck};
 use zone_primitives::policy::AuthRole;
 
 /// Validates resolved fee tokens against the portal and L1 TIP-403 policy.
@@ -18,7 +18,7 @@ use zone_primitives::policy::AuthRole;
 pub(crate) struct ZoneFeeTokenValidator<Client, L1, Policy> {
     client: Client,
     l1_reader: L1,
-    registry: ZoneTip403ProxyRegistry<Policy>,
+    registry: ZoneFeePolicy<Policy>,
 }
 
 impl<Client, L1, Policy> core::fmt::Debug for ZoneFeeTokenValidator<Client, L1, Policy> {
@@ -32,7 +32,7 @@ impl<Client, L1, Policy> ZoneFeeTokenValidator<Client, L1, Policy> {
     pub(crate) const fn new(
         client: Client,
         l1_reader: L1,
-        registry: ZoneTip403ProxyRegistry<Policy>,
+        registry: ZoneFeePolicy<Policy>,
     ) -> Self {
         Self {
             client,
@@ -201,7 +201,7 @@ mod tests {
         recipient: bool,
     ) -> ZoneFeeTokenValidator<(), MockL1, MockPolicy> {
         let policy = MockPolicy { sender, recipient };
-        ZoneFeeTokenValidator::new((), MockL1 { enabled }, ZoneTip403ProxyRegistry::new(policy))
+        ZoneFeeTokenValidator::new((), MockL1 { enabled }, ZoneFeePolicy::new(policy))
     }
 
     #[test]

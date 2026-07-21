@@ -26,9 +26,7 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::policy::AuthRole;
 
-use crate::{
-    L1StorageReader, TempoState, policy::PolicyCheck, tip403_proxy::ZoneTip403ProxyRegistry,
-};
+use crate::{L1StorageReader, TempoState, fee_policy::ZoneFeePolicy, policy::PolicyCheck};
 
 /// L1 state access required to resolve [`ZoneConfig`](https://github.com/tempoxyz/tempo-zones)
 /// token enablement at the zone's finalized Tempo checkpoint.
@@ -116,7 +114,7 @@ impl ZoneFeeManager {
     pub fn collect_fee_pre_tx<P: ZoneConfigReader, R: PolicyCheck>(
         &mut self,
         provider: &P,
-        registry: Option<&ZoneTip403ProxyRegistry<R>>,
+        registry: Option<&ZoneFeePolicy<R>>,
         fee_payer: Address,
         fee_token: Address,
         max_amount: U256,
@@ -150,7 +148,7 @@ impl ZoneFeeManager {
     /// Transfers a sequencer's accrued fees out of protocol custody.
     pub fn distribute_fees<R: PolicyCheck>(
         &mut self,
-        registry: Option<&ZoneTip403ProxyRegistry<R>>,
+        registry: Option<&ZoneFeePolicy<R>>,
         sequencer: Address,
         token: Address,
     ) -> Result<()> {
@@ -180,7 +178,7 @@ impl ZoneFeeManager {
 
     fn ensure_fee_transfer_authorized<R: PolicyCheck>(
         &self,
-        registry: Option<&ZoneTip403ProxyRegistry<R>>,
+        registry: Option<&ZoneFeePolicy<R>>,
         token: &TIP20Token,
         fee_payer: Address,
     ) -> Result<()> {
@@ -212,7 +210,7 @@ impl ZoneFeeManager {
 
     fn ensure_transfer_authorized<R: PolicyCheck>(
         &self,
-        registry: Option<&ZoneTip403ProxyRegistry<R>>,
+        registry: Option<&ZoneFeePolicy<R>>,
         token: Address,
         from: Address,
         to: Address,
@@ -235,7 +233,7 @@ impl ZoneFeeManager {
     /// Wraps the public ZoneFeeManager ABI for EVM registration.
     pub fn create<P: ZoneConfigReader, R: PolicyCheck + Clone + Send + Sync + 'static>(
         provider: P,
-        registry: Option<ZoneTip403ProxyRegistry<R>>,
+        registry: Option<ZoneFeePolicy<R>>,
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
     ) -> DynPrecompile {
         let spec = cfg.spec;
@@ -278,7 +276,7 @@ impl ZoneFeeManager {
     fn call_with_provider<P: ZoneConfigReader, R: PolicyCheck>(
         &mut self,
         provider: &P,
-        registry: Option<&ZoneTip403ProxyRegistry<R>>,
+        registry: Option<&ZoneFeePolicy<R>>,
         calldata: &[u8],
         msg_sender: Address,
     ) -> PrecompileResult {
@@ -436,7 +434,7 @@ mod tests {
                 enabled: vec![alpha.address(), beta.address()],
                 authorized: true,
             };
-            let registry = ZoneTip403ProxyRegistry::new(provider.clone());
+            let registry = ZoneFeePolicy::new(provider.clone());
             let mut manager = ZoneFeeManager::new();
 
             for (token, max, used) in [
@@ -493,7 +491,7 @@ mod tests {
                 enabled: Vec::new(),
                 authorized: true,
             };
-            let registry = ZoneTip403ProxyRegistry::new(provider.clone());
+            let registry = ZoneFeePolicy::new(provider.clone());
 
             let error = ZoneFeeManager::new()
                 .collect_fee_pre_tx(
@@ -530,7 +528,7 @@ mod tests {
                 enabled: vec![token.address()],
                 authorized: false,
             };
-            let registry = ZoneTip403ProxyRegistry::new(provider.clone());
+            let registry = ZoneFeePolicy::new(provider.clone());
 
             let error = ZoneFeeManager::new()
                 .collect_fee_pre_tx(
@@ -565,7 +563,7 @@ mod tests {
                 enabled: vec![token.address()],
                 authorized: true,
             };
-            let allowed_registry = ZoneTip403ProxyRegistry::new(allowed.clone());
+            let allowed_registry = ZoneFeePolicy::new(allowed.clone());
             let mut manager = ZoneFeeManager::new();
             manager.collect_fee_pre_tx(
                 &allowed,
@@ -580,7 +578,7 @@ mod tests {
                 authorized: false,
                 ..allowed
             };
-            let denied_registry = ZoneTip403ProxyRegistry::new(denied);
+            let denied_registry = ZoneFeePolicy::new(denied);
             let error = manager
                 .distribute_fees(Some(&denied_registry), sequencer, token.address())
                 .unwrap_err();

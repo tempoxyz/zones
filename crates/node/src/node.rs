@@ -5,7 +5,6 @@
 
 use crate::{
     ZoneEngine,
-    fee_token_validator::ZoneFeeTokenValidator,
     replication::{broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
@@ -39,7 +38,7 @@ use reth_transaction_pool::{
     Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
 use tempo_evm::TempoEvmConfig;
@@ -296,6 +295,17 @@ impl ZoneNode {
         self
     }
 
+    /// Bound L1 state-provider retries for callers that must fail finitely on cache misses.
+    pub fn with_l1_state_provider_retry_limits(
+        mut self,
+        transport_retries: u32,
+        sync_attempts: NonZeroU32,
+    ) -> Self {
+        self.l1_state_provider_config.max_retries = transport_retries;
+        self.l1_state_provider_config.max_sync_attempts = Some(sync_attempts);
+        self
+    }
+
     /// Set the number of zone blocks between empty withdrawal batch
     /// finalization.
     pub fn with_withdrawal_batch_interval_blocks(mut self, interval_blocks: u64) -> Self {
@@ -465,7 +475,11 @@ where
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+        self.l1_config
+            .l1_state_cache
+            .write()
+            .initialize_floor(tempo_block_number);
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -475,7 +489,7 @@ where
             .await?
             .erased();
 
-        let default_fee_token = self.resolve_and_seed_tokens(&l1_provider).await?;
+        self.resolve_and_seed_tokens(&l1_provider).await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
         if p2p_role == Some(Role::Follower) {
             // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
@@ -487,7 +501,7 @@ where
         } else {
             self.spawn_l1_subscriber(&ctx);
         }
-        self.spawn_policy_tasks(&l1_provider, &ctx, default_fee_token);
+        self.spawn_policy_tasks(&l1_provider, &ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         if let Some(config) = self.p2p_config.take() {
@@ -619,7 +633,7 @@ where
     async fn resolve_and_seed_tokens(
         &mut self,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
-    ) -> eyre::Result<Option<Address>> {
+    ) -> eyre::Result<()> {
         let portal = self.portal_address;
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
@@ -639,7 +653,7 @@ where
                         %portal,
                         "Failed to discover enabled tokens from L1 for policy cache seeding; continuing without initial token policy seed"
                     );
-                    return Ok(None);
+                    return Ok(());
                 }
             };
             info!(
@@ -651,7 +665,6 @@ where
             );
             tokens
         };
-        let default_fee_token = tracked_tokens.first().copied();
 
         if let Err(err) = self
             .policy_cache
@@ -665,10 +678,10 @@ where
                 %portal,
                 "Failed to seed token policies from L1; continuing with RPC fallback"
             );
-            return Ok(default_fee_token);
+            return Ok(());
         }
         info!(target: "reth::cli", "Seeded token policies from L1");
-        Ok(default_fee_token)
+        Ok(())
     }
 
     /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
@@ -687,7 +700,6 @@ where
         &self,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
         ctx: &AddOnsContext<'_, N>,
-        default_fee_token: Option<Address>,
     ) {
         let policy_task_handle = spawn_policy_resolution_task(
             self.policy_cache.clone(),
@@ -699,7 +711,6 @@ where
         spawn_pool_prefetch_task(
             ctx.node.pool().clone(),
             policy_task_handle,
-            default_fee_token,
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
@@ -978,7 +989,7 @@ pub struct ZoneExecutorBuilder {
 }
 
 impl ZoneExecutorBuilder {
-    /// Create a zone executor builder with the shared L1 state/policy caches.
+    /// Create a zone executor builder with the shared L1 state cache.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: L1StateCache,
@@ -1011,9 +1022,6 @@ where
         let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
         // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider);
-
-        // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_state_provider_config.l1_rpc_url,
@@ -1021,10 +1029,10 @@ where
             )
             .await?
             .erased();
-
         let policy_provider = PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
-        evm_config = evm_config.with_policy_provider(policy_provider);
-        info!(target: "reth::cli", "Zone EVM initialized with TempoState + TIP-403 proxy precompiles");
+        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider)
+            .with_policy_provider(policy_provider);
+        info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)
     }
@@ -1055,7 +1063,7 @@ impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type Pool = TempoTransactionPool<Node::Provider>;
+    type Pool = TempoTransactionPool<Node::Provider, ZoneEvmConfig>;
 
     async fn build_pool(
         self,
@@ -1075,7 +1083,7 @@ where
         let fee_token_validator = ZoneFeeTokenValidator::new(
             ctx.provider().clone(),
             evm_config.l1_provider().clone(),
-            zone_precompiles::ZoneTip403ProxyRegistry::new(policy_provider),
+            zone_precompiles::ZoneFeePolicy::new(policy_provider),
         );
         let tempo_evm_config = TempoEvmConfig::new(evm_config.tempo_chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;

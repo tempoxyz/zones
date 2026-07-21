@@ -6,13 +6,13 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{error::Result, storage::StorageActions};
 use tempo_revm::{ProtocolFeeManager, TempoStateAccess, TempoTx, TempoTxEnv};
 use zone_l1::state::PolicyProvider;
-use zone_precompiles::{ZoneConfigReader, ZoneFeeManager, ZoneTip403ProxyRegistry};
+use zone_precompiles::{ZoneConfigReader, ZoneFeeManager, ZoneFeePolicy};
 
 /// Zone implementation of Tempo's internal protocol fee hooks.
 #[derive(Clone)]
 pub(crate) struct ZoneProtocolFeeManager<P> {
     provider: P,
-    registry: Option<ZoneTip403ProxyRegistry<PolicyProvider>>,
+    registry: Option<ZoneFeePolicy<PolicyProvider>>,
 }
 
 impl<P> core::fmt::Debug for ZoneProtocolFeeManager<P> {
@@ -23,10 +23,7 @@ impl<P> core::fmt::Debug for ZoneProtocolFeeManager<P> {
 }
 
 impl<P> ZoneProtocolFeeManager<P> {
-    pub(crate) const fn new(
-        provider: P,
-        registry: Option<ZoneTip403ProxyRegistry<PolicyProvider>>,
-    ) -> Self {
+    pub(crate) const fn new(provider: P, registry: Option<ZoneFeePolicy<PolicyProvider>>) -> Self {
         Self { provider, registry }
     }
 }

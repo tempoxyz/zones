@@ -910,6 +910,24 @@ where
         })
     }
 
+    fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let block_number = self
+                .l1_provider
+                .get_block_number()
+                .await
+                .map_err(internal)?;
+            let key = ZonePortal::new(self.config.zone_portal, &self.l1_provider)
+                .encryptionKeyAtBlock(block_number)
+                .block(BlockId::number(block_number))
+                .call()
+                .await
+                .map_err(internal)?;
+
+            to_raw(&key)
+        })
+    }
+
     fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             let zone_processed_through = self

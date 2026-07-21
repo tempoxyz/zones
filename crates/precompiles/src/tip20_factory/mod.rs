@@ -1,11 +1,11 @@
 //! Zone-side TIP20 factory precompile.
 //!
-//! Deployed at the same address as the L1 [`TIP20Factory`] (`0x20FC…0000`), this
+//! Deployed at the same address as the L1 `TIP20Factory` (`0x20FC…0000`), this
 //! precompile replaces the standard factory on the zone with a single
 //! `enableToken(address, string, string, string)` entrypoint.
 //!
 //! When the sequencer bridges a new TIP-20 token to the zone, the
-//! [`ZoneInbox`] contract calls `enableToken` during `advanceTempo` to:
+//! `ZoneInbox` contract calls `enableToken` during `advanceTempo` to:
 //!
 //! 1. Initialize the TIP-20 storage at the given address (name, symbol, currency).
 //! 2. Grant [`ISSUER_ROLE`] to both [`ZONE_INBOX_ADDRESS`] (for minting on
@@ -17,11 +17,11 @@
 mod dispatch;
 
 pub use IZoneTokenFactory::IZoneTokenFactoryErrors as ZoneTokenFactoryError;
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Address;
-use alloy_sol_types::SolError;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
-    tip20::{ISSUER_ROLE, TIP20Token},
+    PATH_USD_ADDRESS, Precompile as _, TIP20_FACTORY_ADDRESS,
+    tip20::{ISSUER_ROLE, TIP20Token, tip20_slots},
 };
 use tempo_precompiles_macros::contract;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
@@ -51,6 +51,16 @@ pub const ZONE_TIP20_FACTORY_ADDRESS: Address = TIP20_FACTORY_ADDRESS;
 pub struct ZoneTokenFactory {}
 
 impl ZoneTokenFactory {
+    /// Creates the direct-call-only token factory with zone-local storage and execution.
+    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "ZoneTokenFactory",
+            env,
+            crate::execution::NoCallRules,
+            |data, caller| Self::new().call(data, caller),
+        )
+    }
+
     /// Sets the contract bytecode (`0xef`) so the account is non-empty.
     ///
     /// Must be called once during genesis generation before any tokens are
@@ -68,7 +78,12 @@ impl ZoneTokenFactory {
     /// - [`ZONE_OUTBOX_ADDRESS`] — so withdrawals can burn zone-side tokens.
     ///
     /// The quote token is always set to [`PATH_USD_ADDRESS`].
-    pub fn enable_token(&self, call: enableTokenCall) -> tempo_precompiles::Result<()> {
+    pub fn enable_token(&mut self, call: enableTokenCall) -> tempo_precompiles::Result<()> {
+        // Upstream initialization writes the default policy ID, so we cache the L1-anchored value.
+        let l1_policy = self
+            .storage
+            .sload(call.token, tip20_slots::TRANSFER_POLICY_ID)?;
+
         let mut token = TIP20Token::from_address(call.token)?;
         token.initialize(
             ZONE_INBOX_ADDRESS,
@@ -78,51 +93,57 @@ impl ZoneTokenFactory {
             PATH_USD_ADDRESS,
             ZONE_INBOX_ADDRESS,
         )?;
+
+        // Restore the L1-anchored value while preserving the zone-local fields initialized above.
+        let initialized = self
+            .storage
+            .sload(call.token, tip20_slots::TRANSFER_POLICY_ID)?;
+        self.storage.sstore(
+            call.token,
+            tip20_slots::TRANSFER_POLICY_ID,
+            crate::storage::merge_transfer_policy_id(initialized, l1_policy),
+        )?;
+
         token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
         token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
 
         Ok(())
     }
+}
 
-    /// Wraps this precompile in a [`DynPrecompile`] for registration in the zone EVM.
-    ///
-    /// The returned precompile handles delegate-call rejection, EVM storage
-    /// context setup, and dispatches to [`TempoPrecompile::call`].
-    pub fn create(
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> alloy_evm::precompiles::DynPrecompile {
-        use revm::precompile::{PrecompileId, PrecompileOutput};
-        use tempo_precompiles::{
-            DelegateCallNotAllowed, Precompile as _,
-            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-        };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{U256, address};
+    use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_precompiles::storage::{StorageCtx, hashmap::HashMapStorageProvider};
 
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-        alloy_evm::precompiles::DynPrecompile::new_stateful(
-            PrecompileId::Custom("ZoneTokenFactory".into()),
-            move |input| {
-                if !input.is_direct_call() {
-                    return Ok(PrecompileOutput::revert(
-                        0,
-                        SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-                        input.reservoir,
-                    ));
-                }
+    #[test]
+    fn initialization_preserves_anchored_transfer_policy() -> eyre::Result<()> {
+        let token_address = address!("20C0000000000000000000000000000000000999");
+        let policy_id = 7u64;
+        let offset = tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
+        let anchored_policy = U256::from(policy_id) << offset;
+        let mut provider = HashMapStorageProvider::new_with_spec(1, TempoHardfork::default());
 
-                let mut storage = EvmPrecompileStorageProvider::new(
-                    input.internals,
-                    input.gas,
-                    input.reservoir,
-                    spec,
-                    amsterdam_eip8037_enabled,
-                    input.is_static,
-                    gas_params.clone(),
-                );
+        StorageCtx::enter(&mut provider, || -> eyre::Result<()> {
+            StorageCtx.sstore(
+                token_address,
+                tip20_slots::TRANSFER_POLICY_ID,
+                anchored_policy,
+            )?;
 
-                StorageCtx::enter(&mut storage, || Self::new().call(input.data, input.caller))
-            },
-        )
+            ZoneTokenFactory::new().enable_token(enableTokenCall {
+                token: token_address,
+                name: "Zone Token".to_owned(),
+                symbol: "ZONE".to_owned(),
+                currency: "USD".to_owned(),
+            })?;
+
+            let token = TIP20Token::from_address(token_address)?;
+            assert_eq!(token.transfer_policy_id()?, policy_id);
+            assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
+            Ok(())
+        })
     }
 }
