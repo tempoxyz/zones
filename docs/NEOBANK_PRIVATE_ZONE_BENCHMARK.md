@@ -70,10 +70,10 @@ non-secret runtime metadata:
 ZONES_BENCH_PROFILE=neobank contrib/bench/provision-topology.sh up
 ```
 
-The remaining work before enabling the one-command invocation is the dedicated
-runner that renders the profile assets, prepares account approvals and auth in
-the private temporary directory, invokes the scenario, and publishes results.
-That runner will be:
+The dedicated runner renders the profile assets, prepares account approvals and
+private-RPC authorization in a mode-0700 temporary directory, invokes the
+scenario, and writes the standard scenario report consumed by the existing
+workflow results renderer:
 
 ```bash
 contrib/bench/run-neobank-private-flow.sh

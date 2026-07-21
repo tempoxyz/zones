@@ -7,8 +7,9 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: roundtrip
+        default: neobank-e2e
         options:
+          - neobank-e2e
           - roundtrip
           - deposit
       accounts:
@@ -63,7 +64,7 @@ on:
         default: "1000000"
 
   # workflow_dispatch is unavailable until this file reaches the default branch.
-  # Until then, benchmark-harness changes run the default roundtrip on PR updates.
+  # Until then, benchmark-harness changes run the private flow on PR updates.
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -171,10 +172,10 @@ jobs:
 
           phase="$INPUT_PHASE"
           if [ "$EVENT_NAME" = pull_request ]; then
-            phase=roundtrip
+            phase=neobank-e2e
           fi
           case "$phase" in
-            roundtrip|deposit) ;;
+            neobank-e2e|roundtrip|deposit) ;;
             *) echo "::error::unsupported benchmark phase: $phase"; exit 1 ;;
           esac
 
@@ -459,6 +460,9 @@ jobs:
         run: |
           set -euo pipefail
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
+          if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
+            export ZONES_BENCH_PROFILE=neobank
+          fi
           contrib/bench/provision-topology.sh up
           set -a
           # shellcheck source=/dev/null
@@ -475,7 +479,9 @@ jobs:
           do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
-          if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+          if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
+            contrib/bench/run-neobank-private-flow.sh
+          elif [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
             contrib/bench/run-roundtrip.sh
           else
             contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
@@ -494,7 +500,11 @@ jobs:
             --output "$summary"
           )
           if [ -s "$ZONES_BENCH_REPORT" ]; then
-            if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+            if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
+              results_args+=(
+                --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
+              )
+            elif [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
               results_args+=(
                 --scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.rendered.yml"
               )
