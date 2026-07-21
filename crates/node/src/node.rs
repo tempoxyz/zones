@@ -67,7 +67,7 @@ use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
     state::{
-        L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider,
+        EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider,
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
@@ -184,8 +184,10 @@ pub struct ZoneNode {
     l1_config: L1SubscriberConfig,
     /// Configuration for the L1 state provider (contract addresses, query parameters).
     l1_state_provider_config: L1StateProviderConfig,
-    /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
+    /// Shared cache of L1 contract storage.
     l1_state_cache: L1StateCache,
+    /// Shared registry of tokens enabled for this zone.
+    enabled_tokens: EnabledTokenRegistry,
     /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](zone_l1::L1Subscriber)
     /// and read by the precompile during block building.
     policy_cache: PolicyCache,
@@ -219,11 +221,13 @@ impl ZoneNode {
 
         let policy_cache = PolicyCache::default();
         let l1_state_cache = L1StateCache::new(HashSet::from([portal_address]));
+        let enabled_tokens = EnabledTokenRegistry::default();
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
             policy_cache: policy_cache.clone(),
+            enabled_tokens: enabled_tokens.clone(),
             l1_state_cache: l1_state_cache.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
@@ -241,6 +245,7 @@ impl ZoneNode {
             l1_config,
             l1_state_provider_config,
             l1_state_cache,
+            enabled_tokens,
             policy_cache,
             portal_address,
             initial_tokens: None,
@@ -364,7 +369,9 @@ impl ZoneNode {
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(ZonePoolBuilder)
+            .pool(ZonePoolBuilder::new(
+                executor_builder.enabled_tokens.clone(),
+            ))
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
@@ -492,7 +499,8 @@ where
             .await?
             .erased();
 
-        self.resolve_and_seed_tokens(&l1_provider).await?;
+        self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
+            .await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
         if p2p_role == Some(Role::Follower) {
             // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
@@ -632,33 +640,26 @@ where
         Ok(())
     }
 
-    /// Resolve enabled tokens and seed the policy cache.
+    /// Seed the enabled-token registry and token policies from an L1 snapshot.
     async fn resolve_and_seed_tokens(
         &mut self,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        block_number: u64,
     ) -> eyre::Result<()> {
         let portal = self.portal_address;
-        let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
+        let enabled_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let block_number = self.policy_cache.last_l1_block();
-            let tokens = match ZonePortal::new(portal, l1_provider)
+            let tokens = ZonePortal::new(portal, l1_provider)
                 .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
                 .await
-            {
-                Ok(tokens) => tokens,
-                Err(err) => {
-                    warn!(
-                        target: "reth::cli",
-                        %err,
-                        block_number,
-                        %portal,
-                        "Failed to discover enabled tokens from L1 for policy cache seeding; continuing without initial token policy seed"
-                    );
-                    return Ok(());
-                }
-            };
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to discover enabled tokens from portal {portal} at L1 block \
+                         {block_number}: {err}"
+                    )
+                })?;
             info!(
                 target: "reth::cli",
                 count = tokens.len(),
@@ -669,15 +670,21 @@ where
             tokens
         };
 
+        {
+            let mut registry = self.l1_config.enabled_tokens.write();
+            registry.clear();
+            registry.extend(enabled_tokens.iter().copied());
+        }
+
         if let Err(err) = self
             .policy_cache
-            .seed_token_policies(portal, &tracked_tokens, l1_provider)
+            .seed_token_policies(portal, &enabled_tokens, l1_provider)
             .await
         {
             warn!(
                 target: "reth::cli",
                 %err,
-                count = tracked_tokens.len(),
+                count = enabled_tokens.len(),
                 %portal,
                 "Failed to seed token policies from L1; continuing with RPC fallback"
             );
@@ -924,6 +931,7 @@ where
         let executor_builder = ZoneExecutorBuilder::new(
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
+            self.enabled_tokens.clone(),
         );
         let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
@@ -987,6 +995,7 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
 pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: L1StateCache,
+    enabled_tokens: EnabledTokenRegistry,
 }
 
 impl ZoneExecutorBuilder {
@@ -994,10 +1003,12 @@ impl ZoneExecutorBuilder {
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: L1StateCache,
+        enabled_tokens: EnabledTokenRegistry,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
+            enabled_tokens,
         }
     }
 }
@@ -1045,9 +1056,18 @@ where
 }
 
 /// Transaction pool builder for Zone - uses Tempo pool with defaults.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
-pub struct ZonePoolBuilder;
+pub struct ZonePoolBuilder {
+    enabled_tokens: EnabledTokenRegistry,
+}
+
+impl ZonePoolBuilder {
+    /// Create a pool builder using the shared enabled-token registry.
+    pub fn new(enabled_tokens: EnabledTokenRegistry) -> Self {
+        Self { enabled_tokens }
+    }
+}
 
 #[derive(Debug)]
 struct ZonePoolAdmissionError(&'static str);
@@ -1076,10 +1096,10 @@ fn pool_admission_error(message: &'static str) -> InvalidPoolTransactionError {
 
 fn sender_has_enabled_token_balance<E>(
     sender: Address,
-    enabled_tokens: &[Address],
+    enabled_tokens: impl IntoIterator<Item = Address>,
     mut balance_at: impl FnMut(Address, U256) -> Result<Option<U256>, E>,
 ) -> Result<bool, E> {
-    for &token in enabled_tokens {
+    for token in enabled_tokens {
         let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
         if balance_at(token, slot)?.is_some_and(|balance| !balance.is_zero()) {
             return Ok(true);
@@ -1107,7 +1127,6 @@ where
         let blob_store = InMemoryBlobStore::default();
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
-        let l1_provider = evm_config.l1_reader().clone();
         let mut validator =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
@@ -1135,26 +1154,17 @@ where
                 warn!(%err, "Failed to read latest state for zone token-balance admission check");
                 pool_admission_error("could not verify balance of an enabled zone token")
             })?;
-            let tempo_block_number = state.tempo_block_number().map_err(|err| {
-                warn!(%err, "Failed to read Tempo checkpoint for zone token-balance admission check");
+            let sender = *tx.sender_ref();
+            let enabled_tokens = self.enabled_tokens.read();
+            let has_balance = sender_has_enabled_token_balance(
+                sender,
+                enabled_tokens.iter().copied(),
+                |token, slot| state.storage(token, slot.into()),
+            )
+            .map_err(|err| {
+                warn!(%err, %sender, "Failed to read zone token balance during pool admission");
                 pool_admission_error("could not verify balance of an enabled zone token")
             })?;
-            let enabled_tokens = l1_provider
-                .enabled_tokens_at(tempo_block_number)
-                .map_err(|err| {
-                    warn!(%err, tempo_block_number, "Failed to read enabled tokens during pool admission");
-                    pool_admission_error("could not verify balance of an enabled zone token")
-                })?;
-
-            let sender = *tx.sender_ref();
-            let has_balance =
-                sender_has_enabled_token_balance(sender, &enabled_tokens, |token, slot| {
-                    state.storage(token, slot.into())
-                })
-                .map_err(|err| {
-                    warn!(%err, %sender, "Failed to read zone token balance during pool admission");
-                    pool_admission_error("could not verify balance of an enabled zone token")
-                })?;
 
             if !has_balance {
                 return Err(pool_admission_error(
@@ -1263,19 +1273,19 @@ mod tests {
         ];
         let funded_token = tokens[1];
 
-        let has_balance = sender_has_enabled_token_balance(sender, &tokens, |token, _slot| {
+        let has_balance = sender_has_enabled_token_balance(sender, tokens, |token, _slot| {
             Ok::<_, std::convert::Infallible>((token == funded_token).then_some(U256::from(1)))
         })
         .unwrap();
         assert!(has_balance);
 
-        let has_balance = sender_has_enabled_token_balance(sender, &tokens, |_token, _slot| {
+        let has_balance = sender_has_enabled_token_balance(sender, tokens, |_token, _slot| {
             Ok::<_, std::convert::Infallible>(Some(U256::ZERO))
         })
         .unwrap();
         assert!(!has_balance);
 
-        let has_balance = sender_has_enabled_token_balance(sender, &[], |_token, _slot| {
+        let has_balance = sender_has_enabled_token_balance(sender, [], |_token, _slot| {
             Ok::<_, std::convert::Infallible>(Some(U256::from(1)))
         })
         .unwrap();

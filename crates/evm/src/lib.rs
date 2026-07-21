@@ -270,11 +270,6 @@ where
     pub fn tempo_chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
     }
-
-    /// Returns the Tempo L1 storage reader used by zone execution.
-    pub const fn l1_reader(&self) -> &L1 {
-        &self.zone_factory.l1_reader
-    }
 }
 
 impl ZoneEvmConfig {

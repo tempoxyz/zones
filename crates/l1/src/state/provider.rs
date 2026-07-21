@@ -10,7 +10,7 @@
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
 //! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
@@ -22,10 +22,7 @@ use tracing::{debug, info, warn};
 use zone_precompiles::{L1StateError, L1StorageReader, SequencerExt};
 
 use super::cache::L1StateCache;
-use crate::{
-    abi::{PORTAL_ENABLED_TOKENS_SLOT, PORTAL_SEQUENCER_SLOT},
-    rpc::rpc_connection_config,
-};
+use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -252,26 +249,6 @@ impl L1StateProvider {
         Ok(Address::from_slice(&value.as_slice()[12..]))
     }
 
-    /// Read the portal's enabled-token list at a specific L1 block.
-    pub fn enabled_tokens_at(&self, block_number: u64) -> Result<Vec<Address>> {
-        let length = self.get_storage(
-            self.portal_address,
-            PORTAL_ENABLED_TOKENS_SLOT,
-            block_number,
-        )?;
-        let length = usize::try_from(U256::from_be_bytes(length.0))
-            .map_err(|_| eyre::eyre!("enabled-token count does not fit in usize"))?;
-        let base = U256::from_be_bytes(keccak256(PORTAL_ENABLED_TOKENS_SLOT).0);
-
-        (0..length)
-            .map(|index| {
-                let slot = B256::from(base + U256::from(index));
-                self.get_storage(self.portal_address, slot, block_number)
-                    .map(|value| Address::from_slice(&value.as_slice()[12..]))
-            })
-            .collect()
-    }
-
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
@@ -343,51 +320,6 @@ impl SequencerExt for L1StateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn enabled_tokens_are_read_from_portal_storage() {
-        let portal = address!("0x0000000000000000000000000000000000004242");
-        let tokens = [
-            address!("0x20c0000000000000000000000000000000000001"),
-            address!("0x20c0000000000000000000000000000000000002"),
-        ];
-        let block_number = 7;
-        let cache = L1StateCache::default();
-        let base = U256::from_be_bytes(keccak256(PORTAL_ENABLED_TOKENS_SLOT).0);
-        {
-            let mut cache = cache.write();
-            cache.set(
-                portal,
-                PORTAL_ENABLED_TOKENS_SLOT,
-                block_number,
-                B256::from(U256::from(tokens.len())),
-            );
-            for (index, token) in tokens.iter().enumerate() {
-                cache.set(
-                    portal,
-                    B256::from(base + U256::from(index)),
-                    block_number,
-                    token.into_word(),
-                );
-            }
-        }
-
-        let config = L1StateProviderConfig {
-            portal_address: portal,
-            max_sync_attempts: Some(NonZeroU32::MIN),
-            ..Default::default()
-        };
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect("http://127.0.0.1:1")
-            .await
-            .expect("HTTP transport construction is lazy")
-            .erased();
-        let reader =
-            L1StateProvider::new_raw(config, cache, provider, tokio::runtime::Handle::current());
-
-        assert_eq!(reader.enabled_tokens_at(block_number).unwrap(), tokens);
-    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn finite_sync_attempt_limit_returns_diagnostic_error() {

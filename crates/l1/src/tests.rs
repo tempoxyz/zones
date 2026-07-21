@@ -148,13 +148,13 @@ fn test_subscriber(
             portal_address,
             genesis_tempo_block_number,
             policy_cache: crate::PolicyCache::default(),
+            enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(HashSet::from([portal_address])),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
         },
         local_state,
         deposit_queue: DepositQueue::default(),
-        tracked_tokens: vec![],
         tip403_metrics: Default::default(),
         subscriber_metrics: Default::default(),
     }
@@ -659,6 +659,28 @@ fn test_push_log_decodes_sequencer_transferred() {
     );
     assert!(events.deposits.is_empty());
     assert!(events.enabled_tokens.is_empty());
+}
+
+#[test]
+fn confirmed_token_enabled_event_updates_registry() {
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
+        None,
+    );
+    let token = address!("0x20c0000000000000000000000000000000000001");
+    let events = L1PortalEvents {
+        enabled_tokens: vec![EnabledToken {
+            token,
+            name: "Path USD".to_owned(),
+            symbol: "pathUSD".to_owned(),
+            currency: "USD".to_owned(),
+        }],
+        ..Default::default()
+    };
+
+    subscriber.apply_portal_state_events(42, &events);
+
+    assert!(subscriber.config.enabled_tokens.read().contains(&token));
 }
 
 #[test]

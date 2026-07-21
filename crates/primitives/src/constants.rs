@@ -72,9 +72,6 @@ pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
     B256::new(bytes)
 };
 
-/// ZonePortal storage slot 9: `_enabledTokens` (address[]).
-pub const PORTAL_ENABLED_TOKENS_SLOT: B256 = B256::with_last_byte(9);
-
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
 // ---------------------------------------------------------------------------

@@ -54,7 +54,7 @@ use tempo_precompiles::{
     },
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{PORTAL_ENABLED_TOKENS_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
@@ -740,8 +740,7 @@ impl ZoneTestNode {
     }
 
     /// Start a zone node connected to a real L1, anchoring genesis to a specific
-    /// L1 block and optionally overriding the initial token list used for
-    /// startup policy cache seeding.
+    /// L1 block and optionally overriding the initial token list used at startup.
     pub(crate) async fn start_from_l1_at_block_with_initial_tokens(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
@@ -786,7 +785,7 @@ impl ZoneTestNode {
             Some(genesis),
             signer,
             withdrawal_batch_interval_blocks,
-            Some(vec![]),
+            None,
             None,
             true,
         )
@@ -862,7 +861,7 @@ impl ZoneTestNode {
             None,
             signer,
             8,
-            Some(vec![]),
+            Some(vec![PATH_USD_ADDRESS]),
             Some(p2p_config),
             true,
         )
@@ -878,13 +877,18 @@ impl ZoneTestNode {
         // Generate a throwaway signer for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
-        Self::launch_with_genesis(
+        let initial_tokens = (l1_ws_url == DUMMY_L1_URL).then(|| vec![PATH_USD_ADDRESS]);
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
             chain_id,
             None,
             signer,
+            8,
+            initial_tokens,
+            None,
+            true,
         )
         .await
     }
@@ -905,7 +909,7 @@ impl ZoneTestNode {
             custom_genesis,
             sequencer_signer,
             8,
-            Some(vec![]),
+            None,
             None,
             true,
         )
@@ -2842,7 +2846,7 @@ pub(crate) async fn start_local_p2p_pair(
         Some(genesis.clone()),
         signer.clone(),
         8,
-        Some(vec![]),
+        Some(vec![PATH_USD_ADDRESS]),
         Some(configs.remove(0)),
         true,
     )
@@ -2855,7 +2859,7 @@ pub(crate) async fn start_local_p2p_pair(
         Some(genesis),
         signer,
         8,
-        Some(vec![]),
+        Some(vec![PATH_USD_ADDRESS]),
         Some(configs.remove(0)),
         false,
     )
@@ -3692,7 +3696,6 @@ impl L1Fixture {
     ) {
         let mut cache = cache_handle.write();
         let deposit_queue_hash_slot = B256::with_last_byte(5);
-        let enabled_tokens_base = keccak256(PORTAL_ENABLED_TOKENS_SLOT);
         let refunds_slot = B256::with_last_byte(10);
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
@@ -3720,18 +3723,6 @@ impl L1Fixture {
             // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
-            cache.set(
-                portal_address,
-                PORTAL_ENABLED_TOKENS_SLOT,
-                block,
-                B256::from(U256::ONE),
-            );
-            cache.set(
-                portal_address,
-                enabled_tokens_base,
-                block,
-                PATH_USD_ADDRESS.into_word(),
-            );
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
