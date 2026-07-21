@@ -122,7 +122,7 @@ impl JsonRpcError {
         }
     }
 
-    /// Transaction rejected — sender mismatch (-32003).
+    /// Transaction rejected (-32003).
     pub fn transaction_rejected() -> Self {
         Self {
             code: -32003,

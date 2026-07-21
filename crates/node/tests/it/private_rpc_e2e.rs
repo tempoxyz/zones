@@ -13,10 +13,14 @@ use crate::utils::{
     start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
+    network::{EthereumWallet, NetworkTransactionBuilder},
     primitives::{Address, B256, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
+use alloy_eips::eip2718::Encodable2718;
+use alloy_network::Ethereum;
 use alloy_provider::ProviderBuilder;
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::SolCall;
 use futures::{SinkExt, StreamExt};
@@ -48,6 +52,25 @@ fn corrupt_token_hex(token: &str) -> String {
 
 fn address_topic(address: Address) -> String {
     format!("{:#x}", B256::left_padding_from(address.as_slice()))
+}
+
+async fn signed_raw_transaction(signer: &PrivateKeySigner, chain_id: u64) -> eyre::Result<String> {
+    let request = TransactionRequest {
+        from: Some(signer.address()),
+        to: Some(signer.address().into()),
+        gas: Some(500_000),
+        max_fee_per_gas: Some(TEMPO_T0_BASE_FEE as u128),
+        max_priority_fee_per_gas: Some(TEMPO_T0_BASE_FEE as u128),
+        nonce: Some(0),
+        chain_id: Some(chain_id),
+        ..Default::default()
+    };
+    let wallet = EthereumWallet::from(signer.clone());
+    let signed =
+        <TransactionRequest as NetworkTransactionBuilder<Ethereum>>::build(request, &wallet)
+            .await?;
+
+    Ok(format!("0x{}", hex::encode(signed.encoded_2718())))
 }
 
 fn assert_filter_not_found_error(response: &serde_json::Value) {
@@ -170,6 +193,43 @@ async fn test_auth_rejection() -> eyre::Result<()> {
         .call_raw("eth_blockNumber", serde_json::json!([]), &bad_token)
         .await?;
     assert_eq!(status.as_u16(), 403, "wrong chain ID should return 403");
+
+    Ok(())
+}
+
+/// Raw transactions require the authenticated sender to hold an enabled zone token.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_raw_transaction_requires_enabled_token_balance() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let user_signer = PrivateKeySigner::random();
+    let raw = signed_raw_transaction(&user_signer, ctx.config.chain_id).await?;
+
+    for method in ["eth_sendRawTransaction", "eth_sendRawTransactionSync"] {
+        let response = ctx.call_as_user(method, json!([raw]), &user_signer).await?;
+        assert_eq!(
+            response["error"]["code"].as_i64(),
+            Some(-32003),
+            "{method} should reject a sender without enabled-token balance: {response}",
+        );
+    }
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        user_signer.address(),
+        user_signer.address(),
+        1_000_000,
+    )
+    .await?;
+
+    let response = ctx
+        .call_as_user("eth_sendRawTransaction", json!([raw]), &user_signer)
+        .await?;
+    assert!(
+        response["result"].as_str().is_some(),
+        "funded sender transaction should be accepted: {response}",
+    );
 
     Ok(())
 }
