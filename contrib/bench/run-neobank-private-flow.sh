@@ -8,7 +8,34 @@ die() { echo "error: $*" >&2; exit 1; }
 need() { [[ -n "${!1:-}" ]] || die "$1 must be set"; }
 uint() { [[ "${!1:-}" =~ ^[0-9]+$ ]] || die "$1 must be an unsigned integer"; }
 
-for name in ZONES_BENCH_MNEMONIC L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
+load_benchmark_mnemonic() {
+    local mode
+
+    need ZONES_BENCH_MNEMONIC_FILE
+    [[ ! -L "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be a symbolic link"
+    [[ -f "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must be a regular file"
+    [[ -s "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be empty"
+    [[ -r "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must be readable"
+
+    mode="$(stat -c '%a' -- "$ZONES_BENCH_MNEMONIC_FILE")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
+        die "could not validate ZONES_BENCH_MNEMONIC_FILE permissions"
+    (( (8#$mode & 8#077) == 0 )) ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be accessible by group or other users"
+
+    ZONES_BENCH_MNEMONIC="$(<"$ZONES_BENCH_MNEMONIC_FILE")"
+    [[ "$ZONES_BENCH_MNEMONIC" =~ [^[:space:]] ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must contain a mnemonic"
+    export ZONES_BENCH_MNEMONIC
+}
+
+load_benchmark_mnemonic
+
+for name in L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
     L1_PORTAL_ADDRESS ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
     ZONES_BENCH_GATEWAY ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_SEED
 do need "$name"; done
@@ -51,6 +78,7 @@ cleanup() {
     [[ -z "$auth_pid" ]] || { kill -TERM "$auth_pid" 2>/dev/null || true; wait "$auth_pid" 2>/dev/null || true; }
     rm -f -- "$secret_dir/mnemonic" "$secret_dir/zone-auth.json"
     rmdir "$secret_dir" 2>/dev/null || true
+    unset ZONES_BENCH_MNEMONIC
     exit "$status"
 }
 trap cleanup EXIT INT TERM
