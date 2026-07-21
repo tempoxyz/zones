@@ -14,9 +14,7 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
-    /// Optional genesis Tempo block number override. When set, used instead of
-    /// the portal's on-chain `genesisTempoBlockNumber` (which may be 0 for
-    /// portals not created via ZoneFactory).
+    /// Optional genesis Tempo block number used to backfill a fresh zone.
     pub genesis_tempo_block_number: Option<u64>,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// confirmed block and clears it on reorgs.
@@ -236,12 +234,9 @@ impl L1Subscriber {
     ///
     /// Uses the zone's local `tempoBlockNumber` as the primary starting point —
     /// this is the authoritative source for where the zone left off. Falls back
-    /// to the CLI genesis override or the portal's `genesisTempoBlockNumber`
-    /// when the zone hasn't processed any blocks yet.
-    pub(crate) async fn resolve_start_block(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<Option<u64>> {
+    /// to the CLI genesis override when the zone hasn't processed any blocks
+    /// yet. Without either checkpoint, live subscription starts at the L1 tip.
+    pub(crate) async fn resolve_start_block(&self) -> eyre::Result<Option<u64>> {
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.
@@ -256,24 +251,20 @@ impl L1Subscriber {
             return Ok(Some(genesis + 1));
         }
 
-        let portal = ZonePortal::new(self.config.portal_address, l1_provider);
-        let on_chain = portal.genesisTempoBlockNumber().call().await?;
-        if on_chain == 0 {
-            warn!(
-                "Portal genesisTempoBlockNumber is 0 — skipping backfill. \
-                 Set --l1.genesis-block-number to backfill from the correct block."
-            );
-            return Ok(None);
-        }
-
-        info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
-        Ok(Some(on_chain + 1))
+        warn!(
+            "No local Tempo checkpoint or genesis block override — skipping backfill. \
+             Set --l1.genesis-block-number to backfill from the correct block."
+        );
+        Ok(None)
     }
 
     /// Backfill deposit events from the starting block to the current L1 tip.
     #[instrument(skip(self, l1_provider))]
-    async fn sync_to_l1_tip(&self, l1_provider: &impl Provider<TempoNetwork>) -> eyre::Result<()> {
-        let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
+    async fn sync_to_l1_tip(
+        &mut self,
+        l1_provider: &impl Provider<TempoNetwork>,
+    ) -> eyre::Result<()> {
+        let Some(mut from) = self.resolve_start_block().await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
         };

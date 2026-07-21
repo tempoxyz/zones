@@ -26,11 +26,10 @@ import {
     PORTAL_SEQUENCER_SLOT,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
-    ZONE_MESSENGER_ADDRESS,
-    ZONE_VERIFIER_ADDRESS,
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
+import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
 import {
     EMPTY_SENTINEL,
@@ -217,6 +216,8 @@ contract ZonePortalProxyStorageTest is Test {
         address messengerB = makeAddr("messenger B");
         address verifierA = makeAddr("verifier A");
         address verifierB = makeAddr("verifier B");
+        address[] memory sequencersA = new address[](1);
+        sequencersA[0] = makeAddr("sequencer A");
         vm.prank(makeAddr("not factory"));
         vm.expectRevert(IZonePortal.NotFactory.selector);
         ZonePortal(proxyA)
@@ -225,30 +226,29 @@ contract ZonePortalProxyStorageTest is Test {
                 initialToken,
                 messengerA,
                 makeAddr("admin A"),
-                makeAddr("sequencer A"),
+                sequencersA,
+                1,
                 verifierA,
-                keccak256("genesis A"),
-                100,
                 ""
             );
 
         vm.startPrank(ZONE_FACTORY_ADDRESS);
-        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
-        _initializePortal(proxyB, initialToken, 2, messengerB, verifierB, 200);
+        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA);
+        _initializePortal(proxyB, initialToken, 2, messengerB, verifierB);
 
         vm.expectRevert(IZonePortal.AlreadyInitialized.selector);
-        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA, 100);
+        _initializePortal(proxyA, initialToken, 1, messengerA, verifierA);
         vm.stopPrank();
 
         assertEq(ZonePortal(proxyA).zoneId(), 1);
         assertEq(ZonePortal(proxyA).messenger(), messengerA);
         assertEq(ZonePortal(proxyA).verifier(), verifierA);
-        assertEq(ZonePortal(proxyA).genesisTempoBlockNumber(), 100);
+        assertEq(ZonePortal(proxyA).blockHash(), bytes32(0));
 
         assertEq(ZonePortal(proxyB).zoneId(), 2);
         assertEq(ZonePortal(proxyB).messenger(), messengerB);
         assertEq(ZonePortal(proxyB).verifier(), verifierB);
-        assertEq(ZonePortal(proxyB).genesisTempoBlockNumber(), 200);
+        assertEq(ZonePortal(proxyB).blockHash(), bytes32(0));
     }
 
     function _initializePortal(
@@ -256,21 +256,21 @@ contract ZonePortalProxyStorageTest is Test {
         address initialToken,
         uint32 id,
         address portalMessenger,
-        address portalVerifier,
-        uint64 genesisBlockNumber
+        address portalVerifier
     )
         internal
     {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr(string.concat("sequencer ", vm.toString(id)));
         ZonePortal(target)
             .initialize(
                 id,
                 initialToken,
                 portalMessenger,
                 makeAddr(string.concat("admin ", vm.toString(id))),
-                makeAddr(string.concat("sequencer ", vm.toString(id))),
+                sequencers,
+                1,
                 portalVerifier,
-                keccak256(abi.encode("genesis", id)),
-                genesisBlockNumber,
                 ""
             );
     }
@@ -279,6 +279,17 @@ contract ZonePortalProxyStorageTest is Test {
 
 /// @notice Tests for ZonePortal - simulating L1/zone interface
 contract ZonePortalTest is BaseTest {
+
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+    );
+
+    uint256 internal constant SIGNER_A_KEY = 2;
+    uint256 internal constant SIGNER_B_KEY = 3;
+    uint256 internal constant SIGNER_C_KEY = 1;
 
     ZoneFactory public zoneFactory;
     ZonePortal public portal;
@@ -313,10 +324,14 @@ contract ZonePortalTest is BaseTest {
         genesisTempoBlockNumber = uint64(block.number);
 
         // Create a zone
+        address[] memory initialSequencers = new address[](1);
+        initialSequencers[0] = sequencer;
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: sequencer,
+            sequencers: initialSequencers,
+            threshold: 1,
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -330,7 +345,7 @@ contract ZonePortalTest is BaseTest {
         portal = ZonePortal(portalAddr);
 
         // Get the shared messenger
-        messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
+        messenger = ZoneMessenger(zoneFactory.messenger());
 
         // Set expected messenger for withdrawal receiver
         withdrawalReceiver.setExpectedMessenger(address(messenger));
@@ -338,6 +353,74 @@ contract ZonePortalTest is BaseTest {
 
     function _senderTag(address sender) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(sender));
+    }
+
+    function _sequencerSet() internal returns (address[] memory signers) {
+        // vm.addr(2) < vm.addr(3) < vm.addr(1); the portal requires canonical address ordering.
+        signers = new address[](3);
+        signers[0] = vm.addr(SIGNER_A_KEY);
+        signers[1] = vm.addr(SIGNER_B_KEY);
+        signers[2] = vm.addr(SIGNER_C_KEY);
+    }
+
+    function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
+        signers = _sequencerSet();
+        vm.prank(admin);
+        portal.setSequencerSet(signers, quorum);
+    }
+
+    function _attestationDigest(
+        uint256 height,
+        uint64 tempoBlockNumber,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
+        BlockTransition memory blockTransition,
+        DepositQueueTransition memory depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes memory verifierConfig
+    )
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 domainSeparator = keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH,
+                keccak256("ZonePortal"),
+                keccak256("1"),
+                block.chainid,
+                address(portal)
+            )
+        );
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SETTLEMENT_ATTESTATION_TYPEHASH,
+                portal.zoneId(),
+                portal.sequencerSetVersion(),
+                height,
+                portal.withdrawalBatchIndex() + 1,
+                portal.verifier(),
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                keccak256(abi.encode(blockTransition)),
+                keccak256(abi.encode(depositQueueTransition)),
+                withdrawalQueueHash,
+                keccak256(verifierConfig)
+            )
+        );
+        return keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
+    }
+
+    function _sign(uint256 privateKey, bytes32 digest) internal returns (bytes memory) {
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(privateKey, digest);
+        return abi.encodePacked(r, s, v);
+    }
+
+    function _quorumSignatures(bytes32 digest) internal returns (bytes[] memory signatures) {
+        signatures = new bytes[](2);
+        signatures[0] = _sign(SIGNER_A_KEY, digest);
+        signatures[1] = _sign(SIGNER_B_KEY, digest);
     }
 
     function _withdrawal(
@@ -359,6 +442,7 @@ contract ZonePortalTest is BaseTest {
             senderTag: _senderTag(sender),
             to: to,
             amount: amount,
+            fee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackNonce: uint64(uint160(fallbackRecipient)),
@@ -376,16 +460,19 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.isTokenEnabled(address(pathUSD)));
         assertEq(portal.sequencer(), sequencer);
         assertEq(portal.admin(), admin);
-        assertEq(portal.verifier(), ZONE_VERIFIER_ADDRESS);
-        assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
+        assertEq(portal.verifier(), zoneFactory.verifier());
+        assertEq(portal.blockHash(), bytes32(0));
         assertEq(portal.withdrawalBatchIndex(), 0);
         assertEq(portal.messenger(), address(messenger));
         assertEq(portal.bouncebackGas(), 0);
         assertEq(portal.calculateBouncebackFee(), 0);
+        assertEq(portal.sequencerSetVersion(), 1);
+        assertEq(portal.sequencerThreshold(), 1);
+        assertTrue(portal.isSequencer(sequencer));
     }
 
     function test_zoneFactoryTracksZones() public view {
-        assertEq(zoneFactory.nextZoneId(), 2);
+        assertEq(zoneFactory.zoneCount(), 1);
         assertTrue(zoneFactory.isZonePortal(address(portal)));
 
         ZoneInfo memory info = zoneFactory.zones(testZoneId);
@@ -393,7 +480,186 @@ contract ZonePortalTest is BaseTest {
         assertEq(info.portal, address(portal));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
-        assertEq(info.sequencer, sequencer);
+        assertEq(info.sequencers.length, 1);
+        assertEq(info.sequencers[0], sequencer);
+        assertEq(info.threshold, 1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         SEQUENCER QUORUM TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_setSequencerSet_configuresVersionedThreshold() public {
+        address[] memory signers = _sequencerSet();
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.SequencerSetUpdated(2, 2, signers);
+        vm.prank(admin);
+        portal.setSequencerSet(signers, 2);
+
+        assertEq(portal.sequencerSetVersion(), 2);
+        assertEq(portal.sequencerThreshold(), 2);
+        assertEq(portal.sequencerCount(), 3);
+        for (uint256 i; i < signers.length; ++i) {
+            assertEq(portal.sequencerAt(i), signers[i]);
+            assertTrue(portal.isSequencer(signers[i]));
+        }
+    }
+
+    function test_setSequencerSet_revertsForNonAdminAndInvalidSets() public {
+        address[] memory signers = _sequencerSet();
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setSequencerSet(signers, 2);
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidSequencerSet.selector);
+        portal.setSequencerSet(signers, 4);
+
+        (signers[0], signers[1]) = (signers[1], signers[0]);
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidSequencerSet.selector);
+        portal.setSequencerSet(signers, 2);
+    }
+
+    function test_setSequencerSet_revertsIfUnchangedAndRotatesMembership() public {
+        address[] memory signers = _activateSequencerSet(2);
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.SequencerConfigurationUnchanged.selector);
+        portal.setSequencerSet(signers, 2);
+
+        address removed = signers[2];
+        address[] memory replacement = new address[](2);
+        replacement[0] = signers[0];
+        replacement[1] = signers[1];
+        vm.prank(admin);
+        portal.setSequencerSet(replacement, 2);
+
+        assertEq(portal.sequencerSetVersion(), 3);
+        assertFalse(portal.isSequencer(removed));
+    }
+
+    function test_allSequencersCanCallConfigurationMethods() public {
+        address[] memory signers = _activateSequencerSet(2);
+
+        for (uint256 i = 0; i < signers.length; ++i) {
+            vm.startPrank(signers[i]);
+            portal.setZoneGasRate(uint128(i + 1));
+            portal.setRpcUrl(string.concat("https://sequencer-", vm.toString(i), ".example"));
+            vm.stopPrank();
+        }
+
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setZoneGasRate(4);
+    }
+
+    function test_submitBatch_requiresQuorumAfterActivation() public {
+        address[] memory signers = _activateSequencerSet(2);
+
+        vm.prank(signers[0]);
+        vm.expectRevert(IZonePortal.LegacyBatchSubmissionDisabled.selector);
+        portal.submitBatch(
+            uint64(block.number),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("tip") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+    }
+
+    function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
+        address[] memory signers = _activateSequencerSet(2);
+        bytes32 nextBlockHash = keccak256("certified-tip");
+        uint256 nextZoneHeight = 10;
+        vm.roll(block.number + 1);
+        uint64 tempoBlockNumber = uint64(block.number - 1);
+        BlockTransition memory blockTransition =
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: nextBlockHash });
+        DepositQueueTransition memory depositQueueTransition = DepositQueueTransition({
+            prevProcessedHash: bytes32(0),
+            nextProcessedHash: bytes32(0),
+            prevDepositNumber: 0,
+            nextDepositNumber: 0
+        });
+        bytes[] memory signatures = _quorumSignatures(
+            _attestationDigest(
+                nextZoneHeight,
+                tempoBlockNumber,
+                tempoBlockNumber,
+                getBlockHash(tempoBlockNumber),
+                blockTransition,
+                depositQueueTransition,
+                bytes32(0),
+                ""
+            )
+        );
+        vm.prank(signers[0]);
+        portal.submitBatch(
+            tempoBlockNumber,
+            0,
+            blockTransition,
+            depositQueueTransition,
+            bytes32(0),
+            "",
+            "",
+            nextZoneHeight,
+            signatures
+        );
+
+        assertEq(portal.blockHash(), nextBlockHash);
+        assertEq(portal.zoneHeight(), nextZoneHeight);
+    }
+
+    function test_submitBatch_rejectsCertificateForDifferentWithdrawalRoot() public {
+        address[] memory signers = _activateSequencerSet(2);
+        vm.roll(block.number + 1);
+
+        uint64 tempoBlockNumber = uint64(block.number - 1);
+        BlockTransition memory blockTransition = BlockTransition({
+            prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("certified-tip")
+        });
+        DepositQueueTransition memory depositQueueTransition = DepositQueueTransition({
+            prevProcessedHash: bytes32(0),
+            nextProcessedHash: bytes32(0),
+            prevDepositNumber: 0,
+            nextDepositNumber: 0
+        });
+        bytes[] memory signatures = _quorumSignatures(
+            _attestationDigest(
+                10,
+                tempoBlockNumber,
+                tempoBlockNumber,
+                getBlockHash(tempoBlockNumber),
+                blockTransition,
+                depositQueueTransition,
+                bytes32(0),
+                ""
+            )
+        );
+
+        vm.prank(signers[0]);
+        vm.expectRevert(IZonePortal.InvalidQuorumCertificate.selector);
+        portal.submitBatch(
+            tempoBlockNumber,
+            0,
+            blockTransition,
+            depositQueueTransition,
+            keccak256("substituted-withdrawal-root"),
+            "",
+            "",
+            10,
+            signatures
+        );
     }
 
     function test_adminCanPauseAndResumeDeposits() public {
@@ -965,7 +1231,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_submitBatch_revertsOnInvalidProof() public {
         vm.mockCall(
-            ZONE_VERIFIER_ADDRESS,
+            zoneFactory.verifier(),
             abi.encodeWithSelector(IVerifier.verify.selector),
             abi.encode(false)
         );
@@ -1488,6 +1754,89 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
     }
 
+    function test_withdrawal_feeTransferFailureForgoesFeeAndAdvancesQueue() public {
+        // Fund portal
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        bytes32 depositHash = portal.currentDepositQueueHash();
+
+        // Create two withdrawals in the same queue slot. The first has a fee that will fail
+        // to transfer; the second proves the queue can still keep moving afterward.
+        Withdrawal memory w1 =
+            _withdrawal(address(pathUSD), alice, bob, 300e6, bytes32(0), 0, alice, "");
+        w1.fee = 25e6;
+        Withdrawal memory w2 =
+            _withdrawal(address(pathUSD), alice, charlie, 400e6, bytes32(0), 0, alice, "");
+
+        // Build queue: w1 is oldest, w2 remains as the inner queue after w1 is processed.
+        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 batchQueueHash = keccak256(abi.encode(w1, innerHash));
+
+        // Submit batch adding both withdrawals to slot 0.
+        vm.roll(block.number + 1);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            batchQueueHash,
+            "",
+            ""
+        );
+
+        uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
+        uint256 sequencerBalanceBefore = pathUSD.balanceOf(sequencer);
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        uint256 charlieBalanceBefore = pathUSD.balanceOf(charlie);
+        uint64 depositCountBefore = portal.depositCount();
+
+        // Blacklist the sequencer as a token recipient while leaving everyone else allowed.
+        // This makes w1's fee transfer revert while leaving the user-facing transfer valid.
+        address[] memory blockedAccounts = new address[](1);
+        blockedAccounts[0] = sequencer;
+        uint64 policyId = registry.createPolicyWithAccounts(
+            sequencer, ITIP403Registry.PolicyType.BLACKLIST, blockedAccounts
+        );
+        vm.prank(pathUSDAdmin);
+        pathUSD.changeTransferPolicyId(policyId);
+
+        assertFalse(registry.isAuthorizedRecipient(policyId, sequencer));
+        assertTrue(registry.isAuthorizedRecipient(policyId, bob));
+        assertTrue(registry.isAuthorizedRecipient(policyId, charlie));
+
+        // Process w1. The fee is forgiven, bob receives the withdrawal amount, and no
+        // bounce-back deposit is created
+        portal.processWithdrawal(w1, innerHash);
+
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + w1.amount);
+        assertEq(pathUSD.balanceOf(sequencer), sequencerBalanceBefore);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore - w1.amount);
+        assertEq(portal.depositCount(), depositCountBefore);
+
+        // Slot 0 should now contain only w2, with the head still on the same slot.
+        assertEq(portal.withdrawalQueueSlot(0), innerHash);
+        assertEq(portal.withdrawalQueueHead(), 0);
+
+        // Process w2 to prove the failed fee transfer did not block later withdrawals.
+        portal.processWithdrawal(w2, bytes32(0));
+
+        assertEq(pathUSD.balanceOf(charlie), charlieBalanceBefore + w2.amount);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore - w1.amount - w2.amount);
+
+        // Slot 0 is exhausted, so it is cleared and the queue head advances.
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueHead(), 1);
+    }
+
     /*//////////////////////////////////////////////////////////////
                      INVALID WITHDRAWAL TESTS
     //////////////////////////////////////////////////////////////*/
@@ -1697,25 +2046,6 @@ contract ZonePortalTest is BaseTest {
     /*//////////////////////////////////////////////////////////////
                       BATCH SUBMISSION VALIDATION
     //////////////////////////////////////////////////////////////*/
-
-    function test_submitBatch_revertsIfTempoBlockNumberBeforeGenesis() public {
-        bytes32 prevBlockHash = portal.blockHash();
-        vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
-        portal.submitBatch(
-            genesisTempoBlockNumber - 1, // Before genesis
-            0,
-            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0),
-                nextProcessedHash: bytes32(0),
-                prevDepositNumber: 0,
-                nextDepositNumber: 0
-            }),
-            bytes32(0),
-            "",
-            ""
-        );
-    }
 
     function test_submitBatch_revertsIfTempoBlockNumberInFuture() public {
         vm.roll(block.number + 10);
@@ -2156,7 +2486,6 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
-
     function test_withdrawal_zeroGasLimit_noCallback() public {
         // Fund portal
         vm.startPrank(alice);
@@ -2489,8 +2818,8 @@ contract ZonePortalTest is BaseTest {
     function test_metadataGetters() public view {
         assertEq(portal.zoneId(), testZoneId);
         assertEq(portal.sequencer(), sequencer);
-        assertEq(portal.verifier(), ZONE_VERIFIER_ADDRESS);
-        assertEq(portal.genesisTempoBlockNumber(), genesisTempoBlockNumber);
+        assertEq(portal.verifier(), zoneFactory.verifier());
+        assertEq(portal.blockHash(), bytes32(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -3069,7 +3398,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 6: deposit counters + bouncebackGas (uint64) [packed]
     ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
     ///        slot 17: zoneId (uint32) + messenger (address) [packed]
-    ///        slot 18: verifier + genesisTempoBlockNumber + _initialized [packed]
+    ///        slot 18: verifier + _initialized [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: sequencer ---
         bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
@@ -3144,15 +3473,10 @@ contract ZonePortalTest is BaseTest {
             "slot 17: messenger mismatch"
         );
 
-        // --- Slot 18: verifier (address) + genesisTempoBlockNumber (uint64) packed ---
+        // --- Slot 18: verifier (address) + _initialized (bool) packed ---
         bytes32 slot18 = vm.load(address(portal), bytes32(uint256(18)));
         assertEq(address(uint160(uint256(slot18))), portal.verifier(), "slot 18: verifier mismatch");
-        assertEq(
-            uint64(uint256(slot18) >> 160),
-            portal.genesisTempoBlockNumber(),
-            "slot 18: genesisTempoBlockNumber mismatch"
-        );
-        assertEq(uint8(uint256(slot18) >> 224), 1, "slot 18: initialized mismatch");
+        assertEq(uint8(uint256(slot18) >> 160), 1, "slot 18: initialized mismatch");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

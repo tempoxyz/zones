@@ -171,9 +171,6 @@ pub struct BatchSubmitter {
     /// ZonePortal contract instance for calling `submitBatch` and reading
     /// on-chain state such as `blockHash()`.
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
-    /// The portal's `genesisTempoBlockNumber` — batches with a
-    /// `tempo_block_number` below this value will be rejected on-chain.
-    genesis_tempo_block_number: u64,
     /// Concurrency for pipelined L1 header fetching in ancestry mode.
     l1_fetch_concurrency: usize,
     /// EIP-2935 history and safety-margin limits used for anchor decisions.
@@ -275,24 +272,14 @@ impl BatchSubmitter {
     /// Create a new batch submitter from a shared L1 provider.
     ///
     /// The provider must already include the sequencer wallet for signing.
-    pub fn new(
-        portal_address: Address,
-        l1_provider: DynProvider<TempoNetwork>,
-        genesis_tempo_block_number: u64,
-    ) -> Self {
-        Self::with_anchor_config(
-            portal_address,
-            l1_provider,
-            genesis_tempo_block_number,
-            BatchAnchorConfig::default(),
-        )
+    pub fn new(portal_address: Address, l1_provider: DynProvider<TempoNetwork>) -> Self {
+        Self::with_anchor_config(portal_address, l1_provider, BatchAnchorConfig::default())
     }
 
     /// Create a new batch submitter with custom EIP-2935 anchor limits.
     pub fn with_anchor_config(
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
-        genesis_tempo_block_number: u64,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
@@ -300,7 +287,6 @@ impl BatchSubmitter {
             portal_address,
             l1_provider,
             portal,
-            genesis_tempo_block_number,
             l1_fetch_concurrency: 16,
             anchor_config,
             ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
@@ -332,14 +318,6 @@ impl BatchSubmitter {
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
     ))]
     pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
-        if batch.tempo_block_number < self.genesis_tempo_block_number {
-            return Err(eyre::eyre!(
-                "tempo_block_number ({}) is below genesis ({})",
-                batch.tempo_block_number,
-                self.genesis_tempo_block_number
-            ));
-        }
-
         if !batch.withdrawal_queue_hash.is_zero() {
             self.check_withdrawal_queue_capacity().await?;
         }
@@ -595,11 +573,6 @@ impl BatchSubmitter {
         Ok(headers)
     }
 
-    /// Read the portal's `genesisTempoBlockNumber` from L1.
-    pub async fn read_genesis_tempo_block_number(&self) -> Result<u64> {
-        Ok(self.portal.genesisTempoBlockNumber().call().await?)
-    }
-
     /// Read the current `blockHash` from the ZonePortal on L1.
     ///
     /// Used to resync the monitor's `prev_block_hash` after repeated submission
@@ -794,8 +767,8 @@ impl BatchSubmitter {
         let mut found = BTreeMap::new();
         let mut hi = self.l1_provider.get_block_number().await?;
 
-        while hi >= self.genesis_tempo_block_number && found.len() < needed {
-            let lo = backward_log_query_start(hi, self.genesis_tempo_block_number);
+        while found.len() < needed {
+            let lo = backward_log_query_start(hi, 0);
 
             let events = self
                 .portal
@@ -815,7 +788,7 @@ impl BatchSubmitter {
                 }
             }
 
-            if lo == self.genesis_tempo_block_number {
+            if lo == 0 {
                 break;
             }
             hi = lo - 1;
@@ -1442,7 +1415,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
         *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
@@ -1664,7 +1637,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
             .connect_mocked_client(Asserter::new())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider, 0);
+        let submitter = BatchSubmitter::new(portal_address, provider);
 
         let event = abi::ZonePortal::BatchSubmitted {
             withdrawalBatchIndex: 7,
@@ -1709,7 +1682,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider, 0);
+        let submitter = BatchSubmitter::new(portal_address, provider);
 
         asserter.push_success(&10_000_u64);
         let logs: Vec<_> = [99_u64, 100, 101]

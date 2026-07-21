@@ -52,16 +52,17 @@ contract ZonePortalGasLimitTest is Test {
     function setUp() public {
         token = new MockPortalToken();
         portal = new ZonePortal();
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = address(this);
         vm.prank(ZONE_FACTORY_ADDRESS);
         portal.initialize(
             1,
             address(token),
             address(0x400),
             admin,
-            address(this),
+            sequencers,
+            1,
             address(0),
-            keccak256("genesis"),
-            uint64(block.number),
             ""
         );
     }

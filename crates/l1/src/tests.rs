@@ -504,17 +504,8 @@ async fn test_resolve_start_block_reads_live_local_state_each_time() {
         ]))),
         None,
     );
-    let l1_provider =
-        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(Asserter::new());
-
-    assert_eq!(
-        subscriber.resolve_start_block(&l1_provider).await.unwrap(),
-        Some(11)
-    );
-    assert_eq!(
-        subscriber.resolve_start_block(&l1_provider).await.unwrap(),
-        Some(12)
-    );
+    assert_eq!(subscriber.resolve_start_block().await.unwrap(), Some(11));
+    assert_eq!(subscriber.resolve_start_block().await.unwrap(), Some(12));
 }
 
 #[tokio::test]
@@ -523,13 +514,17 @@ async fn test_resolve_start_block_falls_back_to_genesis_override_when_local_stat
         Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
         Some(42),
     );
-    let l1_provider =
-        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(Asserter::new());
+    assert_eq!(subscriber.resolve_start_block().await.unwrap(), Some(43));
+}
 
-    assert_eq!(
-        subscriber.resolve_start_block(&l1_provider).await.unwrap(),
-        Some(43)
+#[tokio::test]
+async fn test_resolve_start_block_skips_backfill_without_checkpoint() {
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
+        None,
     );
+
+    assert_eq!(subscriber.resolve_start_block().await.unwrap(), None);
 }
 
 #[test]

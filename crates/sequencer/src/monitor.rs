@@ -185,17 +185,9 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let genesis_tempo_block_number: u64 =
-            ZonePortal::new(config.portal_address, l1_provider.clone())
-                .genesisTempoBlockNumber()
-                .call()
-                .await
-                .wrap_err("failed to read genesisTempoBlockNumber during zone monitor startup")?;
-
         let batch_submitter = BatchSubmitter::with_anchor_config(
             config.portal_address,
             l1_provider,
-            genesis_tempo_block_number,
             config.batch_anchor_config,
         );
 
@@ -1010,7 +1002,7 @@ mod tests {
             inbox: ZoneInbox::new(Address::repeat_byte(0x33), zone_provider.clone()),
             tempo_state: TempoState::new(Address::repeat_byte(0x44), zone_provider),
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, 0),
+            batch_submitter: BatchSubmitter::new(portal_address, l1_provider),
             withdrawal_notify: Arc::new(Notify::new()),
             repair_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
@@ -1056,7 +1048,7 @@ mod tests {
 
         assert!(
             err.to_string()
-                .contains("failed to read genesisTempoBlockNumber during zone monitor startup")
+                .contains("failed to read portal block hash during zone monitor startup")
         );
         assert!(l1.read_q().is_empty());
         assert!(zone.read_q().is_empty());

@@ -714,21 +714,17 @@ impl ZoneTestNode {
         .await
     }
 
-    /// Start a zone node connected to a real L1, anchoring genesis to the
-    /// portal's on-chain `genesisTempoBlockNumber`.
+    /// Start a zone node connected to a real L1 at an explicit genesis block.
     ///
     /// Unlike [`start_from_l1`], this preserves the full replay gap between the
     /// portal genesis and the current L1 tip, which is useful for long-downtime
     /// catch-up tests.
-    pub(crate) async fn start_from_l1_portal_genesis(
+    pub(crate) async fn start_from_l1_genesis_block(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
         portal_address: Address,
+        genesis_block_number: u64,
     ) -> eyre::Result<Self> {
-        let l1_provider =
-            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
-        let portal = tempo_zone_contracts::ZonePortal::new(portal_address, &l1_provider);
-        let genesis_block_number = portal.genesisTempoBlockNumber().call().await?;
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis_at_block(l1_http_url, portal_address, genesis_block_number)
                 .await?;

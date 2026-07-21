@@ -182,7 +182,6 @@ crate::sol! {
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
         function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
-        function genesisTempoBlockNumber() external view returns (uint64);
         function calculateDepositFee() external view returns (uint128 fee);
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);

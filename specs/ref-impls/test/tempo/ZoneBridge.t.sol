@@ -23,11 +23,8 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
     Withdrawal,
-    ZONE_FACTORY_ADDRESS,
     ZONE_INBOX,
-    ZONE_MESSENGER_ADDRESS,
     ZONE_OUTBOX,
-    ZONE_VERIFIER_ADDRESS,
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
@@ -174,20 +171,21 @@ contract ZoneBridgeTest is BaseTest {
 
         // Deploy portal directly (bypass factory to avoid TIP20 prefix check), but use a
         // mock factory registry so the shared messenger can authenticate the source portal.
-        vm.etch(ZONE_FACTORY_ADDRESS, type(MockZoneFactoryForBridgeMessenger).runtimeCode);
-        MockZoneFactoryForBridgeMessenger messengerFactory =
-            MockZoneFactoryForBridgeMessenger(ZONE_FACTORY_ADDRESS);
+        MockZoneFactoryForBridgeMessenger messengerFactory = new MockZoneFactoryForBridgeMessenger();
+        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
         l1Portal = new ZonePortal();
+        address verifier = l1Factory.verifier();
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
         vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
-            ZONE_MESSENGER_ADDRESS,
+            address(messengerContract),
             admin, // admin
-            sequencer, // sequencer
-            ZONE_VERIFIER_ADDRESS,
-            GENESIS_BLOCK_HASH,
-            genesisTempoBlockNumber,
+            sequencers,
+            1,
+            verifier,
             ""
         );
         zoneId = 1;
@@ -245,6 +243,7 @@ contract ZoneBridgeTest is BaseTest {
             senderTag: _senderTag(sender, txSequence),
             to: to,
             amount: amount,
+            fee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackNonce: uint64(txSequence),
@@ -1163,6 +1162,7 @@ contract ZoneBridgeTest is BaseTest {
             senderTag: keccak256(abi.encodePacked(address(0), bytes32(0))),
             to: alice,
             amount: netAmount,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackNonce: 0,

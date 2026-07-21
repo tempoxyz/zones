@@ -72,8 +72,8 @@ use crate::{
         EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
         PORTAL_SEQUENCER_SLOT,
         ZonePortal::{
-            self, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
-            SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+            DepositMade, EncryptedDepositMade, SequencerTransferStarted, SequencerTransferred,
+            TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
         },
     },
     state::cache::L1StateCacheInner,

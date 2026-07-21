@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {
-    IZoneFactory,
-    ZONE_MESSENGER_ADDRESS,
-    ZONE_VERIFIER_ADDRESS,
-    ZoneInfo
-} from "../interfaces/IZone.sol";
+import { IZoneFactory, ZoneInfo } from "../interfaces/IZone.sol";
+import { Verifier } from "./Verifier.sol";
+import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { ZonePortal } from "./ZonePortal.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
@@ -25,11 +22,28 @@ contract ZoneFactory is IZoneFactory {
 
     /// @notice Next zone ID to be assigned
     /// @dev Starts at 1, reserving zone ID 0 for potential future use (e.g., mainnet as zone 0)
-    uint32 public nextZoneId = 1;
+    uint32 internal _nextZoneId = 1;
 
     mapping(uint32 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
+    mapping(address => bool) internal _validVerifiers;
+    address internal _verifier;
+    address internal _messenger;
     address public owner;
+
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
+    constructor() {
+        owner = msg.sender;
+        emit OwnershipTransferred(address(0), msg.sender);
+
+        address v = address(new Verifier());
+        _validVerifiers[v] = true;
+        _verifier = v;
+        _messenger = address(new ZoneMessenger(address(this)));
+    }
 
     /*//////////////////////////////////////////////////////////////
                             ZONE CREATION
@@ -46,12 +60,12 @@ contract ZoneFactory is IZoneFactory {
             revert InvalidToken();
         }
         if (params.admin == address(0)) revert InvalidAdmin();
-        if (params.sequencer == address(0)) revert InvalidSequencer();
+        if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
         if (gasleft() < ZONE_CREATION_GAS) revert InsufficientGas();
 
-        zoneId = nextZoneId;
+        zoneId = _nextZoneId;
         if (zoneId == type(uint32).max) revert ZoneIdOverflow();
-        nextZoneId = zoneId + 1;
+        _nextZoneId = zoneId + 1;
 
         // Deploy and atomically initialize the portal. TIP-1091 fixes this factory's address as
         // the portal's only initializer authority.
@@ -59,12 +73,11 @@ contract ZoneFactory is IZoneFactory {
         portalContract.initialize(
             zoneId,
             params.initialToken,
-            ZONE_MESSENGER_ADDRESS,
+            _messenger,
             params.admin,
-            params.sequencer,
-            ZONE_VERIFIER_ADDRESS,
-            params.zoneParams.genesisBlockHash,
-            params.zoneParams.genesisTempoBlockNumber,
+            params.sequencers,
+            params.threshold,
+            params.verifier,
             params.rpcUrl
         );
         portal = address(portalContract);
@@ -75,7 +88,9 @@ contract ZoneFactory is IZoneFactory {
             portal: portal,
             initialToken: params.initialToken,
             admin: params.admin,
-            sequencer: params.sequencer,
+            sequencers: params.sequencers,
+            threshold: params.threshold,
+            verifier: params.verifier,
             genesisBlockHash: params.zoneParams.genesisBlockHash,
             genesisTempoBlockHash: params.zoneParams.genesisTempoBlockHash,
             genesisTempoBlockNumber: params.zoneParams.genesisTempoBlockNumber,
@@ -89,8 +104,9 @@ contract ZoneFactory is IZoneFactory {
             portal,
             params.initialToken,
             params.admin,
-            params.sequencer,
-            ZONE_VERIFIER_ADDRESS,
+            params.sequencers,
+            params.threshold,
+            params.verifier,
             params.zoneParams.genesisBlockHash,
             params.zoneParams.genesisTempoBlockHash,
             params.zoneParams.genesisTempoBlockNumber
@@ -111,12 +127,29 @@ contract ZoneFactory is IZoneFactory {
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Returns the number of zones created (not including reserved zone 0)
+    function zoneCount() external view returns (uint32) {
+        return _nextZoneId - 1;
+    }
+
     function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
         return _zones[zoneId];
     }
 
     function isZonePortal(address portal) external view returns (bool) {
         return _isZonePortal[portal];
+    }
+
+    function isValidVerifier(address v) external view returns (bool) {
+        return _validVerifiers[v];
+    }
+
+    function verifier() external view returns (address) {
+        return _verifier;
+    }
+
+    function messenger() external view returns (address) {
+        return _messenger;
     }
 
 }

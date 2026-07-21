@@ -34,11 +34,15 @@ contract ZoneConfigTest is BaseTest {
 
         zoneFactory = _deployZoneFactory();
         genesisTempoBlockNumber = uint64(block.number);
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
 
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: sequencer,
+            sequencers: sequencers,
+            threshold: 1,
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
