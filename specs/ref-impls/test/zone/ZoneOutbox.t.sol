@@ -587,12 +587,13 @@ contract ZoneOutboxTest is Test {
         zoneToken.approve(address(outbox), 3000e6);
 
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
         assertEq(_pendingWithdrawalsCount(), 1);
 
+        vm.startPrank(alice);
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
-        assertEq(_pendingWithdrawalsCount(), 2);
-
         vm.stopPrank();
+        assertEq(_pendingWithdrawalsCount(), 2);
 
         // Finalize clears them
         _finalizeWithdrawalBatch(type(uint256).max);
