@@ -15,7 +15,7 @@ use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
+    AddOnsContext, ConsensusEngineHandle, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
     PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_builder::{
@@ -545,7 +545,7 @@ where
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
-        engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+        engine: ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
         let role = config.role();
         let handle = spawn_p2p(config, network_id)?;
@@ -566,7 +566,7 @@ where
         }
         task_executor.spawn_critical_task(
             "zone-p2p-block-sync",
-            run_block_sync(provider, engine, events, commands),
+            run_block_sync(role, provider, engine, events, commands),
         );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(

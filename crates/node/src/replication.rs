@@ -14,7 +14,7 @@ use std::{collections::BTreeMap, time::Duration};
 use tempo_primitives::{Block, TempoHeader};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
-use zone_p2p::{P2pCommand, P2pEvent};
+use zone_p2p::{P2pCommand, P2pEvent, Role};
 use zone_payload::ZonePayloadTypes;
 
 #[derive(Debug, Clone, Copy)]
@@ -331,8 +331,84 @@ async fn serve_backfill_requests<P>(
     }
 }
 
-/// Serve catch-up requests and import live/backfilled blocks in canonical order.
+/// Run role-appropriate block replication.
+///
+/// Leaders are deliberately serve-only: [`ZoneEngine`](crate::ZoneEngine) is their sole
+/// chain-head writer. Leader recovery is deferred to a future startup recovery phase, before the
+/// zone engine starts. Followers serve catch-up requests and import live/backfilled blocks in
+/// canonical order.
 pub(crate) async fn run_block_sync<P>(
+    role: Role,
+    provider: P,
+    engine: ConsensusEngineHandle<ZonePayloadTypes>,
+    events: mpsc::Receiver<P2pEvent>,
+    commands: mpsc::Sender<P2pCommand>,
+) where
+    P: BlockNumReader
+        + BlockReader<Block = Block>
+        + HeaderProvider<Header = TempoHeader>
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    match role {
+        Role::Leader => run_leader_backfill_server(provider, events, commands).await,
+        Role::Follower => run_follower_block_sync(provider, engine, events, commands).await,
+    }
+}
+
+/// Serve follower backfill requests without ever requesting or importing peer blocks.
+async fn run_leader_backfill_server<P>(
+    provider: P,
+    mut events: mpsc::Receiver<P2pEvent>,
+    commands: mpsc::Sender<P2pCommand>,
+) where
+    P: BlockNumReader + BlockReader<Block = Block> + Clone + Send + Sync + 'static,
+{
+    let (backfill_requests, backfill_request_rx) = mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
+    let mut backfill_server = BackfillServerTask(tokio::spawn(serve_backfill_requests(
+        provider,
+        commands,
+        backfill_request_rx,
+    )));
+
+    loop {
+        tokio::select! {
+            event = events.recv() => {
+                let Some(event) = event else {
+                    debug!(target: "zone::p2p", "P2P event channel closed");
+                    return;
+                };
+                match event {
+                    P2pEvent::Started { .. } => {}
+                    P2pEvent::BackfillRequested { peer, request_id, start } => {
+                        if let Err(err) = backfill_requests.try_send(BackfillRequest { peer, request_id, start }) {
+                            tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
+                        }
+                    }
+                    P2pEvent::BlockReceived { .. }
+                    | P2pEvent::BackfillBlockReceived { .. }
+                    | P2pEvent::BackfillCompleted { .. } => {
+                        // A leader never follows peer chain heads. Keeping this explicit ensures
+                        // ZoneEngine remains the sole writer of the leader's canonical head.
+                        debug!(target: "zone::p2p", "Ignoring peer block sync event on serve-only leader");
+                    }
+                }
+            }
+            result = &mut backfill_server.0 => {
+                match result {
+                    Ok(()) => tracing::error!(target: "zone::p2p", "Block backfill server stopped unexpectedly"),
+                    Err(err) => tracing::error!(target: "zone::p2p", %err, "Block backfill server task failed"),
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Serve catch-up requests and import live/backfilled blocks in canonical order on a follower.
+async fn run_follower_block_sync<P>(
     provider: P,
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     mut events: mpsc::Receiver<P2pEvent>,
@@ -495,7 +571,7 @@ pub(crate) async fn run_block_sync<P>(
 
 async fn drain_pending_blocks<P>(
     provider: &P,
-    engine: &reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+    engine: &ConsensusEngineHandle<ZonePayloadTypes>,
     pending: &mut BTreeMap<u64, Vec<u8>>,
 ) -> eyre::Result<()>
 where
@@ -517,7 +593,7 @@ where
 
 async fn import_peer_block<P>(
     provider: &P,
-    engine: &reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+    engine: &ConsensusEngineHandle<ZonePayloadTypes>,
     encoded: &[u8],
 ) -> eyre::Result<()>
 where
