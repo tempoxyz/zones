@@ -117,6 +117,16 @@ contract ZoneOutboxTest is Test {
         encryptedSenders = new bytes[](count);
     }
 
+    function _pendingWithdrawalsCount() internal returns (uint256 count) {
+        vm.prank(sequencer);
+        count = outbox.pendingWithdrawalsCount();
+    }
+
+    function _getPendingWithdrawals() internal returns (PendingWithdrawal[] memory pending) {
+        vm.prank(sequencer);
+        pending = outbox.getPendingWithdrawals();
+    }
+
     function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
         return _finalizeWithdrawalBatchAs(sequencer, count);
     }
@@ -155,7 +165,7 @@ contract ZoneOutboxTest is Test {
 
     function _finalizeWithdrawalBatchAs(address caller, uint256 count) internal returns (bytes32) {
         if (count == type(uint256).max) {
-            count = outbox.pendingWithdrawalsCount();
+            count = _pendingWithdrawalsCount();
         }
         vm.startPrank(caller);
         bytes32 hash = outbox.finalizeWithdrawalBatch(
@@ -175,14 +185,14 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 500e6, bytes32("memo"), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
 
         vm.startPrank(bob);
         zoneToken.approve(address(outbox), 300e6);
         outbox.requestWithdrawal(address(zoneToken), bob, 300e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 2);
+        assertEq(_pendingWithdrawalsCount(), 2);
     }
 
     function test_requestWithdrawal_assignsMonotonicFallbackNonces() public {
@@ -192,7 +202,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), bob, 100e6, bytes32(0), 0, charlie, "");
         vm.stopPrank();
 
-        PendingWithdrawal[] memory pending = outbox.getPendingWithdrawals();
+        PendingWithdrawal[] memory pending = _getPendingWithdrawals();
         assertEq(pending[0].fallbackNonce, 1);
         assertEq(pending[1].fallbackNonce, 2);
         assertEq(outbox.lastFallbackNonce(), 2);
@@ -224,7 +234,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), bob, 300e6, bytes32("second"), 0, alice, "");
         vm.stopPrank();
 
-        PendingWithdrawal[] memory pending = outbox.getPendingWithdrawals();
+        PendingWithdrawal[] memory pending = _getPendingWithdrawals();
         assertEq(pending.length, 2);
         assertEq(pending[0].sender, alice);
         assertEq(pending[0].txHash, txContext.txHashFor(1));
@@ -236,6 +246,22 @@ contract ZoneOutboxTest is Test {
         assertEq(pending[1].to, bob);
         assertEq(pending[1].amount, 300e6);
         assertEq(pending[1].memo, bytes32("second"));
+    }
+
+    function test_pendingWithdrawalGetters_revertUnlessSequencerOrSystem() public {
+        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.prank(alice);
+        outbox.pendingWithdrawalsCount();
+
+        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        vm.prank(alice);
+        outbox.getPendingWithdrawals();
+
+        vm.prank(address(0));
+        assertEq(outbox.pendingWithdrawalsCount(), 0);
+
+        vm.prank(address(0));
+        assertEq(outbox.getPendingWithdrawals().length, 0);
     }
 
     function test_requestWithdrawal_revertsWhenTokenNotEnabled() public {
@@ -250,7 +276,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(disabledToken), bob, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
         assertEq(disabledToken.balanceOf(alice), 1000e6);
     }
 
@@ -264,7 +290,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -285,14 +311,14 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
 
         bytes[] memory encryptedSenders = new bytes[](0);
 
         vm.prank(sequencer);
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
         outbox.finalizeWithdrawalBatch(0, uint64(block.number), encryptedSenders);
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
     }
 
     function test_finalizeWithdrawalBatch_singleWithdrawal_correctHash() public {
@@ -346,12 +372,12 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 300e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 2);
+        assertEq(_pendingWithdrawalsCount(), 2);
 
         // Batch all
         _finalizeWithdrawalBatch(type(uint256).max);
 
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
     }
 
     function test_finalizeWithdrawalBatch_partialBatch_reverts() public {
@@ -363,13 +389,13 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 500e6, bytes32("w3"), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 3);
+        assertEq(_pendingWithdrawalsCount(), 3);
 
         bytes[] memory encryptedSenders = new bytes[](2);
         vm.prank(sequencer);
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 2, 3));
         outbox.finalizeWithdrawalBatch(2, uint64(block.number), encryptedSenders);
-        assertEq(outbox.pendingWithdrawalsCount(), 3);
+        assertEq(_pendingWithdrawalsCount(), 3);
     }
 
     function test_finalizeWithdrawalBatch_exactCountProcessesAllInFifoOrder() public {
@@ -382,7 +408,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 400e6, bytes32("w4"), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 4);
+        assertEq(_pendingWithdrawalsCount(), 4);
 
         bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
 
@@ -396,7 +422,7 @@ contract ZoneOutboxTest is Test {
         bytes32 expectedHash = keccak256(abi.encode(w1, hash2));
 
         assertEq(hash, expectedHash);
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
     }
 
     function test_finalizeWithdrawalBatch_emitsEvent() public {
@@ -555,22 +581,22 @@ contract ZoneOutboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_pendingWithdrawalsCount_tracksCorrectly() public {
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
 
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 3000e6);
 
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
 
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
-        assertEq(outbox.pendingWithdrawalsCount(), 2);
+        assertEq(_pendingWithdrawalsCount(), 2);
 
         vm.stopPrank();
 
         // Finalize clears them
         _finalizeWithdrawalBatch(type(uint256).max);
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -642,7 +668,7 @@ contract ZoneOutboxTest is Test {
         vm.prank(sequencer);
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 5, 4));
         outbox.finalizeWithdrawalBatch(5, uint64(block.number), senders);
-        assertEq(outbox.pendingWithdrawalsCount(), 4);
+        assertEq(_pendingWithdrawalsCount(), 4);
     }
 
     function test_requestWithdrawal_transfersFromSender() public {
@@ -697,7 +723,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
     }
 
     function test_requestWithdrawal_callbackNeedsFallback_reverts() public {
@@ -720,7 +746,7 @@ contract ZoneOutboxTest is Test {
         );
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
     }
 
     function test_requestWithdrawal_revertsWhenGasLimitTooHigh() public {
@@ -898,13 +924,13 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 500e6, bytes32("w5"), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 5);
+        assertEq(_pendingWithdrawalsCount(), 5);
 
         bytes[] memory encryptedSenders = new bytes[](2);
         vm.prank(sequencer);
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 2, 5));
         outbox.finalizeWithdrawalBatch(2, uint64(block.number), encryptedSenders);
-        assertEq(outbox.pendingWithdrawalsCount(), 5);
+        assertEq(_pendingWithdrawalsCount(), 5);
     }
 
     function test_finalizeWithdrawalBatch_countLargerThanPending_reverts() public {
@@ -919,7 +945,7 @@ contract ZoneOutboxTest is Test {
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 1000, 2));
         outbox.finalizeWithdrawalBatch(1000, uint64(block.number), encryptedSenders);
 
-        assertEq(outbox.pendingWithdrawalsCount(), 2);
+        assertEq(_pendingWithdrawalsCount(), 2);
     }
 
     function test_finalizeWithdrawalBatch_consecutiveBatches() public {
@@ -984,7 +1010,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
 
         // Should still produce valid hash
         Withdrawal memory w = _withdrawal(1, alice, bob, 0, bytes32(0), 0, alice, "");
@@ -1049,12 +1075,12 @@ contract ZoneOutboxTest is Test {
         }
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), numWithdrawals);
+        assertEq(_pendingWithdrawalsCount(), numWithdrawals);
 
         bytes32 hash = _finalizeWithdrawalBatch(type(uint256).max);
 
         assertTrue(hash != bytes32(0));
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1084,7 +1110,7 @@ contract ZoneOutboxTest is Test {
             outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         }
         vm.stopPrank();
-        assertEq(outbox.pendingWithdrawalsCount(), 10);
+        assertEq(_pendingWithdrawalsCount(), 10);
     }
 
     function test_maxWithdrawalsPerBlock_enforcesLimit() public {
@@ -1125,7 +1151,7 @@ contract ZoneOutboxTest is Test {
         outbox.requestWithdrawal(address(zoneToken), alice, 10e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(outbox.pendingWithdrawalsCount(), 4);
+        assertEq(_pendingWithdrawalsCount(), 4);
     }
 
     function test_maxWithdrawalsPerBlock_canBeUpdated() public {
@@ -1188,7 +1214,7 @@ contract ZoneOutboxTest is Test {
         vm.prank(sequencer);
         vm.expectRevert(abi.encodeWithSelector(ZoneOutbox.InvalidWithdrawalCount.selector, 0, 1));
         outbox.finalizeWithdrawalBatch(0, uint64(block.number), encryptedSenders);
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
         assertEq(outbox.lastBatch().withdrawalBatchIndex, 0);
     }
 
@@ -1230,7 +1256,7 @@ contract ZoneOutboxTest is Test {
         }
 
         assertEq(_finalizeWithdrawalBatch(count), expectedHash);
-        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(_pendingWithdrawalsCount(), 0);
     }
 
 }
