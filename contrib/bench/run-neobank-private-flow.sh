@@ -82,7 +82,7 @@ auth_pid=""
 cleanup() {
     local status=$?
     [[ -z "$auth_pid" ]] || { kill -TERM "$auth_pid" 2>/dev/null || true; wait "$auth_pid" 2>/dev/null || true; }
-    rm -f -- "$secret_dir/mnemonic" "$secret_dir/zone-auth.json"
+    rm -f -- "$secret_dir/mnemonic" "$secret_dir/zone-auth.json" "$secret_dir/auth-token-map.log"
     rmdir "$secret_dir" 2>/dev/null || true
     unset ZONES_BENCH_MNEMONIC
     exit "$status"
@@ -214,7 +214,7 @@ export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 stage_start auth_token_map
 "$txgen_bin" auth-token-map --spec "$ZONES_BENCH_OUTPUT/zone-flow.yml" --pool users --zone-id "$zone_id" \
     --chain-id "$zone_chain_id" --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
-    --watch --output "$secret_dir/zone-auth.json" >"$ZONES_BENCH_OUTPUT/auth-token-map.log" 2>&1 &
+    --watch --output "$secret_dir/zone-auth.json" >"$secret_dir/auth-token-map.log" 2>&1 &
 auth_pid=$!
 for _ in $(seq 1 60); do [[ -f "$secret_dir/zone-auth.json" ]] && break; sleep 1; done
 [[ -f "$secret_dir/zone-auth.json" ]] || die "timed out creating private Zone auth map"

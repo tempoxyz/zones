@@ -164,6 +164,7 @@ mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_REPORT")"
 
 auth_pid=""
 auth_map=""
+auth_log=""
 secret_dir=""
 cleanup() {
     local status=$?
@@ -179,7 +180,7 @@ cleanup() {
         shopt -s nullglob
         auth_temp_files=("$secret_dir"/.zone-auth.json.txgen-*.tmp)
         shopt -u nullglob
-        rm -f -- "$auth_map" "${auth_temp_files[@]}"
+        rm -f -- "$auth_map" "$auth_log" "${auth_temp_files[@]}"
         rmdir -- "$secret_dir" 2>/dev/null || true
     fi
     unset ZONES_BENCH_MNEMONIC
@@ -215,6 +216,7 @@ start_zone_auth_map() {
     secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-benchmark-auth.XXXXXX")"
     chmod 700 "$secret_dir"
     auth_map="$secret_dir/zone-auth.json"
+    auth_log="$secret_dir/auth-token-map.log"
     "$txgen_bin" auth-token-map \
         --spec "$spec" \
         --pool users \
@@ -223,7 +225,7 @@ start_zone_auth_map() {
         --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" \
         --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
         --watch \
-        --output "$auth_map" >"$ZONES_BENCH_OUTPUT/auth-token-map.log" 2>&1 &
+        --output "$auth_map" >"$auth_log" 2>&1 &
     auth_pid=$!
 
     auth_deadline=$((SECONDS + 60))

@@ -169,7 +169,7 @@ cleanup() {
         shopt -s nullglob
         auth_temp_files=("$secret_dir"/.zone-auth.json.txgen-*.tmp)
         shopt -u nullglob
-        rm -f -- "$secret_dir/zone-auth.json" "${auth_temp_files[@]}"
+        rm -f -- "$secret_dir/zone-auth.json" "$secret_dir/auth-token-map.log" "${auth_temp_files[@]}"
         rmdir -- "$secret_dir" 2>/dev/null || true
     fi
     unset ZONES_BENCH_MNEMONIC
@@ -656,7 +656,7 @@ auth_map="$secret_dir/zone-auth.json"
     --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" \
     --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
     --watch \
-    --output "$auth_map" >"$ZONES_BENCH_OUTPUT/auth-token-map.log" 2>&1 &
+    --output "$auth_map" >"$secret_dir/auth-token-map.log" 2>&1 &
 auth_pid=$!
 
 auth_deadline=$((SECONDS + 60))
