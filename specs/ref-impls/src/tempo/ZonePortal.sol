@@ -175,10 +175,12 @@ contract ZonePortal is IZonePortal {
 
         for (uint256 i; i < _zoneGateways.length; ++i) {
             role[_zoneGateways[i]] = Role.CallbackGateway;
+            emit RoleUpdated(_zoneGateways[i], Role.None, Role.CallbackGateway);
         }
 
         for (uint256 i; i < _allowedAccounts.length; ++i) {
             role[_allowedAccounts[i]] = Role.Account;
+            emit RoleUpdated(_allowedAccounts[i], Role.None, Role.Account);
         }
 
         // Enable the initial token. The admin may enable additional TIP-20s later.
