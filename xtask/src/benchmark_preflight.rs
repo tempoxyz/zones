@@ -34,7 +34,10 @@ const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/bench/
 const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const AUTH_TOKEN_TTL_SECS: u64 = 300;
-const EXPIRING_NONCE_VALID_FOR_SECS: u64 = 25;
+// Setup approvals are generated before their parallel send phase. They need a
+// wider window than streaming workload transactions, especially after the L1
+// advances time while accepting a full account pool.
+const APPROVAL_SETUP_VALID_FOR_SECS: u64 = 30;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -1607,7 +1610,7 @@ fn approval_step(
     }
     if options.expiring_nonce {
         transaction["expiring_nonce"] = serde_json::json!(true);
-        transaction["valid_for_secs"] = serde_json::json!(EXPIRING_NONCE_VALID_FOR_SECS);
+        transaction["valid_for_secs"] = serde_json::json!(APPROVAL_SETUP_VALID_FOR_SECS);
     }
     serde_yaml::to_value(serde_json::json!({
         "id": format!(
@@ -1952,7 +1955,7 @@ mod tests {
         assert_eq!(deposit["setup"]["steps"][0]["tx"]["expiring_nonce"], true);
         assert_eq!(
             deposit["setup"]["steps"][0]["tx"]["valid_for_secs"],
-            EXPIRING_NONCE_VALID_FOR_SECS
+            APPROVAL_SETUP_VALID_FOR_SECS
         );
         assert_eq!(
             deposit["templates"]["deposit"]["call"]["function"],
@@ -2012,7 +2015,7 @@ mod tests {
         assert_eq!(sponsored_approval["expiring_nonce"], true);
         assert_eq!(
             sponsored_approval["valid_for_secs"],
-            EXPIRING_NONCE_VALID_FOR_SECS
+            APPROVAL_SETUP_VALID_FOR_SECS
         );
         assert_eq!(sponsored_approval["call"]["function"], "approve");
         assert_eq!(

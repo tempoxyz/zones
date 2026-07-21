@@ -56,12 +56,14 @@ trap cleanup EXIT INT TERM
 
 preflight_phase() {
     local phase="$1" fixture="$2"
-    "${preflight[@]}" --l1-rpc-url "$L1_RPC_URL" --zone-rpc-url "$ZONE_RPC_URL" \
+    local -a command=("${preflight[@]}" --l1-rpc-url "$L1_RPC_URL" --zone-rpc-url "$ZONE_RPC_URL" \
         --token "$ZONES_BENCH_DLUSD" --account-start "$ZONES_BENCH_ACCOUNT_START" \
         --accounts "$ZONES_BENCH_ACCOUNTS" --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
         --activity-amount "$ZONES_BENCH_ACTIVITY_AMOUNT" --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
         --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" --transactions-per-account 1 \
-        --check-phase "$phase" --fixture-state "$fixture" --output "$ZONES_BENCH_OUTPUT"
+        --check-phase "$phase" --output "$ZONES_BENCH_OUTPUT")
+    [[ -z "$fixture" ]] || command+=(--fixture-state "$fixture")
+    "${command[@]}"
 }
 
 # The bootstrap gives the sequencer DLUSD for sponsored, untimed Zone approvals.
@@ -69,6 +71,9 @@ preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
     --max-in-flight 1 --max-rpc-in-flight 4 --failure-policy fail-fast --seed "$ZONES_BENCH_SEED" \
     --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
+# Re-render expiring approval setup after bootstrap rather than letting the
+# bootstrap's block-time advance consume its nonce-validity window.
+preflight_phase bootstrap ""
 
 # The generic preflight renders one portal approval per user. It is outside timing.
 "$txgen_bin" generate --spec "$ZONES_BENCH_OUTPUT/deposit.yml" --count 0 --seed "$ZONES_BENCH_SEED" \
