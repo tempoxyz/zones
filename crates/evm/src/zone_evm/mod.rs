@@ -4,7 +4,7 @@ pub(crate) mod contract_creation;
 
 use crate::{
     TempoCtx,
-    database::{AnchoredZoneDb, ZoneDbError},
+    database::{L1OverlayDB, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
 use alloy_primitives::{Address, Bytes};
@@ -28,23 +28,23 @@ type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 /// exact database supplied by the caller. All completed results are validated and sanitized before
 /// their state transitions can be committed through that public database.
 pub struct ZoneEvm<DB: Database, I, L1: L1StorageReader = L1StateProvider> {
-    inner: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
+    inner: TempoEvm<L1OverlayDB<DB, L1>, I>,
 }
 
 impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
     /// Creates a new `ZoneEvm` with guarded `CREATE` and `CREATE2` opcodes.
-    pub(super) fn new(mut evm: TempoEvm<AnchoredZoneDb<DB, L1>, I>) -> Self {
+    pub(super) fn new(mut evm: TempoEvm<L1OverlayDB<DB, L1>, I>) -> Self {
         contract_creation::configure_runtime(&mut evm);
         Self { inner: evm }
     }
 
     /// Provides a reference to the EVM context.
-    pub fn ctx(&self) -> &TempoCtx<AnchoredZoneDb<DB, L1>> {
+    pub fn ctx(&self) -> &TempoCtx<L1OverlayDB<DB, L1>> {
         self.inner.ctx()
     }
 
     /// Provides a mutable reference to the EVM context.
-    pub fn ctx_mut(&mut self) -> &mut TempoCtx<AnchoredZoneDb<DB, L1>> {
+    pub fn ctx_mut(&mut self) -> &mut TempoCtx<L1OverlayDB<DB, L1>> {
         self.inner.ctx_mut()
     }
 
@@ -62,12 +62,12 @@ impl<DB, I, L1> ZoneEvm<DB, I, L1>
 where
     DB: Database,
     L1: L1StorageReader,
-    I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>,
+    I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
 {
     fn execute_inner(
         &mut self,
         execute: impl FnOnce(
-            &mut TempoEvm<AnchoredZoneDb<DB, L1>, I>,
+            &mut TempoEvm<L1OverlayDB<DB, L1>, I>,
         ) -> Result<TempoResult, AdaptedEvmError<DB::Error>>,
     ) -> Result<TempoResult, ZoneEvmError<DB::Error>> {
         let result = match execute(&mut self.inner) {
@@ -90,7 +90,7 @@ impl<DB, I, L1> Evm for ZoneEvm<DB, I, L1>
 where
     DB: Database,
     L1: L1StorageReader,
-    I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>,
+    I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
 {
     type DB = DB;
     type Tx = TempoTxEnv;
@@ -178,7 +178,7 @@ mod tests {
     use zone_precompiles::test_utils::MockL1Reader;
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
-        let db = AnchoredZoneDb::new(EmptyDB::default(), MockL1Reader::default());
+        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default());
         ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
     }
 

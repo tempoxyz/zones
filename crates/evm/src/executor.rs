@@ -22,7 +22,7 @@ use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 
-use crate::{AnchoredZoneDb, ZoneEvm, tx_context};
+use crate::{L1OverlayDB, ZoneEvm, tx_context};
 
 /// Simplified block executor for zone nodes.
 ///
@@ -35,7 +35,7 @@ pub struct ZoneBlockExecutor<'a, DB: Database, I> {
 impl<'a, DB, I> ZoneBlockExecutor<'a, DB, I>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<AnchoredZoneDb<DB, L1StateProvider>>>,
+    I: Inspector<TempoContext<L1OverlayDB<DB, L1StateProvider>>>,
 {
     /// Create a zone block executor for `evm` and the current block context.
     pub fn new(
@@ -84,7 +84,7 @@ where
 impl<'a, DB, I> BlockExecutor for ZoneBlockExecutor<'a, DB, I>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<AnchoredZoneDb<DB, L1StateProvider>>>,
+    I: Inspector<TempoContext<L1OverlayDB<DB, L1StateProvider>>>,
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
