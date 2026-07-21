@@ -37,7 +37,10 @@ const AUTH_TOKEN_TTL_SECS: u64 = 300;
 // Setup approvals are generated before their parallel send phase. They need a
 // wider window than streaming workload transactions, especially after the L1
 // advances time while accepting a full account pool.
-const APPROVAL_SETUP_VALID_FOR_SECS: u64 = 30;
+// `txgen` uses the latest L1 timestamp while the node evaluates the first
+// submitted transaction against its next block timestamp.  Leave a one-second
+// margin below the protocol's 30-second future bound.
+const APPROVAL_SETUP_VALID_FOR_SECS: u64 = 29;
 
 alloy::sol! {
     #[sol(rpc)]
