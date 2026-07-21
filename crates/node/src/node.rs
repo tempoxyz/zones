@@ -508,7 +508,6 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
-        let l1_state_provider = ctx.node.evm_config().l1_state_provider().clone();
         let handle = self.inner.launch_add_ons(ctx).await?;
 
         Self::launch_private_rpc(
@@ -518,7 +517,6 @@ where
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
             chain_id,
-            l1_state_provider,
         )
         .await?;
 
@@ -754,7 +752,6 @@ where
         retry_connection_interval: Duration,
         portal_address: Address,
         chain_id: u64,
-        l1_state_provider: L1StateProvider,
     ) -> eyre::Result<()> {
         if config.zone_id != 0 {
             let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
@@ -784,9 +781,8 @@ where
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
         };
-        let api: Arc<dyn ZoneRpcApi> = Arc::new(
-            ZoneRpc::new(eth_handlers, private_rpc_config.clone(), l1_state_provider).await?,
-        );
+        let api: Arc<dyn ZoneRpcApi> =
+            Arc::new(ZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
         let local_addr = start_private_rpc(private_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 

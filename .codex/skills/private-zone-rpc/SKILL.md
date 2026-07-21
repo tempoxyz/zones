@@ -63,7 +63,7 @@ The helper prints the JSON-RPC body on success and keeps the token out of logs.
 ## Reading The Active Encryption Key
 
 Any authenticated caller can read the active sequencer encryption key at the
-Zone's processed Tempo head:
+current Tempo L1 head:
 
 ```bash
 cast rpc zone_getEncryptionKey \
@@ -74,12 +74,8 @@ cast rpc zone_getEncryptionKey \
 The result contains JSON-RPC quantities for `keyIndex` and
 `tempoBlockNumber`, the canonical `portalAddress`, and a compressed secp256k1
 `publicKey` with `x` and a numeric `prefix` of `2` or `3`. The block number is
-the exact processed Tempo block used for the key lookup, so the result never
-claims a rotation newer than the Zone's observed L1 state.
-
-An authenticated request returns JSON-RPC error `-32007` when no encryption
-key can be resolved at that processed head. Missing or invalid authentication
-is rejected before method dispatch as described below.
+the Tempo L1 block used for the key lookup. The endpoint reads L1 directly so
+new keys are available before the Zone processes the corresponding block.
 
 ## Finding Zone ID And Chain ID
 

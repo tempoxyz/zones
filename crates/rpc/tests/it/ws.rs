@@ -229,17 +229,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
     }
 
     fn zone_get_encryption_key(&self, _auth: zone_rpc::auth::AuthContext) -> BoxFut<'_> {
-        Box::pin(async move {
-            zone_rpc::types::to_raw(&serde_json::json!({
-                "keyIndex": "0x0",
-                "portalAddress": format!("{:#x}", Address::repeat_byte(0x33)),
-                "publicKey": {
-                    "x": format!("{:#x}", alloy_primitives::B256::repeat_byte(0x44)),
-                    "prefix": 2,
-                },
-                "tempoBlockNumber": "0x2a",
-            }))
-        })
+        Box::pin(async { Err(zone_rpc::types::JsonRpcError::internal("not implemented")) })
     }
 
     fn zone_get_deposit_status(

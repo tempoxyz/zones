@@ -49,7 +49,6 @@ use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{
     DepositType, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
 };
-use zone_l1::state::L1StateProvider;
 use zone_rpc::{
     auth::AuthContext,
     types::{
@@ -141,7 +140,6 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::PrivateRpcConfig,
     l1_provider: DynProvider<TempoNetwork>,
-    l1_state_provider: L1StateProvider,
     zone_provider: DynProvider<TempoNetwork>,
     tempo_state: tempo_zone_contracts::TempoState::TempoStateInstance<
         DynProvider<TempoNetwork>,
@@ -157,16 +155,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     pub async fn new(
         eth: EthHandlers<Api>,
         config: zone_rpc::PrivateRpcConfig,
-        l1_state_provider: L1StateProvider,
     ) -> eyre::Result<Self> {
-        if config.zone_portal != l1_state_provider.portal_address() {
-            eyre::bail!(
-                "private RPC portal {} does not match Zone EVM portal {}",
-                config.zone_portal,
-                l1_state_provider.portal_address(),
-            );
-        }
-
         let l1_rpc_url = config.l1_rpc_url.clone();
         let zone_rpc_url = config.zone_rpc_url.clone();
         let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -191,7 +180,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             eth,
             config,
             l1_provider,
-            l1_state_provider,
             zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
@@ -331,51 +319,27 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
-    async fn encryption_key_at_processed_head(
-        &self,
-    ) -> Result<EncryptionKeyResponse, JsonRpcError> {
-        let zone_head = self
-            .zone_provider
+    async fn latest_encryption_key(&self) -> Result<EncryptionKeyResponse, JsonRpcError> {
+        let tempo_block_number = self
+            .l1_provider
             .get_block_number()
             .await
             .map_err(internal)?;
-        let zone_block = BlockId::number(zone_head);
-        let tempo_block_number_call = self.tempo_state.tempoBlockNumber().block(zone_block);
-        let tempo_block_hash_call = self.tempo_state.tempoBlockHash().block(zone_block);
-        let (tempo_block_number, tempo_block_hash) =
-            tokio::try_join!(tempo_block_number_call.call(), tempo_block_hash_call.call(),)
-                .map_err(internal)?;
-        let portal_address = self.l1_state_provider.portal_address();
-
-        let (key, key_index) = self
-            .l1_state_provider
-            .encryption_key_at(BlockId::hash(tempo_block_hash))
+        let portal_address = self.config.zone_portal;
+        let key = ZonePortal::new(portal_address, &self.l1_provider)
+            .encryptionKeyAtBlock(tempo_block_number)
+            .block(BlockId::number(tempo_block_number))
+            .call()
             .await
-            .map_err(|err| {
-                tracing::warn!(
-                    target: "zone::rpc",
-                    %err,
-                    %portal_address,
-                    tempo_block_number,
-                    "Failed to resolve encryption key at processed Tempo head"
-                );
-                JsonRpcError::encryption_key_unavailable(tempo_block_number)
-            })?;
-
-        let prefix = key
-            .normalized_y_parity()
-            .ok_or_else(|| JsonRpcError::encryption_key_unavailable(tempo_block_number))?;
-        let mut compressed_key = [0u8; 33];
-        compressed_key[0] = prefix;
-        compressed_key[1..].copy_from_slice(key.x.as_slice());
-        if k256::PublicKey::from_sec1_bytes(&compressed_key).is_err() {
-            return Err(JsonRpcError::encryption_key_unavailable(tempo_block_number));
-        }
+            .map_err(internal)?;
 
         Ok(EncryptionKeyResponse {
-            key_index,
+            key_index: key.keyIndex,
             portal_address,
-            public_key: EncryptionPublicKey { x: key.x, prefix },
+            public_key: EncryptionPublicKey {
+                x: key.x,
+                prefix: key.yParity,
+            },
             tempo_block_number: U64::from(tempo_block_number),
         })
     }
@@ -972,7 +936,7 @@ where
     }
 
     fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&self.encryption_key_at_processed_head().await?) })
+        Box::pin(async move { to_raw(&self.latest_encryption_key().await?) })
     }
 
     fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_> {

@@ -959,11 +959,11 @@ The zone exposes four methods under the `zone_` namespace:
 |--------|--------|-------------|
 | `zone_getAuthorizationTokenInfo` | Any authenticated | Returns the authenticated account address and token expiry |
 | `zone_getZoneInfo` | Any authenticated | Returns `zoneId`, `zoneTokens`, `sequencer`, `chainId` |
-| `zone_getEncryptionKey` | Any authenticated | Returns the active sequencer encryption key at the Zone's processed Tempo head |
+| `zone_getEncryptionKey` | Any authenticated | Returns the active sequencer encryption key at the current Tempo L1 head |
 | `zone_getDepositStatus(tempoBlockNumber)` | Scoped | Returns deposit processing status for the given Tempo block, filtered to deposits where the caller is the sender or recipient |
 
-`zone_getEncryptionKey` resolves both the portal key count and active key against the exact Tempo
-block number and hash stored in the Zone's `TempoState`. Its response is:
+`zone_getEncryptionKey` reads the active key directly from the portal at the current Tempo L1 head.
+Its response is:
 
 ```ts
 {
@@ -977,10 +977,9 @@ block number and hash stored in the Zone's `TempoState`. Its response is:
 }
 ```
 
-The key index and block number use JSON-RPC quantity encoding. `portalAddress` is the canonical L1
-portal configured in the Zone EVM. Key rotation becomes visible only after the Zone processes the
-corresponding Tempo block. The method returns the newest key at that processed head even while an
-older key remains accepted by the portal during `ENCRYPTION_KEY_GRACE_PERIOD`.
+The key index and block number use JSON-RPC quantity encoding. `portalAddress` is the configured L1
+portal. Key rotation is visible immediately on L1 and does not wait for the Zone to process the
+corresponding Tempo block.
 
 There are no state-changing methods via authorization token. Withdrawals require a signed transaction submitted via `eth_sendRawTransaction`.
 
@@ -994,7 +993,6 @@ There are no state-changing methods via authorization token. Withdrawals require
 | `-32004` | Account mismatch | `from` mismatch on `eth_call` / `eth_estimateGas` |
 | `-32005` | Sequencer only | Method requires sequencer access |
 | `-32006` | Method disabled | Method not available on zones |
-| `-32007` | Encryption key unavailable | No valid encryption key can be resolved at the Zone's processed Tempo head |
 
 Methods where the user explicitly supplies a mismatched parameter return explicit errors (the user already knows the address they provided). Methods that query about other accounts return silent dummy values (`0x0`, `null`, empty results) to avoid revealing "data exists but you can't see it."
 

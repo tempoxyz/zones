@@ -899,14 +899,13 @@ impl ZoneTestNode {
         // Build the real private RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
-        let l1_state_provider = node_handle.node.evm_config.l1_state_provider().clone();
         let rpc_api_factory = Arc::new(move |config: zone_node::rpc::PrivateRpcConfig| {
             let eth_handlers = eth_handlers.clone();
-            let l1_state_provider = l1_state_provider.clone();
             Box::pin(async move {
-                Ok(Arc::new(
-                    zone_node::rpc::ZoneRpc::new(eth_handlers, config, l1_state_provider).await?,
-                ) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
+                Ok(
+                    Arc::new(zone_node::rpc::ZoneRpc::new(eth_handlers, config).await?)
+                        as Arc<dyn zone_node::rpc::ZoneRpcApi>,
+                )
             })
                 as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>
         });
@@ -1537,7 +1536,7 @@ impl L1TestNode {
         &self,
         portal_address: Address,
         encryption_key: &k256::SecretKey,
-    ) -> eyre::Result<u64> {
+    ) -> eyre::Result<()> {
         self.set_sequencer_encryption_key_with_signer(
             portal_address,
             encryption_key,
@@ -1552,7 +1551,7 @@ impl L1TestNode {
         portal_address: Address,
         encryption_key: &k256::SecretKey,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
-    ) -> eyre::Result<u64> {
+    ) -> eyre::Result<()> {
         use alloy_signer::SignerSync;
         use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
         use tempo_zone_contracts::ZonePortal;
@@ -1589,9 +1588,7 @@ impl L1TestNode {
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "setSequencerEncryptionKey failed");
-        receipt
-            .block_number
-            .ok_or_else(|| eyre::eyre!("setSequencerEncryptionKey receipt missing block number"))
+        Ok(())
     }
 
     /// Build a valid encrypted deposit payload for the current portal key.
@@ -3454,13 +3451,6 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
 
 /// Start a zone with a private RPC server backed by a real L1 + ZonePortal.
 pub(crate) async fn start_zone_with_private_rpc_l1() -> eyre::Result<PrivateRpcL1TestCtx> {
-    start_zone_with_private_rpc_l1_with_encryption().await
-}
-
-/// Start a zone with a private RPC server backed by a real L1 and a portal
-/// without a registered encryption key.
-pub(crate) async fn start_zone_with_private_rpc_l1_without_encryption()
--> eyre::Result<PrivateRpcL1TestCtx> {
     start_zone_with_private_rpc_l1_inner().await
 }
 
@@ -3468,16 +3458,7 @@ pub(crate) async fn start_zone_with_private_rpc_l1_without_encryption()
 /// with a registered encryption key.
 pub(crate) async fn start_zone_with_private_rpc_l1_with_encryption()
 -> eyre::Result<PrivateRpcL1TestCtx> {
-    let ctx = start_zone_with_private_rpc_l1_inner().await?;
-    let key = k256::SecretKey::from(ctx.l1().dev_signer().credential());
-    let key_block = ctx
-        .l1()
-        .set_sequencer_encryption_key(ctx.portal_address(), &key)
-        .await?;
-    ctx.zone
-        .wait_for_tempo_block_number(key_block, DEFAULT_TIMEOUT)
-        .await?;
-    Ok(ctx)
+    start_zone_with_private_rpc_l1_inner().await
 }
 
 async fn start_zone_with_private_rpc_l1_inner() -> eyre::Result<PrivateRpcL1TestCtx> {
@@ -3487,6 +3468,10 @@ async fn start_zone_with_private_rpc_l1_inner() -> eyre::Result<PrivateRpcL1Test
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
 
     zone.wait_for_l2_tempo_finalized(0, DEFAULT_TIMEOUT).await?;
+
+    let key = k256::SecretKey::from(l1.dev_signer().credential());
+    l1.set_sequencer_encryption_key(portal_address, &key)
+        .await?;
 
     let chain_id = zone_chain_id(&zone).await?;
 
