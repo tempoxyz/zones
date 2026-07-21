@@ -157,7 +157,10 @@ preflight_phase bootstrap ""
 cp -R contrib/bench/neobank "$ZONES_BENCH_OUTPUT/neobank"
 mkdir -p "$ZONES_BENCH_OUTPUT/txgen"
 cp -R contrib/bench/txgen/abis "$ZONES_BENCH_OUTPUT/txgen/abis"
-cp -R contrib/bench/neobank/abis "$ZONES_BENCH_OUTPUT/abis"
+# Preflight already renders its portal artifacts into this directory. Copy the
+# fixture artifacts into that existing directory rather than nesting them at
+# abis/abis/, which would leave ZoneGateway unresolved by the scenario loader.
+cp contrib/bench/neobank/abis/*.json "$ZONES_BENCH_OUTPUT/abis/"
 zone_id="$(jq -er '.zoneId' "$ZONES_BENCH_OUTPUT/preflight.json")"
 l1_chain_id="$(cast chain-id --rpc-url "$L1_RPC_URL")"
 zone_chain_id="$(cast chain-id --rpc-url "$ZONE_RPC_URL")"
