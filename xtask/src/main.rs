@@ -3,8 +3,9 @@ use crate::{
     benchmark_preflight::BenchmarkPreflight, benchmark_results::BenchmarkResults,
     configure_benchmark_fees::ConfigureBenchmarkFees, create_zone::CreateZone,
     demo_blacklist::DemoBlacklist, demo_swap_and_deposit::DemoSwapAndDeposit,
-    deploy_router::DeployRouter, encrypted_deposit::EncryptedDeposit,
-    generate_p2p_key::GenerateP2pKey, generate_zone_genesis::GenerateZoneGenesis,
+    deploy_neobank_fixtures::DeployNeobankFixtures, deploy_router::DeployRouter,
+    encrypted_deposit::EncryptedDeposit, generate_p2p_key::GenerateP2pKey,
+    generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory,
     set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
 };
@@ -17,6 +18,7 @@ mod configure_benchmark_fees;
 mod create_zone;
 mod demo_blacklist;
 mod demo_swap_and_deposit;
+mod deploy_neobank_fixtures;
 mod deploy_router;
 mod encrypted_deposit;
 mod generate_p2p_key;
@@ -49,6 +51,10 @@ async fn main() -> eyre::Result<()> {
             .run()
             .await
             .wrap_err("failed to run swap-and-deposit demo"),
+        Action::DeployNeobankFixtures(args) => args
+            .run()
+            .await
+            .wrap_err("failed to deploy private-Zone benchmark fixtures"),
         Action::DeployRouter(args) => args.run().await.wrap_err("failed to deploy router"),
         Action::EncryptedDeposit(args) => args
             .run()
@@ -85,6 +91,7 @@ enum Action {
     CreateZone(CreateZone),
     DemoBlacklist(DemoBlacklist),
     DemoSwapAndDeposit(DemoSwapAndDeposit),
+    DeployNeobankFixtures(DeployNeobankFixtures),
     DeployRouter(DeployRouter),
     EncryptedDeposit(EncryptedDeposit),
     GenerateP2pKey(GenerateP2pKey),

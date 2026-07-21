@@ -10,7 +10,7 @@ interface IFixtureToken {
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function mint(address to, uint256 amount) external;
-    function burn(address from, uint256 amount) external;
+    function burn(uint256 amount) external;
 }
 
 interface IFixturePortal {
@@ -48,60 +48,6 @@ interface IFixtureVaultAdapter {
     function redeem(uint256 shares, address receiver, uint256 minAssets) external returns (uint256 assets);
 }
 
-contract BenchmarkToken {
-    string public name;
-    string public symbol;
-    uint8 public immutable decimals;
-    uint256 public totalSupply;
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    event Transfer(address indexed from, address indexed to, uint256 amount);
-    event Approval(address indexed owner, address indexed spender, uint256 amount);
-
-    constructor(string memory name_, string memory symbol_, uint8 decimals_) {
-        name = name_;
-        symbol = symbol_;
-        decimals = decimals_;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        emit Approval(msg.sender, spender, amount);
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        _transfer(msg.sender, to, amount);
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        uint256 approved = allowance[from][msg.sender];
-        if (approved != type(uint256).max) allowance[from][msg.sender] = approved - amount;
-        _transfer(from, to, amount);
-        return true;
-    }
-
-    function mint(address to, uint256 amount) external {
-        totalSupply += amount;
-        balanceOf[to] += amount;
-        emit Transfer(address(0), to, amount);
-    }
-
-    function burn(address from, uint256 amount) external {
-        balanceOf[from] -= amount;
-        totalSupply -= amount;
-        emit Transfer(from, address(0), amount);
-    }
-
-    function _transfer(address from, address to, uint256 amount) private {
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        emit Transfer(from, to, amount);
-    }
-}
-
 /// @notice 1:1 reserve-backed swap fixture using the canonical swap signature.
 contract DirectSwapFixture is IFixtureStableSwap {
     function swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, address receiver, uint256 minAmountOut)
@@ -136,7 +82,7 @@ contract VaultAdapterFixture is IFixtureVaultAdapter {
         assets = shares;
         require(assets >= minAssets, "minimum assets");
         require(IFixtureToken(shareToken).transferFrom(msg.sender, address(this), shares), "share transfer");
-        IFixtureToken(shareToken).burn(address(this), shares);
+        IFixtureToken(shareToken).burn(shares);
         require(IFixtureToken(asset).transfer(receiver, assets), "asset transfer");
     }
 }

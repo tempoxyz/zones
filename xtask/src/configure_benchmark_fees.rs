@@ -1,4 +1,4 @@
-//! Configures non-zero bridge fee rates for a production-shaped benchmark deployment.
+//! Configures bridge fee rates for a benchmark deployment.
 //!
 //! A freshly created portal and outbox default their rates to zero. Deposit and bounce-back rates
 //! can be initialized immediately on Tempo L1. The outbox rate is optional because the sequencer
@@ -55,19 +55,7 @@ pub(crate) struct ConfigureBenchmarkFees {
 
 impl ConfigureBenchmarkFees {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        ensure!(
-            self.zone_gas_rate > 0,
-            "--zone-gas-rate must be greater than zero for a benchmark deployment"
-        );
-        ensure!(
-            self.bounceback_gas > 0,
-            "--bounceback-gas must be greater than zero for a benchmark deployment"
-        );
-        if let Some(tempo_gas_rate) = self.tempo_gas_rate {
-            ensure!(
-                tempo_gas_rate > 0,
-                "--tempo-gas-rate must be greater than zero for a benchmark deployment"
-            );
+        if self.tempo_gas_rate.is_some() {
             ensure!(
                 self.zone_tx_gas_limit > 0,
                 "--zone-tx-gas-limit must be greater than zero"

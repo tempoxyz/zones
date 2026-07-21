@@ -24,9 +24,11 @@ narrow, 1:1 test fixtures. They are not a production vault or gateway stack.
 ## Topology and policy
 
 Provision the existing two-validator L1 plus authenticated private Zone RPC.
-The neobank profile must deploy separate DLUSD, pathUSD, and EarnToken fixture
-addresses before the Zone is created; DLUSD is its initial token and EarnToken
-is enabled after deployment. pathUSD remains L1-only vault collateral.
+The local Tempo genesis supplies three distinct native TIP-20 addresses: DLUSD,
+pathUSD, and EarnToken. The neobank profile makes DLUSD the initial Zone token,
+enables EarnToken on the portal before the Zone starts, grants the vault fixture
+the EarnToken issuer role, and keeps pathUSD as L1-only vault collateral. It
+does not replace those assets with ordinary ERC-20 test contracts.
 
 The profile has zero user bridge and withdrawal protocol fees. It retains a
 separate generic profile with nonzero bootstrap fees. The token authorization
@@ -57,11 +59,21 @@ the scenario report or an artifact.
 
 ## Current blocking capability
 
-The pinned transaction generator now supports the required in-memory encrypted
-deposit preparation and named-tuple ABI encoding. The remaining work before
-enabling the one-command invocation is topology provisioning: deploy the
-fixtures, enable the two Zone tokens, apply the closed-loop policy, and render
-the runtime addresses. Once that is in place, the command is:
+The pinned transaction generator supports the required in-memory encrypted
+deposit preparation and named-tuple ABI encoding. The topology provisioner now
+has a `neobank` profile which deploys and seeds the L1 fixtures outside the
+measured interval, enables EarnToken, grants the narrow issuer role, sets the
+bridge rates to zero, waits for Zone token ingestion, and writes only
+non-secret runtime metadata:
+
+```bash
+ZONES_BENCH_PROFILE=neobank contrib/bench/provision-topology.sh up
+```
+
+The remaining work before enabling the one-command invocation is the dedicated
+runner that renders the profile assets, prepares account approvals and auth in
+the private temporary directory, invokes the scenario, and publishes results.
+That runner will be:
 
 ```bash
 contrib/bench/run-neobank-private-flow.sh

@@ -25,6 +25,8 @@ readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly ZONES_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 readonly ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
 readonly PATH_USD="0x20C0000000000000000000000000000000000000"
+readonly DLUSD="0x20C0000000000000000000000000000000000001"
+readonly EARN_TOKEN="0x20C0000000000000000000000000000000000002"
 readonly TEMPO_STATE="0x1c00000000000000000000000000000000000000"
 readonly ZONE_CONFIG="0x1c00000000000000000000000000000000000003"
 readonly EIP2935_HISTORY_STORAGE="0x0000F90827F1C53a10cb7A02335B175320002935"
@@ -251,7 +253,8 @@ wait_for_zone_configuration() {
     local zone_rpc="$1"
     local anchor_block="$2"
     local expected_sequencer="$3"
-    local timeout="$4"
+    local initial_token="$4"
+    local timeout="$5"
     local deadline=$((SECONDS + timeout)) finalized is_sequencer enabled
 
     while (( SECONDS < deadline )); do
@@ -259,7 +262,7 @@ wait_for_zone_configuration() {
             --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
         is_sequencer="$(cast call "$ZONE_CONFIG" 'isSequencer(address)(bool)' "$expected_sequencer" \
             --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        enabled="$(cast call "$ZONE_CONFIG" 'isEnabledToken(address)(bool)' "$PATH_USD" \
+        enabled="$(cast call "$ZONE_CONFIG" 'isEnabledToken(address)(bool)' "$initial_token" \
             --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
 
         if [[ "$finalized" =~ ^[0-9]+$ ]] \
@@ -274,7 +277,21 @@ wait_for_zone_configuration() {
     die "timed out waiting for the Zone to ingest its portal configuration past L1 anchor \
 $anchor_block (finalized=${finalized:-unavailable}, \
 expected_sequencer=${expected_sequencer}, is_sequencer=${is_sequencer:-unavailable}, \
-token=${PATH_USD}, enabled=${enabled:-unavailable})"
+token=${initial_token}, enabled=${enabled:-unavailable})"
+}
+
+wait_for_zone_enabled_token() {
+    local zone_rpc="$1"
+    local token="$2"
+    local timeout="$3"
+    local deadline=$((SECONDS + timeout)) enabled
+    while (( SECONDS < deadline )); do
+        enabled="$(cast call "$ZONE_CONFIG" 'isEnabledToken(address)(bool)' "$token" \
+            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
+        [[ "$enabled" == "true" ]] && return 0
+        sleep 1
+    done
+    die "timed out waiting for Zone to enable token $token"
 }
 
 write_env() {
@@ -317,11 +334,16 @@ provision_up() {
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
     local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
-    local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-0}"
+    local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-1024}"
     local bloat_balance="${ZONES_BENCH_BLOAT_BALANCE:-18446744073709551615}"
     local rpc_timeout="${ZONES_BENCH_RPC_TIMEOUT_SECS:-300}"
     local zone_timeout="${ZONES_BENCH_ZONE_TIMEOUT_SECS:-300}"
     local run_key="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}"
+    local profile="${ZONES_BENCH_PROFILE:-generic}"
+    case "$profile" in
+        generic|neobank) ;;
+        *) die "ZONES_BENCH_PROFILE must be generic or neobank" ;;
+    esac
 
     ZONES_BENCH_ACCOUNT_START="$account_start"
     ZONES_BENCH_ACCOUNTS="$accounts"
@@ -403,8 +425,9 @@ provision_up() {
     trap 'exit 130' INT TERM
 
     local mnemonic_file="$ZONES_BENCH_MNEMONIC_FILE"
-    local owner_key sequencer_key owner_address admin_address sequencer_address
+    local owner_key sequencer_key admin_key owner_address admin_address sequencer_address
     owner_key="$(derive_key "$mnemonic_file" 0)"
+    admin_key="$(derive_key "$mnemonic_file" 3)"
     sequencer_key="$(derive_key "$mnemonic_file" 4)"
     owner_address="$(derive_address "$mnemonic_file" 0)"
     admin_address="$(derive_address "$mnemonic_file" 3)"
@@ -501,12 +524,17 @@ provision_up() {
     [[ "$(rpc "$l1_a_rpc" eth_getCode "[\"$ZONE_FACTORY\",\"latest\"]")" != "0x" ]] \
         || die "canonical ZoneFactory has no code on Tempo L1"
 
+    local zone_token="$PATH_USD"
+    if [[ "$profile" == "neobank" ]]; then
+        zone_token="$DLUSD"
+    fi
+
     echo "creating a Zone through the canonical factory"
     ZONE_FACTORY_OWNER_KEY="$owner_key" "$ZONES_XTASK_BIN" create-zone \
         --output "$zone_dir" \
         --l1-rpc-url "$l1_a_rpc" \
         --zone-factory "$ZONE_FACTORY" \
-        --initial-token "$PATH_USD" \
+        --initial-token "$zone_token" \
         --admin "$admin_address" \
         --sequencer "$sequencer_address"
 
@@ -526,11 +554,33 @@ provision_up() {
     L1_RPC_URL="$l1_a_rpc" L1_PORTAL_ADDRESS="$portal" PRIVATE_KEY="$sequencer_key" \
         "$ZONES_XTASK_BIN" set-encryption-key
 
-    echo "configuring non-zero deposit and bounce-back fee rates"
-    SEQUENCER_KEY="$sequencer_key" "$ZONES_XTASK_BIN" configure-benchmark-fees \
-        --l1-rpc-url "$l1_a_rpc" \
-        --portal "$portal" \
-        --token "$PATH_USD"
+    local fixture_metadata=""
+    if [[ "$profile" == "neobank" ]]; then
+        fixture_metadata="$control_root/neobank-fixtures.json"
+        echo "deploying and configuring private-Zone benchmark fixtures"
+        FIXTURE_DEPLOYER_KEY="$owner_key" PORTAL_ADMIN_KEY="$admin_key" \
+            "$ZONES_XTASK_BIN" deploy-neobank-fixtures \
+                --l1-rpc-url "$l1_a_rpc" \
+                --portal "$portal" \
+                --dlusd "$DLUSD" \
+                --pathusd "$PATH_USD" \
+                --earn-token "$EARN_TOKEN" \
+                --output "$fixture_metadata"
+        require_file "$fixture_metadata"
+        echo "configuring zero user bridge and withdrawal protocol fees"
+        SEQUENCER_KEY="$sequencer_key" "$ZONES_XTASK_BIN" configure-benchmark-fees \
+            --l1-rpc-url "$l1_a_rpc" \
+            --portal "$portal" \
+            --token "$DLUSD" \
+            --zone-gas-rate 0 \
+            --bounceback-gas 0
+    else
+        echo "configuring non-zero deposit and bounce-back fee rates"
+        SEQUENCER_KEY="$sequencer_key" "$ZONES_XTASK_BIN" configure-benchmark-fees \
+            --l1-rpc-url "$l1_a_rpc" \
+            --portal "$portal" \
+            --token "$PATH_USD"
+    fi
 
     export SEQUENCER_KEY="$sequencer_key"
     start_process zone "$ZONE_BIN" "${ZONES_BENCH_ZONE_CPUS:-8-13,24-29}" "$log_dir/zone.log" \
@@ -547,20 +597,23 @@ provision_up() {
         --log.file.directory "$log_dir/zone" \
         --ipcdisable \
         --sequencer
-    unset SEQUENCER_KEY sequencer_key owner_key
+    unset SEQUENCER_KEY sequencer_key owner_key admin_key
 
     local zone_rpc="http://127.0.0.1:8546"
     local zone_private_rpc="http://127.0.0.1:8544"
     wait_for_rpc "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
-    wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_timeout"
+    wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_token" "$zone_timeout"
+    if [[ "$profile" == "neobank" ]]; then
+        wait_for_zone_enabled_token "$zone_rpc" "$EARN_TOKEN" "$zone_timeout"
+    fi
     local queried_zone_chain_id
     queried_zone_chain_id="$(hex_to_dec "$(rpc "$zone_rpc" eth_chainId)")"
     [[ "$queried_zone_chain_id" == "$zone_chain_id" ]] \
         || die "Zone RPC chain ID $queried_zone_chain_id does not match zone.json chain ID $zone_chain_id"
 
     local target_id="local-consensus-${genesis_a#0x}-zone-$zone_id"
-    write_env "$env_file" \
+    local -a env_pairs=(
         L1_RPC_URL "$l1_a_rpc" \
         L1_WS_RPC_URL "ws://127.0.0.1:8545" \
         ZONES_BENCH_L1_B_RPC_URL "$l1_b_rpc" \
@@ -568,7 +621,8 @@ provision_up() {
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
         ZONE_PRIVATE_RPC_URL "$zone_private_rpc" \
-        ZONES_BENCH_TOKEN "$PATH_USD" \
+        ZONES_BENCH_TOKEN "$zone_token" \
+        ZONES_BENCH_PROFILE "$profile" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \
         ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID "$queried_zone_chain_id" \
@@ -585,6 +639,20 @@ provision_up() {
         ZONES_BENCH_STATE_A_ROOT "$state_a_root" \
         ZONES_BENCH_STATE_B_ROOT "$state_b_root" \
         ZONES_BENCH_ZONE_STATE_ROOT "$zone_state_root"
+    )
+    if [[ "$profile" == "neobank" ]]; then
+        env_pairs+=(
+            ZONES_BENCH_DLUSD "$DLUSD"
+            ZONES_BENCH_PATHUSD "$PATH_USD"
+            ZONES_BENCH_EARN_TOKEN "$EARN_TOKEN"
+            ZONES_BENCH_GATEWAY "$(jq -er '.gateway' "$fixture_metadata")"
+            ZONES_BENCH_BRIDGE_WALLET "$(jq -er '.bridgeWallet' "$fixture_metadata")"
+            ZONES_BENCH_DIRECT_SWAP "$(jq -er '.directSwap' "$fixture_metadata")"
+            ZONES_BENCH_VAULT_ADAPTER "$(jq -er '.vaultAdapter' "$fixture_metadata")"
+            ZONES_BENCH_FIXTURE_METADATA "$fixture_metadata"
+        )
+    fi
+    write_env "$env_file" "${env_pairs[@]}"
 
     provision_succeeded=1
     provision_pid_file=""
