@@ -2,7 +2,9 @@
 
 use alloy_primitives::{Address, B256, U256};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{charge_input_cost, dispatch, storage::Handler};
+use tempo_precompiles::{
+    charge_input_cost, dispatch, dispatch::typed::metadata as typed_metadata, storage::Handler,
+};
 use tempo_zone_contracts::{ILegacyZoneOutbox, IZoneOutbox};
 use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
 
@@ -37,8 +39,12 @@ impl ZoneOutbox {
                 lastFinalizedTimestamp(_) => metadata::<IZoneOutbox::lastFinalizedTimestampCall>(|| self.last_finalized_timestamp.read()),
                 nextWithdrawalIndex(_) => metadata::<IZoneOutbox::nextWithdrawalIndexCall>(|| self.next_withdrawal_index.read()),
                 lastFallbackNonce(_) => metadata::<IZoneOutbox::lastFallbackNonceCall>(|| self.last_fallback_nonce.read()),
-                pendingWithdrawalsCount(_) => metadata::<IZoneOutbox::pendingWithdrawalsCountCall>(|| self.pending_withdrawals_count()),
-                getPendingWithdrawals(_) => metadata::<IZoneOutbox::getPendingWithdrawalsCall>(|| self.get_pending_withdrawals()),
+                pendingWithdrawalsCount(_) => typed_metadata::<IZoneOutbox::pendingWithdrawalsCountCall, _>(|| {
+                    self.pending_withdrawals_count(l1, portal_address, msg_sender)
+                }),
+                getPendingWithdrawals(_) => typed_metadata::<IZoneOutbox::getPendingWithdrawalsCall, _>(|| {
+                    self.get_pending_withdrawals(l1, portal_address, msg_sender)
+                }),
                 calculateWithdrawalFee(call) => view(call, |call| self.calculate_withdrawal_fee(call.gasLimit)),
                 MAX_CALLBACK_DATA_SIZE(_) => metadata::<IZoneOutbox::MAX_CALLBACK_DATA_SIZECall>(|| Ok(U256::from(MAX_CALLBACK_DATA_SIZE))),
                 MAX_WITHDRAWAL_GAS_LIMIT(_) => metadata::<IZoneOutbox::MAX_WITHDRAWAL_GAS_LIMITCall>(|| Ok(MAX_WITHDRAWAL_GAS_LIMIT)),

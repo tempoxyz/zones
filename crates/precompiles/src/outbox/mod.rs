@@ -157,7 +157,15 @@ impl ZoneOutbox {
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
-        check_withdrawal_request(&call)?;
+        if call.fallbackRecipient.is_zero() {
+            return Err(ZoneOutboxError::invalid_fallback_recipient().into());
+        }
+        if call.data.len() > MAX_CALLBACK_DATA_SIZE {
+            return Err(ZoneOutboxError::callback_data_too_large().into());
+        }
+
+        validate_gas_limit(call.gasLimit)?;
+
         self.ensure_token_enabled(l1, portal_address, call.token)?;
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
@@ -330,11 +338,26 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn pending_withdrawals_count(&self) -> TempoResult<U256> {
-        self.pending_withdrawals.len().map(|val| U256::from(val))
+    fn pending_withdrawals_count<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        portal_address: Address,
+        caller: Address,
+    ) -> ZoneResult<U256> {
+        self.ensure_sequencer(l1, portal_address, caller)?;
+        self.pending_withdrawals
+            .len()
+            .map(U256::from)
+            .map_err(Into::into)
     }
 
-    fn get_pending_withdrawals(&self) -> TempoResult<Vec<IZoneOutbox::PendingWithdrawal>> {
+    fn get_pending_withdrawals<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        portal_address: Address,
+        caller: Address,
+    ) -> ZoneResult<Vec<IZoneOutbox::PendingWithdrawal>> {
+        self.ensure_sequencer(l1, portal_address, caller)?;
         let len = self.pending_withdrawals.len()?;
         let mut pending = Vec::with_capacity(len);
         for index in 0..len {
@@ -463,17 +486,6 @@ impl From<PendingWithdrawal> for IZoneOutbox::PendingWithdrawal {
 fn validate_gas_limit(gas_limit: u64) -> ZoneResult<()> {
     if gas_limit > MAX_WITHDRAWAL_GAS_LIMIT {
         return Err(ZoneOutboxError::gas_limit_too_high().into());
-    }
-    Ok(())
-}
-
-fn check_withdrawal_request(call: &IZoneOutbox::requestWithdrawalCall) -> ZoneResult<()> {
-    if call.fallbackRecipient.is_zero() {
-        return Err(ZoneOutboxError::invalid_fallback_recipient().into());
-    }
-    validate_gas_limit(call.gasLimit)?;
-    if call.data.len() > MAX_CALLBACK_DATA_SIZE {
-        return Err(ZoneOutboxError::callback_data_too_large().into());
     }
     Ok(())
 }

@@ -125,7 +125,7 @@ impl Harness {
 
     fn pending(&mut self) -> eyre::Result<Vec<ZoneOutboxAbi::PendingWithdrawal>> {
         let output = self.call(
-            Address::ZERO,
+            SEQUENCER,
             ZoneOutboxAbi::getPendingWithdrawalsCall {}.abi_encode(),
         )?;
         Ok(ZoneOutboxAbi::getPendingWithdrawalsCall::abi_decode_returns(&output.bytes)?)
@@ -219,6 +219,26 @@ fn request_withdrawal_stores_fields_and_fifo_order() -> eyre::Result<()> {
     assert_eq!(pending[0].amount, 500);
     assert_eq!(pending[1].to, BOB);
     assert_eq!(pending[1].amount, 300);
+    Ok(())
+}
+
+#[test]
+fn pending_withdrawal_getters_require_sequencer_or_system() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+
+    for calldata in [
+        ZoneOutboxAbi::pendingWithdrawalsCountCall {}.abi_encode(),
+        ZoneOutboxAbi::getPendingWithdrawalsCall {}.abi_encode(),
+    ] {
+        assert_revert(
+            harness.call(ALICE, calldata.clone()),
+            ZoneOutboxError::only_sequencer(),
+        );
+
+        assert!(harness.call(SEQUENCER, calldata.clone())?.is_success());
+        assert!(harness.call(Address::ZERO, calldata)?.is_success());
+    }
+
     Ok(())
 }
 
