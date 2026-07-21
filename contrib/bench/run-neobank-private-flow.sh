@@ -39,7 +39,7 @@ do uint "$name"; done
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
-for command in "$txgen_bin" "$bench_bin" cast jq rg sed; do command -v "$command" >/dev/null || die "missing $command"; done
+for command in "$txgen_bin" "$bench_bin" cast grep jq sed; do command -v "$command" >/dev/null || die "missing $command"; done
 if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark-preflight); else preflight=(cargo run --profile release -p tempo-xtask -- benchmark-preflight); fi
 
 mkdir -p "$ZONES_BENCH_OUTPUT"
@@ -109,7 +109,7 @@ for file in l1-onramp.yml zone-flow.yml private-flow-scenario.yml; do
         -e 's|__DEPOSIT_GAS_LIMIT__|2000000|g' -e 's|__ACTIVITY_GAS_LIMIT__|500000|g' -e 's|__WITHDRAWAL_TX_GAS_LIMIT__|10000000|g' \
         "$ZONES_BENCH_OUTPUT/neobank/$file" >"$ZONES_BENCH_OUTPUT/$file"
 done
-if rg -n '__[A-Z0-9_]+__' \
+if grep -En '__[A-Z0-9_]+__' \
     "$ZONES_BENCH_OUTPUT/l1-onramp.yml" \
     "$ZONES_BENCH_OUTPUT/zone-flow.yml" \
     "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
