@@ -275,6 +275,16 @@ contract ZonePortalProxyStorageTest is Test {
             );
 
         vm.startPrank(ZONE_FACTORY_ADDRESS);
+        address[] memory initialSequencersA = new address[](1);
+        initialSequencersA[0] = makeAddr("sequencer 1");
+        vm.expectEmit(true, false, false, true, proxyA);
+        emit IZonePortal.SequencerSetUpdated(0, 1, initialSequencersA);
+        vm.expectEmit(true, false, false, true, proxyA);
+        emit IZonePortal.RoleUpdated(messengerA, Role.None, Role.CallbackGateway);
+        vm.expectEmit(true, false, false, true, proxyA);
+        emit IZonePortal.RoleUpdated(makeAddr("admin 1"), Role.None, Role.Account);
+        vm.expectEmit(true, false, false, true, proxyA);
+        emit IZonePortal.RoleUpdated(makeAddr("sequencer 1"), Role.None, Role.Account);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA);
         _initializePortal(proxyB, initialToken, 2, messengerB, verifierB);
 
