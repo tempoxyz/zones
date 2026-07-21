@@ -86,7 +86,7 @@ pub struct ZoneBlock {
     pub decryptions: Vec<DecryptionData>,
     /// Tokens enabled by `ZoneInbox.advanceTempo`, in calldata order.
     pub enabled_tokens: Vec<EnabledToken>,
-    /// Withdrawal count passed to finalization in the final block, if any.
+    /// Withdrawal count passed to finalization in this block, if any.
     pub finalize_withdrawal_batch_count: Option<U256>,
     /// Encrypted sender payloads passed to withdrawal finalization.
     pub finalize_withdrawal_batch_encrypted_senders: Vec<Bytes>,

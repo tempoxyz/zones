@@ -11581,6 +11581,7 @@ dependencies = [
  "alloy-provider",
  "alloy-rlp",
  "alloy-rpc-types-eth",
+ "alloy-signer-local",
  "alloy-sol-types",
  "clap",
  "const-hex",
@@ -11593,9 +11594,12 @@ dependencies = [
  "tempo-primitives",
  "tempo-zone-contracts",
  "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
  "zone-chainspec",
  "zone-precompiles",
  "zone-primitives",
+ "zone-rpc",
  "zone-spf",
 ]
 

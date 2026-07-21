@@ -15,7 +15,7 @@ use alloy_evm::{
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolCall as _;
-use reth_chainspec::EthereumHardforks as _;
+use reth_chainspec::{EthChainSpec as _, EthereumHardforks as _};
 use reth_evm::{ConfigureEvm as _, NextBlockEnvAttributes};
 use revm::{
     database::{State, states::bundle_state::BundleRetention},
@@ -98,14 +98,7 @@ pub(crate) fn execute_zone_block(
         .insert(parent_number, block.parent_hash);
 
     let tempo_reader = tempo_database.for_sequencer(sequencer);
-    let evm_config = TempoEvmConfig::new(config.zone_chain_spec.inner.clone());
-    let attributes = next_block_env_attributes(config.zone_chain_spec.as_ref(), parent, block)?;
-    let mut env = evm_config
-        .next_evm_env(parent, &attributes)
-        .map_err(|_| Error::EvmEnvironment)?;
-    // The Zone ID is a public input, while the parent Tempo chain spec carries
-    // the L1 chain ID. Bind transaction replay to the submitted Zone here.
-    env.cfg_env.chain_id = zone_chain_id(zone_id);
+    let env = next_block_evm_env(config, parent, block, zone_id)?;
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;
     let factory = ZoneEvmFactory::new(tempo_reader);
@@ -163,6 +156,30 @@ pub(crate) fn execute_zone_block(
         output,
         evm_env: assembly_env,
     })
+}
+
+/// Construct the production Zone EVM environment while using the witness-backed
+/// L1 reader separately from [`zone_evm::ZoneEvmConfig`].
+pub(crate) fn next_block_evm_env(
+    config: &SpfConfig,
+    parent: &TempoHeader,
+    block: &ZoneBlock,
+    zone_id: u32,
+) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
+    let evm_config = TempoEvmConfig::new(config.zone_chain_spec.inner.clone());
+    let attributes = next_block_env_attributes(config.zone_chain_spec.as_ref(), parent, block)?;
+    let mut env = evm_config
+        .next_evm_env(parent, &attributes)
+        .map_err(|_| Error::EvmEnvironment)?;
+
+    // ZoneEvmConfig applies these overrides after delegating environment
+    // construction to TempoEvmConfig. Keep replay identical to production.
+    env.cfg_env.chain_id = zone_chain_id(zone_id);
+    env.block_env.inner.basefee = config
+        .zone_chain_spec
+        .next_block_base_fee(parent, block.timestamp)
+        .unwrap_or_default();
+    Ok(env)
 }
 
 /// Construct the same next-block attributes supplied by the production Zone

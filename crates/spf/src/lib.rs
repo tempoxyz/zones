@@ -5,7 +5,7 @@
 //! proving guest.
 
 use alloy_consensus::{BlockHeader as _, Sealable as _};
-use alloy_primitives::{B256, Bloom, U256, keccak256};
+use alloy_primitives::{B256, U256, keccak256};
 use alloy_rlp::Decodable as _;
 use reth_evm::execute::BlockAssemblerInput;
 use reth_primitives_traits::SealedHeader;
@@ -32,17 +32,16 @@ pub use types::*;
 ///
 /// `config` is trusted network configuration chosen by the verifier. Every
 /// other value is prover supplied and must be validated against witness-backed
-/// execution.
+/// execution. The replay may end at an open Zone tip without withdrawal
+/// finalization; settlement policy can impose a finalization boundary separately.
 pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<BatchOutput, Error> {
     // The parent header is the committed starting point for this batch. Its
     // hash binds the witness to the previously submitted Zone block, and its
     // state root selects the initial Zone state.
-    if witness.parent_header.inner.logs_bloom != Bloom::ZERO {
-        return Err(Error::ParentHeaderLogsBloom);
-    }
     if witness.zone_blocks.is_empty() {
         return Err(Error::EmptyZoneBatch);
     }
+
     // The Zone database is backed by the parent state root and the supplied
     // trie nodes. Reads performed during execution are therefore limited to
     // state proven by the witness, while writes remain in REVM's overlay.
@@ -103,14 +102,15 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
 
     // Each block is checked against the canonical Tempo header produced by its
     // predecessor. Replay feeds the execution result through Tempo's block
-    // assembler with the Zone aggregate bloom fixed to zero.
+    // assembler, which derives the aggregate logs bloom from the receipts.
     let initial_parent_hash = witness.parent_header.hash_slow();
     let mut previous_header = witness.parent_header.clone();
-    let block_count = witness.zone_blocks.len();
     for (block_index, block) in witness.zone_blocks.iter().enumerate() {
         let expected_parent_hash = previous_header.hash_slow();
         if block.parent_hash != expected_parent_hash {
             return Err(Error::BlockParentHashMismatch {
+                block_index,
+                block_number: block.number,
                 expected: expected_parent_hash,
                 actual: block.parent_hash,
             });
@@ -138,7 +138,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
                 actual: block.beneficiary,
             });
         }
-        validate_system_inputs(block, block_index, block_index + 1 == block_count)?;
+        validate_system_inputs(block, block_index)?;
 
         // The EVM environment uses the verifier-selected fork schedule at this
         // block's timestamp. An imported Tempo header changes the L1 reader
@@ -185,7 +185,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
                 ),
                 None,
                 None,
-                Some(Bloom::ZERO),
+                None,
             )
             .map_err(|_| Error::BlockAssembly { block_index })?;
         previous_header = assembled.header;
@@ -208,20 +208,32 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         ZONE_INBOX_PROCESSED_NUMBER_SLOT,
     )?
     .to::<u64>();
-    let withdrawal_queue_hash = B256::from(
-        read_zone_storage(
+    let has_withdrawal_finalization = witness
+        .zone_blocks
+        .iter()
+        .any(|block| block.finalize_withdrawal_batch_count.is_some());
+    let (withdrawal_queue_hash, withdrawal_batch_index) = if has_withdrawal_finalization {
+        let hash = B256::from(
+            read_zone_storage(
+                &mut zone_state,
+                ZONE_OUTBOX_ADDRESS,
+                ZONE_OUTBOX_LAST_BATCH_HASH_SLOT,
+            )?
+            .to_be_bytes::<32>(),
+        );
+        let index = read_zone_storage(
             &mut zone_state,
             ZONE_OUTBOX_ADDRESS,
-            ZONE_OUTBOX_LAST_BATCH_HASH_SLOT,
+            ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT,
         )?
-        .to_be_bytes::<32>(),
-    );
-    let withdrawal_batch_index = read_zone_storage(
-        &mut zone_state,
-        ZONE_OUTBOX_ADDRESS,
-        ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT,
-    )?
-    .to::<u64>();
+        .to::<u64>();
+        (hash, index)
+    } else {
+        (
+            B256::ZERO,
+            witness.public_inputs.expected_withdrawal_batch_index,
+        )
+    };
     let final_tempo_hash = B256::from(
         read_zone_storage(
             &mut zone_state,
@@ -365,19 +377,13 @@ fn validate_tempo_anchor(
     Ok(())
 }
 
-fn validate_system_inputs(block: &ZoneBlock, index: usize, is_final: bool) -> Result<(), Error> {
+fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
     if block.tempo_header_rlp.is_none()
         && (!block.deposits.is_empty()
             || !block.decryptions.is_empty()
             || !block.enabled_tokens.is_empty())
     {
         return Err(Error::TempoInputsWithoutHeader { block_index: index });
-    }
-
-    match (is_final, block.finalize_withdrawal_batch_count) {
-        (true, None) => return Err(Error::MissingFinalization { block_index: index }),
-        (false, Some(_)) => return Err(Error::UnexpectedFinalization { block_index: index }),
-        _ => {}
     }
 
     match block.finalize_withdrawal_batch_count {
@@ -408,9 +414,6 @@ pub enum Error {
     /// A read against the provided state witness failed.
     #[error(transparent)]
     WitnessDatabase(#[from] WitnessDatabaseError),
-    /// Zone headers must use the privacy-preserving zero aggregate bloom.
-    #[error("parent Zone header has a non-zero aggregate logs bloom")]
-    ParentHeaderLogsBloom,
     /// A batch must execute at least one Zone block.
     #[error("zone batch contains no blocks")]
     EmptyZoneBatch,
@@ -425,9 +428,16 @@ pub enum Error {
         actual_number: u64,
         actual_hash: B256,
     },
-    /// The first Zone block is not chained to the previous committed header.
-    #[error("zone block parent hash mismatch: expected {expected:?}, got {actual:?}")]
-    BlockParentHashMismatch { expected: B256, actual: B256 },
+    /// A Zone block is not chained to the replayed preceding header.
+    #[error(
+        "zone block {block_number} (batch index {block_index}) parent hash mismatch: expected {expected:?}, got {actual:?}"
+    )]
+    BlockParentHashMismatch {
+        block_index: usize,
+        block_number: u64,
+        expected: B256,
+        actual: B256,
+    },
     /// A Zone block number does not increment by one.
     #[error("zone block number mismatch: expected {expected}, got {actual}")]
     BlockNumberMismatch { expected: u64, actual: u64 },
@@ -446,12 +456,6 @@ pub enum Error {
     /// Tempo-dependent inputs appeared without a Tempo header import.
     #[error("zone block {block_index} has Tempo inputs without a Tempo header")]
     TempoInputsWithoutHeader { block_index: usize },
-    /// An intermediate Zone block attempted withdrawal finalization.
-    #[error("intermediate zone block {block_index} attempted withdrawal finalization")]
-    UnexpectedFinalization { block_index: usize },
-    /// The final Zone block omitted withdrawal finalization.
-    #[error("final zone block {block_index} omitted withdrawal finalization")]
-    MissingFinalization { block_index: usize },
     /// Finalization sender data was supplied without a finalization count.
     #[error("zone block {block_index} has finalization senders without a count")]
     FinalizationEncryptedSendersWithoutCount { block_index: usize },
@@ -690,17 +694,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_parent_header_with_a_non_zero_logs_bloom() {
-        let mut witness = minimal_batch_witness();
-        witness.parent_header.inner.logs_bloom = Bloom::repeat_byte(1);
-
-        assert_eq!(
-            prove_zone_batch(&test_config(), witness),
-            Err(Error::ParentHeaderLogsBloom)
-        );
-    }
-
-    #[test]
     fn rejects_a_zone_witness_without_the_parent_state_root_node() {
         let database = WitnessDatabase::from_zone_state_witness(
             ZoneStateWitness {
@@ -887,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn prepares_zone_next_block_attributes() {
+    fn prepares_zone_next_block_environment() {
         let witness = minimal_batch_witness();
         let block = ZoneBlock {
             number: 1,
@@ -920,10 +913,23 @@ mod tests {
             witness.parent_header.inner.gas_limit
         );
         assert_eq!(attributes.timestamp_millis_part, 0);
+
+        let env = execution::evm::next_block_evm_env(
+            &config,
+            &witness.parent_header,
+            &block,
+            witness.public_inputs.zone_id,
+        )
+        .unwrap();
+        assert_eq!(
+            env.cfg_env.chain_id,
+            zone_primitives::constants::zone_chain_id(witness.public_inputs.zone_id)
+        );
+        assert_eq!(env.block_env.inner.basefee, 0);
     }
 
     #[test]
-    fn rejects_a_final_block_without_finalization() {
+    fn accepts_an_open_snapshot_without_finalization() {
         let witness = minimal_batch_witness();
         let block = ZoneBlock {
             number: 1,
@@ -939,10 +945,7 @@ mod tests {
             transactions: Vec::new(),
         };
 
-        assert_eq!(
-            validate_system_inputs(&block, 0, true),
-            Err(Error::MissingFinalization { block_index: 0 })
-        );
+        assert_eq!(validate_system_inputs(&block, 0), Ok(()));
     }
 
     #[test]

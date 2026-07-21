@@ -11,6 +11,7 @@ use alloy_network::primitives::BlockTransactions;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
+use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
 use eyre::{Context, Result, bail, eyre};
@@ -21,15 +22,15 @@ use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::spec::chainspec_from_chain_id;
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_FACTORY_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
-    ZoneFactory, ZoneInbox, ZoneOutbox, ZonePortal,
+    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox,
+    ZoneOutbox, ZonePortal,
 };
+use tracing::{debug, info};
+use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::{
-    ZONE_CHAIN_ID_BASE, ZONE_CHAIN_ID_BASE_TESTNET, ZONE_CHAIN_ID_RANGE,
-    ZONE_CHAIN_ID_RANGE_TESTNET,
-};
+use zone_primitives::constants::zone_chain_id;
+use zone_rpc::{ZoneProvider, ZoneProviderConfig};
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
@@ -46,6 +47,15 @@ type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 #[derive(Debug, Parser)]
 #[command(name = "tempo-zone-spf", about = "Tempo Zone SPF development tools")]
 struct Cli {
+    /// Tracing filter. Can also be set with RUST_LOG.
+    #[arg(
+        long,
+        global = true,
+        env = "RUST_LOG",
+        default_value = "tempo_zone_spf=info"
+    )]
+    log_filter: String,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -62,15 +72,31 @@ struct GenerateInputArgs {
     #[arg(long)]
     tempo_rpc_url: String,
 
-    /// Unrestricted Zone HTTP or WebSocket RPC URL with debug methods enabled.
+    /// Authenticated private Zone HTTP RPC URL used for Zone discovery.
     #[arg(long)]
     zone_rpc_url: String,
+
+    /// Unrestricted Zone RPC URL used for full blocks, state, and debug methods.
+    #[arg(long)]
+    zone_unrestricted_rpc_url: String,
+
+    /// Private key used to authenticate with the private Zone RPC.
+    #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", hide_env_values = true)]
+    private_key: String,
+
+    /// Numeric Zone identifier used in the private RPC authorization token.
+    #[arg(long)]
+    zone_id: u32,
+
+    /// Zone chain ID. Defaults to the chain ID canonically derived from `--zone-id`.
+    #[arg(long)]
+    zone_chain_id: Option<u64>,
 
     /// Override the first Zone block in the batch.
     #[arg(long)]
     from_block: Option<u64>,
 
-    /// Override the final Zone block. It must contain the first finalization at or after `from`.
+    /// Override the final Zone block. Defaults to the current Zone tip.
     #[arg(long)]
     to_block: Option<u64>,
 
@@ -84,7 +110,13 @@ struct Timings(Vec<(&'static str, Duration)>);
 
 impl Timings {
     fn record<T>(&mut self, name: &'static str, started: Instant, value: T) -> T {
-        self.0.push((name, started.elapsed()));
+        let elapsed = started.elapsed();
+        info!(
+            phase = name,
+            elapsed_ms = elapsed.as_millis(),
+            "phase complete"
+        );
+        self.0.push((name, elapsed));
         value
     }
 
@@ -102,7 +134,8 @@ struct Discovery {
     zone_id: u32,
     portal: Address,
     sequencer: Address,
-    expected_withdrawal_batch_index: u64,
+    portal_withdrawal_batch_index: u64,
+    portal_tempo_block_number: u64,
     tempo_chain_id: u64,
     portal_block_hash: B256,
 }
@@ -128,22 +161,74 @@ struct ExecutionWitness {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match Cli::parse().command {
+    let cli = Cli::parse();
+    init_tracing(&cli.log_filter)?;
+    match cli.command {
         Command::GenerateInput(args) => generate_input(args).await,
     }
+}
+
+fn init_tracing(filter: &str) -> Result<()> {
+    let filter = EnvFilter::try_new(filter).context("parse tracing filter")?;
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .try_init()
+        .map_err(|error| eyre!("initialize tracing: {error}"))
+}
+
+fn start_phase(name: &'static str) -> Instant {
+    info!(phase = name, "starting phase");
+    Instant::now()
 }
 
 async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let total_started = Instant::now();
     let mut timings = Timings::default();
+    info!(
+        zone_id = args.zone_id,
+        from_block = ?args.from_block,
+        to_block = ?args.to_block,
+        writes_output = args.output.is_some(),
+        "generating SPF input"
+    );
 
-    let started = Instant::now();
+    let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
-    let zone_provider = connect(&args.zone_rpc_url, "Zone").await?;
-    let discovery = discover(&tempo_provider, &zone_provider).await?;
+    let zone_provider = connect(&args.zone_unrestricted_rpc_url, "unrestricted Zone").await?;
+    let signer = args
+        .private_key
+        .parse::<PrivateKeySigner>()
+        .context("parse private Zone RPC key")?;
+    let expected_zone_chain_id = args
+        .zone_chain_id
+        .unwrap_or_else(|| zone_chain_id(args.zone_id));
+    let private_zone_provider = connect_private_zone(
+        &args.zone_rpc_url,
+        signer,
+        args.zone_id,
+        expected_zone_chain_id,
+    )?;
+    let discovery = discover(
+        &tempo_provider,
+        &private_zone_provider,
+        args.zone_id,
+        expected_zone_chain_id,
+    )
+    .await?;
+    validate_unrestricted_zone(&zone_provider, &discovery, expected_zone_chain_id).await?;
+    info!(
+        zone_id = discovery.zone_id,
+        portal = %discovery.portal,
+        sequencer = %discovery.sequencer,
+        committed_zone_hash = %discovery.portal_block_hash,
+        portal_tempo_block = discovery.portal_tempo_block_number,
+        withdrawal_batch_index = discovery.portal_withdrawal_batch_index,
+        "discovered Zone"
+    );
     timings.record("discovery", started, ());
 
-    let started = Instant::now();
+    let started = start_phase("batch extraction");
     let (parent_header, parent_number, extracted) =
         discover_batch(&zone_provider, &discovery, args.from_block, args.to_block).await?;
     let from_block = extracted
@@ -153,18 +238,40 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .number;
     let to_block = extracted.last().expect("non-empty").input.number;
     let next_block_hash = zone_header(&zone_provider, to_block).await?.hash_slow();
+    let finalization_count = extracted
+        .iter()
+        .filter(|block| block.has_finalization)
+        .count();
+    let expected_withdrawal_batch_index = discovery
+        .portal_withdrawal_batch_index
+        .checked_add(u64::try_from(finalization_count).expect("block count fits u64"))
+        .ok_or_else(|| eyre!("withdrawal batch index overflow"))?;
+    let (zone_head, tempo_head) = tokio::try_join!(
+        zone_provider.get_block_number(),
+        tempo_provider.get_block_number()
+    )?;
+    info!(
+        from_block,
+        to_block,
+        zone_head,
+        tempo_head,
+        portal_tempo_block = discovery.portal_tempo_block_number,
+        block_count = extracted.len(),
+        finalization_count,
+        "selected Zone block range"
+    );
     timings.record("batch extraction", started, ());
 
-    let started = Instant::now();
+    let started = start_phase("initial checkpoint");
     let initial_tempo_header =
         initial_tempo_header(&tempo_provider, &zone_provider, parent_number).await?;
     timings.record("initial checkpoint", started, ());
 
-    let started = Instant::now();
+    let started = start_phase("Zone state witness");
     let (zone_state_witness, traces) = zone_witnesses(&zone_provider, from_block, to_block).await?;
     timings.record("Zone state witness", started, ());
 
-    let started = Instant::now();
+    let started = start_phase("Tempo state witness");
     let portal = discovery.portal;
     let mut checkpoint_by_zone_block = BTreeMap::new();
     let mut checkpoint = initial_tempo_header.number();
@@ -197,7 +304,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .transpose()?
         .unwrap_or_else(|| initial_tempo_header.clone());
 
-    let started = Instant::now();
+    let started = start_phase("Tempo ancestry");
     let (anchor_block_number, anchor_block_hash, tempo_ancestry_headers, anchor_mode) =
         tempo_anchor(&tempo_provider, &final_tempo_header).await?;
     timings.record("Tempo ancestry", started, ());
@@ -208,7 +315,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
             tempo_block_number: final_tempo_header.number(),
             anchor_block_number,
             anchor_block_hash,
-            expected_withdrawal_batch_index: discovery.expected_withdrawal_batch_index,
+            expected_withdrawal_batch_index,
             sequencer: discovery.sequencer,
         },
         parent_header,
@@ -218,7 +325,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         tempo_ancestry_headers,
     };
 
-    let started = Instant::now();
+    let started = start_phase("SPF validation");
     let output = validate_witness(discovery.tempo_chain_id, &witness)?;
     if output.block_transition.nextBlockHash != next_block_hash {
         bail!(
@@ -228,7 +335,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     }
     timings.record("SPF validation", started, ());
 
-    let started = Instant::now();
+    let started = start_phase("output");
     let output_bytes = if let Some(path) = &args.output {
         let json = serde_json::to_vec_pretty(&witness).context("serialize batch witness")?;
         std::fs::write(path, &json)
@@ -260,71 +367,120 @@ async fn connect(url: &str, label: &str) -> Result<DynProvider<TempoNetwork>> {
         .map(Provider::erased)
 }
 
+fn connect_private_zone(
+    url: &str,
+    signer: PrivateKeySigner,
+    zone_id: u32,
+    chain_id: u64,
+) -> Result<DynProvider<TempoNetwork>> {
+    let rpc_url = url
+        .parse()
+        .wrap_err_with(|| format!("parse private Zone RPC URL {url}"))?;
+    ZoneProvider::new(ZoneProviderConfig {
+        signer,
+        zone_id,
+        chain_id,
+        token_ttl: Duration::from_secs(600),
+        rpc_url,
+    })
+    .wrap_err_with(|| format!("connect to private Zone RPC at {url}"))
+    .map(|provider| provider.provider())
+}
+
 async fn discover(
     tempo: &DynProvider<TempoNetwork>,
-    zone: &DynProvider<TempoNetwork>,
+    private_zone: &DynProvider<TempoNetwork>,
+    expected_zone_id: u32,
+    expected_zone_chain_id: u64,
 ) -> Result<Discovery> {
     let (tempo_chain_id, zone_chain_id) =
-        tokio::try_join!(tempo.get_chain_id(), zone.get_chain_id())?;
-    let zone_id = match zone
+        tokio::try_join!(tempo.get_chain_id(), private_zone.get_chain_id())?;
+    if zone_chain_id != expected_zone_chain_id {
+        bail!(
+            "private Zone RPC reports chain ID {zone_chain_id}, but the auth token uses {expected_zone_chain_id}"
+        );
+    }
+    let zone_id = private_zone
         .client()
         .request_noparams::<Value>("zone_getZoneInfo")
         .await
-    {
-        Ok(value) => value
-            .get("zoneId")
-            .and_then(Value::as_str)
-            .map(parse_quantity)
-            .transpose()?
-            .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| eyre!("zone_getZoneInfo returned no valid zoneId"))?,
-        Err(_) => zone_id_from_chain_ids(tempo_chain_id, zone_chain_id)?,
-    };
+        .context("call authenticated zone_getZoneInfo")?
+        .get("zoneId")
+        .and_then(Value::as_str)
+        .map(parse_quantity)
+        .transpose()?
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| eyre!("zone_getZoneInfo returned no valid zoneId"))?;
+    if zone_id != expected_zone_id {
+        bail!("private Zone RPC reports Zone ID {zone_id}, but --zone-id is {expected_zone_id}");
+    }
 
-    let factory = ZoneFactory::new(ZONE_FACTORY_ADDRESS, tempo.clone());
-    let info = factory
-        .zones(zone_id)
+    let portal_address = ZoneInbox::new(ZONE_INBOX_ADDRESS, private_zone.clone())
+        .tempoPortal()
         .call()
         .await
-        .wrap_err_with(|| format!("look up Zone {zone_id} in ZoneFactory"))?;
-    if info.portal == Address::ZERO {
-        bail!("ZoneFactory has no Zone {zone_id}");
+        .context("read Tempo portal address from ZoneInbox")?;
+    if portal_address == Address::ZERO {
+        bail!("ZoneInbox reports a zero Tempo portal address");
     }
-    let portal = ZonePortal::new(info.portal, tempo.clone());
+    let portal = ZonePortal::new(portal_address, tempo.clone());
+    let portal_zone_id_call = portal.zoneId();
     let sequencer_call = portal.sequencer();
     let withdrawal_batch_index_call = portal.withdrawalBatchIndex();
     let block_hash_call = portal.blockHash();
-    let (sequencer, withdrawal_batch_index, portal_block_hash) = tokio::try_join!(
+    let tempo_block_number_call = portal.lastSyncedTempoBlockNumber();
+    let (
+        portal_zone_id,
+        sequencer,
+        withdrawal_batch_index,
+        portal_block_hash,
+        portal_tempo_block_number,
+    ) = tokio::try_join!(
+        portal_zone_id_call.call(),
         sequencer_call.call(),
         withdrawal_batch_index_call.call(),
         block_hash_call.call(),
+        tempo_block_number_call.call(),
     )?;
+    if portal_zone_id != zone_id {
+        bail!(
+            "ZoneInbox points to Tempo portal {portal_address}, but that portal reports Zone ID {portal_zone_id} instead of {zone_id}"
+        );
+    }
 
     Ok(Discovery {
         zone_id,
-        portal: info.portal,
+        portal: portal_address,
         sequencer,
-        expected_withdrawal_batch_index: withdrawal_batch_index
-            .checked_add(1)
-            .ok_or_else(|| eyre!("withdrawal batch index overflow"))?,
+        portal_withdrawal_batch_index: withdrawal_batch_index,
+        portal_tempo_block_number,
         tempo_chain_id,
         portal_block_hash,
     })
 }
 
-fn zone_id_from_chain_ids(tempo_chain_id: u64, zone_chain_id: u64) -> Result<u32> {
-    let (base, range) = match tempo_chain_id {
-        42431 => (ZONE_CHAIN_ID_BASE_TESTNET, ZONE_CHAIN_ID_RANGE_TESTNET),
-        4217 => (ZONE_CHAIN_ID_BASE, ZONE_CHAIN_ID_RANGE),
-        _ => bail!(
-            "zone_getZoneInfo is unavailable and Tempo chain ID {tempo_chain_id} is unsupported"
-        ),
-    };
-    let offset = zone_chain_id
-        .checked_sub(base)
-        .filter(|offset| *offset < range)
-        .ok_or_else(|| eyre!("Zone chain ID {zone_chain_id} is outside the expected range"))?;
-    u32::try_from(offset).map_err(|_| eyre!("derived Zone ID does not fit u32"))
+async fn validate_unrestricted_zone(
+    zone: &DynProvider<TempoNetwork>,
+    discovery: &Discovery,
+    expected_chain_id: u64,
+) -> Result<()> {
+    let inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.clone());
+    let portal_call = inbox.tempoPortal();
+    let (chain_id, portal) = tokio::join!(zone.get_chain_id(), portal_call.call());
+    let chain_id = chain_id.context("read unrestricted Zone chain ID")?;
+    let portal = portal.context("read Tempo portal from unrestricted Zone RPC")?;
+    if chain_id != expected_chain_id {
+        bail!(
+            "unrestricted Zone RPC reports chain ID {chain_id}, but the private Zone RPC reports {expected_chain_id}"
+        );
+    }
+    if portal != discovery.portal {
+        bail!(
+            "unrestricted Zone RPC points to Tempo portal {portal}, but the private Zone RPC points to {}",
+            discovery.portal
+        );
+    }
+    Ok(())
 }
 
 async fn discover_batch(
@@ -333,15 +489,18 @@ async fn discover_batch(
     from_override: Option<u64>,
     to_override: Option<u64>,
 ) -> Result<(TempoHeader, u64, Vec<ExtractedBlock>)> {
-    let portal_parent = zone
-        .get_block_by_hash(discovery.portal_block_hash)
-        .await?
-        .ok_or_else(|| {
-            eyre!(
-                "portal block hash {} is not present on the Zone RPC",
+    let portal_parent = match zone.get_block_by_hash(discovery.portal_block_hash).await? {
+        Some(block) => block,
+        None => {
+            let tip = zone.get_block_number().await?;
+            let genesis_hash = zone_header(zone, 0).await?.hash_slow();
+            bail!(
+                "Tempo portal {} commits Zone block hash {}, but the unrestricted Zone RPC does not contain it (Zone tip: {tip}, genesis hash: {genesis_hash}); the endpoint may belong to a reset or different Zone chain",
+                discovery.portal,
                 discovery.portal_block_hash
-            )
-        })?;
+            );
+        }
+    };
     let portal_parent_number = portal_parent.header.number();
     let default_from = portal_parent_number
         .checked_add(1)
@@ -366,22 +525,17 @@ async fn discover_batch(
     for number in from..=limit {
         let block = fetch_full_block(zone, number).await?;
         let extracted = extract_block(block)?;
-        let finalized = extracted.has_finalization;
+        debug!(
+            zone_block = number,
+            parent_hash = %extracted.input.parent_hash,
+            user_transactions = extracted.user_transaction_count,
+            checkpoint = ?extracted.checkpoint_number,
+            has_finalization = extracted.has_finalization,
+            "extracted Zone block"
+        );
         blocks.push(extracted);
-        if finalized {
-            if to_override.is_some() && number != limit {
-                bail!(
-                    "Zone block {number} is an earlier batch boundary than requested --to-block {limit}"
-                );
-            }
-            return Ok((parent_header, parent_number, blocks));
-        }
     }
-
-    if to_override.is_some() {
-        bail!("requested --to-block {limit} does not finalize a withdrawal batch");
-    }
-    bail!("no finalized, unsubmitted Zone batch is currently available")
+    Ok((parent_header, parent_number, blocks))
 }
 
 async fn fetch_full_block(zone: &DynProvider<TempoNetwork>, number: u64) -> Result<RpcBlock> {
@@ -550,6 +704,8 @@ async fn zone_witnesses(
 ) -> Result<(ZoneStateWitness, Vec<(u64, Value)>)> {
     let results = stream::iter(from..=to)
         .map(|number| async move {
+            let started = Instant::now();
+            debug!(zone_block = number, "requesting execution witness and call trace");
             let witness = zone
                 .client()
                 .request::<_, ExecutionWitness>(
@@ -574,6 +730,14 @@ async fn zone_witnesses(
                 )
                 .await
                 .wrap_err_with(|| format!("call trace for Zone block {number}"))?;
+            debug!(
+                zone_block = number,
+                state_nodes = witness.state.len(),
+                bytecodes = witness.codes.len(),
+                ancestor_headers = witness.headers.len(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "received execution witness and call trace"
+            );
             Ok::<_, eyre::Report>((number, witness, trace))
         })
         .buffer_unordered(RPC_CONCURRENCY)
@@ -672,11 +836,27 @@ async fn tempo_state_witness(
         .collect::<Vec<_>>();
     let proofs = stream::iter(requests)
         .map(|(block, account, slots)| async move {
-            tempo
+            let started = Instant::now();
+            debug!(
+                tempo_block = block,
+                account = %account,
+                storage_slots = slots.len(),
+                "requesting Tempo state proof"
+            );
+            let proof = tempo
                 .get_proof(account, slots)
                 .block_id(BlockId::number(block))
                 .await
-                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))
+                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))?;
+            debug!(
+                tempo_block = block,
+                account = %account,
+                account_proof_nodes = proof.account_proof.len(),
+                storage_proofs = proof.storage_proof.len(),
+                elapsed_ms = started.elapsed().as_millis(),
+                "received Tempo state proof"
+            );
+            Ok::<_, eyre::Report>(proof)
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -788,6 +968,13 @@ fn print_summary(
         last.number,
         witness.zone_blocks.len()
     );
+    println!(
+        "  Withdrawal finalizes:  {}",
+        extracted
+            .iter()
+            .filter(|block| block.has_finalization)
+            .count()
+    );
     println!("  User transactions:     {user_transactions}");
     println!(
         "  Tempo checkpoint:      {}",
@@ -847,19 +1034,6 @@ fn format_duration(duration: Duration) -> String {
 mod tests {
     use super::*;
     use alloy_primitives::address;
-
-    #[test]
-    fn derives_zone_ids_from_mainnet_and_testnet_chain_ids() {
-        assert_eq!(
-            zone_id_from_chain_ids(4217, ZONE_CHAIN_ID_BASE + 7).unwrap(),
-            7
-        );
-        assert_eq!(
-            zone_id_from_chain_ids(42431, ZONE_CHAIN_ID_BASE_TESTNET + 9).unwrap(),
-            9
-        );
-        assert!(zone_id_from_chain_ids(1, ZONE_CHAIN_ID_BASE).is_err());
-    }
 
     #[test]
     fn collects_tempo_storage_reads_from_nested_call_traces() {
