@@ -462,6 +462,8 @@ jobs:
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
           if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
             export ZONES_BENCH_PROFILE=neobank
+            export ZONES_BENCH_L1_GAS_LIMIT=30000000
+            export ZONES_BENCH_L1_GENERAL_GAS_LIMIT=30000000
           fi
           contrib/bench/provision-topology.sh up
           set -a
