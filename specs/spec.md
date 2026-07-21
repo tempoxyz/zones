@@ -967,19 +967,15 @@ Its response is:
 
 ```ts
 {
+  x: Hex,
+  yParity: 2 | 3,
   keyIndex: bigint,
-  portalAddress: Address,
-  publicKey: {
-    x: Hex,
-    prefix: 2 | 3,
-  },
-  tempoBlockNumber: bigint,
 }
 ```
 
-The key index and block number use JSON-RPC quantity encoding. `portalAddress` is the configured L1
-portal. Key rotation is visible immediately on L1 and does not wait for the Zone to process the
-corresponding Tempo block.
+This is the portal's `encryptionKeyAtBlock` return value without additional wrapping. The key index
+uses JSON-RPC quantity encoding. Key rotation is visible immediately on L1 and does not wait for the
+Zone to process the corresponding Tempo block.
 
 There are no state-changing methods via authorization token. Withdrawals require a signed transaction submitted via `eth_sendRawTransaction`.
 

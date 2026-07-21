@@ -1209,14 +1209,14 @@ async fn test_zone_get_encryption_key_reads_latest_l1_key() -> eyre::Result<()> 
         second.get("error").is_none(),
         "unexpected response: {second}"
     );
-    assert_eq!(second["result"]["keyIndex"], "0x1");
     assert_eq!(
-        second["result"]["portalAddress"],
-        format!("{portal_address:#x}")
+        second["result"],
+        serde_json::json!({
+            "x": second_x,
+            "yParity": second_prefix,
+            "keyIndex": "0x1",
+        })
     );
-    assert_eq!(second["result"]["publicKey"]["x"], second_x);
-    assert_eq!(second["result"]["publicKey"]["prefix"], second_prefix);
-    assert!(second["result"]["tempoBlockNumber"].as_str().is_some());
 
     Ok(())
 }

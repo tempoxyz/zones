@@ -71,11 +71,10 @@ cast rpc zone_getEncryptionKey \
   --rpc-headers "X-Authorization-Token: $TOKEN"
 ```
 
-The result contains JSON-RPC quantities for `keyIndex` and
-`tempoBlockNumber`, the canonical `portalAddress`, and a compressed secp256k1
-`publicKey` with `x` and a numeric `prefix` of `2` or `3`. The block number is
-the Tempo L1 block used for the key lookup. The endpoint reads L1 directly so
-new keys are available before the Zone processes the corresponding block.
+The result is the portal's `encryptionKeyAtBlock` return value: `x`, a numeric
+`yParity` of `2` or `3`, and the JSON-RPC quantity `keyIndex`. The endpoint
+reads L1 directly so new keys are available before the Zone processes the
+corresponding block.
 
 ## Finding Zone ID And Chain ID
 

@@ -183,29 +183,6 @@ pub struct ZoneInfoResponse {
     pub chain_id: U64,
 }
 
-/// Response payload for `zone_getEncryptionKey`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct EncryptionKeyResponse {
-    /// Zero-based index of the active key at the queried Tempo L1 block.
-    pub key_index: U256,
-    /// The Zone's canonical L1 portal address.
-    pub portal_address: Address,
-    /// The active sequencer encryption public key.
-    pub public_key: EncryptionPublicKey,
-    /// The Tempo L1 block against which the key was resolved.
-    pub tempo_block_number: U64,
-}
-
-/// SEC1 compressed public-key components used by viem's Zone actions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct EncryptionPublicKey {
-    /// X-coordinate of the secp256k1 public key.
-    pub x: B256,
-    /// SEC1 compressed key prefix (`2` for even Y, `3` for odd Y).
-    pub prefix: u8,
-}
-
 /// Response payload for `zone_getDepositStatus`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

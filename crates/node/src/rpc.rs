@@ -53,8 +53,8 @@ use zone_rpc::{
     auth::AuthContext,
     types::{
         AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, DepositKind, DepositState,
-        DepositStatusEntry, DepositStatusResponse, EncryptionKeyResponse, EncryptionPublicKey,
-        JsonRpcError, ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
+        DepositStatusEntry, DepositStatusResponse, JsonRpcError, ZoneInfoResponse, internal,
+        raw_null, raw_zero, to_raw,
     },
 };
 
@@ -317,31 +317,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .call()
             .await
             .map_err(internal)
-    }
-
-    async fn latest_encryption_key(&self) -> Result<EncryptionKeyResponse, JsonRpcError> {
-        let tempo_block_number = self
-            .l1_provider
-            .get_block_number()
-            .await
-            .map_err(internal)?;
-        let portal_address = self.config.zone_portal;
-        let key = ZonePortal::new(portal_address, &self.l1_provider)
-            .encryptionKeyAtBlock(tempo_block_number)
-            .block(BlockId::number(tempo_block_number))
-            .call()
-            .await
-            .map_err(internal)?;
-
-        Ok(EncryptionKeyResponse {
-            key_index: key.keyIndex,
-            portal_address,
-            public_key: EncryptionPublicKey {
-                x: key.x,
-                prefix: key.yParity,
-            },
-            tempo_block_number: U64::from(tempo_block_number),
-        })
     }
 
     async fn enforce_authorized(
@@ -936,7 +911,21 @@ where
     }
 
     fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&self.latest_encryption_key().await?) })
+        Box::pin(async move {
+            let block_number = self
+                .l1_provider
+                .get_block_number()
+                .await
+                .map_err(internal)?;
+            let key = ZonePortal::new(self.config.zone_portal, &self.l1_provider)
+                .encryptionKeyAtBlock(block_number)
+                .block(BlockId::number(block_number))
+                .call()
+                .await
+                .map_err(internal)?;
+
+            to_raw(&key)
+        })
     }
 
     fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_> {
