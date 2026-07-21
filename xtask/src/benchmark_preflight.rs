@@ -2253,7 +2253,6 @@ mod tests {
             &deposit,
             config.token,
             config.portal,
-            true,
             2,
             config.l1_max_fee_per_gas,
         );
@@ -2302,7 +2301,6 @@ mod tests {
             &withdrawal,
             config.token,
             config.outbox,
-            true,
             2,
             config.zone_max_fee_per_gas,
         );
@@ -2334,7 +2332,6 @@ mod tests {
             &bootstrap,
             config.token,
             config.portal,
-            false,
             1,
             config.l1_max_fee_per_gas,
         );
@@ -2353,7 +2350,6 @@ mod tests {
             &zone_roundtrip,
             config.token,
             config.outbox,
-            true,
             2,
             config.zone_max_fee_per_gas,
         );
@@ -2563,7 +2559,6 @@ mod tests {
         generated: &[serde_json::Value],
         token: Address,
         spender: Address,
-        expiring: bool,
         expected: usize,
         base_max_fee_per_gas: u128,
     ) {
@@ -2589,10 +2584,11 @@ mod tests {
             );
 
             let envelope = decode_envelope(setup);
-            assert_eq!(envelope.is_expiring_nonce(), expiring);
-            let uniqueness_bump = if expiring { index as u128 + 1 } else { 0 };
-            let expected_max_fee = base_max_fee_per_gas + uniqueness_bump;
-            assert_eq!(envelope.max_fee_per_gas(), expected_max_fee);
+            assert!(
+                !envelope.is_expiring_nonce(),
+                "untimed setup approval {index} must not expire"
+            );
+            assert_eq!(envelope.max_fee_per_gas(), base_max_fee_per_gas);
             let (target, input) = only_call(&envelope);
             assert_eq!(target, token);
             let call = ITIP20::approveCall::abi_decode(input).unwrap();
