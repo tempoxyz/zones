@@ -186,7 +186,7 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Operates the zone: collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs.
 - Are equal online operational keys; there is no primary sequencer.
 - Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero threshold no greater than the set size.
-- May be replaced atomically by the admin together with the threshold. Each replacement increments `sequencerSetVersion` and invalidates certificates from earlier versions.
+- May be replaced atomically by the admin together with the threshold. The configuration nonce starts at `0`; each later replacement increments `sequencerSetVersion` and invalidates certificates from earlier configurations.
 - Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
 - Hold the encryption private keys used to decrypt [encrypted deposits](#encrypted-deposits).
 
@@ -237,7 +237,7 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | `threshold` | The number of distinct active-sequencer signatures required for settlement. MUST be nonzero and no greater than `sequencers.length`. |
 | `rpcUrl` | The public RPC endpoint advertised for the zone. |
 
-The native factory assigns a unique `zoneId`, etches the TIP-1091 proxy runtime at its reserved vanity address, initializes the portal storage with the fixed messenger and verifier, sets `blockHash` to zero, installs sequencer-set version 1, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
+The native factory assigns a unique `zoneId`, etches the TIP-1091 proxy runtime at its reserved vanity address, initializes the portal storage with the fixed messenger and verifier, sets `blockHash` and the initial sequencer-set configuration nonce to zero, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
 
 The shared portal runtime MUST preserve the native factory's constructor-equivalent storage suffix:
 
@@ -344,11 +344,11 @@ The admin atomically replaces the active sequencer set and threshold with
 `ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero,
 unique, sorted in strictly increasing address order, and no more than eight. A replacement
 increments `sequencerSetVersion`, including a threshold-only change, so certificates collected
-under the previous configuration cannot be replayed.
+under the previous configuration cannot be replayed. The initial configuration uses nonce `0`.
 
-The legacy `sequencer()` getter and two-step transfer functions remain ABI compatibility surfaces
-for portals created before versioned sets. They do not grant a distinguished sequencer authority
-on TIP-1091 portals, which are initialized at version 1.
+The `sequencer()` getter and two-step transfer functions expose the current single block-producer
+representative used by zone-side components. They do not grant that representative authority
+distinct from active-set membership on Tempo.
 
 ### Admin Transfer
 
@@ -1719,7 +1719,7 @@ interface IZonePortal {
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
-    event SequencerSetUpdated(uint64 indexed version, uint8 threshold, address[] sequencers);
+    event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
@@ -1753,7 +1753,6 @@ interface IZonePortal {
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
     error InvalidQuorumCertificate();
-    error LegacyBatchSubmissionDisabled();
 
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
@@ -1803,11 +1802,6 @@ interface IZonePortal {
     function submitBatch(
         uint64 tempoBlockNumber, uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition, DepositQueueTransition calldata depositQueueTransition,
-        bytes32 withdrawalQueueHash, bytes calldata verifierConfig, bytes calldata proof
-    ) external;
-    function submitBatch(
-        uint64 tempoBlockNumber, uint64 recentTempoBlockNumber,
-        BlockTransition calldata blockTransition, DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash, bytes calldata verifierConfig, bytes calldata proof,
         uint256 zoneHeight, bytes[] calldata signatures
     ) external;
@@ -1823,8 +1817,7 @@ interface IZonePortal {
     ///         underlying TIP-20 transfer reverts (e.g. policy still forbids the recipient).
     function claimRefund(address token) external returns (uint128 amount);
 
-    // Legacy representative management. These functions only update the compatibility
-    // `sequencer`/`pendingSequencer` fields and do not change active membership.
+    // Block-producer representative management. These functions do not change active membership.
     function transferSequencer(address newSequencer) external;
     function acceptSequencer() external;
 
@@ -1857,7 +1850,7 @@ interface IZonePortal {
     // State
     function zoneId() external view returns (uint32);
     function messenger() external view returns (address);
-    function sequencer() external view returns (address); // legacy representative
+    function sequencer() external view returns (address); // block-producer representative
     function admin() external view returns (address);
     function pendingSequencer() external view returns (address);
     function pendingAdmin() external view returns (address);

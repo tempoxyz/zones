@@ -213,16 +213,6 @@ crate::sol! {
             DepositQueueTransition calldata depositQueueTransition,
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
-            bytes calldata proof
-        ) external;
-
-        function submitBatch(
-            uint64 tempoBlockNumber,
-            uint64 recentTempoBlockNumber,
-            BlockTransition calldata blockTransition,
-            DepositQueueTransition calldata depositQueueTransition,
-            bytes32 withdrawalQueueHash,
-            bytes calldata verifierConfig,
             bytes calldata proof,
             uint256 nextZoneHeight,
             bytes[] calldata signatures

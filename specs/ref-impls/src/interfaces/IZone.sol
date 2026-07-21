@@ -538,7 +538,7 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
-    /// @notice Emitted when an active sequencer updates the legacy representative fields.
+    /// @notice Emitted when an active sequencer updates the block-producer representative.
     /// @dev Retained for ABI compatibility. This does not change active-set membership.
     event SequencerTransferStarted(
         address indexed currentSequencer, address indexed pendingSequencer
@@ -604,7 +604,7 @@ interface IZonePortal {
     event RpcUrlUpdated(string rpcUrl);
 
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
-    event SequencerSetUpdated(uint64 indexed version, uint8 threshold, address[] sequencers);
+    event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
     error NotSequencer();
     error NotAdmin();
@@ -636,7 +636,6 @@ interface IZonePortal {
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
     error InvalidQuorumCertificate();
-    error LegacyBatchSubmissionDisabled();
 
     function initialize(
         uint32 zoneId,
@@ -691,7 +690,7 @@ interface IZonePortal {
 
     function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
 
-    /// @notice Version of the active sequencer configuration.
+    /// @notice Configuration nonce for the active sequencer set and threshold.
     function sequencerSetVersion() external view returns (uint64);
 
     /// @notice Number of distinct registered signatures required for batch settlement.
@@ -748,7 +747,7 @@ interface IZonePortal {
     /// @param rpcUrl The new RPC URL (may be empty to clear it)
     function setRpcUrl(string calldata rpcUrl) external;
 
-    /// @notice Update the pending legacy representative. Only callable by an active sequencer.
+    /// @notice Update the pending block-producer representative. Only callable by an active sequencer.
     /// @dev Retained for ABI compatibility. This does not change active-set membership.
     function transferSequencer(address newSequencer) external;
 
@@ -878,17 +877,6 @@ interface IZonePortal {
     function refunds(address token, address owner) external view returns (uint128);
 
     function claimRefund(address token) external returns (uint128 amount);
-
-    function submitBatch(
-        uint64 tempoBlockNumber,
-        uint64 recentTempoBlockNumber,
-        BlockTransition calldata blockTransition,
-        DepositQueueTransition calldata depositQueueTransition,
-        bytes32 withdrawalQueueHash,
-        bytes calldata verifierConfig,
-        bytes calldata proof
-    )
-        external;
 
     /// @notice Submit a batch with an n-of-m certificate for its zone tip.
     function submitBatch(

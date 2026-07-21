@@ -170,7 +170,7 @@ contract BaseTest is Test {
         withdrawals[0] = withdrawal;
     }
 
-    /// @notice Submit through the TIP-1091 overload while dedicated certificate tests exercise
+    /// @notice Submit through the TIP-1091 entrypoint while dedicated certificate tests exercise
     ///         the real signature precompile behavior independently.
     function _submitBatch(
         IZonePortal portal,

@@ -153,7 +153,7 @@ contract ZonePortal is IZonePortal {
     address public verifier;
     bool internal _initialized;
 
-    /// @notice Versioned set used for every sequencer-authorized operation and settlement.
+    /// @notice Configuration nonce for the active sequencer set and threshold.
     uint64 public sequencerSetVersion;
     uint8 public sequencerThreshold;
     uint256 public zoneHeight;
@@ -204,9 +204,7 @@ contract ZonePortal is IZonePortal {
     }
 
     modifier onlySequencer() {
-        if (sequencerSetVersion == 0 ? msg.sender != sequencer : !isSequencer[msg.sender]) {
-            revert NotSequencer();
-        }
+        if (!isSequencer[msg.sender]) revert NotSequencer();
         _;
     }
 
@@ -231,7 +229,7 @@ contract ZonePortal is IZonePortal {
                            SEQUENCER MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Update the pending legacy representative. Only callable by an active sequencer.
+    /// @notice Update the pending block-producer representative. Only callable by an active sequencer.
     /// @dev Retained for ABI compatibility. This does not change active-set membership.
     function transferSequencer(address newSequencer) external onlySequencer {
         pendingSequencer = newSequencer;
@@ -300,8 +298,6 @@ contract ZonePortal is IZonePortal {
                 }
             }
         }
-        // Quorum is part of the versioned configuration: changing only the threshold is valid
-        // and must invalidate certificates collected under the previous version.
         if (rejectUnchanged && membersUnchanged && newThreshold == sequencerThreshold) {
             revert SequencerConfigurationUnchanged();
         }
@@ -316,11 +312,12 @@ contract ZonePortal is IZonePortal {
             isSequencer[signer] = true;
         }
 
-        // Preserve the legacy getter without granting the first member distinct permissions.
+        // Expose the block-producer representative without granting it distinct permissions.
         sequencer = newSequencers[0];
         sequencerThreshold = newThreshold;
-        uint64 newVersion = ++sequencerSetVersion;
-        emit SequencerSetUpdated(newVersion, newThreshold, newSequencers);
+        uint64 version = sequencerSetVersion;
+        if (rejectUnchanged) version = ++sequencerSetVersion;
+        emit SequencerSetUpdated(version, newThreshold, newSequencers);
     }
 
     /// @inheritdoc IZonePortal
@@ -970,12 +967,6 @@ contract ZonePortal is IZonePortal {
         if (fee == 0) return;
 
         uint256 length = _sequencers.length;
-        if (length == 0) {
-            // Compatibility for portals initialized before threshold sequencers.
-            _tryTransfer(token, sequencer, fee);
-            return;
-        }
-
         uint128 share = fee / uint128(length);
         if (share == 0) return;
         for (uint256 i = 0; i < length; ++i) {
@@ -1012,36 +1003,6 @@ contract ZonePortal is IZonePortal {
                            BATCH SUBMISSION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Submit a legacy batch before a signer set has been activated.
-    /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
-    /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
-    function submitBatch(
-        uint64 tempoBlockNumber,
-        uint64 recentTempoBlockNumber,
-        BlockTransition calldata blockTransition,
-        DepositQueueTransition calldata depositQueueTransition,
-        bytes32 withdrawalQueueHash,
-        bytes calldata verifierConfig,
-        bytes calldata proof
-    )
-        external
-        onlySequencer
-    {
-        if (sequencerSetVersion != 0) revert LegacyBatchSubmissionDisabled();
-        bytes[] memory signatures = new bytes[](0);
-        _submitBatch(
-            tempoBlockNumber,
-            recentTempoBlockNumber,
-            blockTransition,
-            depositQueueTransition,
-            withdrawalQueueHash,
-            verifierConfig,
-            proof,
-            0,
-            signatures
-        );
-    }
-
     /// @inheritdoc IZonePortal
     function submitBatch(
         uint64 tempoBlockNumber,
@@ -1057,7 +1018,6 @@ contract ZonePortal is IZonePortal {
         external
         onlySequencer
     {
-        if (sequencerSetVersion == 0) revert InvalidQuorumCertificate();
         _submitBatch(
             tempoBlockNumber,
             recentTempoBlockNumber,
@@ -1118,20 +1078,17 @@ contract ZonePortal is IZonePortal {
         // The certificate binds every value that affects settlement, rather than only the
         // zone block hash. A leader therefore cannot reuse signatures for this block with a
         // different withdrawal root, deposit transition, Tempo anchor, or verifier config.
-        if (
-            sequencerSetVersion != 0
-                && !_verifySettlement(
-                    nextZoneHeight,
-                    tempoBlockNumber,
-                    anchorBlockNumber,
-                    anchorBlockHash,
-                    blockTransition,
-                    depositQueueTransition,
-                    withdrawalQueueHash,
-                    verifierConfig,
-                    signatures
-                )
-        ) revert InvalidQuorumCertificate();
+        if (!_verifySettlement(
+                nextZoneHeight,
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                blockTransition,
+                depositQueueTransition,
+                withdrawalQueueHash,
+                verifierConfig,
+                signatures
+            )) revert InvalidQuorumCertificate();
 
         // These are strictly not necessary, but we'll assert them here since they are cheap while
         // the prover doesn't (yet) enforce them.
@@ -1168,7 +1125,7 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
-        if (sequencerSetVersion != 0) zoneHeight = nextZoneHeight;
+        zoneHeight = nextZoneHeight;
 
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
@@ -1200,8 +1157,8 @@ contract ZonePortal is IZonePortal {
     {
         uint256 threshold = sequencerThreshold;
         if (
-            sequencerSetVersion == 0 || nextZoneHeight <= zoneHeight
-                || signatures.length < threshold || signatures.length > _sequencers.length
+            nextZoneHeight <= zoneHeight || signatures.length < threshold
+                || signatures.length > _sequencers.length
         ) return false;
 
         bytes32 structHash = keccak256(

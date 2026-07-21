@@ -296,7 +296,7 @@ contract ZonePortalProxyStorageTest is Test {
     function _assertTip1091Storage(address target, address initialSequencer) internal view {
         bytes32 slot18 = vm.load(target, bytes32(uint256(18)));
         assertEq(uint8(uint256(slot18) >> 160), 1, "slot 18: initialized mismatch");
-        assertEq(uint64(uint256(slot18) >> 168), 1, "slot 18: version mismatch");
+        assertEq(uint64(uint256(slot18) >> 168), 0, "slot 18: nonce mismatch");
         assertEq(uint8(uint256(slot18) >> 232), 1, "slot 18: threshold mismatch");
         assertEq(uint256(vm.load(target, bytes32(uint256(19)))), 0, "slot 19: height mismatch");
         assertEq(uint256(vm.load(target, bytes32(uint256(20)))), 1, "slot 20: length mismatch");
@@ -495,7 +495,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.messenger(), address(messenger));
         assertEq(portal.bouncebackGas(), 0);
         assertEq(portal.calculateBouncebackFee(), 0);
-        assertEq(portal.sequencerSetVersion(), 1);
+        assertEq(portal.sequencerSetVersion(), 0);
         assertEq(portal.sequencerThreshold(), 1);
         assertTrue(portal.isSequencer(sequencer));
     }
@@ -517,15 +517,15 @@ contract ZonePortalTest is BaseTest {
                          SEQUENCER QUORUM TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_setSequencerSet_configuresVersionedThreshold() public {
+    function test_setSequencerSet_incrementsConfigurationNonce() public {
         address[] memory signers = _sequencerSet();
 
         vm.expectEmit(true, false, false, true);
-        emit IZonePortal.SequencerSetUpdated(2, 2, signers);
+        emit IZonePortal.SequencerSetUpdated(1, 2, signers);
         vm.prank(admin);
         portal.setSequencerSet(signers, 2);
 
-        assertEq(portal.sequencerSetVersion(), 2);
+        assertEq(portal.sequencerSetVersion(), 1);
         assertEq(portal.sequencerThreshold(), 2);
         assertEq(portal.sequencerCount(), 3);
         for (uint256 i; i < signers.length; ++i) {
@@ -573,7 +573,7 @@ contract ZonePortalTest is BaseTest {
         vm.prank(admin);
         portal.setSequencerSet(replacement, 2);
 
-        assertEq(portal.sequencerSetVersion(), 3);
+        assertEq(portal.sequencerSetVersion(), 2);
         assertFalse(portal.isSequencer(removed));
     }
 
@@ -590,27 +590,6 @@ contract ZonePortalTest is BaseTest {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.setZoneGasRate(4);
-    }
-
-    function test_submitBatch_requiresQuorumAfterActivation() public {
-        address[] memory signers = _activateSequencerSet(2);
-
-        vm.expectRevert(IZonePortal.LegacyBatchSubmissionDisabled.selector);
-        vm.prank(signers[0]);
-        portal.submitBatch(
-            uint64(block.number),
-            0,
-            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("tip") }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0),
-                nextProcessedHash: bytes32(0),
-                prevDepositNumber: 0,
-                nextDepositNumber: 0
-            }),
-            bytes32(0),
-            "",
-            ""
-        );
     }
 
     function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
@@ -762,7 +741,9 @@ contract ZonePortalTest is BaseTest {
             }),
             bytes32(0),
             "",
-            ""
+            "",
+            1,
+            new bytes[](0)
         );
 
         vm.expectRevert(IZonePortal.NotSequencer.selector);

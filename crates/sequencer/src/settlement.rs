@@ -420,7 +420,7 @@ impl BatchSubmitter {
 
         let pending = self
             .portal
-            .submitBatch_1(
+            .submitBatch(
                 batch.tempo_block_number,
                 recent_tempo_block_number,
                 block_transition,
