@@ -8,6 +8,16 @@ die() { echo "error: $*" >&2; exit 1; }
 need() { [[ -n "${!1:-}" ]] || die "$1 must be set"; }
 uint() { [[ "${!1:-}" =~ ^[0-9]+$ ]] || die "$1 must be an unsigned integer"; }
 
+# bench enables these targets at DEBUG even under the default INFO filter.
+# Drop only per-request HTTP bookkeeping; benchmark diagnostics still pass through.
+filter_transport_debug() {
+    awk '
+        index($0, " DEBUG ") && index($0, "alloy_transport_http::reqwest_transport:") { next }
+        index($0, " DEBUG ") && index($0, "alloy_transport_http::hyper_transport:") { next }
+        { print; fflush() }
+    '
+}
+
 load_benchmark_mnemonic() {
     local mode
 
@@ -99,7 +109,9 @@ preflight_phase() {
 preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
     --max-in-flight 1 --max-rpc-in-flight 4 --failure-policy fail-fast --seed "$ZONES_BENCH_SEED" \
-    --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
+    --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json" \
+    > >(filter_transport_debug) \
+    2> >(filter_transport_debug >&2)
 # Refresh preflight after bootstrap so the rendered report reflects its funded
 # sponsor state. Setup approvals themselves are deliberately non-expiring.
 preflight_phase bootstrap ""
@@ -108,7 +120,9 @@ preflight_phase bootstrap ""
 "$txgen_bin" generate --spec "$ZONES_BENCH_OUTPUT/deposit.yml" --count 0 --seed "$ZONES_BENCH_SEED" \
     --output "$ZONES_BENCH_OUTPUT/portal-approvals.ndjson"
 "$bench_bin" send --input "$ZONES_BENCH_OUTPUT/portal-approvals.ndjson" --rpc-url "$L1_RPC_URL" \
-    --query-rpc-url "$L1_RPC_URL" --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
+    --query-rpc-url "$L1_RPC_URL" --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console \
+    > >(filter_transport_debug) \
+    2> >(filter_transport_debug >&2)
 
 cp -R contrib/bench/neobank "$ZONES_BENCH_OUTPUT/neobank"
 mkdir -p "$ZONES_BENCH_OUTPUT/txgen"
@@ -177,8 +191,12 @@ zone_approval_spec="$ZONES_BENCH_OUTPUT/zone-approvals.yml"
 "$txgen_bin" generate --spec "$zone_approval_spec" --count 0 --seed "$ZONES_BENCH_SEED" --output "$ZONES_BENCH_OUTPUT/zone-approvals.ndjson"
 "$bench_bin" send --input "$ZONES_BENCH_OUTPUT/zone-approvals.ndjson" --rpc-url "$ZONE_PRIVATE_RPC_URL" --query-rpc-url "$ZONE_RPC_URL" \
     --sender-header-name X-Authorization-Token --sender-header-map "$secret_dir/zone-auth.json" \
-    --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
+    --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console \
+    > >(filter_transport_debug) \
+    2> >(filter_transport_debug >&2)
 
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
-    --failure-policy continue --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT"
+    --failure-policy continue --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT" \
+    > >(filter_transport_debug) \
+    2> >(filter_transport_debug >&2)
