@@ -26,6 +26,7 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
+use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::{Result, WrapErr};
 use tempo_alloy::TempoNetwork;
@@ -139,6 +140,7 @@ impl ZoneMonitor {
     pub async fn new(
         config: ZoneMonitorConfig,
         l1_provider: DynProvider<TempoNetwork>,
+        signer: PrivateKeySigner,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
@@ -165,6 +167,7 @@ impl ZoneMonitor {
             config,
             provider,
             l1_provider,
+            Some(signer),
             withdrawal_store,
             withdrawal_notify,
             repair_notify,
@@ -176,6 +179,7 @@ impl ZoneMonitor {
         config: ZoneMonitorConfig,
         provider: DynProvider<TempoNetwork>,
         l1_provider: DynProvider<TempoNetwork>,
+        signer: Option<PrivateKeySigner>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
@@ -185,9 +189,10 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let batch_submitter = BatchSubmitter::with_anchor_config(
+        let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
+            signer,
             config.batch_anchor_config,
         );
 
@@ -498,6 +503,7 @@ impl ZoneMonitor {
         }
 
         let batch_data = BatchData {
+            zone_height: to,
             tempo_block_number: end_state.tempo_block_number,
             prev_block_hash: self.prev_zone_block_hash,
             next_block_hash: end_state.block_hash,
@@ -878,6 +884,7 @@ impl ZoneMonitor {
 pub fn spawn_zone_monitor(
     config: ZoneMonitorConfig,
     l1_provider: DynProvider<TempoNetwork>,
+    signer: PrivateKeySigner,
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
@@ -887,6 +894,7 @@ pub fn spawn_zone_monitor(
             match ZoneMonitor::new(
                 config.clone(),
                 l1_provider.clone(),
+                signer.clone(),
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
                 repair_notify.clone(),
@@ -1036,6 +1044,7 @@ mod tests {
             config,
             mock_provider(zone.clone()),
             mock_provider(l1.clone()),
+            None,
             SharedWithdrawalStore::new(),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
@@ -1183,6 +1192,7 @@ mod tests {
 
         let mut monitor = test_monitor(l1.clone(), zone.clone());
         let batch_data = BatchData {
+            zone_height: 20,
             tempo_block_number: 123,
             prev_block_hash: B256::repeat_byte(0x99),
             next_block_hash: B256::repeat_byte(0x55),

@@ -1719,6 +1719,7 @@ interface IZonePortal {
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    event SequencerSetUpdated(uint64 indexed version, uint8 threshold, address[] sequencers);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
@@ -1749,6 +1750,10 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
+    error InvalidSequencerSet();
+    error SequencerConfigurationUnchanged();
+    error InvalidQuorumCertificate();
+    error LegacyBatchSubmissionDisabled();
 
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
@@ -1800,6 +1805,12 @@ interface IZonePortal {
         BlockTransition calldata blockTransition, DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash, bytes calldata verifierConfig, bytes calldata proof
     ) external;
+    function submitBatch(
+        uint64 tempoBlockNumber, uint64 recentTempoBlockNumber,
+        BlockTransition calldata blockTransition, DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash, bytes calldata verifierConfig, bytes calldata proof,
+        uint256 zoneHeight, bytes[] calldata signatures
+    ) external;
 
     // Withdrawal processing
     function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
@@ -1812,9 +1823,19 @@ interface IZonePortal {
     ///         underlying TIP-20 transfer reverts (e.g. policy still forbids the recipient).
     function claimRefund(address token) external returns (uint128 amount);
 
-    // Sequencer management
+    // Legacy representative management. These functions only update the compatibility
+    // `sequencer`/`pendingSequencer` fields and do not change active membership.
     function transferSequencer(address newSequencer) external;
     function acceptSequencer() external;
+
+    // Active sequencer-set management
+    function setSequencerSet(address[] calldata sequencers, uint8 threshold) external;
+    function sequencerSetVersion() external view returns (uint64);
+    function sequencerThreshold() external view returns (uint8);
+    function zoneHeight() external view returns (uint256);
+    function isSequencer(address account) external view returns (bool);
+    function sequencerCount() external view returns (uint256);
+    function sequencerAt(uint256 index) external view returns (address);
 
     // Admin management
     function transferAdmin(address newAdmin) external;
@@ -1836,7 +1857,7 @@ interface IZonePortal {
     // State
     function zoneId() external view returns (uint32);
     function messenger() external view returns (address);
-    function sequencer() external view returns (address);
+    function sequencer() external view returns (address); // legacy representative
     function admin() external view returns (address);
     function pendingSequencer() external view returns (address);
     function pendingAdmin() external view returns (address);

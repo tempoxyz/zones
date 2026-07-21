@@ -4,7 +4,6 @@ use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, FixedBytes, address};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::SolEvent;
-use alloy_transport::mock::Asserter;
 use serde::Deserialize;
 use std::{
     collections::{HashSet, VecDeque},

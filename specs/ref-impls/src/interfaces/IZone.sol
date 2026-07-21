@@ -538,12 +538,12 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
-    /// @notice Emitted when the current sequencer nominates a new sequencer (two-step transfer).
-    /// @dev A `pendingSequencer` of address(0) signals cancellation of a pending transfer.
+    /// @notice Emitted when an active sequencer updates the legacy representative fields.
+    /// @dev Retained for ABI compatibility. This does not change active-set membership.
     event SequencerTransferStarted(
         address indexed currentSequencer, address indexed pendingSequencer
     );
-    /// @notice Emitted when a pending sequencer accepts and the sequencer role is handed over.
+    /// @notice Emitted when the pending legacy representative accepts the update.
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /// @notice Emitted when the current admin nominates a new admin (two-step transfer).
@@ -610,6 +610,7 @@ interface IZonePortal {
     error NotAdmin();
     error NotFactory();
     error AlreadyInitialized();
+    error MustDelegateCall();
     error NotPendingSequencer();
     error NotPendingAdmin();
     error InvalidProof();
@@ -747,11 +748,12 @@ interface IZonePortal {
     /// @param rpcUrl The new RPC URL (may be empty to clear it)
     function setRpcUrl(string calldata rpcUrl) external;
 
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    /// @param newSequencer The address that will become sequencer after accepting.
+    /// @notice Update the pending legacy representative. Only callable by an active sequencer.
+    /// @dev Retained for ABI compatibility. This does not change active-set membership.
     function transferSequencer(address newSequencer) external;
 
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    /// @notice Accept an update to the legacy representative field.
+    /// @dev Retained for ABI compatibility. This does not change active-set membership.
     function acceptSequencer() external;
 
     /// @notice Atomically replace the sequencer set and settlement threshold. Only callable by admin.

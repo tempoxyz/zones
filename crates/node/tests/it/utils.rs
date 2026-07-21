@@ -213,13 +213,11 @@ fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre
         ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
     };
 
-    let one = B256::with_last_byte(1);
+    // ZoneFactory packs `uint32 nextZoneId`, `address owner`, and the lock flag
+    // into slot 0. Mirror that layout when installing the reference runtime.
+    let packed_factory_config: U256 = U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32);
     let mut factory_storage = BTreeMap::new();
-    factory_storage.insert(B256::ZERO, one);
-    factory_storage.insert(
-        B256::with_last_byte(3),
-        B256::left_padding_from(owner.as_slice()),
-    );
+    factory_storage.insert(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()));
 
     genesis.alloc.insert(
         ZONE_FACTORY_ADDRESS,
@@ -256,19 +254,35 @@ fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
 
-// TODO(rusowsky): Remove once Tempo L1 stores transfer policy IDs in the TIP403 precompile.
-fn pack_transfer_policy_id(policy_id: u64) -> U256 {
-    U256::from(policy_id) << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8)
-}
-
-/// Seed a TIP-20 transfer policy ID in the canonical packed L1 storage slot.
-pub(crate) fn seed_raw_tip20_policy_id(
+/// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
+pub(crate) fn seed_raw_tip403_token_policy(
     cache: &mut zone_l1::state::L1StateCacheInner,
     block_number: u64,
     token: Address,
     policy_id: u64,
 ) {
-    let packed = pack_transfer_policy_id(policy_id);
+    let slot = keccak256((token, tip403_registry_slots::TOKEN_TRANSFER_POLICIES).abi_encode());
+    let packed: U256 = U256::from(policy_id) | (U256::ONE << 64);
+    cache.set(
+        TIP403_REGISTRY_ADDRESS,
+        slot,
+        block_number,
+        B256::from(packed.to_be_bytes()),
+    );
+    debug_assert_eq!(
+        cache.get(TIP403_REGISTRY_ADDRESS, slot, block_number),
+        Some(B256::from(packed.to_be_bytes()))
+    );
+}
+
+/// Seed the token-local transfer-policy field used by Tempo's TIP-1092 compatibility fallback.
+fn seed_raw_legacy_tip20_policy(
+    cache: &mut zone_l1::state::L1StateCacheInner,
+    block_number: u64,
+    token: Address,
+    policy_id: u64,
+) {
+    let packed = U256::from(policy_id) << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8);
     cache.set(
         token,
         B256::from(tip20_slots::TRANSFER_POLICY_ID.to_be_bytes()),
@@ -891,7 +905,7 @@ impl ZoneTestNode {
         let l1_state_cache = zone_node.l1_state_cache();
         if is_local_dummy_l1 {
             let mut cache = l1_state_cache.write();
-            seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
+            seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         }
 
         let node_handle = NodeBuilder::new(node_config)
@@ -3605,8 +3619,8 @@ impl L1Fixture {
 
         // System transactions resolve their zero-address fee token before execution. Keep that
         // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
-        seed_raw_tip20_policy_id(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
-        seed_raw_tip20_policy_id(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
+        seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
+        seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         cache.update_anchor(NumHash {
             number: num_blocks,
             hash: B256::ZERO,
@@ -3646,7 +3660,16 @@ impl L1Fixture {
         for cache in self.caches.lock().unwrap().iter() {
             let mut cache = cache.write();
             for token in tokens {
-                seed_raw_tip20_policy_id(
+                seed_raw_tip403_token_policy(
+                    &mut cache,
+                    block_number,
+                    token.token,
+                    ALLOW_ALL_POLICY_ID,
+                );
+                // Synthetic enable-token events do not include the accompanying L1 state
+                // transition. Model both the TIP-1092 registry binding and its supported
+                // token-local fallback so same-block deposits remain self-contained.
+                seed_raw_legacy_tip20_policy(
                     &mut cache,
                     block_number,
                     token.token,

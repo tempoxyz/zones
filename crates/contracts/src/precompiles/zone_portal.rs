@@ -174,6 +174,10 @@ crate::sol! {
         function admin() external view returns (address);
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
+        function sequencerSetVersion() external view returns (uint64);
+        function sequencerThreshold() external view returns (uint256);
+        function zoneHeight() external view returns (uint256);
+        function isSequencer(address account) external view returns (bool);
         function sequencerPubkey() external view returns (bytes32);
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
@@ -210,6 +214,18 @@ crate::sol! {
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
             bytes calldata proof
+        ) external;
+
+        function submitBatch(
+            uint64 tempoBlockNumber,
+            uint64 recentTempoBlockNumber,
+            BlockTransition calldata blockTransition,
+            DepositQueueTransition calldata depositQueueTransition,
+            bytes32 withdrawalQueueHash,
+            bytes calldata verifierConfig,
+            bytes calldata proof,
+            uint256 nextZoneHeight,
+            bytes[] calldata signatures
         ) external;
 
         function enableToken(address token) external;

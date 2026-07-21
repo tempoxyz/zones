@@ -40,7 +40,7 @@ const SHORT_STEPPING_TIMEOUT: Duration = Duration::from_secs(60);
 async fn fetch_submit_batch_call(
     l1: &L1TestNode,
     tx_hash: alloy_primitives::B256,
-) -> eyre::Result<(ZonePortal::submitBatchCall, u64)> {
+) -> eyre::Result<(ZonePortal::submitBatch_1Call, u64)> {
     let response: serde_json::Value = reqwest::Client::new()
         .post(l1.http_url().clone())
         .json(&serde_json::json!({
@@ -83,7 +83,7 @@ async fn fetch_submit_batch_call(
     let calldata = const_hex::decode(input.strip_prefix("0x").unwrap_or(input)).map_err(|err| {
         eyre::eyre!("failed to hex-decode submitBatch calldata for {tx_hash}: {err}")
     })?;
-    let call = ZonePortal::submitBatchCall::abi_decode(&calldata)
+    let call = ZonePortal::submitBatch_1Call::abi_decode(&calldata)
         .map_err(|err| eyre::eyre!("failed to decode submitBatch calldata: {err}"))?;
 
     let block_number = tx
