@@ -1,0 +1,240 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: __L1_CHAIN_ID__
+    workload: ./l1-onramp.yml
+
+  zone:
+    network: tempo
+    rpc_url: "${ZONE_PRIVATE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    request_auth:
+      sender_header:
+        name: X-Authorization-Token
+        map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
+        reload_interval: 1s
+    chain_id: __ZONE_CHAIN_ID__
+    workload: ./zone-flow.yml
+
+scenario:
+  name: neobank-private-zone-flow
+  timeout: 10m
+
+  bindings:
+    account:
+      account: { pool: users, select: lease }
+    recipient:
+      account: { pool: users, select: random }
+    onramp_action_id:
+      bytes32: { random_bytes: 32 }
+    earn_deposit_action_id:
+      bytes32: { random_bytes: 32 }
+    earn_redeem_action_id:
+      bytes32: { random_bytes: 32 }
+    offramp_action_id:
+      bytes32: { random_bytes: 32 }
+
+  steps:
+    - checkpoint: { chain: zone }
+      save: zone_before_onramp
+
+    - invoke:
+        chain: l1
+        action: prepare_encrypted_deposit
+        with:
+          recipient: { var: account.address }
+          zoneId: __ZONE_ID__
+          portalAddress: "__PORTAL__"
+          memo: { var: onramp_action_id }
+      save: onramp_encryption
+
+    - submit:
+        chain: l1
+        template: encrypted_onramp
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "__DLUSD__"
+              - __ONRAMP_AMOUNT__
+              - { var: onramp_encryption.keyIndex }
+              - { var: onramp_encryption.encrypted }
+              - { var: account.address }
+      save: onramp
+
+    - wait_log:
+        chain: l1
+        transaction_hash: { var: onramp.tx_hash }
+        sender: { var: onramp.sender }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: EncryptedDepositMade
+        where:
+          sender: { var: account.address }
+          token: "__DLUSD__"
+        max_block_range: 1000
+      save: onramp_enqueued
+
+    - wait_log:
+        chain: zone
+        from_block: { var: zone_before_onramp.block_number }
+        address: "__INBOX__"
+        abi: ZoneInbox
+        event: EncryptedDepositProcessed
+        where:
+          depositHash: { var: onramp_enqueued.args.newCurrentDepositQueueHash }
+          sender: { var: account.address }
+          to: { var: account.address }
+          token: "__DLUSD__"
+        max_block_range: 1000
+      save: onramp_processed
+
+    - submit:
+        chain: zone
+        template: private_transfer
+        with:
+          from: { var: account.ref }
+          call:
+            args: [{ var: recipient.address }, __PRIVATE_TRANSFER_AMOUNT__]
+      save: private_transfer
+
+    - wait_receipt:
+        chain: zone
+        transaction_hash: { var: private_transfer.tx_hash }
+        sender: { var: private_transfer.sender }
+      save: private_transfer_receipt
+
+    - checkpoint: { chain: l1 }
+      save: l1_before_earn_deposit
+    - checkpoint: { chain: zone }
+      save: zone_before_earn_deposit
+    - submit:
+        chain: zone
+        template: gateway_deposit
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "__DLUSD__"
+              - "__GATEWAY__"
+              - __EARN_DEPOSIT_AMOUNT__
+              - { var: earn_deposit_action_id }
+              - __CALLBACK_GAS_LIMIT__
+              - { var: account.address }
+              - "${ZONES_BENCH_EARN_DEPOSIT_CALLBACK}"
+              - "0x"
+      save: earn_deposit_request
+
+    - wait_log:
+        chain: l1
+        from_block: { var: l1_before_earn_deposit.block_number }
+        address: "__GATEWAY__"
+        abi: ZoneGateway
+        event: EarnDeposit
+        where:
+          actionId: { var: earn_deposit_action_id }
+          inputToken: "__DLUSD__"
+        max_block_range: 1000
+      save: earn_deposit
+
+    - wait_log:
+        chain: zone
+        from_block: { var: zone_before_earn_deposit.block_number }
+        address: "__INBOX__"
+        abi: ZoneInbox
+        event: EncryptedDepositProcessed
+        where:
+          depositHash: { var: earn_deposit.args.zoneDepositHash }
+          sender: "__GATEWAY__"
+          to: { var: account.address }
+          token: "__EARN_TOKEN__"
+        max_block_range: 1000
+      save: earn_deposit_processed
+
+    - checkpoint: { chain: l1 }
+      save: l1_before_earn_redeem
+    - checkpoint: { chain: zone }
+      save: zone_before_earn_redeem
+    - submit:
+        chain: zone
+        template: gateway_redeem
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "__EARN_TOKEN__"
+              - "__GATEWAY__"
+              - __EARN_REDEEM_AMOUNT__
+              - { var: earn_redeem_action_id }
+              - __CALLBACK_GAS_LIMIT__
+              - { var: account.address }
+              - "${ZONES_BENCH_EARN_REDEEM_CALLBACK}"
+              - "0x"
+      save: earn_redeem_request
+
+    - wait_log:
+        chain: l1
+        from_block: { var: l1_before_earn_redeem.block_number }
+        address: "__GATEWAY__"
+        abi: ZoneGateway
+        event: EarnRedeem
+        where:
+          actionId: { var: earn_redeem_action_id }
+          outputToken: "__DLUSD__"
+        max_block_range: 1000
+      save: earn_redeem
+
+    - wait_log:
+        chain: zone
+        from_block: { var: zone_before_earn_redeem.block_number }
+        address: "__INBOX__"
+        abi: ZoneInbox
+        event: EncryptedDepositProcessed
+        where:
+          depositHash: { var: earn_redeem.args.zoneDepositHash }
+          sender: "__GATEWAY__"
+          to: { var: account.address }
+          token: "__DLUSD__"
+        max_block_range: 1000
+      save: earn_redeem_processed
+
+    - checkpoint: { chain: l1 }
+      save: l1_before_offramp
+    - submit:
+        chain: zone
+        template: offramp
+        with:
+          from: { var: account.ref }
+          call:
+            args:
+              - "__DLUSD__"
+              - "__BRIDGE_WALLET__"
+              - __OFFRAMP_AMOUNT__
+              - { var: offramp_action_id }
+              - 0
+              - { var: account.address }
+              - "0x"
+              - "0x"
+      save: offramp
+
+    - wait_log:
+        chain: l1
+        from_block: { var: l1_before_offramp.block_number }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: WithdrawalProcessed
+        where:
+          to: "__BRIDGE_WALLET__"
+          senderTag:
+            keccak256_packed:
+              types: [address, bytes32]
+              values: [{ var: account.address }, { var: offramp.tx_hash }]
+          token: "__DLUSD__"
+          amount: __OFFRAMP_AMOUNT__
+          callbackSuccess: true
+        max_block_range: 1000
+      save: offramp_processed
