@@ -355,8 +355,8 @@ entire bootstrap, preflight, authorization, and measured sequence:
 ```bash
 export ZONES_BENCH_SEED='<unique unsigned integer>'
 export ZONES_BENCH_ACCOUNTS=100
-export ZONES_BENCH_COUNT=100
-export ZONES_BENCH_TPS=10
+export ZONES_BENCH_COUNT=1000
+export ZONES_BENCH_TPS=20
 export ZONES_BENCH_MAX_CONCURRENT=100
 export ZONES_BENCH_DEPOSIT_AMOUNT=2000000
 export ZONES_BENCH_ACTIVITY_AMOUNT=1
@@ -621,8 +621,8 @@ gh workflow run zones-benchmark.yml \
   --ref '<branch-or-tag>' \
   -f phase=roundtrip \
   -f accounts=100 \
-  -f count=100 \
-  -f tps=10 \
+  -f count=1000 \
+  -f tps=20 \
   -f state-bloat-gib=1
 ```
 
