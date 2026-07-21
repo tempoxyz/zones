@@ -2014,7 +2014,7 @@ mod tests {
         let bootstrap_steps = bootstrap_scenario["scenario"]["steps"]
             .as_sequence()
             .unwrap();
-        assert_eq!(bootstrap_steps.len(), 4);
+        assert_eq!(bootstrap_steps.len(), 3);
         assert_eq!(bootstrap_steps[2]["use"], "deposit-and-wait-zone");
         assert_eq!(bootstrap_steps[2]["as"], "bootstrap_deposit");
         assert_eq!(
@@ -2024,11 +2024,6 @@ mod tests {
         assert_eq!(
             bootstrap_steps[2]["with"]["sender_address"]["var"],
             "account.address"
-        );
-        assert_eq!(bootstrap_steps[3]["wait_log"]["event"], "BatchSubmitted");
-        assert_eq!(
-            bootstrap_steps[3]["wait_log"]["where"]["lastProcessedDepositNumber"]["var"],
-            "bootstrap_deposit.deposit_made.args.depositNumber"
         );
 
         let scenario_fragments: Value = serde_yaml::from_str(
@@ -2374,7 +2369,7 @@ mod tests {
                 &output.join("bootstrap-scenario.rendered.yml"),
                 &output,
             );
-            assert_flattened_scenario(&bootstrap_scenario, 6);
+            assert_flattened_scenario(&bootstrap_scenario, 5);
             assert_eq!(
                 bootstrap_scenario["scenario"]["steps"][2]["save"],
                 "bootstrap_deposit.submission"

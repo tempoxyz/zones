@@ -49,15 +49,5 @@ scenario:
         amount: __BOOTSTRAP_DEPOSIT_AMOUNT__
         zone_from_block: { var: zone_before_deposit.block_number }
 
-    # DepositProcessed proves the Zone credited the bootstrap. BatchSubmitted
-    # proves L1 committed the same deposit number before ready preflight runs.
-    - wait_log:
-        chain: l1
-        from_block: { var: l1_before_deposit.block_number }
-        address: "__PORTAL__"
-        abi: ZonePortal
-        event: BatchSubmitted
-        where:
-          lastProcessedDepositNumber: { var: bootstrap_deposit.deposit_made.args.depositNumber }
-        max_block_range: 1000
-      save: batch_submitted
+    # DepositProcessed from the composed fragment is terminal here: it proves
+    # the Zone credited the sequencer's sponsorship balance.
