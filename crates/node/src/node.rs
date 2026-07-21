@@ -78,10 +78,18 @@ use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequence
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
 /// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
+///
+/// Additional dev-schedule L1 chain IDs (devnets that activate all Tempo
+/// hardforks at genesis) can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
+/// environment variable as a comma-separated list.
 fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1337 | 31337 => Some(DEV.clone()),
-        _ => None,
+        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
+            .ok()?
+            .split(',')
+            .any(|id| id.trim().parse() == Ok(chain_id))
+            .then(|| DEV.clone()),
     })
 }
 
@@ -1173,6 +1181,13 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
+
+        // SAFETY: test-only env mutation; no other test reads this variable.
+        unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
+        assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
+        assert!(tempo_chain_spec_for_l1(999_999).is_none());
+        unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
     }
 
     #[test]

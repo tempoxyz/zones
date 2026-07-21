@@ -13573,6 +13573,7 @@ name = "zone-p2p"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-signer-local",
  "commonware-codec",
  "commonware-cryptography",
  "commonware-p2p",
@@ -13626,6 +13627,7 @@ dependencies = [
  "zone-chainspec",
  "zone-l1",
  "zone-precompiles",
+ "zone-primitives",
 ]
 
 [[package]]
@@ -13726,6 +13728,7 @@ dependencies = [
  "metrics",
  "parking_lot",
  "reth-metrics",
+ "schnellru",
  "serde_json",
  "tempo-alloy",
  "tempo-primitives",

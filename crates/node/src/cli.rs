@@ -107,9 +107,13 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
                     eyre::eyre!("--p2p.key is required with --sequencer.manifest")
                 })?;
+                let secp256k1_key_path = args.secp256k1_key.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--secp256k1.key is required with --sequencer.manifest")
+                })?;
                 P2pConfig::load(
                     manifest_path,
                     ed25519_key_path,
+                    secp256k1_key_path,
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
                     args.zone_id,
@@ -123,6 +127,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 target: "reth::cli",
                 role = %config.role(),
                 ed25519_public_key = %config.ed25519_public_key(),
+                secp256k1_address = %config.secp256k1_address(),
                 listen = %config.listen(),
                 "Validated multi-sequencer manifest and local identity"
             );
@@ -218,7 +223,7 @@ pub struct ZoneArgs {
         long = "sequencer.manifest",
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
-        requires = "p2p_key",
+        requires_all = ["p2p_key", "secp256k1_key"],
         conflicts_with = "enable_sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
@@ -231,6 +236,15 @@ pub struct ZoneArgs {
         requires = "sequencer_manifest"
     )]
     pub p2p_key: Option<PathBuf>,
+
+    /// Path to this node's hex-encoded individual secp256k1 private key.
+    #[arg(
+        long = "secp256k1.key",
+        env = "SECP256K1_KEY",
+        value_name = "PATH",
+        requires = "sequencer_manifest"
+    )]
+    pub secp256k1_key: Option<PathBuf>,
 
     /// Socket address bound for multi-sequencer Commonware traffic.
     #[arg(
@@ -394,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_requires_a_p2p_key_and_conflicts_with_legacy_sequencer() {
+    fn manifest_mode_requires_node_keys_and_conflicts_with_legacy_sequencer() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -416,11 +430,25 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
 
+        let missing_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            missing_secp256k1_key.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
         let conflict = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
             "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
             "--sequencer",
         ]))
         .unwrap_err();
@@ -472,6 +500,8 @@ mod tests {
             "zone.toml",
             "--p2p.key",
             "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
             "--p2p.bypass-ip-check",
         ]))
         .unwrap();
