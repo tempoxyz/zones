@@ -122,17 +122,7 @@ where
             && tx_env.tempo_tx_env.is_none()
             && tx_env.kind() == TxKind::Call(ZONE_INBOX_ADDRESS)
             && tx_env.data.get(..4) == Some(ZoneInbox::advanceTempoCall::SELECTOR.as_slice());
-        if self.inner.receipts.is_empty() {
-            if !is_advance_tempo {
-                return Err(validation_error(
-                    "advanceTempo must be the first transaction in every zone block",
-                ));
-            }
-        } else if is_advance_tempo {
-            return Err(validation_error(
-                "advanceTempo must appear exactly once in every zone block",
-            ));
-        }
+        validate_advance_tempo_position(is_advance_tempo, self.inner.receipts.len())?;
         self.pending_advance_tempo = is_advance_tempo;
 
         // Override the validator's fee token preference to match this
@@ -157,11 +147,7 @@ where
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
-        if !self.saw_advance_tempo {
-            return Err(validation_error(
-                "zone block is missing its required advanceTempo transaction",
-            ));
-        }
+        validate_advance_tempo_present(self.saw_advance_tempo)?;
         self.inner.finish()
     }
 
@@ -182,6 +168,31 @@ fn validation_error(message: &'static str) -> BlockExecutionError {
     BlockValidationError::msg(message).into()
 }
 
+fn validate_advance_tempo_position(
+    is_advance_tempo: bool,
+    transaction_index: usize,
+) -> Result<(), BlockExecutionError> {
+    match (transaction_index, is_advance_tempo) {
+        (0, false) => Err(validation_error(
+            "advanceTempo must be the first transaction in every zone block",
+        )),
+        (1.., true) => Err(validation_error(
+            "advanceTempo must appear exactly once in every zone block",
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn validate_advance_tempo_present(saw_advance_tempo: bool) -> Result<(), BlockExecutionError> {
+    if saw_advance_tempo {
+        Ok(())
+    } else {
+        Err(validation_error(
+            "zone block is missing its required advanceTempo transaction",
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use alloy_primitives::{Address, U256};
@@ -192,6 +203,17 @@ mod tests {
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+
+    #[test]
+    fn requires_exactly_one_advance_tempo_as_first_transaction() {
+        assert!(validate_advance_tempo_position(false, 0).is_err());
+        assert!(validate_advance_tempo_position(true, 0).is_ok());
+        assert!(validate_advance_tempo_position(false, 1).is_ok());
+        assert!(validate_advance_tempo_position(true, 1).is_err());
+
+        assert!(validate_advance_tempo_present(false).is_err());
+        assert!(validate_advance_tempo_present(true).is_ok());
+    }
 
     #[test]
     fn clears_only_prewarming_expiring_nonce_index() {
