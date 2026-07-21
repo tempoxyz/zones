@@ -16,6 +16,7 @@ use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
+use std::num::NonZeroU32;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StateError, L1StorageReader, SequencerExt};
@@ -42,7 +43,7 @@ pub struct L1StateProviderConfig {
     /// Defaults to 100ms.
     pub retry_connection_interval: std::time::Duration,
     /// Maximum number of synchronous RPC attempts per cache miss. `None` retries indefinitely.
-    pub max_sync_attempts: Option<u32>,
+    pub max_sync_attempts: Option<NonZeroU32>,
 }
 
 impl Default for L1StateProviderConfig {
@@ -90,7 +91,7 @@ pub struct L1StateProvider {
     /// dispatch async RPC calls from a blocking (non-async) context.
     runtime_handle: tokio::runtime::Handle,
     /// Optional finite attempt limit for synchronous cache-miss fallback.
-    max_sync_attempts: Option<u32>,
+    max_sync_attempts: Option<NonZeroU32>,
 }
 
 impl L1StateProvider {
@@ -209,7 +210,7 @@ impl L1StateProvider {
                 Err(rpc_err) => {
                     if self
                         .max_sync_attempts
-                        .is_some_and(|max_attempts| attempt >= max_attempts)
+                        .is_some_and(|max_attempts| attempt >= max_attempts.get())
                     {
                         return Err(eyre::eyre!(
                             "L1 storage RPC fetch failed after {attempt} attempts for address={address} slot={slot} block={block_number}: {rpc_err}"
@@ -323,7 +324,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn finite_sync_attempt_limit_returns_diagnostic_error() {
         let config = L1StateProviderConfig {
-            max_sync_attempts: Some(1),
+            max_sync_attempts: Some(NonZeroU32::MIN),
             ..Default::default()
         };
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()

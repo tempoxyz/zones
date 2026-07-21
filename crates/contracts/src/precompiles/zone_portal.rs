@@ -19,7 +19,6 @@ crate::sol! {
             bytes32 senderTag;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
@@ -202,7 +201,7 @@ crate::sol! {
             external
             returns (bytes32 newCurrentDepositQueueHash);
 
-        function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+        function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -258,6 +257,8 @@ crate::sol! {
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+            external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
     }
 }
@@ -379,7 +380,6 @@ impl Withdrawal {
             senderTag: sender_tag,
             to: event.to,
             amount: event.amount,
-            fee: event.fee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackNonce: event.fallbackNonce,

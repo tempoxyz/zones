@@ -4,7 +4,7 @@ pub(crate) mod contract_creation;
 
 use crate::{
     TempoCtx,
-    database::{AnchoredZoneDb, ZoneDbError},
+    database::{L1OverlayDB, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
 use alloy_primitives::{Address, Bytes};
@@ -12,8 +12,8 @@ use revm::context::{
     DBErrorMarker,
     result::{EVMError, ResultAndState},
 };
-use tempo_evm::{TempoBlockEnv, TempoHaltReason, evm::TempoEvm};
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
+use tempo_evm::{TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, evm::TempoEvm};
+use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, ValidationContext};
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::L1StorageReader;
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
@@ -28,28 +28,28 @@ type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 /// exact database supplied by the caller. All completed results are validated and sanitized before
 /// their state transitions can be committed through that public database.
 pub struct ZoneEvm<DB: Database, I, L1: L1StorageReader = L1StateProvider> {
-    inner: TempoEvm<AnchoredZoneDb<DB, L1>, I>,
+    inner: TempoEvm<L1OverlayDB<DB, L1>, I>,
 }
 
 impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
     /// Creates a new `ZoneEvm` with guarded `CREATE` and `CREATE2` opcodes.
-    pub(super) fn new(mut evm: TempoEvm<AnchoredZoneDb<DB, L1>, I>) -> Self {
+    pub(super) fn new(mut evm: TempoEvm<L1OverlayDB<DB, L1>, I>) -> Self {
         contract_creation::configure_runtime(&mut evm);
         Self { inner: evm }
     }
 
     /// Provides a reference to the EVM context.
-    pub fn ctx(&self) -> &TempoCtx<AnchoredZoneDb<DB, L1>> {
+    pub fn ctx(&self) -> &TempoCtx<L1OverlayDB<DB, L1>> {
         self.inner.ctx()
     }
 
     /// Provides a mutable reference to the EVM context.
-    pub fn ctx_mut(&mut self) -> &mut TempoCtx<AnchoredZoneDb<DB, L1>> {
+    pub fn ctx_mut(&mut self) -> &mut TempoCtx<L1OverlayDB<DB, L1>> {
         self.inner.ctx_mut()
     }
 
-    /// Clears database-adapter bookkeeping left by the current transaction attempt.
-    pub(crate) fn reset_transaction_state(&mut self) {
+    /// Clears the L1 overlay bookkeeping left by the current transaction attempt.
+    pub(crate) fn clear_l1_overlay_state(&mut self) {
         self.inner
             .ctx_mut()
             .journaled_state
@@ -62,12 +62,14 @@ impl<DB, I, L1> ZoneEvm<DB, I, L1>
 where
     DB: Database,
     L1: L1StorageReader,
-    I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>,
+    I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
 {
-    fn execute_inner(
+    /// Executes a transaction through Tempo, strips mirrored L1 fields from its state transition,
+    /// and clears transaction-local overlay bookkeeping before returning.
+    fn execute_and_sanitize(
         &mut self,
         execute: impl FnOnce(
-            &mut TempoEvm<AnchoredZoneDb<DB, L1>, I>,
+            &mut TempoEvm<L1OverlayDB<DB, L1>, I>,
         ) -> Result<TempoResult, AdaptedEvmError<DB::Error>>,
     ) -> Result<TempoResult, ZoneEvmError<DB::Error>> {
         let result = match execute(&mut self.inner) {
@@ -81,7 +83,26 @@ where
             Err(error) => Err(map_adapter_error(error)),
         };
 
-        self.reset_transaction_state();
+        self.clear_l1_overlay_state();
+        result
+    }
+}
+
+impl<DB, I, L1> TempoPoolValidationEvm for ZoneEvm<DB, I, L1>
+where
+    DB: Database,
+    L1: L1StorageReader,
+    I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
+{
+    fn validate_pool_transaction(
+        &mut self,
+        tx: TempoTxEnv,
+    ) -> Result<ValidationContext, ZoneEvmError<DB::Error>> {
+        let result = self
+            .inner
+            .validate_pool_transaction(tx)
+            .map_err(map_adapter_error);
+        self.clear_l1_overlay_state();
         result
     }
 }
@@ -90,7 +111,7 @@ impl<DB, I, L1> Evm for ZoneEvm<DB, I, L1>
 where
     DB: Database,
     L1: L1StorageReader,
-    I: Inspector<TempoCtx<AnchoredZoneDb<DB, L1>>>,
+    I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
 {
     type DB = DB;
     type Tx = TempoTxEnv;
@@ -118,7 +139,7 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
-        self.execute_inner(|evm| evm.transact_raw(tx))
+        self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 
     fn transact_system_call(
@@ -127,7 +148,7 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.execute_inner(|evm| evm.transact_system_call(caller, contract, data))
+        self.execute_and_sanitize(|evm| evm.transact_system_call(caller, contract, data))
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
@@ -178,7 +199,7 @@ mod tests {
     use zone_precompiles::test_utils::MockL1Reader;
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
-        let db = AnchoredZoneDb::new(EmptyDB::default(), MockL1Reader::default());
+        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default());
         ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
     }
 
@@ -219,7 +240,7 @@ mod tests {
 
         for execution_result in results {
             let mut evm = test_evm();
-            let result = evm.execute_inner(move |_| {
+            let result = evm.execute_and_sanitize(move |_| {
                 Ok(ResultAndState::new(execution_result, registry_write()))
             });
 

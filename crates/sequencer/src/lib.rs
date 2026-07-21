@@ -73,7 +73,7 @@ pub struct ZoneSequencerHandle {
 ///   shared store, builds [`crate::BatchData`], and submits each batch synchronously to the
 ///   ZonePortal on Tempo L1. Local state only advances on successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
-///   `processWithdrawal` for each pending withdrawal.
+///   `processWithdrawals` for each pending withdrawal.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.

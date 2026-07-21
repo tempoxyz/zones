@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter};
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use alloy_sol_types::{SolEvent, SolValue};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
@@ -22,6 +22,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     net::{SocketAddr, TcpListener},
+    num::NonZeroU32,
     ops::Deref,
     pin::Pin,
     sync::{
@@ -914,7 +915,7 @@ impl ZoneTestNode {
         if is_local_dummy_l1 {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
-                .with_l1_state_provider_retry_limits(0, 1);
+                .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         let p2p_enabled = p2p_config.is_some();
         if let Some(p2p_config) = p2p_config {
@@ -2727,6 +2728,10 @@ pub(crate) async fn start_local_p2p_pair(
         Ed25519PrivateKey::from_seed(103),
     ];
     let public_keys = identities.each_ref().map(|key| key.public_key());
+    let secp256k1_keys = [101_u64, 102, 103].map(|key| format!("0x{key:064x}"));
+    let secp256k1_signers = secp256k1_keys
+        .each_ref()
+        .map(|key| key.parse::<PrivateKeySigner>().unwrap());
 
     let unique = NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed);
     let config_dir = std::env::temp_dir().join(format!(
@@ -2739,10 +2744,16 @@ pub(crate) async fn start_local_p2p_pair(
         "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
         const_hex::encode_prefixed(public_keys[0].as_ref())
     );
-    for (index, (public_key, address)) in public_keys.iter().zip(addresses).enumerate() {
+    for (index, ((public_key, secp256k1_signer), address)) in public_keys
+        .iter()
+        .zip(&secp256k1_signers)
+        .zip(addresses)
+        .enumerate()
+    {
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
-            const_hex::encode_prefixed(public_key.as_ref())
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref()),
+            secp256k1_signer.address(),
         ));
     }
     std::fs::write(&manifest_path, manifest)?;
@@ -2753,9 +2764,12 @@ pub(crate) async fn start_local_p2p_pair(
             &key_path,
             const_hex::encode_prefixed(identities[index].encode().as_ref()),
         )?;
+        let secp256k1_key_path = config_dir.join(format!("node-{index}-secp256k1.key"));
+        std::fs::write(&secp256k1_key_path, &secp256k1_keys[index])?;
         configs.push(P2pConfig::load(
             &manifest_path,
             &key_path,
+            &secp256k1_key_path,
             addresses[index],
             false,
             0,
@@ -2816,6 +2830,10 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
         Ed25519PrivateKey::from_seed(203),
     ];
     let public_keys = identities.each_ref().map(|key| key.public_key());
+    let secp256k1_keys = [201_u64, 202, 203].map(|key| format!("0x{key:064x}"));
+    let secp256k1_signers = secp256k1_keys
+        .each_ref()
+        .map(|key| key.parse::<PrivateKeySigner>().unwrap());
     let addresses = [listen, available_address()?, available_address()?];
     let config_dir = std::env::temp_dir().join(format!(
         "tempo-zone-p2p-config-{}-{}",
@@ -2829,10 +2847,16 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
         "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
         const_hex::encode_prefixed(public_keys[0].as_ref())
     );
-    for (index, (public_key, address)) in public_keys.iter().zip(addresses).enumerate() {
+    for (index, ((public_key, secp256k1_signer), address)) in public_keys
+        .iter()
+        .zip(&secp256k1_signers)
+        .zip(addresses)
+        .enumerate()
+    {
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
-            const_hex::encode_prefixed(public_key.as_ref())
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref()),
+            secp256k1_signer.address(),
         ));
     }
     std::fs::write(&manifest_path, manifest)?;
@@ -2840,9 +2864,12 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
         &key_path,
         const_hex::encode_prefixed(identities[0].encode().as_ref()),
     )?;
+    let secp256k1_key_path = config_dir.join("leader-secp256k1.key");
+    std::fs::write(&secp256k1_key_path, &secp256k1_keys[0])?;
     let config = P2pConfig::load(
         &manifest_path,
         &key_path,
+        &secp256k1_key_path,
         listen,
         false,
         0,
@@ -3703,6 +3730,23 @@ impl L1Fixture {
         }
     }
 
+    /// Extend the fixture caches' contiguous receipt coverage through a generated block.
+    ///
+    /// `seed_l1_cache` may seed only the blocks a test normally needs. Tests that subsequently
+    /// cross that horizon still need unchanged slots to inherit their last seeded value rather
+    /// than falling back to the deliberately unavailable dummy L1 RPC.
+    fn extend_cache_coverage(&self, block_number: u64) {
+        for cache in self.caches.lock().unwrap().iter() {
+            let mut cache = cache.write();
+            if block_number > cache.anchor().number {
+                cache.update_anchor(NumHash {
+                    number: block_number,
+                    hash: B256::ZERO,
+                });
+            }
+        }
+    }
+
     /// Build a [`TempoHeader`] for the next L1 block.
     fn next_header(&mut self) -> TempoHeader {
         let number = self.next_block_number;
@@ -3726,6 +3770,7 @@ impl L1Fixture {
         self.last_hash = keccak256(&rlp_buf);
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
+        self.extend_cache_coverage(number);
 
         // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
         // coverage the subscriber would publish before the engine consumes this block.

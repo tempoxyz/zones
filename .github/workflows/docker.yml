@@ -38,6 +38,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          submodules: recursive
 
       - uses: depot/setup-action@15c09a5f77a0840ad4bce955686522a257853461 # v1.7.1
 
@@ -47,6 +48,24 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/tempo-zone
           bake-target: tempo-zone
+          tags: |
+            type=schedule,pattern=nightly
+            type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=stable,enable=${{ github.ref_type == 'tag' }}
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=edge,branch=main
+            type=sha,prefix=sha-
+            type=ref,event=pr
+
+      - name: Docker metadata for tempo-zone-xtask
+        id: meta-tempo-zone-xtask
+        uses: docker/metadata-action@80c7e94dd9b9319bd5eb7a0e0fe9291e23a2a2e9 # v6.1.0
+        with:
+          images: ${{ env.REGISTRY }}/tempo-zone-xtask
+          bake-target: tempo-zone-xtask
           tags: |
             type=schedule,pattern=nightly
             type=raw,value=nightly,enable=${{ github.event.inputs.nightly == 'true' }}
@@ -75,6 +94,7 @@ jobs:
           files: |
             docker-bake.hcl
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
+            ${{ steps.meta-tempo-zone-xtask.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
           push: ${{ github.event_name != 'pull_request' }}

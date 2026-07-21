@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 # tempo
 tempo-chainspec.workspace = true
-tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
@@ -76,6 +75,7 @@ serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url = "2"
+zeroize.workspace = true
 
 [dev-dependencies]
 alloy = { workspace = true, features = [
@@ -104,6 +104,7 @@ reqwest.workspace = true
 revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
+tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-revm.workspace = true

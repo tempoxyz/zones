@@ -1,6 +1,6 @@
 ---
 name: private-zone-rpc
-description: Interact with authenticated private Tempo Zone RPC endpoints, derive X-Authorization-Token zone auth tokens, identify zone IDs and chain IDs from ZoneFactory or repo metadata, and debug 401/403 auth failures. Use when calling rpc-zone-*-private endpoints, web3_clientVersion, eth_chainId, zone_getZoneInfo, or any private zone JSON-RPC method that needs a zone auth token.
+description: Interact with authenticated private Tempo Zone RPC endpoints, derive X-Authorization-Token zone auth tokens, identify zone IDs and chain IDs from ZoneFactory or repo metadata, and debug 401/403 auth failures. Use when calling rpc-zone-*-private endpoints, web3_clientVersion, eth_chainId, zone_getZoneInfo, zone_getEncryptionKey, or any private zone JSON-RPC method that needs a zone auth token.
 ---
 
 # Private Zone RPC
@@ -59,6 +59,22 @@ use the helper script for one-off calls:
 ```
 
 The helper prints the JSON-RPC body on success and keeps the token out of logs.
+
+## Reading The Active Encryption Key
+
+Any authenticated caller can read the active sequencer encryption key at the
+current Tempo L1 head:
+
+```bash
+cast rpc zone_getEncryptionKey \
+  --rpc-url https://private-zone-rpc.example.com \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+```
+
+The result is the portal's `encryptionKeyAtBlock` return value: `x`, a numeric
+`yParity` of `2` or `3`, and the JSON-RPC quantity `keyIndex`. The endpoint
+reads L1 directly so new keys are available before the Zone processes the
+corresponding block.
 
 ## Finding Zone ID And Chain ID
 

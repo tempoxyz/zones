@@ -1011,7 +1011,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///   │                                         │
 ///   │   ◄──── requestWithdrawal ───── │
 ///   │   ◄──── submitBatch ────────  │
-///   │   processWithdrawal                     │
+///   │   processWithdrawals                     │
 ///   │            → tokens to L1              │
 /// ```
 ///
@@ -1161,7 +1161,7 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
 ///  3. Make an encrypted deposit targeting the blacklisted recipient.
 ///  4. Verify upstream TIP-20 mint enforcement fails and refunds the sender on L1.
 ///
-/// `AnchoredZoneDb` exposes finalized L1 policy state directly to upstream Tempo execution.
+/// `L1OverlayDB` exposes finalized L1 policy state directly to upstream Tempo execution.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

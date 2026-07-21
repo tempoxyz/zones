@@ -8,6 +8,7 @@ use clap::{Args, CommandFactory, FromArgMatches};
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
+use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{P2pConfig, Role};
@@ -107,9 +108,13 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
                     eyre::eyre!("--p2p.key is required with --sequencer.manifest")
                 })?;
+                let secp256k1_key_path = args.secp256k1_key.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--secp256k1.key is required with --sequencer.manifest")
+                })?;
                 P2pConfig::load(
                     manifest_path,
                     ed25519_key_path,
+                    secp256k1_key_path,
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
                     args.zone_id,
@@ -123,6 +128,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 target: "reth::cli",
                 role = %config.role(),
                 ed25519_public_key = %config.ed25519_public_key(),
+                secp256k1_address = %config.secp256k1_address(),
                 listen = %config.listen(),
                 "Validated multi-sequencer manifest and local identity"
             );
@@ -136,13 +142,14 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             builder.config_mut().engine.memory_block_buffer_target = 0;
         }
         let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_role);
-        let sequencer_signer = (should_sequence_blocks || manifest_mode)
-            .then(|| {
-                args.sequencer_key
-                    .parse::<PrivateKeySigner>()
-                    .map_err(|err| eyre::eyre!("invalid --sequencer-key: {err}"))
-            })
-            .transpose()?;
+        let sequencer_signer = if should_sequence_blocks || manifest_mode {
+            Some(
+                load_sequencer_signer(args.sequencer_key, args.sequencer_key_file.as_deref())
+                    .await?,
+            )
+        } else {
+            None
+        };
 
         builder.config_mut().network.discovery.disable_discovery = true;
         builder.config_mut().rpc.disable_auth_server = true;
@@ -189,6 +196,43 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     })
 }
 
+async fn load_sequencer_signer(
+    inline_key: Option<String>,
+    key_file: Option<&std::path::Path>,
+) -> eyre::Result<PrivateKeySigner> {
+    let (key, source) = match (inline_key, key_file) {
+        (Some(key), None) => (Zeroizing::new(key), "--sequencer-key".to_owned()),
+        (None, Some(path)) => {
+            let path = path.to_path_buf();
+            let source = format!("--sequencer-key-file {}", path.display());
+            let display_path = path.display().to_string();
+            let key = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
+                .await
+                .map_err(|err| {
+                    eyre::eyre!("sequencer key reader task failed for {display_path}: {err}")
+                })?
+                .map_err(|err| {
+                    eyre::eyre!("failed to read sequencer key from {display_path}: {err}")
+                })?;
+            (Zeroizing::new(key), source)
+        }
+        (Some(_), Some(_)) => {
+            return Err(eyre::eyre!(
+                "--sequencer-key and --sequencer-key-file are mutually exclusive"
+            ));
+        }
+        (None, None) => {
+            return Err(eyre::eyre!(
+                "one of --sequencer-key or --sequencer-key-file is required"
+            ));
+        }
+    };
+
+    key.trim()
+        .parse::<PrivateKeySigner>()
+        .map_err(|_| eyre::eyre!("invalid sequencer key from {source}"))
+}
+
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
@@ -209,8 +253,24 @@ pub struct ZoneArgs {
     pub block_interval_ms: u64,
 
     /// Sequencer private key (hex, with or without 0x prefix).
-    #[arg(long = "sequencer-key", env = "SEQUENCER_KEY")]
-    pub sequencer_key: String,
+    #[arg(
+        long = "sequencer-key",
+        env = "SEQUENCER_KEY",
+        value_name = "HEX",
+        required_unless_present = "sequencer_key_file",
+        conflicts_with = "sequencer_key_file"
+    )]
+    pub sequencer_key: Option<String>,
+
+    /// Path to a file or FIFO containing the sequencer private key.
+    #[arg(
+        long = "sequencer-key-file",
+        env = "SEQUENCER_KEY_FILE",
+        value_name = "PATH",
+        required_unless_present = "sequencer_key",
+        conflicts_with = "sequencer_key"
+    )]
+    pub sequencer_key_file: Option<PathBuf>,
 
     /// Path to the static multi-sequencer manifest. Its presence activates
     /// multi-sequencer mode and makes the manifest authoritative for role selection.
@@ -218,7 +278,7 @@ pub struct ZoneArgs {
         long = "sequencer.manifest",
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
-        requires = "p2p_key",
+        requires_all = ["p2p_key", "secp256k1_key"],
         conflicts_with = "enable_sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
@@ -231,6 +291,15 @@ pub struct ZoneArgs {
         requires = "sequencer_manifest"
     )]
     pub p2p_key: Option<PathBuf>,
+
+    /// Path to this node's hex-encoded individual secp256k1 private key.
+    #[arg(
+        long = "secp256k1.key",
+        env = "SECP256K1_KEY",
+        value_name = "PATH",
+        requires = "sequencer_manifest"
+    )]
+    pub secp256k1_key: Option<PathBuf>,
 
     /// Socket address bound for multi-sequencer Commonware traffic.
     #[arg(
@@ -368,9 +437,11 @@ fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::{io::Write as _, process::Command, thread, time::Duration};
+
     use clap::Parser as _;
 
-    use super::{ZoneArgs, ZoneCli, sequencer_enabled, validate_l1_rpc_url};
+    use super::{ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url};
     use zone_p2p::Role;
 
     #[derive(Debug, clap::Parser)]
@@ -394,7 +465,105 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_requires_a_p2p_key_and_conflicts_with_legacy_sequencer() {
+    fn sequencer_key_file_is_accepted_and_conflicts_with_inline_key() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let parsed = ZoneArgsParser::try_parse_from(
+            common
+                .into_iter()
+                .chain(["--sequencer-key-file", "/run/secrets/sequencer-key"]),
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.zone.sequencer_key_file.as_deref(),
+            Some(std::path::Path::new("/run/secrets/sequencer-key"))
+        );
+        assert!(parsed.zone.sequencer_key.is_none());
+
+        let error = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer-key",
+            "0x01",
+            "--sequencer-key-file",
+            "/run/secrets/sequencer-key",
+        ]))
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loads_sequencer_key_from_file_with_trailing_newline() {
+        let path =
+            std::env::temp_dir().join(format!("tempo-zone-sequencer-key-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            "0000000000000000000000000000000000000000000000000000000000000001\n",
+        )
+        .unwrap();
+
+        let signer = load_sequencer_signer(None, Some(&path)).await.unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(
+            signer.address(),
+            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+                .parse::<alloy_primitives::Address>()
+                .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loads_sequencer_key_from_fifo() {
+        let path = std::env::temp_dir().join(format!(
+            "tempo-zone-sequencer-key-{}.fifo",
+            std::process::id()
+        ));
+        let status = Command::new("mkfifo")
+            .args(["-m", "600"])
+            .arg(&path)
+            .status()
+            .expect("mkfifo must be available");
+        assert!(status.success(), "mkfifo failed: {status}");
+
+        let writer_path = path.clone();
+        let writer = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            let mut fifo = std::fs::OpenOptions::new()
+                .write(true)
+                .open(writer_path)
+                .unwrap();
+            writeln!(
+                fifo,
+                "0000000000000000000000000000000000000000000000000000000000000001"
+            )
+            .unwrap();
+        });
+
+        let signer = tokio::time::timeout(
+            Duration::from_secs(2),
+            load_sequencer_signer(None, Some(&path)),
+        )
+        .await
+        .expect("FIFO read timed out")
+        .unwrap();
+        writer.join().unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(
+            signer.address(),
+            "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
+                .parse::<alloy_primitives::Address>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn manifest_mode_requires_node_keys_and_conflicts_with_legacy_sequencer() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -416,11 +585,25 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
 
+        let missing_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            missing_secp256k1_key.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
         let conflict = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
             "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
             "--sequencer",
         ]))
         .unwrap_err();
@@ -472,6 +655,8 @@ mod tests {
             "zone.toml",
             "--p2p.key",
             "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
             "--p2p.bypass-ip-check",
         ]))
         .unwrap();
