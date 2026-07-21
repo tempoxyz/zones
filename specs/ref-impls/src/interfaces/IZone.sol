@@ -846,11 +846,12 @@ interface IZonePortal {
         view
         returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
+    /// @notice Set zone gas rate. Only callable by admin.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
 
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
+    /// @dev Only callable by admin.
     /// @param _bouncebackGas Gas amount used in the Tempo-side bounce-back fee calculation
     function setBouncebackGas(uint64 _bouncebackGas) external;
 

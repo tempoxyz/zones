@@ -310,17 +310,19 @@ contract ZonePortal is IZonePortal {
         return _sequencers[index];
     }
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
-    /// @dev Sequencers publish the operational rate; collected deposit fees are paid to the admin.
+    /// @notice Set zone gas rate. Only callable by admin.
+    /// @dev The admin publishes the operational rate and receives collected deposit fees.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
-    function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
+    function setZoneGasRate(uint128 _zoneGasRate) external onlyAdmin {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
     }
 
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
-    function setBouncebackGas(uint64 _bouncebackGas) external onlySequencer {
+    /// @dev Only the admin can change the amount because it determines the fee deducted from a
+    ///      failed deposit at processing time.
+    function setBouncebackGas(uint64 _bouncebackGas) external onlyAdmin {
         bouncebackGas = _bouncebackGas;
         emit BouncebackGasUpdated(_bouncebackGas);
     }

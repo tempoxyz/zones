@@ -735,19 +735,18 @@ contract ZonePortalTest is BaseTest {
         assertFalse(portal.isSequencer(removed));
     }
 
-    function test_allSequencersCanCallConfigurationMethods() public {
+    function test_allSequencersCanCallSequencerConfigurationMethods() public {
         address[] memory signers = _activateSequencerSet(2);
 
         for (uint256 i = 0; i < signers.length; ++i) {
             vm.startPrank(signers[i]);
-            portal.setZoneGasRate(uint128(i + 1));
             portal.setRpcUrl(string.concat("https://sequencer-", vm.toString(i), ".example"));
             vm.stopPrank();
         }
 
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setZoneGasRate(4);
+        portal.setRpcUrl("https://not-a-sequencer.example");
     }
 
     function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
@@ -855,6 +854,12 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.enableToken(address(pathUSD));
+
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setZoneGasRate(1);
+
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setBouncebackGas(1);
         vm.stopPrank();
     }
 
@@ -931,12 +936,6 @@ contract ZonePortalTest is BaseTest {
         bytes32 prevBlockHash = portal.blockHash();
 
         vm.startPrank(admin);
-
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setZoneGasRate(1);
-
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setBouncebackGas(1);
 
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.setRpcUrl("https://rpc.example");
@@ -3701,7 +3700,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_deductsFee() public {
-        portal.setZoneGasRate(1); // 1 token per gas -> fee = 100_000
+        _setZoneGasRate(1); // 1 token per gas -> fee = 100_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
@@ -3836,7 +3835,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnDepositTooSmall() public {
-        portal.setZoneGasRate(1); // fee = 100_000
+        _setZoneGasRate(1); // fee = 100_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
         vm.startPrank(alice);
@@ -3992,7 +3991,7 @@ contract ZonePortalTest is BaseTest {
 
         // --- Slot 1: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
         uint128 testRate = 42;
-        portal.setZoneGasRate(testRate);
+        _setZoneGasRate(testRate);
         bytes32 slot1 = vm.load(address(portal), bytes32(uint256(1)));
         // zoneGasRate is at the lowest 128 bits (uint128), withdrawalBatchIndex at bits 128-191
         uint128 loadedRate = uint128(uint256(slot1));
@@ -4010,7 +4009,7 @@ contract ZonePortalTest is BaseTest {
 
         // --- Slot 4: deposit counters + bouncebackGas (uint64) packed ---
         uint64 testBouncebackGas = 43;
-        portal.setBouncebackGas(testBouncebackGas);
+        _setBouncebackGas(testBouncebackGas);
         bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
         assertEq(
             uint64(uint256(slot4) >> 128),
@@ -4230,13 +4229,13 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.currentDepositQueueHash(), depositHash);
     }
 
-    /// @notice Sequencer updates the zone gas rate and emits the new value.
+    /// @notice Admin updates the zone gas rate and emits the new value.
     function test_setZoneGasRate_updatesRateAndEmits() public {
         uint128 newRate = 42;
 
         vm.expectEmit(false, false, false, true, address(portal));
         emit IZonePortal.ZoneGasRateUpdated(newRate);
-        portal.setZoneGasRate(newRate);
+        _setZoneGasRate(newRate);
 
         assertEq(portal.zoneGasRate(), newRate);
     }
@@ -4245,6 +4244,7 @@ contract ZonePortalTest is BaseTest {
     function test_setZoneGasRate_revertsWhenTooHigh() public {
         uint128 tooHigh = uint128(1e18) + 1;
 
+        vm.prank(admin);
         vm.expectRevert(IZonePortal.GasFeeRateTooHigh.selector);
         portal.setZoneGasRate(tooHigh);
     }
@@ -4254,32 +4254,32 @@ contract ZonePortalTest is BaseTest {
     function test_setZoneGasRate_acceptsExactMaximum() public {
         uint128 maxRate = portal.MAX_GAS_FEE_RATE();
 
-        portal.setZoneGasRate(maxRate);
+        _setZoneGasRate(maxRate);
         assertEq(portal.zoneGasRate(), maxRate);
     }
 
-    /// @notice Only the sequencer can update the zone gas rate.
-    function test_setZoneGasRate_revertsIfNotSequencer() public {
-        vm.prank(alice);
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
+    /// @notice Only the admin can update the zone gas rate.
+    function test_setZoneGasRate_revertsIfNotAdmin() public {
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setZoneGasRate(1);
     }
 
-    /// @notice Sequencer updates the gas amount used for bounce-back fees.
+    /// @notice Admin updates the gas amount used for bounce-back fees.
     function test_setBouncebackGas_updatesGasAndEmits() public {
         uint64 newBouncebackGas = 42;
 
         vm.expectEmit(false, false, false, true, address(portal));
         emit IZonePortal.BouncebackGasUpdated(newBouncebackGas);
-        portal.setBouncebackGas(newBouncebackGas);
+        _setBouncebackGas(newBouncebackGas);
 
         assertEq(portal.bouncebackGas(), newBouncebackGas);
     }
 
-    /// @notice Only the sequencer can update the bounce-back gas amount.
-    function test_setBouncebackGas_revertsIfNotSequencer() public {
-        vm.prank(alice);
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
+    /// @notice Only the admin can update the bounce-back gas amount.
+    function test_setBouncebackGas_revertsIfNotAdmin() public {
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setBouncebackGas(1);
     }
 
@@ -4402,7 +4402,7 @@ contract ZonePortalTest is BaseTest {
     function testFuzz_calculateDepositFee(uint128 zoneGasRate) public {
         zoneGasRate = uint128(bound(zoneGasRate, 0, portal.MAX_GAS_FEE_RATE()));
 
-        portal.setZoneGasRate(zoneGasRate);
+        _setZoneGasRate(zoneGasRate);
 
         uint128 fee = portal.calculateDepositFee();
 
@@ -4412,7 +4412,7 @@ contract ZonePortalTest is BaseTest {
     /// @notice Bounceback fee rounds basefee gas cost up to token units.
     function testFuzz_calculateBouncebackFee(uint64 bouncebackGas, uint256 basefee) public {
         basefee = bound(basefee, 0, 1e18);
-        portal.setBouncebackGas(bouncebackGas);
+        _setBouncebackGas(bouncebackGas);
         vm.fee(basefee);
 
         uint256 expected = (uint256(bouncebackGas) * basefee + 1e12 - 1) / 1e12;
@@ -4425,8 +4425,8 @@ contract ZonePortalTest is BaseTest {
     function testFuzz_deposit_amountBoundary(uint128 amount) public {
         amount = uint128(bound(amount, 0, 1000e6));
         vm.fee(1e12);
-        portal.setZoneGasRate(1);
-        portal.setBouncebackGas(300_000);
+        _setZoneGasRate(1);
+        _setBouncebackGas(300_000);
         uint128 minimum = portal.calculateDepositFee() + portal.calculateBouncebackFee();
 
         vm.startPrank(alice);
@@ -4515,6 +4515,16 @@ contract ZonePortalTest is BaseTest {
         assertEq(x, xs[expectedIndex]);
         assertEq(yParity, yParities[expectedIndex]);
         assertEq(keyIndex, expectedIndex);
+    }
+
+    function _setZoneGasRate(uint128 rate) internal {
+        vm.prank(admin);
+        portal.setZoneGasRate(rate);
+    }
+
+    function _setBouncebackGas(uint64 gasAmount) internal {
+        vm.prank(admin);
+        portal.setBouncebackGas(gasAmount);
     }
 
 }

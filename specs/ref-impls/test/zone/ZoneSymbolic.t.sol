@@ -34,7 +34,7 @@ contract ZonePortalSymbolic is ZonePortalTest {
     function check_depositFeeNeverOverflows(uint128 rate) external {
         vm.assume(rate <= portal.MAX_GAS_FEE_RATE());
 
-        vm.prank(sequencer);
+        vm.prank(admin);
         portal.setZoneGasRate(rate);
 
         uint128 fee = portal.calculateDepositFee();
@@ -45,7 +45,7 @@ contract ZonePortalSymbolic is ZonePortalTest {
     ///         for any input (over-cap inputs revert and are pruned). Encodes the MAX_GAS_FEE_RATE
     ///         invariant.
     function check_gasRateAlwaysWithinCap(uint128 rate) external {
-        vm.prank(sequencer);
+        vm.prank(admin);
         try portal.setZoneGasRate(rate) {
             assertLe(uint256(portal.zoneGasRate()), uint256(portal.MAX_GAS_FEE_RATE()));
         } catch { }
