@@ -8,7 +8,9 @@
 use std::{net::TcpListener, time::Duration};
 
 use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
-use alloy_consensus::Transaction;
+use alloy_consensus::{
+    Transaction, constants::EMPTY_ROOT_HASH, proofs::calculate_transaction_root,
+};
 use alloy_eips::NumHash;
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
@@ -28,6 +30,50 @@ use crate::utils::{
 };
 
 const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
+
+/// A full execution payload without the required first `advanceTempo` transaction is rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_payload_without_advance_tempo_is_rejected() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    zone.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
+
+    let parent = zone
+        .block_by_number(0)?
+        .ok_or_else(|| eyre::eyre!("missing genesis block"))?;
+    let mut block = zone
+        .block_by_number(1)?
+        .ok_or_else(|| eyre::eyre!("missing first zone block"))?;
+    let first = block
+        .body
+        .transactions
+        .first()
+        .ok_or_else(|| eyre::eyre!("first zone block has no transactions"))?;
+    eyre::ensure!(
+        first.is_system_tx(),
+        "first transaction is not a system transaction"
+    );
+
+    block.body.transactions.remove(0);
+    block.header.inner.transactions_root = calculate_transaction_root(&block.body.transactions);
+    block.header.inner.state_root = parent.header.inner.state_root;
+    block.header.inner.receipts_root = EMPTY_ROOT_HASH;
+    block.header.inner.logs_bloom = Default::default();
+    block.header.inner.gas_used = 0;
+
+    let status = zone.submit_payload(block).await?;
+    assert!(
+        !status.is_valid(),
+        "payload without advanceTempo was accepted"
+    );
+    assert!(
+        format!("{status:?}").contains("missing its required advanceTempo transaction"),
+        "unexpected payload rejection: {status:?}"
+    );
+    Ok(())
+}
 
 /// A follower imports the leader's executed block and exposes the resulting state over RPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
