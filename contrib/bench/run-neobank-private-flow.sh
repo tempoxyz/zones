@@ -69,7 +69,6 @@ preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
     --max-in-flight 1 --max-rpc-in-flight 4 --failure-policy fail-fast --seed "$ZONES_BENCH_SEED" \
     --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
-preflight_phase deposit ready
 
 # The generic preflight renders one portal approval per user. It is outside timing.
 "$txgen_bin" generate --spec "$ZONES_BENCH_OUTPUT/deposit.yml" --count 0 --seed "$ZONES_BENCH_SEED" \
