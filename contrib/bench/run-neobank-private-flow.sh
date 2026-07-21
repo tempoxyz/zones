@@ -192,6 +192,12 @@ then
     die "unresolved placeholder in rendered private-flow spec"
 fi
 
+# Validate the exact rendered scenario before starting the long-lived auth
+# helper or submitting any setup traffic. This is deliberately offline: it
+# rejects bad cross-chain ABI/template references without contacting a node.
+export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
+"$txgen_bin" scenario validate --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
+
 # The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
 "$txgen_bin" auth-token-map --spec "$ZONES_BENCH_OUTPUT/zone-flow.yml" --pool users --zone-id "$zone_id" \
     --chain-id "$zone_chain_id" --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
@@ -199,7 +205,6 @@ fi
 auth_pid=$!
 for _ in $(seq 1 60); do [[ -f "$secret_dir/zone-auth.json" ]] && break; sleep 1; done
 [[ -f "$secret_dir/zone-auth.json" ]] || die "timed out creating private Zone auth map"
-export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 
 # Approve both Zone assets before timing. EarnToken needs no user balance for approval;
 # the sequencer sponsors these setup transactions from its untimed bootstrap balance.

@@ -12,6 +12,7 @@ accounts:
 artifacts:
   TIP20: txgen/abis/tip20.json
   ZonePortal: abis/zone-portal.json
+  ZoneGateway: abis/zone-gateway.json
 
 setup: { steps: [] }
 
