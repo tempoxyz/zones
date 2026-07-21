@@ -169,7 +169,7 @@ export TEMPO_BIN="$TEMPO_ROOT/target/profiling/tempo"
 export TEMPO_XTASK_BIN="$TEMPO_ROOT/target/profiling/tempo-xtask"
 export ZONES_BENCH_MNEMONIC='<private mnemonic for this isolated run>'
 export ZONES_BENCH_ACCOUNT_START=16
-export ZONES_BENCH_ACCOUNTS=100
+export ZONES_BENCH_ACCOUNTS=200
 export ZONES_BENCH_BLOAT_MIB=1000
 export ZONES_BENCH_TOPOLOGY_DIR="$PWD/target/zones-benchmark/topology"
 export ZONES_BENCH_STATE_A_ROOT='/reth-bench-a/zones-manual-<unique-run-id>'
@@ -355,10 +355,10 @@ entire bootstrap, preflight, authorization, and measured sequence:
 
 ```bash
 export ZONES_BENCH_SEED='<unique unsigned integer>'
-export ZONES_BENCH_ACCOUNTS=100
-export ZONES_BENCH_COUNT=1000
+export ZONES_BENCH_ACCOUNTS=200
+export ZONES_BENCH_COUNT=3000
 export ZONES_BENCH_TPS=20
-export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_MAX_CONCURRENT=200
 export ZONES_BENCH_DEPOSIT_AMOUNT=2000000
 export ZONES_BENCH_ACTIVITY_AMOUNT=1
 export ZONES_BENCH_WITHDRAWAL_AMOUNT=1000000
@@ -621,9 +621,10 @@ UI or CLI and select the branch/ref to test:
 gh workflow run zones-benchmark.yml \
   --ref '<branch-or-tag>' \
   -f phase=roundtrip \
-  -f accounts=100 \
-  -f count=1000 \
+  -f accounts=200 \
+  -f count=3000 \
   -f tps=20 \
+  -f max-concurrent=200 \
   -f state-bloat-gib=1
 ```
 

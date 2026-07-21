@@ -15,12 +15,12 @@ on:
         description: Number of benchmark accounts.
         type: string
         required: true
-        default: "100"
+        default: "200"
       count:
         description: Number of measured transactions, or complete journeys for roundtrip.
         type: string
         required: true
-        default: "1000"
+        default: "3000"
       tps:
         description: Target phase TPS, or journey starts per second for roundtrip.
         type: string
@@ -30,7 +30,7 @@ on:
         description: Maximum concurrent transactions, or leased journeys for roundtrip.
         type: string
         required: true
-        default: "100"
+        default: "200"
       state-bloat-gib:
         description: Tempo L1 TIP-20 state bloat per validator; never applied to the Zone.
         type: choice
@@ -148,10 +148,10 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
-          INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
-          INPUT_COUNT: ${{ inputs.count || '1000' }}
+          INPUT_ACCOUNTS: ${{ inputs.accounts || '200' }}
+          INPUT_COUNT: ${{ inputs.count || '3000' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
-          INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
+          INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '200' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
           INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
