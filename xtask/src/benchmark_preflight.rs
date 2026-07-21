@@ -2109,11 +2109,26 @@ mod tests {
         let config = local_render_config();
         let mut replacements = common_replacements(&config);
         replacements.extend(HashMap::from([
-            ("__DLUSD__".into(), Value::from("0x2000000000000000000000000000000000000001")),
-            ("__PATHUSD__".into(), Value::from("0x2000000000000000000000000000000000000002")),
-            ("__EARN_TOKEN__".into(), Value::from("0x2000000000000000000000000000000000000003")),
-            ("__GATEWAY__".into(), Value::from("0x3000000000000000000000000000000000000001")),
-            ("__BRIDGE_WALLET__".into(), Value::from("0x3000000000000000000000000000000000000002")),
+            (
+                "__DLUSD__".into(),
+                Value::from("0x2000000000000000000000000000000000000001"),
+            ),
+            (
+                "__PATHUSD__".into(),
+                Value::from("0x2000000000000000000000000000000000000002"),
+            ),
+            (
+                "__EARN_TOKEN__".into(),
+                Value::from("0x2000000000000000000000000000000000000003"),
+            ),
+            (
+                "__GATEWAY__".into(),
+                Value::from("0x3000000000000000000000000000000000000001"),
+            ),
+            (
+                "__BRIDGE_WALLET__".into(),
+                Value::from("0x3000000000000000000000000000000000000002"),
+            ),
             ("__PRIVATE_TRANSFER_AMOUNT__".into(), Value::from(1_u64)),
             ("__EARN_DEPOSIT_AMOUNT__".into(), Value::from(100_u64)),
             ("__EARN_REDEEM_AMOUNT__".into(), Value::from(100_u64)),
@@ -2131,19 +2146,27 @@ mod tests {
             render_document(source, &destination, &replacements, false).unwrap();
             let contents = fs::read_to_string(destination).unwrap();
             let _: Value = serde_yaml::from_str(&contents).unwrap();
-            assert!(!contents.contains("__"), "unresolved placeholder in {source}");
+            assert!(
+                !contents.contains("__"),
+                "unresolved placeholder in {source}"
+            );
         }
 
-        let zone: Value = serde_yaml::from_str(
-            &fs::read_to_string(output.join("zone-flow.yml")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(zone["templates"]["private_transfer"]["expiring_nonce"], true);
+        let zone: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("zone-flow.yml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            zone["templates"]["private_transfer"]["expiring_nonce"],
+            true
+        );
         assert_eq!(
             zone["templates"]["gateway_deposit"]["call"]["function"],
             "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
         );
-        assert_eq!(zone["templates"]["gateway_deposit"]["call"]["args"][4], 2_000_000);
+        assert_eq!(
+            zone["templates"]["gateway_deposit"]["call"]["args"][4],
+            2_000_000
+        );
         assert_eq!(zone["templates"]["gateway_redeem"]["call"]["args"][7], "0x");
         assert_eq!(zone["templates"]["offramp"]["call"]["args"][4], 0);
 
@@ -2157,6 +2180,48 @@ mod tests {
                 && step["wait_log"]["where"]["depositHash"]["var"]
                     == "earn_deposit.args.zoneDepositHash"
         }));
+        for (flow, token, action) in [
+            (
+                0_u64,
+                "0x2000000000000000000000000000000000000003",
+                "earn_deposit_action_id",
+            ),
+            (
+                1_u64,
+                "0x2000000000000000000000000000000000000001",
+                "earn_redeem_action_id",
+            ),
+        ] {
+            assert!(
+                steps.iter().any(|step| {
+                    let args = step["submit"]["with"]["call"]["args"].as_sequence();
+                    let Some(args) = args else {
+                        return false;
+                    };
+                    let Some(encoded) = args.get(6).map(|value| &value["abi_encode"]) else {
+                        return false;
+                    };
+                    encoded["types"][0]
+                        .as_str()
+                        .is_some_and(|value| value.starts_with("tuple(uint8 flow,"))
+                        && encoded["values"][0]["flow"] == flow
+                        && encoded["values"][0]["outputToken"] == token
+                        && encoded["values"][0]["actionId"]["var"] == action
+                        && encoded["values"][0]["encrypted"]["var"]
+                            .as_str()
+                            .is_some_and(|value| value.ends_with("_encryption.encrypted"))
+                }),
+                "missing dynamically encoded callback for flow {flow}"
+            );
+        }
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step["invoke"]["action"] == "prepare_encrypted_deposit")
+                .count(),
+            3,
+            "each encrypted terminal deposit must prepare an in-memory payload"
+        );
         assert!(steps.iter().any(|step| {
             step["wait_log"]["event"] == "WithdrawalProcessed"
                 && step["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0]

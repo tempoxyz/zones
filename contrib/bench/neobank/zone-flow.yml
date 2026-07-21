@@ -50,7 +50,7 @@ templates:
         - { var: action_id }
         - __CALLBACK_GAS_LIMIT__
         - { var: account.address }
-        - "${ZONES_BENCH_EARN_DEPOSIT_CALLBACK}"
+        - "0x"
         - "0x"
 
   gateway_redeem:
@@ -69,7 +69,7 @@ templates:
         - { var: action_id }
         - __CALLBACK_GAS_LIMIT__
         - { var: account.address }
-        - "${ZONES_BENCH_EARN_REDEEM_CALLBACK}"
+        - "0x"
         - "0x"
 
   offramp:

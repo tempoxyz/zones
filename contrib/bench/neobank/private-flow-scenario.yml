@@ -90,6 +90,7 @@ scenario:
           sender: { var: account.address }
           to: { var: account.address }
           token: "__DLUSD__"
+          memo: { var: onramp_action_id }
         max_block_range: 1000
       save: onramp_processed
 
@@ -112,6 +113,15 @@ scenario:
       save: l1_before_earn_deposit
     - checkpoint: { chain: zone }
       save: zone_before_earn_deposit
+    - invoke:
+        chain: l1
+        action: prepare_encrypted_deposit
+        with:
+          recipient: { var: account.address }
+          zoneId: __ZONE_ID__
+          portalAddress: "__PORTAL__"
+          memo: { var: earn_deposit_action_id }
+      save: earn_deposit_encryption
     - submit:
         chain: zone
         template: gateway_deposit
@@ -125,7 +135,19 @@ scenario:
               - { var: earn_deposit_action_id }
               - __CALLBACK_GAS_LIMIT__
               - { var: account.address }
-              - "${ZONES_BENCH_EARN_DEPOSIT_CALLBACK}"
+              - abi_encode:
+                  types:
+                    - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                  values:
+                    - flow: 0
+                      outputToken: "__EARN_TOKEN__"
+                      keyIndex: { var: earn_deposit_encryption.keyIndex }
+                      encrypted: { var: earn_deposit_encryption.encrypted }
+                      minVaultAssets: __EARN_DEPOSIT_AMOUNT__
+                      minVaultShares: __EARN_DEPOSIT_AMOUNT__
+                      minOutputAmount: 0
+                      actionId: { var: earn_deposit_action_id }
+                      refundRecipient: { var: account.address }
               - "0x"
       save: earn_deposit_request
 
@@ -152,6 +174,7 @@ scenario:
           sender: "__GATEWAY__"
           to: { var: account.address }
           token: "__EARN_TOKEN__"
+          memo: { var: earn_deposit_action_id }
         max_block_range: 1000
       save: earn_deposit_processed
 
@@ -159,6 +182,15 @@ scenario:
       save: l1_before_earn_redeem
     - checkpoint: { chain: zone }
       save: zone_before_earn_redeem
+    - invoke:
+        chain: l1
+        action: prepare_encrypted_deposit
+        with:
+          recipient: { var: account.address }
+          zoneId: __ZONE_ID__
+          portalAddress: "__PORTAL__"
+          memo: { var: earn_redeem_action_id }
+      save: earn_redeem_encryption
     - submit:
         chain: zone
         template: gateway_redeem
@@ -172,7 +204,19 @@ scenario:
               - { var: earn_redeem_action_id }
               - __CALLBACK_GAS_LIMIT__
               - { var: account.address }
-              - "${ZONES_BENCH_EARN_REDEEM_CALLBACK}"
+              - abi_encode:
+                  types:
+                    - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                  values:
+                    - flow: 1
+                      outputToken: "__DLUSD__"
+                      keyIndex: { var: earn_redeem_encryption.keyIndex }
+                      encrypted: { var: earn_redeem_encryption.encrypted }
+                      minVaultAssets: __EARN_REDEEM_AMOUNT__
+                      minVaultShares: 0
+                      minOutputAmount: __EARN_REDEEM_AMOUNT__
+                      actionId: { var: earn_redeem_action_id }
+                      refundRecipient: { var: account.address }
               - "0x"
       save: earn_redeem_request
 
@@ -199,6 +243,7 @@ scenario:
           sender: "__GATEWAY__"
           to: { var: account.address }
           token: "__DLUSD__"
+          memo: { var: earn_redeem_action_id }
         max_block_range: 1000
       save: earn_redeem_processed
 

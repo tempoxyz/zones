@@ -49,34 +49,19 @@ journey. `l1-onramp.yml` contains the encrypted L1 entry; `zone-flow.yml`
 contains the private transfer, both composable requests, and the off-ramp.
 They are intentionally separate from the generic roundtrip assets.
 
-The transaction generator prepares the onramp payload in memory from the
-leased account, action ID, portal address, and current portal encryption key.
-It does not write that ciphertext to the scenario report or an artifact. The
-secure runtime must still inject the following per-instance values only in
-memory:
-
-- encrypted onramp calldata for the leased account and onramp action ID;
-- encoded gateway deposit callback data, including its encrypted EarnToken
-  return payload, fallback recipient, and action ID; and
-- encoded gateway redemption callback data, including its encrypted DLUSD
-  return payload, fallback recipient, and action ID.
+The transaction generator prepares all three encrypted payloads in memory from
+the leased account, action ID, portal address, and current portal encryption
+key. It ABI-encodes the canonical callback tuple directly into the composable
+withdrawal `bytes` argument. Neither ciphertext nor callback data is written to
+the scenario report or an artifact.
 
 ## Current blocking capability
 
-The pinned transaction generator can now run multi-chain scenarios, exact
-receipt-scoped event waits, recipient-aware encrypted onramps, and tuple call
-arguments. It cannot yet ABI-encode a tuple into a `bytes` argument, which is
-needed for the canonical gateway callback struct.
-
-Consequently, the full command is intentionally not enabled in CI yet. Running
-the current scenario would require static callback bytes, which would not
-measure the requested flow. The generic roundtrip remains runnable.
-
-The narrow upstream addition needed before enabling this profile is an ABI
-encode expression that returns `bytes` from the canonical callback tuple. It
-must receive the encrypted return fields and action ID in memory and must not
-serialize ciphertext or credentials to the scenario report. Once that lands,
-the one-command invocation is:
+The pinned transaction generator now supports the required in-memory encrypted
+deposit preparation and named-tuple ABI encoding. The remaining work before
+enabling the one-command invocation is topology provisioning: deploy the
+fixtures, enable the two Zone tokens, apply the closed-loop policy, and render
+the runtime addresses. Once that is in place, the command is:
 
 ```bash
 contrib/bench/run-neobank-private-flow.sh
