@@ -34,14 +34,6 @@ const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/bench/
 const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const AUTH_TOKEN_TTL_SECS: u64 = 300;
-// Setup approvals are generated before their parallel send phase. They need a
-// wider window than streaming workload transactions, especially after the L1
-// advances time while accepting a full account pool.
-// `txgen` uses the latest L1 timestamp while the node evaluates the first
-// submitted transaction against its next block timestamp.  Leave a one-second
-// margin below the protocol's 30-second future bound.
-const APPROVAL_SETUP_VALID_FOR_SECS: u64 = 29;
-
 alloy::sol! {
     #[sol(rpc)]
     interface ZoneBenchmarkConfig {
@@ -1368,7 +1360,6 @@ fn render_all_specs(
                 ApprovalOptions {
                     l1: true,
                     sponsored: false,
-                    expiring_nonce: true,
                 },
             )
         })
@@ -1385,7 +1376,6 @@ fn render_all_specs(
                 ApprovalOptions {
                     l1: false,
                     sponsored: false,
-                    expiring_nonce: true,
                 },
             )
         })
@@ -1401,7 +1391,6 @@ fn render_all_specs(
                 ApprovalOptions {
                     l1: true,
                     sponsored: false,
-                    expiring_nonce: false,
                 },
             )
         })
@@ -1449,7 +1438,6 @@ fn render_all_specs(
                     ApprovalOptions {
                         l1: false,
                         sponsored: true,
-                        expiring_nonce: true,
                     },
                 )
             })
@@ -1566,7 +1554,6 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
 struct ApprovalOptions {
     l1: bool,
     sponsored: bool,
-    expiring_nonce: bool,
 }
 
 fn approval_step(
@@ -1610,10 +1597,6 @@ fn approval_step(
             "pool": "sponsor",
             "select": { "index": 0 },
         });
-    }
-    if options.expiring_nonce {
-        transaction["expiring_nonce"] = serde_json::json!(true);
-        transaction["valid_for_secs"] = serde_json::json!(APPROVAL_SETUP_VALID_FOR_SECS);
     }
     serde_yaml::to_value(serde_json::json!({
         "id": format!(
@@ -1955,10 +1938,10 @@ mod tests {
         let deposit: Value =
             serde_yaml::from_str(&fs::read_to_string(output.join("deposit.yml")).unwrap()).unwrap();
         assert_eq!(deposit["setup"]["steps"].as_sequence().unwrap().len(), 2);
-        assert_eq!(deposit["setup"]["steps"][0]["tx"]["expiring_nonce"], true);
-        assert_eq!(
-            deposit["setup"]["steps"][0]["tx"]["valid_for_secs"],
-            APPROVAL_SETUP_VALID_FOR_SECS
+        assert!(
+            deposit["setup"]["steps"][0]["tx"]
+                .get("expiring_nonce")
+                .is_none()
         );
         assert_eq!(
             deposit["templates"]["deposit"]["call"]["function"],
@@ -1984,9 +1967,10 @@ mod tests {
                 .get("sponsor")
                 .is_none()
         );
-        assert_eq!(
-            withdrawal["setup"]["steps"][0]["tx"]["expiring_nonce"],
-            true
+        assert!(
+            withdrawal["setup"]["steps"][0]["tx"]
+                .get("expiring_nonce")
+                .is_none()
         );
         assert_eq!(
             withdrawal["templates"]["request_withdrawal"]["call"]["function"],
@@ -2015,11 +1999,7 @@ mod tests {
                 .unwrap();
         let sponsored_approval = &zone_roundtrip["setup"]["steps"][0]["tx"];
         assert_eq!(sponsored_approval["sponsor"]["pool"], "sponsor");
-        assert_eq!(sponsored_approval["expiring_nonce"], true);
-        assert_eq!(
-            sponsored_approval["valid_for_secs"],
-            APPROVAL_SETUP_VALID_FOR_SECS
-        );
+        assert!(sponsored_approval.get("expiring_nonce").is_none());
         assert_eq!(sponsored_approval["call"]["function"], "approve");
         assert_eq!(
             zone_roundtrip["templates"]["request_withdrawal"]["call"]["function"],

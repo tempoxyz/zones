@@ -71,8 +71,8 @@ preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
     --max-in-flight 1 --max-rpc-in-flight 4 --failure-policy fail-fast --seed "$ZONES_BENCH_SEED" \
     --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
-# Re-render expiring approval setup after bootstrap rather than letting the
-# bootstrap's block-time advance consume its nonce-validity window.
+# Refresh preflight after bootstrap so the rendered report reflects its funded
+# sponsor state. Setup approvals themselves are deliberately non-expiring.
 preflight_phase bootstrap ""
 
 # The generic preflight renders one portal approval per user. It is outside timing.
