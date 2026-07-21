@@ -8,7 +8,7 @@
 //!
 //! 1. Direct-call-only rules reject delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply [`CallRules`] admission checks using calldata and call metadata.
+//! 3. Apply pure [`CallRules`] admission checks using calldata and caller metadata.
 //! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Admission-rule rejections include calldata input gas, while early delegate-call rejection is
@@ -57,54 +57,22 @@ impl ZonePrecompileEnv {
 pub(crate) enum CallCheck {
     /// Invoke the supplied precompile implementation.
     Continue,
-    /// Revert with ABI-encoded data.
+    /// Revert with ABI-encoded data. The execution wrapper MUST apply input gas and reservoir.
     Revert(Bytes),
-    /// Return without invoking the supplied implementation. The execution wrapper applies input
-    /// gas before forwarding this result.
-    Return(PrecompileResult),
 }
 
-impl CallCheck {
-    /// Reject a call with an ABI-encoded Solidity error.
-    pub(crate) fn revert(error: impl SolError) -> Self {
-        Self::Revert(error.abi_encode().into())
-    }
-
-    /// Reject a call with a typed Tempo or zone-native precompile error.
-    pub(crate) fn from_error(error: impl Into<crate::ZonePrecompileError>) -> Self {
-        Self::Return(StorageCtx::default().error_result(error.into()))
-    }
-}
-
-/// Call metadata available to zone admission rules after storage setup.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ZoneCall<'a> {
-    /// Input calldata.
-    pub(crate) data: &'a [u8],
-    /// EVM caller.
-    pub(crate) caller: Address,
-    /// Whether the EVM call is static.
-    pub(crate) is_static: bool,
-}
-
-impl ZoneCall<'_> {
-    pub(crate) fn selector(&self) -> Option<[u8; 4]> {
-        selector_from_calldata(self.data)
-    }
-}
-
-/// Selector-, caller-, and call-context-dependent precompile rules.
+/// Pure, selector and caller dependent, precompile call rules evaluated before storage setup.
 ///
 /// Rules may enforce admission policy and duplicate cheap business checks as fail-fast preflight.
-/// Storage reads resolve through the same EVM database adapter as the implementation.
+/// All state access remains in the implementation and resolves through the EVM database adapter.
 pub(crate) trait CallRules: 'static {
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
         None
     }
 
-    /// Applies Zone-specific admission rules before invoking the implementation.
-    fn admit(&self, _call: ZoneCall<'_>) -> CallCheck {
+    /// Applies pure Zone-specific admission rules before storage setup.
+    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -129,12 +97,8 @@ pub(crate) fn create_precompile(
             ));
         }
 
-        let call = ZoneCall {
-            data: input.data,
-            caller: input.caller,
-            is_static: input.is_static,
-        };
-        let fixed_gas = rules.fixed_gas(call.selector());
+        let (data, caller) = (input.data, input.caller);
+        let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
@@ -154,14 +118,13 @@ pub(crate) fn create_precompile(
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
 
-        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(call) {
-            CallCheck::Continue => execute(call.data, call.caller),
-            CallCheck::Revert(data) => {
-                let storage = StorageCtx::default();
-                let result = Ok(storage.revert_output(data));
-                add_input_cost(storage, call.data, result)
+        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
+            CallCheck::Continue => execute(data, caller),
+            CallCheck::Revert(output) => {
+                let s = StorageCtx::default();
+                let output = s.revert_output(output);
+                add_input_cost(s, data, Ok(output))
             }
-            CallCheck::Return(result) => add_input_cost(StorageCtx::default(), call.data, result),
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
@@ -206,11 +169,11 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, call: ZoneCall<'_>) -> CallCheck {
+        fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
             *self.0.borrow_mut() = Some((
-                Bytes::copy_from_slice(call.data),
-                call.selector(),
-                call.caller,
+                Bytes::copy_from_slice(data),
+                selector_from_calldata(data),
+                caller,
             ));
             CallCheck::Continue
         }
@@ -324,11 +287,9 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, _call: ZoneCall<'_>) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
             self.0.set(true);
-            CallCheck::Return(Ok(
-                StorageCtx::default().revert_output(Bytes::from_static(b"denied"))
-            ))
+            CallCheck::Revert(Bytes::from_static(b"denied"))
         }
     }
 

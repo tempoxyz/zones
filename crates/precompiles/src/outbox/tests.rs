@@ -4,18 +4,23 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{Precompile as _, storage::FromWord, test_util::TIP20Setup};
-use tempo_zone_contracts::{IZoneOutbox as ZoneOutboxAbi, portal_token_config_slot};
+use std::{cell::Cell, rc::Rc};
+use tempo_precompiles::{storage::FromWord, test_util::TIP20Setup};
+use tempo_zone_contracts::{
+    ILegacyZoneOutbox, IZoneOutbox as ZoneOutboxAbi, portal_token_config_slot,
+};
 
 use crate::{
-    execution,
-    test_utils::{TestContext, call_precompile, test_context, test_env, test_storage_provider},
-    tx_context,
+    create_outbox_precompile,
+    test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+    },
 };
 
 const GAS: u64 = 10_000_000;
+const ANCHOR: u64 = 42;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
-const PORTAL: Address = address!("0x0000000000000000000000000000000000000077");
+const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
 const BOB: Address = address!("0x00000000000000000000000000000000000000b2");
 const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000c3");
@@ -24,6 +29,8 @@ const FEE_PAYER: Address = address!("0x00000000000000000000000000000000000000d4"
 struct Harness {
     ctx: TestContext,
     precompile: DynPrecompile,
+    transaction_context: Rc<Cell<Option<(B256, Address)>>>,
+    l1: MockL1Reader,
     token: Address,
 }
 
@@ -31,19 +38,27 @@ impl Harness {
     fn new() -> eyre::Result<Self> {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
+        let l1 = MockL1Reader::default();
+        l1.insert(
+            PORTAL,
+            PORTAL_SEQUENCER_SLOT.into(),
+            ANCHOR,
+            SEQUENCER.to_word(),
+        );
+        l1.insert(
+            PORTAL,
+            portal_token_config_slot(token).into(),
+            ANCHOR,
+            U256::ONE,
+        );
 
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
                 StorageCtx::default().sstore(
-                    PORTAL,
-                    PORTAL_SEQUENCER_SLOT.into(),
-                    SEQUENCER.to_word(),
-                )?;
-                StorageCtx::default().sstore(
-                    PORTAL,
-                    portal_token_config_slot(token).into(),
-                    U256::ONE,
+                    TEMPO_STATE_ADDRESS,
+                    TEMPO_BLOCK_NUMBER_SLOT,
+                    U256::from(ANCHOR),
                 )?;
 
                 ZoneOutbox::new().initialize()?;
@@ -60,32 +75,28 @@ impl Harness {
         }
 
         let env = test_env(&ctx);
-        let precompile = execution::create_precompile(
-            "ZoneOutboxTest",
-            &env,
-            ZoneOutboxRules::new(PORTAL),
-            |data, caller| ZoneOutbox::new().call(data, caller),
-        );
+        let transaction_context = Rc::new(Cell::new(None));
+        let context = transaction_context.clone();
+        let precompile =
+            create_outbox_precompile(L1State::new(l1.clone()), &env, move || context.get());
 
         Ok(Self {
             ctx,
             precompile,
+            transaction_context,
+            l1,
             token,
         })
     }
 
     #[rustfmt::skip]
     fn call_inner(&mut self, caller: Address, fee_payer: Address, data: impl AsRef<[u8]>, with_context: bool, is_static: bool) -> PrecompileResult {
-        let mut call = || { call_precompile(
+        self.transaction_context.set(with_context.then_some((TX_HASH, fee_payer)));
+        let result = call_precompile(
             &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, is_static, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
-        )};
-
-        if with_context {
-            let _guard = tx_context::set_current_transaction(TX_HASH, fee_payer);
-            call()
-        } else {
-            call()
-        }
+        );
+        self.transaction_context.set(None);
+        result
     }
 
     fn call_without_hash(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
@@ -110,15 +121,12 @@ impl Harness {
     }
 
     fn set_token_enabled(&mut self, enabled: bool) -> eyre::Result<()> {
-        let token = self.token;
-        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || {
-            StorageCtx::default().sstore(
-                PORTAL,
-                portal_token_config_slot(token).into(),
-                if enabled { U256::ONE } else { U256::ZERO },
-            )
-        })?;
+        self.l1.insert(
+            PORTAL,
+            portal_token_config_slot(self.token).into(),
+            ANCHOR,
+            if enabled { U256::ONE } else { U256::ZERO },
+        );
         Ok(())
     }
 
@@ -218,6 +226,22 @@ fn request_withdrawal_stores_fields_and_fifo_order() -> eyre::Result<()> {
     assert_eq!(pending[0].amount, 500);
     assert_eq!(pending[1].to, BOB);
     assert_eq!(pending[1].amount, 300);
+    Ok(())
+}
+
+#[test]
+fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_gas_rate(1)?;
+    harness.request(1, BOB, B256::ZERO)?;
+
+    assert_eq!(
+        harness.l1.storage_requests(),
+        vec![
+            (PORTAL, PORTAL_SEQUENCER_SLOT, ANCHOR),
+            (PORTAL, portal_token_config_slot(harness.token), ANCHOR,),
+        ]
+    );
     Ok(())
 }
 
@@ -640,6 +664,7 @@ fn malformed_legacy_withdrawal_reverts_with_empty_data() -> eyre::Result<()> {
 #[test]
 fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
+    harness.set_token_enabled(false)?;
     let token = harness.token;
     assert_revert(
         harness.call_static(
@@ -657,6 +682,10 @@ fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
             .abi_encode(),
         ),
         ZoneOutboxError::static_call_not_allowed(),
+    );
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "static mutation must reach dispatch without portal reads"
     );
     assert!(harness.pending()?.is_empty());
     Ok(())

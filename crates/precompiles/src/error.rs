@@ -5,7 +5,9 @@ use revm::precompile::{PrecompileOutput, PrecompileResult};
 use tempo_precompiles::IntoPrecompileResult;
 use tempo_zone_contracts::{ZoneOutboxError, ZonePortalError};
 
-use crate::{tip20_factory::ZoneTokenFactoryError, tip403_proxy::ReadOnlyRegistry};
+use crate::{
+    storage::L1StateError, tip20_factory::ZoneTokenFactoryError, tip403_proxy::ReadOnlyRegistry,
+};
 
 pub use tempo_precompiles::error::{Result, TempoPrecompileError};
 
@@ -14,8 +16,8 @@ pub type ZoneResult<T> = core::result::Result<T, ZonePrecompileError>;
 
 /// An error raised while executing a zone-specific precompile.
 ///
-/// Upstream Tempo errors retain their original halt/revert/fatal behavior, while each
-/// zone-specific error is returned as an ABI-encoded EVM revert.
+/// Upstream Tempo errors retain their original halt/revert/fatal behavior, L1 state failures are
+/// fatal, and protocol-specific errors are returned as ABI-encoded EVM reverts.
 #[derive(
     Debug, Clone, PartialEq, Eq, thiserror::Error, derive_more::From, derive_more::TryInto,
 )]
@@ -23,6 +25,9 @@ pub enum ZonePrecompileError {
     /// An error originating in the upstream Tempo precompiles crate.
     #[error(transparent)]
     Tempo(TempoPrecompileError),
+    /// A finalized Tempo L1 read failed or conflicted with the active anchor.
+    #[error(transparent)]
+    L1State(L1StateError),
     /// Error from the ZonePortal.
     #[error("ZonePortal error: {0:?}")]
     Portal(ZonePortalError),
@@ -41,6 +46,7 @@ impl IntoPrecompileResult for ZonePrecompileError {
     fn into_precompile_result(self, gas: u64, reservoir: u64) -> PrecompileResult {
         let data = match self {
             Self::Tempo(error) => return error.into_precompile_result(gas, reservoir),
+            Self::L1State(error) => return Err(error.into()),
             Self::Portal(error) => error.abi_encode(),
             Self::Outbox(error) => error.abi_encode(),
             Self::ZoneTokenFactory(error) => error.abi_encode(),
@@ -53,7 +59,7 @@ impl IntoPrecompileResult for ZonePrecompileError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::U256;
+    use alloy_primitives::{Address, B256, U256};
     use alloy_sol_types::SolError;
     use revm::precompile::PrecompileHalt;
     use tempo_zone_contracts::IZoneOutbox;
@@ -101,5 +107,18 @@ mod tests {
             .unwrap();
         assert_eq!(output.halt_reason(), Some(&PrecompileHalt::OutOfGas));
         assert_eq!(output.reservoir, 20);
+
+        let l1_error = L1StateError::StorageUnavailable {
+            account: Address::ZERO,
+            slot: B256::ZERO,
+            block_number: 1,
+            reason: "unavailable".into(),
+        };
+        assert!(
+            ZonePrecompileError::from(l1_error)
+                .into_precompile_result(10, 20)
+                .is_err(),
+            "L1 state failures must remain fatal"
+        );
     }
 }

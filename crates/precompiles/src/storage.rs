@@ -12,7 +12,7 @@ use thiserror::Error;
 
 pub(crate) use tempo_precompiles::storage::*;
 
-/// L1 storage access needed by the anchored Zone database and `TempoState` reads.
+/// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
     /// ZonePortal account whose configuration is mirrored from Tempo L1.
     fn portal_address(&self) -> Address;
@@ -44,9 +44,9 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// rejected. The Zone EVM resets the anchor after every transaction attempt, including failed and
 /// noncommitting simulations.
 ///
-/// Clones share the selected anchor and provider handle so the Zone database adapter and native
-/// `TempoState` precompile enforce one view of L1 state. A new `L1State` must be created for each
-/// EVM execution context; it must not be shared across independent EVMs.
+/// Clones share the selected anchor and provider handle so the Zone database adapter, `TempoState`,
+/// and other native precompiles enforce one view of L1 state. A new `L1State` must be created for
+/// each EVM execution context; it must not be shared across independent EVMs.
 #[derive(Clone)]
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.
@@ -128,7 +128,7 @@ impl<P> fmt::Debug for L1State<P> {
 }
 
 /// Failure to read or advance execution-local Tempo L1 state.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum L1StateError {
     /// The underlying L1 provider could not resolve storage at the requested block.
     #[error(

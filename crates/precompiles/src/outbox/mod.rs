@@ -7,7 +7,6 @@ mod tests;
 use alloc::vec::Vec;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
-use alloy_sol_types::SolCall;
 use revm::interpreter::instructions::utility::IntoAddress;
 use tempo_precompiles::{
     Result as TempoResult,
@@ -17,92 +16,24 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
-    ILegacyZoneOutbox, IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortalError,
+    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortalError,
     portal_token_config_slot,
 };
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_SEQUENCER_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
     ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
-    execution::{CallCheck, CallRules, ZoneCall},
+    storage::{L1State, L1StorageReader},
+    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
 const MAX_GAS_FEE_RATE: u128 = 1_000_000_000_000_000_000;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
-
-const SEQUENCER_SELECTORS: &[[u8; 4]] = &[
-    IZoneOutbox::setTempoGasRateCall::SELECTOR,
-    IZoneOutbox::setMaxWithdrawalsPerBlockCall::SELECTOR,
-    IZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR,
-];
-const WITHDRAWAL_SELECTORS: &[[u8; 4]] = &[
-    IZoneOutbox::requestWithdrawalCall::SELECTOR,
-    ILegacyZoneOutbox::requestWithdrawalCall::SELECTOR,
-];
-
-/// Admission checks that require the finalized `ZonePortal` state.
-pub(crate) struct ZoneOutboxRules {
-    portal: Address,
-}
-
-impl ZoneOutboxRules {
-    pub(crate) fn new(portal: Address) -> Self {
-        Self { portal }
-    }
-}
-
-impl CallRules for ZoneOutboxRules {
-    fn admit(&self, call: ZoneCall<'_>) -> CallCheck {
-        if call.is_static
-            && call.selector().is_some_and(|selector| {
-                SEQUENCER_SELECTORS.contains(&selector)
-                    || WITHDRAWAL_SELECTORS.contains(&selector)
-                    || matches!(
-                        selector,
-                        IZoneOutbox::enqueueDepositBounceBackCall::SELECTOR
-                            | IZoneOutbox::consumeFallbackRecipientCall::SELECTOR
-                    )
-            })
-        {
-            return CallCheck::from_error(ZoneOutboxError::static_call_not_allowed());
-        }
-
-        let withdrawal = decode_withdrawal(call);
-        if let Some(withdrawal) = &withdrawal
-            && let Err(err) = check_withdrawal_request(withdrawal)
-        {
-            return CallCheck::from_error(err);
-        }
-
-        let Some(selector) = call.selector() else {
-            return CallCheck::Continue;
-        };
-        if SEQUENCER_SELECTORS.contains(&selector) && call.caller != Address::ZERO {
-            let sequencer =
-                match StorageCtx::default().sload(self.portal, PORTAL_SEQUENCER_SLOT.into()) {
-                    Ok(value) => value.into_address(),
-                    Err(err) => return CallCheck::from_error(err),
-                };
-            if sequencer != call.caller {
-                return CallCheck::from_error(ZoneOutboxError::only_sequencer());
-            }
-        }
-
-        if let Some(withdrawal) = withdrawal {
-            let slot = portal_token_config_slot(withdrawal.token).into();
-            match StorageCtx::default().sload(self.portal, slot) {
-                Ok(value) if value.byte(0) != 0 => {}
-                Ok(_) => return CallCheck::from_error(ZonePortalError::token_not_enabled()),
-                Err(err) => return CallCheck::from_error(err),
-            }
-        }
-        CallCheck::Continue
-    }
-}
 
 #[contract(addr = ZONE_OUTBOX_ADDRESS)]
 pub struct ZoneOutbox {
@@ -123,6 +54,49 @@ impl ZoneOutbox {
     /// Initializes the precompile account code.
     pub fn initialize(&mut self) -> TempoResult<()> {
         self.__initialize()
+    }
+
+    fn read_portal_slot<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        slot: B256,
+    ) -> ZoneResult<U256> {
+        let anchor = StorageCtx::default().sload(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)?;
+        let anchor = u64::try_from(anchor).map_err(|_| {
+            TempoPrecompileError::Fatal("Tempo block number does not fit in u64".into())
+        })?;
+        Ok(l1
+            .read_l1_storage(l1.portal_address(), slot, anchor)?
+            .into())
+    }
+
+    fn ensure_sequencer<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        caller: Address,
+    ) -> ZoneResult<()> {
+        if caller == Address::ZERO {
+            return Ok(());
+        }
+        let sequencer = self
+            .read_portal_slot(l1, PORTAL_SEQUENCER_SLOT)?
+            .into_address();
+        if caller != sequencer {
+            return Err(ZoneOutboxError::only_sequencer().into());
+        }
+        Ok(())
+    }
+
+    fn ensure_token_enabled<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        token: Address,
+    ) -> ZoneResult<()> {
+        let value = self.read_portal_slot(l1, portal_token_config_slot(token))?;
+        if value.byte(0) == 0 {
+            return Err(ZonePortalError::token_not_enabled().into());
+        }
+        Ok(())
     }
 
     fn calculate_fee_unchecked(&self, gas_limit: u64) -> TempoResult<u128> {
@@ -173,17 +147,19 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn request_withdrawal(
+    fn request_withdrawal<P: L1StorageReader>(
         &mut self,
+        l1: &L1State<P>,
         caller: Address,
         fee_payer: Address,
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
+        check_withdrawal_request(&call)?;
+        self.ensure_token_enabled(l1, call.token)?;
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
         }
-        check_withdrawal_request(&call)?;
         self.enforce_withdrawal_block_cap()?;
 
         // If necessary, validate reveal
@@ -267,10 +243,13 @@ impl ZoneOutbox {
         Ok(recipient)
     }
 
-    fn finalize_withdrawal_batch(
+    fn finalize_withdrawal_batch<P: L1StorageReader>(
         &mut self,
+        l1: &L1State<P>,
+        caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
+        self.ensure_sequencer(l1, caller)?;
         if call.blockNumber != self.storage.block_number() {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }
@@ -316,7 +295,13 @@ impl ZoneOutbox {
         Ok(withdrawal_queue_hash)
     }
 
-    fn set_tempo_gas_rate(&mut self, call: IZoneOutbox::setTempoGasRateCall) -> ZoneResult<()> {
+    fn set_tempo_gas_rate<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        call: IZoneOutbox::setTempoGasRateCall,
+    ) -> ZoneResult<()> {
+        self.ensure_sequencer(l1, caller)?;
         if call._tempoGasRate > MAX_GAS_FEE_RATE {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
@@ -325,10 +310,13 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn set_max_withdrawals_per_block(
+    fn set_max_withdrawals_per_block<P: L1StorageReader>(
         &mut self,
+        l1: &L1State<P>,
+        caller: Address,
         call: IZoneOutbox::setMaxWithdrawalsPerBlockCall,
-    ) -> TempoResult<()> {
+    ) -> ZoneResult<()> {
+        self.ensure_sequencer(l1, caller)?;
         self.max_withdrawals_per_block
             .write(call._maxWithdrawalsPerBlock)?;
         self.emit_event(ZoneOutboxEvent::max_withdrawals_per_block_updated(
@@ -464,20 +452,6 @@ impl From<PendingWithdrawal> for IZoneOutbox::PendingWithdrawal {
             callbackData: pending.callback_data,
             revealTo: pending.reveal_to,
         }
-    }
-}
-
-fn decode_withdrawal(call: ZoneCall<'_>) -> Option<IZoneOutbox::requestWithdrawalCall> {
-    match call.selector()? {
-        IZoneOutbox::requestWithdrawalCall::SELECTOR => {
-            IZoneOutbox::requestWithdrawalCall::abi_decode_raw_validate(&call.data[4..]).ok()
-        }
-        ILegacyZoneOutbox::requestWithdrawalCall::SELECTOR => {
-            ILegacyZoneOutbox::requestWithdrawalCall::abi_decode_raw_validate(&call.data[4..])
-                .ok()
-                .map(Into::into)
-        }
-        _ => None,
     }
 }
 

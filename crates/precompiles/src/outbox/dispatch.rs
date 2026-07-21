@@ -1,21 +1,28 @@
 //! ABI dispatch for the [`ZoneOutbox`] precompile.
 
-use alloy_primitives::{Address, U256};
+use alloy_primitives::{Address, B256, U256};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{Precompile, charge_input_cost, dispatch, storage::Handler};
+use tempo_precompiles::{charge_input_cost, dispatch, storage::Handler};
 use tempo_zone_contracts::{ILegacyZoneOutbox, IZoneOutbox};
 use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
 
 use crate::{
     dispatch::{metadata, mutate, mutate_void, view},
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, COMPRESSED_PUBLIC_KEY_SIZE},
-    tx_context,
+    storage::{L1State, L1StorageReader},
 };
 
 use super::{MAX_CALLBACK_DATA_SIZE, MAX_GAS_FEE_RATE, WITHDRAWAL_BASE_GAS, ZoneOutbox};
 
-impl Precompile for ZoneOutbox {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+impl ZoneOutbox {
+    pub(crate) fn call_with_transaction<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        calldata: &[u8],
+        msg_sender: Address,
+        tx_hash: B256,
+        fee_payer: Address,
+    ) -> PrecompileResult {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
         }
@@ -38,25 +45,21 @@ impl Precompile for ZoneOutbox {
                 WITHDRAWAL_BASE_GAS(_) => metadata::<IZoneOutbox::WITHDRAWAL_BASE_GASCall>(|| Ok(WITHDRAWAL_BASE_GAS)),
                 REVEAL_TO_KEY_LENGTH(_) => metadata::<IZoneOutbox::REVEAL_TO_KEY_LENGTHCall>(|| Ok(U256::from(COMPRESSED_PUBLIC_KEY_SIZE))),
                 AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH(_) => metadata::<IZoneOutbox::AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTHCall>(|| Ok(U256::from(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE))),
-                setTempoGasRate(call) => mutate_void(call, msg_sender, |_, call| self.set_tempo_gas_rate(call)),
-                setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |_, call| self.set_max_withdrawals_per_block(call)),
+                setTempoGasRate(call) => mutate_void(call, msg_sender, |sender, call| self.set_tempo_gas_rate(l1, sender, call)),
+                setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(l1, sender, call)),
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| {
-                    self.request_withdrawal(
-                        sender,
-                        tx_context::current_fee_payer().unwrap_or(sender),
-                        tx_context::current_tx_hash().unwrap_or_default(),
-                        call,
-                    )
+                    self.request_withdrawal(l1, sender, fee_payer, tx_hash, call)
                 }),
                 enqueueDepositBounceBack(call) => mutate_void(call, msg_sender, |sender, call| self.enqueue_deposit_bounce_back(sender, call)),
                 consumeFallbackRecipient(call) => mutate(call, msg_sender, |sender, call| self.consume_fallback_recipient(sender, call.fallbackNonce)),
-                finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |_, call| self.finalize_withdrawal_batch(call)),
+                finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(l1, sender, call)),
             }
             ILegacyZoneOutbox::ILegacyZoneOutboxCalls {
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| self.request_withdrawal(
+                    l1,
                     sender,
-                    tx_context::current_fee_payer().unwrap_or(sender),
-                    tx_context::current_tx_hash().unwrap_or_default(),
+                    fee_payer,
+                    tx_hash,
                     call.into(),
                 )),
             }

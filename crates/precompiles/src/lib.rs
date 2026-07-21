@@ -34,7 +34,6 @@ pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
 pub mod outbox;
-pub mod tx_context;
 
 /// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
 pub mod dispatch {
@@ -64,17 +63,27 @@ pub use ztip20::SequencerExt;
 use alloc::sync::Arc;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
 
-/// Creates the native ZoneOutbox over ordinary zone storage and finalized portal reads supplied
-/// by the EVM database overlay.
-pub fn create_outbox_precompile(portal: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
+/// Creates the native ZoneOutbox over ordinary Zone storage and direct finalized portal reads.
+pub fn create_outbox_precompile<P, F>(
+    l1: L1State<P>,
+    env: &ZonePrecompileEnv,
+    current_transaction: F,
+) -> DynPrecompile
+where
+    P: L1StorageReader,
+    F: Fn() -> Option<(B256, Address)> + 'static,
+{
     execution::create_precompile(
         "ZoneOutbox",
         env,
-        outbox::ZoneOutboxRules::new(portal),
-        |data, caller| ZoneOutbox::new().call(data, caller),
+        execution::NoCallRules,
+        move |data, caller| {
+            let (tx_hash, fee_payer) = current_transaction().unwrap_or((B256::ZERO, caller));
+            ZoneOutbox::new().call_with_transaction(&l1, data, caller, tx_hash, fee_payer)
+        },
     )
 }
 

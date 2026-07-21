@@ -5,10 +5,9 @@
 //! storage. The zone keeps mutating selectors read-only and otherwise follows upstream dispatch,
 //! gas, delegate-call, and receive-policy behavior.
 
-use crate::execution::{CallCheck, CallRules, ZoneCall};
-#[cfg(test)]
+use crate::execution::{CallCheck, CallRules};
 use alloy_primitives::Address;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use tempo_contracts::precompiles::ITIP403Registry;
 
 const TIP403_MUTATING_SELECTORS: &[[u8; 4]] = &[
@@ -31,12 +30,12 @@ alloy_sol_types::sol! {
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn admit(&self, call: ZoneCall<'_>) -> CallCheck {
+    fn admit(&self, data: &[u8], _caller: Address) -> CallCheck {
         if TIP403_MUTATING_SELECTORS
             .iter()
-            .any(|selector| call.data.starts_with(selector))
+            .any(|selector| data.starts_with(selector))
         {
-            return CallCheck::revert(ReadOnlyRegistry {});
+            return CallCheck::Revert(ReadOnlyRegistry {}.abi_encode().into());
         }
 
         CallCheck::Continue
@@ -49,7 +48,6 @@ mod tests {
 
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{Bytes, U256, address};
-    use alloy_sol_types::SolError;
     use revm::precompile::{PrecompileError, PrecompileOutput};
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
@@ -117,14 +115,10 @@ mod tests {
     fn mutating_selectors_are_rejected_by_admission() {
         let rules = Tip403Rules;
         for selector in TIP403_MUTATING_SELECTORS {
-            let CallCheck::Revert(data) = rules.admit(ZoneCall {
-                data: selector,
-                caller: CALLER,
-                is_static: false,
-            }) else {
-                panic!("mutating selector should be rejected");
-            };
-            assert_eq!(data, ReadOnlyRegistry {}.abi_encode());
+            assert!(matches!(
+                rules.admit(selector, CALLER),
+                CallCheck::Revert(data) if data == ReadOnlyRegistry {}.abi_encode()
+            ));
         }
     }
 
