@@ -68,6 +68,8 @@ cargo run --release --bin tempo-zone -- dev \
 
 This uses the protocol-managed ZoneFactory to create a portal, writes the generated zone files to
 `/tmp/tempo-zone-dev`, and serves the zone HTTP RPC at `http://127.0.0.1:9545`.
+The configured dev key must own the native ZoneFactory. Stock owner-gated T9 chains require an
+ownership transfer before provisioning; separate factory-owner credentials are not yet supported.
 
 Older Anvil builds are rejected because they mine Ethereum header hashes and only
 add Tempo fields to the RPC response. Zones require canonical Tempo header hashes

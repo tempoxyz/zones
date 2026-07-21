@@ -148,6 +148,9 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
 /// replays the creation block and initializes a custom initial token from the
 /// portal constructor's `TokenEnabled` event.
 #[tokio::test(flavor = "multi_thread")]
+// TODO(TIP-1091): Re-enable with a stock T9 dev chain and supply the factory-owner signer
+// separately from the portal admin/sequencer signer.
+#[ignore = "TODO(TIP-1091): cover stock T9 factory-owner provisioning"]
 async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

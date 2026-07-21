@@ -23,7 +23,7 @@ use zone_sequencer::register_encryption_key;
 pub struct ProvisionConfig {
     /// Tempo L1 RPC URL (http(s) or ws(s)).
     pub l1_rpc_url: String,
-    /// Dev key: L1 fee payer, portal admin, and zone sequencer.
+    /// Dev key: factory owner, L1 fee payer, portal admin, and zone sequencer.
     pub dev_key: PrivateKeySigner,
     /// Optional factory override, which must equal TIP-1091's protocol address.
     pub factory: Option<Address>,
@@ -85,6 +85,13 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let factory_address = native_zone_factory(&l1_rpc_url, wallet).await?;
 
     let factory = ZoneFactory::new(factory_address, &provider);
+    let factory_owner = factory.owner().call().await?;
+    eyre::ensure!(
+        factory_owner == dev_address,
+        "ZoneFactory owner is {factory_owner}, but the configured dev key resolves to \
+         {dev_address}; use the standard Tempo dev key or transfer factory ownership before \
+         provisioning"
+    );
     // Anchor before createZone so the L1 subscriber replays the creation block,
     // including the initial TokenEnabled event emitted by the portal constructor.
     let anchor_block_number = provider.get_block_number().await?;
