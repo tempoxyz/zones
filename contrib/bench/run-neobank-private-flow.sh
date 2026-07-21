@@ -133,7 +133,9 @@ zone_approval_spec="$ZONES_BENCH_OUTPUT/zone-approvals.yml"
     printf 'chain_id: %s\n\n' "$zone_chain_id"
     printf 'gas:\n  max_fee_per_gas: %s\n  max_priority_fee_per_gas: %s\n\n' "$zone_fee" "$zone_fee"
     printf 'accounts:\n  users:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    range: [%s, %s]\n  sponsor:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    index: 4\n\n' "$ZONES_BENCH_ACCOUNT_START" "$account_end"
-    printf 'artifacts:\n  TIP20: %s/txgen/abis/tip20.json\n\nsetup:\n  steps:\n' "$ZONES_BENCH_OUTPUT"
+    # txgen resolves artifact paths relative to this generated spec, not the
+    # repository root. Keep the portable output tree self-contained.
+    printf 'artifacts:\n  TIP20: txgen/abis/tip20.json\n\nsetup:\n  steps:\n'
     for ((index = 0; index < 10#$ZONES_BENCH_ACCOUNTS; index++)); do
         for token in "$ZONES_BENCH_DLUSD" "$ZONES_BENCH_EARN_TOKEN"; do
             printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$index" "${token: -1}" "$index" "$ZONES_BENCH_DLUSD" "$token"

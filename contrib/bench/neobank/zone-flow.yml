@@ -13,8 +13,8 @@ accounts:
     range: [__SEQUENCER_ACCOUNT_INDEX__, __SEQUENCER_ACCOUNT_END__]
 
 artifacts:
-  TIP20: ../txgen/abis/tip20.json
-  ZoneOutbox: ../txgen/abis/zone-outbox.json
+  TIP20: txgen/abis/tip20.json
+  ZoneOutbox: txgen/abis/zone-outbox.json
   ZoneInbox: abis/zone-inbox.json
   ZoneGateway: abis/zone-gateway.json
 

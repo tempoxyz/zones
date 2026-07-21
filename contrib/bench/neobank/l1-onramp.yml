@@ -10,7 +10,7 @@ accounts:
     range: [__ACCOUNT_START__, __ACCOUNT_END__]
 
 artifacts:
-  TIP20: ../txgen/abis/tip20.json
+  TIP20: txgen/abis/tip20.json
   ZonePortal: abis/zone-portal.json
 
 setup: { steps: [] }
