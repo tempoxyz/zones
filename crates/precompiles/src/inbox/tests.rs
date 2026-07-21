@@ -1,0 +1,798 @@
+use super::*;
+
+use alloy_evm::EvmInternals;
+use alloy_primitives::{address, keccak256};
+use alloy_rlp::Encodable as _;
+use alloy_sol_types::{SolCall, SolError};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use tempo_precompiles::{
+    PATH_USD_ADDRESS,
+    storage::{ContractStorage, StorageCtx},
+    test_util::TIP20Setup,
+    tip20::{ITIP20, TIP20Token},
+};
+use tempo_primitives::TempoHeader;
+use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
+
+use crate::test_utils::{
+    EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
+    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
+};
+
+const GAS: u64 = 30_000_000;
+const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000a1");
+const ALICE: Address = address!("0x00000000000000000000000000000000000000a2");
+const BOB: Address = address!("0x00000000000000000000000000000000000000b0");
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BounceBack {
+    token: Address,
+    amount: u128,
+    recipient: Address,
+}
+
+#[derive(Clone, Default)]
+struct FakeOutbox {
+    bounce_backs: Arc<Mutex<Vec<BounceBack>>>,
+    fallback_recipients: Arc<Mutex<HashMap<u64, Address>>>,
+}
+
+impl FakeOutbox {
+    fn bounce_backs(&self) -> Vec<BounceBack> {
+        self.bounce_backs.lock().unwrap().clone()
+    }
+
+    fn insert_fallback(&self, nonce: u64, recipient: Address) {
+        self.fallback_recipients
+            .lock()
+            .unwrap()
+            .insert(nonce, recipient);
+    }
+}
+
+impl InboxOutbox for FakeOutbox {
+    fn enqueue_deposit_bounce_back(
+        &mut self,
+        token: Address,
+        amount: u128,
+        bounceback_recipient: Address,
+    ) -> ZoneResult<()> {
+        self.bounce_backs.lock().unwrap().push(BounceBack {
+            token,
+            amount,
+            recipient: bounceback_recipient,
+        });
+        Ok(())
+    }
+
+    fn consume_fallback_recipient(&mut self, fallback_nonce: u64) -> ZoneResult<Address> {
+        self.fallback_recipients
+            .lock()
+            .unwrap()
+            .remove(&fallback_nonce)
+            .ok_or_else(|| TempoPrecompileError::Fatal("missing fallback recipient".into()).into())
+    }
+}
+
+fn encode_header(header: &TempoHeader) -> Bytes {
+    let mut encoded = Vec::new();
+    header.encode(&mut encoded);
+    encoded.into()
+}
+
+struct Harness {
+    ctx: TestContext,
+    l1: MockL1Reader,
+    l1_state: L1State<MockL1Reader>,
+    outbox: FakeOutbox,
+    precompile: DynPrecompile,
+    genesis_hash: B256,
+}
+
+impl Harness {
+    fn new() -> eyre::Result<Self> {
+        Self::with_l1(MockL1Reader::default())
+    }
+
+    fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
+        let mut ctx = test_context();
+        let genesis_rlp = encode_header(&TempoHeader::default());
+        let genesis_hash = keccak256(&genesis_rlp);
+        {
+            let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+                TempoState::new().initialize(&genesis_rlp)?;
+                ZoneInbox::new().initialize()?;
+                TIP20Setup::path_usd(ALICE)
+                    .with_issuer(ALICE)
+                    .with_issuer(ZONE_INBOX_ADDRESS)
+                    .with_issuer(ZONE_OUTBOX_ADDRESS)
+                    .apply()?;
+                Ok(())
+            })?;
+        }
+
+        let portal = l1.portal_address();
+        l1.set_u256(
+            portal,
+            U256::from_be_bytes(PORTAL_SEQUENCER_SLOT.0),
+            0,
+            SEQUENCER.into_word().into(),
+        );
+        let l1_state = L1State::new(l1.clone());
+        let outbox = FakeOutbox::default();
+        let precompile = ZoneInbox::create(l1_state.clone(), outbox.clone(), &test_env(&ctx));
+        Ok(Self {
+            ctx,
+            l1,
+            l1_state,
+            outbox,
+            precompile,
+            genesis_hash,
+        })
+    }
+
+    fn child_header(&self) -> TempoHeader {
+        TempoHeader {
+            inner: alloy_consensus::Header {
+                parent_hash: self.genesis_hash,
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn set_queue_hash(&self, hash: B256) {
+        self.l1.set_u256(
+            self.l1.portal_address(),
+            U256::from_be_bytes(PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.0),
+            1,
+            U256::from_be_bytes(hash.0),
+        );
+    }
+
+    fn advance_call(
+        &self,
+        deposits: Vec<QueuedDeposit>,
+        decryptions: Vec<DecryptionData>,
+    ) -> ZoneInboxAbi::advanceTempoCall {
+        ZoneInboxAbi::advanceTempoCall {
+            header: encode_header(&self.child_header()),
+            deposits,
+            decryptions,
+            enabledTokens: Vec::new(),
+        }
+    }
+
+    fn call(&mut self, caller: Address, calldata: impl AsRef<[u8]>) -> PrecompileResult {
+        call_precompile(
+            &mut self.ctx,
+            &self.precompile,
+            caller,
+            calldata.as_ref(),
+            GAS,
+            false,
+            ZONE_INBOX_ADDRESS,
+            ZONE_INBOX_ADDRESS,
+        )
+    }
+
+    fn call_atomic(&mut self, caller: Address, calldata: impl AsRef<[u8]>) -> PrecompileResult {
+        let checkpoint = EvmInternals::from_context(&mut self.ctx).checkpoint();
+        let result = self.call(caller, calldata);
+        let success = result.as_ref().is_ok_and(|output| output.is_success());
+        let mut internals = EvmInternals::from_context(&mut self.ctx);
+        if success {
+            internals.checkpoint_commit();
+        } else {
+            internals.checkpoint_revert(checkpoint);
+        }
+        result
+    }
+
+    fn balance(&mut self, token: Address, owner: Address) -> eyre::Result<U256> {
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            Ok(TIP20Token::from_address(token)?
+                .balance_of(ITIP20::balanceOfCall { account: owner })?)
+        })
+    }
+}
+
+#[test]
+fn advance_checks_parent_sequencer_and_reads_queue_at_child_anchor() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_queue_hash(B256::ZERO);
+
+    harness.call(
+        SEQUENCER,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+
+    assert_eq!(harness.l1_state.get_anchor(), Some(1));
+    let requests = harness.l1.storage_requests();
+    assert!(requests.contains(&(harness.l1.portal_address(), PORTAL_SEQUENCER_SLOT, 0)));
+    assert!(requests.contains(&(
+        harness.l1.portal_address(),
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        1
+    )));
+    Ok(())
+}
+
+#[test]
+fn zero_system_caller_skips_sequencer_read() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_queue_hash(B256::ZERO);
+
+    harness.call(
+        Address::ZERO,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+
+    assert!(!harness.l1.storage_requests().contains(&(
+        harness.l1.portal_address(),
+        PORTAL_SEQUENCER_SLOT,
+        0
+    )));
+    Ok(())
+}
+
+#[test]
+fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let calldata = harness.advance_call(Vec::new(), Vec::new()).abi_encode();
+    let output = call_precompile(
+        &mut harness.ctx,
+        &harness.precompile,
+        SEQUENCER,
+        &calldata,
+        GAS,
+        true,
+        ZONE_INBOX_ADDRESS,
+        ZONE_INBOX_ADDRESS,
+    )?;
+    assert!(output.is_revert());
+    assert!(output.bytes.is_empty());
+    assert!(harness.l1.storage_requests().is_empty());
+
+    let output = call_precompile(
+        &mut harness.ctx,
+        &harness.precompile,
+        SEQUENCER,
+        &calldata,
+        GAS,
+        false,
+        ZONE_INBOX_ADDRESS,
+        Address::repeat_byte(0x44),
+    )?;
+    assert!(output.is_revert());
+    assert_eq!(
+        output.bytes,
+        tempo_precompiles::DelegateCallNotAllowed {}.abi_encode()
+    );
+    assert!(harness.l1.storage_requests().is_empty());
+    Ok(())
+}
+
+#[test]
+fn wrong_sequencer_reverts_before_checkpoint_advancement() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let output = harness.call(
+        ALICE,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+
+    assert!(output.is_revert());
+    assert_eq!(output.bytes, ZoneInboxAbi::OnlySequencer {}.abi_encode());
+    assert_eq!(harness.l1_state.get_anchor(), None);
+    assert_eq!(harness.l1.storage_requests().len(), 1);
+    Ok(())
+}
+
+#[test]
+fn child_anchor_storage_failure_is_fatal_and_rolls_back_checkpoint() -> eyre::Result<()> {
+    let mut harness = Harness::with_l1(MockL1Reader::failing_storage())?;
+    let result = harness.call_atomic(
+        Address::ZERO,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    );
+    assert!(result.is_err(), "L1 storage failure must remain fatal");
+
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        assert_eq!(TempoState::new().tempo_block_number()?, 0);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn queue_head_mismatch_reverts_and_rolls_back_checkpoint() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_queue_hash(B256::repeat_byte(0x44));
+
+    let output = harness.call_atomic(
+        SEQUENCER,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+    assert!(output.is_revert());
+    assert_eq!(
+        output.bytes,
+        ZoneInboxAbi::InvalidDepositQueueHash {}.abi_encode()
+    );
+
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        assert_eq!(TempoState::new().tempo_block_number()?, 0);
+        assert_eq!(
+            ZoneInbox::new().processed_deposit_queue_hash.read()?,
+            B256::ZERO
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn regular_deposit_mints_and_updates_hash_and_number() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let deposit = Deposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        to: BOB,
+        amount: 500,
+        bouncebackRecipient: ALICE,
+        memo: B256::repeat_byte(0x11),
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+    let queued = QueuedDeposit {
+        depositType: DepositType::Regular,
+        depositData: deposit.abi_encode().into(),
+    };
+
+    harness.call(
+        SEQUENCER,
+        harness.advance_call(vec![queued], Vec::new()).abi_encode(),
+    )?;
+
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(500));
+    assert!(harness.outbox.bounce_backs().is_empty());
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        assert_eq!(
+            ZoneInbox::new().processed_deposit_queue_hash.read()?,
+            expected_hash
+        );
+        assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 1);
+        assert_eq!(
+            StorageCtx::default().sload(ZONE_INBOX_ADDRESS, U256::ZERO)?,
+            U256::from_be_bytes(expected_hash.0)
+        );
+        assert_eq!(
+            StorageCtx::default().sload(ZONE_INBOX_ADDRESS, U256::ONE)?,
+            U256::ONE
+        );
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn failed_regular_mint_enqueues_one_bounce_back() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let uninitialized_token = address!("0x20c0000000000000000000000000000000000099");
+    let deposit = Deposit {
+        token: uninitialized_token,
+        sender: ALICE,
+        to: BOB,
+        amount: 222,
+        bouncebackRecipient: ALICE,
+        memo: B256::ZERO,
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        SEQUENCER,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+
+    assert_eq!(
+        harness.outbox.bounce_backs(),
+        vec![BounceBack {
+            token: uninitialized_token,
+            amount: 222,
+            recipient: ALICE,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = address!("0x20c00000000000000000000000000000000000aa");
+    harness.set_queue_hash(B256::ZERO);
+    let mut call = harness.advance_call(Vec::new(), Vec::new());
+    call.enabledTokens.push(EnabledToken {
+        token,
+        name: "Example Dollar".into(),
+        symbol: "EXD".into(),
+        currency: "USD".into(),
+    });
+
+    harness.call(SEQUENCER, call.abi_encode())?;
+
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        let token = TIP20Token::from_address(token)?;
+        assert!(token.is_initialized()?);
+        assert_eq!(token.name()?, "Example Dollar");
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let output = harness.call(
+        SEQUENCER,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: Bytes::from_static(b"malformed"),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+
+    assert!(output.is_revert());
+    assert!(output.bytes.is_empty());
+    assert!(harness.l1.storage_requests().is_empty());
+    Ok(())
+}
+
+#[test]
+fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let fixture = EncryptedDepositFixture::new();
+    let decrypted = fixture.decrypt().expect("fixture decrypts");
+    let portal = harness.l1.portal_address();
+    let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x);
+    let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
+    let plaintext = build_plaintext(&fixture.to, &fixture.memo);
+    let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
+    let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
+
+    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let slot_x = base + fixture.key_index * U256::from(2);
+    harness
+        .l1
+        .set_u256(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.set_u256(
+        portal,
+        slot_x + U256::ONE,
+        1,
+        U256::from(sequencer_y_parity),
+    );
+
+    let deposit = EncryptedDeposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        amount: 900,
+        bouncebackRecipient: ALICE,
+        keyIndex: fixture.key_index,
+        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+            ephemeralPubkeyX: fixture.eph_pub_x,
+            ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
+            ciphertext: ciphertext.into(),
+            nonce: nonce.into(),
+            tag: tag.into(),
+        },
+    };
+    let expected_hash =
+        keccak256((DepositType::Encrypted, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        SEQUENCER,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Encrypted,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                vec![DecryptionData {
+                    sharedSecret: decrypted.proof.shared_secret,
+                    sharedSecretYParity: decrypted.proof.shared_secret_y_parity,
+                    cpProof: tempo_zone_contracts::ChaumPedersenProof {
+                        s: decrypted.proof.cp_proof_s,
+                        c: decrypted.proof.cp_proof_c,
+                    },
+                }],
+            )
+            .abi_encode(),
+    )?;
+
+    assert_eq!(
+        harness.balance(PATH_USD_ADDRESS, fixture.to)?,
+        U256::from(900)
+    );
+    assert!(harness.outbox.bounce_backs().is_empty());
+    assert!(
+        harness
+            .l1
+            .storage_requests()
+            .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1))
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let fixture = EncryptedDepositFixture::new();
+    let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
+    let portal = harness.l1.portal_address();
+    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let slot_x = base + fixture.key_index * U256::from(2);
+    harness
+        .l1
+        .set_u256(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.set_u256(
+        portal,
+        slot_x + U256::ONE,
+        1,
+        U256::from(sequencer_y_parity),
+    );
+    let deposit = EncryptedDeposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        amount: 333,
+        bouncebackRecipient: BOB,
+        keyIndex: fixture.key_index,
+        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+            ephemeralPubkeyX: fixture.eph_pub_x,
+            ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
+            ciphertext: fixture.ciphertext.into(),
+            nonce: fixture.nonce.into(),
+            tag: fixture.tag.into(),
+        },
+    };
+    let expected_hash =
+        keccak256((DepositType::Encrypted, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        SEQUENCER,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Encrypted,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                vec![DecryptionData {
+                    sharedSecret: B256::ZERO,
+                    sharedSecretYParity: 2,
+                    cpProof: tempo_zone_contracts::ChaumPedersenProof {
+                        s: B256::ZERO,
+                        c: B256::ZERO,
+                    },
+                }],
+            )
+            .abi_encode(),
+    )?;
+
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, fixture.to)?, U256::ZERO);
+    assert_eq!(
+        harness.outbox.bounce_backs(),
+        vec![BounceBack {
+            token: PATH_USD_ADDRESS,
+            amount: 333,
+            recipient: BOB,
+        }]
+    );
+    Ok(())
+}
+
+#[test]
+fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
+    let fixture = EncryptedDepositFixture::new();
+    let deposit = EncryptedDeposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        amount: 1,
+        bouncebackRecipient: BOB,
+        keyIndex: fixture.key_index,
+        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+            ephemeralPubkeyX: fixture.eph_pub_x,
+            ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
+            ciphertext: fixture.ciphertext.into(),
+            nonce: fixture.nonce.into(),
+            tag: fixture.tag.into(),
+        },
+    };
+    let expected_hash =
+        keccak256((DepositType::Encrypted, deposit.clone(), B256::ZERO).abi_encode_params());
+    let mut missing = Harness::new()?;
+    missing.set_queue_hash(expected_hash);
+    let output = missing.call_atomic(
+        SEQUENCER,
+        missing
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Encrypted,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+    assert!(output.is_revert());
+    assert_eq!(
+        output.bytes,
+        ZoneInboxAbi::MissingDecryptionData {}.abi_encode()
+    );
+
+    let mut extra = Harness::new()?;
+    extra.set_queue_hash(B256::ZERO);
+    let output = extra.call_atomic(
+        SEQUENCER,
+        extra
+            .advance_call(
+                Vec::new(),
+                vec![DecryptionData {
+                    sharedSecret: B256::ZERO,
+                    sharedSecretYParity: 2,
+                    cpProof: tempo_zone_contracts::ChaumPedersenProof {
+                        s: B256::ZERO,
+                        c: B256::ZERO,
+                    },
+                }],
+            )
+            .abi_encode(),
+    )?;
+    assert!(output.is_revert());
+    assert_eq!(
+        output.bytes,
+        ZoneInboxAbi::ExtraDecryptionData {}.abi_encode()
+    );
+    Ok(())
+}
+
+#[test]
+fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    {
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            ZoneInbox::new().refunds[PATH_USD_ADDRESS][BOB].write(444)?;
+            Ok(())
+        })?;
+    }
+
+    let output = harness.call(
+        BOB,
+        ZoneInboxAbi::claimRefundCall {
+            token: PATH_USD_ADDRESS,
+        }
+        .abi_encode(),
+    )?;
+    assert_eq!(
+        ZoneInboxAbi::claimRefundCall::abi_decode_returns(&output.bytes)?,
+        444
+    );
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(444));
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        assert_eq!(ZoneInbox::new().refunds[PATH_USD_ADDRESS][BOB].read()?, 0);
+        Ok(())
+    })?;
+    Ok(())
+}
+
+#[test]
+fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let nonce = 8u64;
+    harness.outbox.insert_fallback(nonce, BOB);
+    let token = address!("0x20c00000000000000000000000000000000000cc");
+    let mut encoded_nonce = [0u8; 20];
+    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
+    let deposit = Deposit {
+        token,
+        sender: harness.l1.portal_address(),
+        to: Address::from(encoded_nonce),
+        amount: 555,
+        bouncebackRecipient: Address::ZERO,
+        memo: B256::ZERO,
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        SEQUENCER,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        assert_eq!(ZoneInbox::new().refunds[token][BOB].read()?, 555);
+        Ok(())
+    })?;
+    assert!(harness.outbox.bounce_backs().is_empty());
+    Ok(())
+}
+
+#[test]
+fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let nonce = 7u64;
+    harness.outbox.insert_fallback(nonce, BOB);
+    let mut encoded_nonce = [0u8; 20];
+    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
+    let deposit = Deposit {
+        token: PATH_USD_ADDRESS,
+        sender: harness.l1.portal_address(),
+        to: Address::from(encoded_nonce),
+        amount: 321,
+        bouncebackRecipient: Address::ZERO,
+        memo: B256::ZERO,
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        SEQUENCER,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(321));
+    assert!(harness.outbox.bounce_backs().is_empty());
+    assert!(
+        !harness
+            .outbox
+            .fallback_recipients
+            .lock()
+            .unwrap()
+            .contains_key(&nonce)
+    );
+    Ok(())
+}
