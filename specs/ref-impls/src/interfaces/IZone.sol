@@ -3,6 +3,10 @@ pragma solidity ^0.8.13;
 
 // Protocol-managed ZoneFactory precompile defined by TIP-1091.
 address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
+bytes12 constant ZONE_PORTAL_PREFIX = 0x5AD000000000000000000000;
+address constant ZONE_PORTAL_IMPL_ADDRESS = 0x5AD1000000000000000000000000000000000000;
+address constant ZONE_VERIFIER_ADDRESS = 0x5a56000000000000000000000000000000000000;
+address constant ZONE_MESSENGER_ADDRESS = 0x5A4d000000000000000000000000000000000000;
 
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
@@ -27,7 +31,6 @@ struct ZoneInfo {
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address admin;
     address sequencer;
-    address verifier;
     bytes32 genesisBlockHash;
     bytes32 genesisTempoBlockHash;
     uint64 genesisTempoBlockNumber;
@@ -418,7 +421,6 @@ interface IZoneFactory {
         address initialToken; // first TIP-20 to enable (sequencer can enable more later)
         address admin;
         address sequencer;
-        address verifier;
         ZoneParams zoneParams;
         string rpcUrl;
     }
@@ -440,7 +442,6 @@ interface IZoneFactory {
     error NotOwner();
     error InvalidAdmin();
     error InvalidSequencer();
-    error InvalidVerifier();
     error InsufficientGas();
     error ZoneIdOverflow();
 
@@ -450,26 +451,16 @@ interface IZoneFactory {
     /// @notice Transfers zone-creation authority to `newOwner`.
     function transferOwnership(address newOwner) external;
 
-    /// @notice Returns whether a verifier contract is approved for zone creation.
-    /// @param verifier The verifier contract address to check.
-    /// @return valid True if `verifier` can be passed to `createZone`.
-    function isValidVerifier(address verifier) external view returns (bool);
-
-    /// @notice Returns the default verifier deployed by the factory.
-    /// @return verifier The default verifier contract address.
-    function verifier() external view returns (address);
-
     /// @notice Creates a new zone and deploys its portal contract.
-    /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
+    /// @param params The initial token, sequencer, and genesis parameters for the zone.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
     function createZone(CreateZoneParams calldata params)
         external
         returns (uint32 zoneId, address portal);
 
-    /// @notice Returns the number of zones created so far.
-    /// @return count The total number of created zones, excluding reserved zone ID 0.
-    function zoneCount() external view returns (uint32);
+    /// @notice Returns the next zone ID that will be assigned.
+    function nextZoneId() external view returns (uint32);
 
     /// @notice Returns the stored metadata for a zone.
     /// @param zoneId The zone ID to query.
@@ -480,10 +471,6 @@ interface IZoneFactory {
     /// @param portal The portal address to check.
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
-
-    /// @notice Returns the shared messenger used for withdrawal callbacks.
-    /// @return messenger The shared messenger contract address.
-    function messenger() external view returns (address);
 
 }
 

@@ -208,94 +208,43 @@ fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Byt
     ))
 }
 
-fn forge_deployed_bytecode_with_address_immutable(
-    contract: &str,
-    address: Address,
-) -> eyre::Result<alloy_primitives::Bytes> {
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
-    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
-    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
-    })?;
-    let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let mut bytecode = alloy_primitives::hex::decode(
-        artifact["deployedBytecode"]["object"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?,
-    )?;
-    let references = artifact["deployedBytecode"]["immutableReferences"]
-        .as_object()
-        .ok_or_else(|| eyre::eyre!("missing immutable references in {contract} artifact"))?;
-    let mut patched = 0;
-    for reference in references.values().flat_map(|value| {
-        value
-            .as_array()
-            .into_iter()
-            .flat_map(|references| references.iter())
-    }) {
-        let start = reference["start"]
-            .as_u64()
-            .ok_or_else(|| eyre::eyre!("invalid immutable start in {contract} artifact"))?
-            as usize;
-        let length = reference["length"]
-            .as_u64()
-            .ok_or_else(|| eyre::eyre!("invalid immutable length in {contract} artifact"))?
-            as usize;
-        eyre::ensure!(length == 32, "unexpected immutable size in {contract}");
-        bytecode[start + 12..start + length].copy_from_slice(address.as_slice());
-        patched += 1;
-    }
-    eyre::ensure!(patched > 0, "no immutable references found in {contract}");
-    Ok(bytecode.into())
-}
-
 fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    const VERIFIER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000001");
-    const MESSENGER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000002");
+    use tempo_zone_contracts::{
+        ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+    };
 
     let one = B256::with_last_byte(1);
     let mut factory_storage = BTreeMap::new();
     factory_storage.insert(B256::ZERO, one);
     factory_storage.insert(
-        keccak256((VERIFIER_ADDRESS, U256::from(3)).abi_encode()),
-        one,
-    );
-    factory_storage.insert(
-        B256::with_last_byte(4),
-        B256::left_padding_from(VERIFIER_ADDRESS.as_slice()),
-    );
-    factory_storage.insert(
-        B256::with_last_byte(5),
-        B256::left_padding_from(MESSENGER_ADDRESS.as_slice()),
-    );
-    factory_storage.insert(
-        B256::with_last_byte(6),
+        B256::with_last_byte(3),
         B256::left_padding_from(owner.as_slice()),
     );
-    factory_storage.insert(B256::with_last_byte(7), B256::with_last_byte(3));
 
     genesis.alloc.insert(
         ZONE_FACTORY_ADDRESS,
         GenesisAccount::default()
-            .with_nonce(Some(3))
+            .with_nonce(Some(1))
             .with_code(Some(forge_deployed_bytecode("ZoneFactory")?))
             .with_storage(Some(factory_storage)),
     );
     genesis.alloc.insert(
-        VERIFIER_ADDRESS,
+        ZONE_VERIFIER_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
             .with_code(Some(forge_deployed_bytecode("Verifier")?)),
     );
     genesis.alloc.insert(
-        MESSENGER_ADDRESS,
+        ZONE_PORTAL_IMPL_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode_with_address_immutable(
-                "ZoneMessenger",
-                ZONE_FACTORY_ADDRESS,
-            )?)),
+            .with_code(Some(forge_deployed_bytecode("ZonePortal")?)),
+    );
+    genesis.alloc.insert(
+        ZONE_MESSENGER_ADDRESS,
+        GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
     );
     Ok(())
 }
@@ -1437,13 +1386,11 @@ impl L1TestNode {
         l1_header.encode(&mut rlp_buf);
         let genesis_tempo_block_hash = keccak256(&rlp_buf);
 
-        let verifier_address = factory.verifier().call().await?;
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
                 sequencer,
-                verifier: verifier_address,
                 zoneParams: ZoneFactory::ZoneParams {
                     genesisBlockHash: B256::ZERO,
                     genesisTempoBlockHash: genesis_tempo_block_hash,

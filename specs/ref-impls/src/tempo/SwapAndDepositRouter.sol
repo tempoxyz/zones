@@ -6,6 +6,7 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
+    ZONE_MESSENGER_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
 import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
@@ -73,7 +74,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
-        if (msg.sender != zoneFactory.messenger()) {
+        if (msg.sender != ZONE_MESSENGER_ADDRESS) {
             revert UnauthorizedMessenger();
         }
 

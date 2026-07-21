@@ -4,6 +4,8 @@ pragma solidity ^0.8.13;
 import {
     IWithdrawalReceiver,
     MAX_WITHDRAWAL_CALLBACK_GAS,
+    ZONE_FACTORY_ADDRESS,
+    ZONE_MESSENGER_ADDRESS,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
@@ -92,11 +94,13 @@ contract ZoneMessengerTest is BaseTest {
 
     function setUp() public override {
         super.setUp();
-        messengerFactory = new MockZoneFactoryForMessenger();
+        vm.etch(ZONE_FACTORY_ADDRESS, type(MockZoneFactoryForMessenger).runtimeCode);
+        messengerFactory = MockZoneFactoryForMessenger(ZONE_FACTORY_ADDRESS);
         messengerFactory.setPortal(ZONE_ID, portal);
         messengerFactory.setPortal(OTHER_ZONE_ID, otherPortal);
 
-        messenger = new ZoneMessenger(address(messengerFactory));
+        vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
+        messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         zoneToken.setMinter(address(this), true);
     }
@@ -109,7 +113,7 @@ contract ZoneMessengerTest is BaseTest {
         );
     }
 
-    function test_zoneFactoryImmutable() public view {
+    function test_zoneFactoryConstant() public view {
         assertEq(address(messenger.zoneFactory()), address(messengerFactory));
     }
 

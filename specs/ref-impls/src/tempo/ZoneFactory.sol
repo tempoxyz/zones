@@ -1,9 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneFactory, ZoneInfo } from "../interfaces/IZone.sol";
-import { Verifier } from "./Verifier.sol";
-import { ZoneMessenger } from "./ZoneMessenger.sol";
+import {
+    IZoneFactory,
+    ZONE_MESSENGER_ADDRESS,
+    ZONE_VERIFIER_ADDRESS,
+    ZoneInfo
+} from "../interfaces/IZone.sol";
 import { ZonePortal } from "./ZonePortal.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
@@ -22,33 +25,11 @@ contract ZoneFactory is IZoneFactory {
 
     /// @notice Next zone ID to be assigned
     /// @dev Starts at 1, reserving zone ID 0 for potential future use (e.g., mainnet as zone 0)
-    uint32 internal _nextZoneId = 1;
+    uint32 public nextZoneId = 1;
 
     mapping(uint32 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
-    mapping(address => bool) internal _validVerifiers;
-    address internal _verifier;
-    address internal _messenger;
     address public owner;
-
-    /// @notice Tracks deployment count for CREATE address prediction
-    /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment,
-    ///      nonce 2 by the shared ZoneMessenger, so zone deployments start at nonce 3.
-    uint256 internal _deploymentNonce = 3;
-
-    /*//////////////////////////////////////////////////////////////
-                              CONSTRUCTOR
-    //////////////////////////////////////////////////////////////*/
-
-    constructor() {
-        owner = msg.sender;
-        emit OwnershipTransferred(address(0), msg.sender);
-
-        address v = address(new Verifier());
-        _validVerifiers[v] = true;
-        _verifier = v;
-        _messenger = address(new ZoneMessenger(address(this)));
-    }
 
     /*//////////////////////////////////////////////////////////////
                             ZONE CREATION
@@ -66,17 +47,11 @@ contract ZoneFactory is IZoneFactory {
         }
         if (params.admin == address(0)) revert InvalidAdmin();
         if (params.sequencer == address(0)) revert InvalidSequencer();
-        if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
         if (gasleft() < ZONE_CREATION_GAS) revert InsufficientGas();
 
-        zoneId = _nextZoneId;
+        zoneId = nextZoneId;
         if (zoneId == type(uint32).max) revert ZoneIdOverflow();
-        _nextZoneId = zoneId + 1;
-
-        uint256 currentNonce = _deploymentNonce;
-        _deploymentNonce += 1; // We'll deploy 1 contract
-
-        address predictedPortal = _computeCreateAddress(address(this), currentNonce);
+        nextZoneId = zoneId + 1;
 
         // Deploy and atomically initialize the portal. TIP-1091 fixes this factory's address as
         // the portal's only initializer authority.
@@ -84,18 +59,15 @@ contract ZoneFactory is IZoneFactory {
         portalContract.initialize(
             zoneId,
             params.initialToken,
-            _messenger,
+            ZONE_MESSENGER_ADDRESS,
             params.admin,
             params.sequencer,
-            params.verifier,
+            ZONE_VERIFIER_ADDRESS,
             params.zoneParams.genesisBlockHash,
             params.zoneParams.genesisTempoBlockNumber,
             params.rpcUrl
         );
         portal = address(portalContract);
-
-        // Verify our prediction was correct
-        require(portal == predictedPortal, "Portal address mismatch - nonce tracking error");
 
         // Store zone info
         _zones[zoneId] = ZoneInfo({
@@ -104,7 +76,6 @@ contract ZoneFactory is IZoneFactory {
             initialToken: params.initialToken,
             admin: params.admin,
             sequencer: params.sequencer,
-            verifier: params.verifier,
             genesisBlockHash: params.zoneParams.genesisBlockHash,
             genesisTempoBlockHash: params.zoneParams.genesisTempoBlockHash,
             genesisTempoBlockNumber: params.zoneParams.genesisTempoBlockNumber,
@@ -119,7 +90,7 @@ contract ZoneFactory is IZoneFactory {
             params.initialToken,
             params.admin,
             params.sequencer,
-            params.verifier,
+            ZONE_VERIFIER_ADDRESS,
             params.zoneParams.genesisBlockHash,
             params.zoneParams.genesisTempoBlockHash,
             params.zoneParams.genesisTempoBlockNumber
@@ -136,42 +107,9 @@ contract ZoneFactory is IZoneFactory {
         emit OwnershipTransferred(previousOwner, newOwner);
     }
 
-    /// @notice Compute the address of a contract deployed with CREATE
-    /// @dev address = keccak256(rlp([sender, nonce]))[12:]
-    function _computeCreateAddress(address deployer, uint256 nonce)
-        internal
-        pure
-        returns (address)
-    {
-        bytes memory data;
-        if (nonce == 0x00) {
-            data = abi.encodePacked(bytes1(0xd6), bytes1(0x94), deployer, bytes1(0x80));
-        } else if (nonce <= 0x7f) {
-            data = abi.encodePacked(bytes1(0xd6), bytes1(0x94), deployer, uint8(nonce));
-        } else if (nonce <= 0xff) {
-            data =
-                abi.encodePacked(bytes1(0xd7), bytes1(0x94), deployer, bytes1(0x81), uint8(nonce));
-        } else if (nonce <= 0xffff) {
-            data =
-                abi.encodePacked(bytes1(0xd8), bytes1(0x94), deployer, bytes1(0x82), uint16(nonce));
-        } else if (nonce <= 0xffffff) {
-            data =
-                abi.encodePacked(bytes1(0xd9), bytes1(0x94), deployer, bytes1(0x83), uint24(nonce));
-        } else {
-            data =
-                abi.encodePacked(bytes1(0xda), bytes1(0x94), deployer, bytes1(0x84), uint32(nonce));
-        }
-        return address(uint160(uint256(keccak256(data))));
-    }
-
     /*//////////////////////////////////////////////////////////////
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Returns the number of zones created (not including reserved zone 0)
-    function zoneCount() external view returns (uint32) {
-        return _nextZoneId - 1;
-    }
 
     function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
         return _zones[zoneId];
@@ -179,18 +117,6 @@ contract ZoneFactory is IZoneFactory {
 
     function isZonePortal(address portal) external view returns (bool) {
         return _isZonePortal[portal];
-    }
-
-    function isValidVerifier(address v) external view returns (bool) {
-        return _validVerifiers[v];
-    }
-
-    function verifier() external view returns (address) {
-        return _verifier;
-    }
-
-    function messenger() external view returns (address) {
-        return _messenger;
     }
 
 }

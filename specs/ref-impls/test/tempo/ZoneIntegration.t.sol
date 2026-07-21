@@ -14,6 +14,9 @@ import {
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     QueuedDeposit,
     Withdrawal,
+    ZONE_FACTORY_ADDRESS,
+    ZONE_MESSENGER_ADDRESS,
+    ZONE_VERIFIER_ADDRESS,
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
@@ -112,19 +115,18 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Deploy portal directly (bypass factory TIP20 prefix check), but use a
         // mock factory registry so the shared messenger can authenticate the source portal.
+        vm.etch(ZONE_FACTORY_ADDRESS, type(MockZoneFactoryForIntegrationMessenger).runtimeCode);
         MockZoneFactoryForIntegrationMessenger messengerFactory =
-            new MockZoneFactoryForIntegrationMessenger();
-        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
+            MockZoneFactoryForIntegrationMessenger(ZONE_FACTORY_ADDRESS);
         l1Portal = new ZonePortal();
-        address verifier = l1Factory.verifier();
         vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1,
             address(l2ZoneToken),
-            address(messengerContract),
+            ZONE_MESSENGER_ADDRESS,
             admin,
             sequencer,
-            verifier,
+            ZONE_VERIFIER_ADDRESS,
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
             ""

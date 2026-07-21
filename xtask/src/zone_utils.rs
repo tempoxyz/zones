@@ -13,7 +13,7 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{ZoneInbox, ZonePortal};
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneInbox, ZonePortal};
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// Shared Moderato ZoneFactory.
@@ -21,9 +21,8 @@ pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// `create-zone`, `deploy-router`, and `zone-info` use this as their default
 /// factory unless the caller overrides `--zone-factory` or `ZONE_FACTORY`, or
 /// `zone.json` already provides a zone-specific value.
-/// Explorer: https://explore.moderato.tempo.xyz/address/0xd97052545B978cc79Dd083912C72CA62f889dFaF
-pub(crate) const MODERATO_ZONE_FACTORY: Address =
-    address!("0xd97052545B978cc79Dd083912C72CA62f889dFaF");
+/// Explorer: https://explore.moderato.tempo.xyz/address/0x5aF2000000000000000000000000000000000000
+pub(crate) const MODERATO_ZONE_FACTORY: Address = ZONE_FACTORY_ADDRESS;
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;

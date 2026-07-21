@@ -66,7 +66,7 @@ cargo run --release --bin tempo-zone -- dev \
   --l1.rpc-url ws://127.0.0.1:8545
 ```
 
-This provisions a new ZoneFactory and portal, writes the generated zone files to
+This uses the protocol-managed ZoneFactory to create a portal, writes the generated zone files to
 `/tmp/tempo-zone-dev`, and serves the zone HTTP RPC at `http://127.0.0.1:9545`.
 
 Older Anvil builds are rejected because they mine Ethereum header hashes and only
@@ -141,7 +141,7 @@ View on explorer: `https://explore.moderato.tempo.xyz/address/<SEQUENCER_ADDR>`
 
 ### 4. Create the Zone on L1
 
-This deploys a ZonePortal on L1, wired to the factory's shared ZoneMessenger, and generates the zone's genesis file:
+This creates a ZonePortal through the protocol-managed factory, wired to the shared ZoneMessenger, and generates the zone's genesis file:
 
 ```bash
 export PRIVATE_KEY="$SEQUENCER_KEY"
@@ -559,46 +559,26 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Contract | Address |
 |----------|---------|
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
-| ZoneFactory (moderato) | `0xd97052545B978cc79Dd083912C72CA62f889dFaF` |
+| ZoneFactory | `0x5aF2000000000000000000000000000000000000` |
+| ZonePortal implementation | `0x5AD1000000000000000000000000000000000000` |
+| Zone verifier | `0x5a56000000000000000000000000000000000000` |
+| ZoneMessenger | `0x5A4d000000000000000000000000000000000000` |
 
 The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` uses `zoneFactory` from `zone.json` before falling back to this address. Pass `--zone-factory` or set `ZONE_FACTORY` to override it.
 
-### Deploying a New ZoneFactory
+### Verifying the ZoneFactory
 
-Deploy a fresh shared factory when the Solidity `ZoneFactory`, `ZonePortal`, `ZoneMessenger`, or verifier ABI changes in a way that existing factory deployments cannot serve.
-
-```bash
-cd specs/ref-impls
-export ETH_RPC_URL=https://rpc.moderato.tempo.xyz
-export PRIVATE_KEY=<deployer_private_key>
-
-forge build
-forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/tempo/ZoneFactory.sol:ZoneFactory
-```
-
-The `--private-key "$PRIVATE_KEY"` form is useful for controlled non-interactive deployments. For manual deployments, prefer replacing it with `--interactive` and paste the key at Foundry's prompt so the key is not written into shell history or process arguments.
-
-After deployment, capture the `Deployed to` address and transaction hash, then verify the contract:
+TIP-1091 makes the factory and its shared dependencies protocol-managed accounts. Verify them at their fixed addresses:
 
 ```bash
-export ZONE_FACTORY=0x...
+export ZONE_FACTORY=0x5aF2000000000000000000000000000000000000
 
 cast code "$ZONE_FACTORY" --rpc-url "$ETH_RPC_URL"
-cast call "$ZONE_FACTORY" "zoneCount()(uint32)" --rpc-url "$ETH_RPC_URL"
-cast call "$ZONE_FACTORY" "verifier()(address)" --rpc-url "$ETH_RPC_URL"
-cast call "$ZONE_FACTORY" "messenger()(address)" --rpc-url "$ETH_RPC_URL"
+cast call "$ZONE_FACTORY" "nextZoneId()(uint32)" --rpc-url "$ETH_RPC_URL"
+cast code 0x5AD1000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
+cast code 0x5a56000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
+cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 ```
-
-`zoneCount()` should be `0` on a fresh deployment, and `verifier()` and `messenger()` should return the contracts deployed by the factory constructor. Update `MODERATO_ZONE_FACTORY` in `xtask/src/zone_utils.rs`, the Key Addresses table above, and any other `rg` hits for the previous address.
-
-Current deployment:
-
-| Field | Value |
-|-------|-------|
-| Address | `0xd97052545B978cc79Dd083912C72CA62f889dFaF` |
-| Transaction | `0xb99ae18e4223b4176fac475dfa6fdfe2c43da9e95777bd5ff0387b6b20b99b44` |
-| Block | `26546762` |
-| Deployed | `2026-07-14 18:26:32 UTC` |
 
 ### Zone Node CLI Options
 

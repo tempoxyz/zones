@@ -17,7 +17,8 @@ import {
     QueuedDeposit,
     TokenConfig,
     Withdrawal,
-    ZONE_FACTORY_ADDRESS
+    ZONE_FACTORY_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
@@ -63,9 +64,6 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
-    /// @dev The fixed account holding the shared portal logic contract runtime.
-    address internal constant ZONE_PORTAL_LOGIC_ADDRESS =
-        0x5AD1000000000000000000000000000000000000;
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -184,7 +182,7 @@ contract ZonePortal is IZonePortal {
 
     /// @dev Initialization is valid only in a portal proxy's storage context.
     modifier onlyDelegateCall() {
-        if (address(this) == ZONE_PORTAL_LOGIC_ADDRESS) revert MustDelegateCall();
+        if (address(this) == ZONE_PORTAL_IMPL_ADDRESS) revert MustDelegateCall();
         _;
     }
 

@@ -39,7 +39,6 @@ contract ZoneConfigTest is BaseTest {
             initialToken: address(pathUSD),
             admin: admin,
             sequencer: sequencer,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,

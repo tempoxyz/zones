@@ -85,8 +85,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let factory_address = deploy_zone_factory(&l1_rpc_url, wallet).await?;
 
     let factory = ZoneFactory::new(factory_address, &provider);
-    let verifier = factory.verifier().call().await?;
-
     // Anchor before createZone so the L1 subscriber replays the creation block,
     // including the initial TokenEnabled event emitted by the portal constructor.
     let anchor_block_number = provider.get_block_number().await?;
@@ -103,7 +101,6 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             initialToken: initial_token,
             admin: dev_address,
             sequencer: dev_address,
-            verifier,
             zoneParams: ZoneFactory::ZoneParams {
                 genesisBlockHash: B256::ZERO,
                 genesisTempoBlockHash: anchor_block_hash,

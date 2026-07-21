@@ -1,7 +1,9 @@
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{ZoneFactory, ZonePortal};
+use tempo_zone_contracts::{
+    ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
+};
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
@@ -30,10 +32,10 @@ impl ZoneInfoCmd {
         let zone_id = if self.identifier.starts_with("0x") {
             // Look up by portal address — scan all zones
             let portal: Address = self.identifier.parse()?;
-            let count = factory.zoneCount().call().await?;
+            let next_zone_id = factory.nextZoneId().call().await?;
 
             let mut found = None;
-            for id in 1..=count {
+            for id in 1..next_zone_id {
                 let info = factory.zones(id).call().await?;
                 if info.portal == portal {
                     found = Some(id);
@@ -51,14 +53,12 @@ impl ZoneInfoCmd {
         if info.portal == Address::ZERO {
             return Err(eyre!("zone {zone_id} does not exist"));
         }
-        let messenger = factory.messenger().call().await?;
-
         println!("Zone {}", info.zoneId);
         println!("  Portal:                {}", info.portal);
-        println!("  Messenger:             {messenger}");
+        println!("  Messenger:             {ZONE_MESSENGER_ADDRESS}");
         println!("  Initial Token:         {}", info.initialToken);
         println!("  Sequencer:             {}", info.sequencer);
-        println!("  Verifier:              {}", info.verifier);
+        println!("  Verifier:              {ZONE_VERIFIER_ADDRESS}");
         println!("  Genesis Block Hash:    {}", info.genesisBlockHash);
         println!("  Genesis Tempo Hash:    {}", info.genesisTempoBlockHash);
         println!("  Genesis Tempo Block:   {}", info.genesisTempoBlockNumber);
