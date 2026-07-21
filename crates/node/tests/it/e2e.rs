@@ -19,7 +19,7 @@ use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
     ZoneInbox, ZoneOutbox,
 };
-use zone_l1::ChainTempoStateExt;
+use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, WITHDRAWAL_TX_GAS, ZoneTestNode, approve_outbox,
@@ -60,8 +60,11 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let recipient = address!("0x0000000000000000000000000000000000005678");
     let amount = 1_000_000_u128;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, depositor, recipient, amount);
+    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
-    follower.l1_block_tracker().record(anchor)?;
+    follower
+        .l1_block_tracker()
+        .record_with_portal_events(anchor, observed)?;
 
     leader
         .wait_for_balance(
@@ -127,6 +130,7 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
     // --- Block 1: fund Alice while pathUSD is still allow-all (anchor L1#1). ---
     let deposit_amount: u128 = 1_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, alice, alice, deposit_amount);
+    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
     leader
         .wait_for_balance(
@@ -137,7 +141,9 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
         )
         .await?;
 
-    follower.l1_block_tracker().record(anchor)?;
+    follower
+        .l1_block_tracker()
+        .record_with_portal_events(anchor, observed)?;
     follower
         .wait_for_balance(
             PATH_USD_ADDRESS,
