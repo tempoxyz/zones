@@ -62,11 +62,6 @@ use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, Polic
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
-/// Copies the Zone chain spec and applies the Tempo hardfork conditions from its parent chain.
-fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneChainSpec> {
-    Arc::new(zone.clone().with_tempo_hardforks_from(tempo))
-}
-
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// zone-native precompiles.
 #[derive(Debug, Clone)]
@@ -466,6 +461,11 @@ where
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         self.inner.tx_iterator_for_payload(payload)
     }
+}
+
+/// Copies the Zone chain spec and applies the Tempo hardfork conditions from its parent chain.
+fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneChainSpec> {
+    Arc::new(zone.clone().with_tempo_hardforks_from(tempo))
 }
 
 #[cfg(test)]
