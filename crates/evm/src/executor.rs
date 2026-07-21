@@ -114,7 +114,7 @@ where
             .inner
             .execute_transaction_without_commit((tx_env, recovered));
 
-        self.evm_mut().reset_transaction_state();
+        self.evm_mut().clear_l1_overlay_state();
         result
     }
 

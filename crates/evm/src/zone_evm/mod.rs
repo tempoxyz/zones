@@ -48,8 +48,8 @@ impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
         self.inner.ctx_mut()
     }
 
-    /// Clears database-adapter bookkeeping left by the current transaction attempt.
-    pub(crate) fn reset_transaction_state(&mut self) {
+    /// Clears the L1 overlay bookkeeping left by the current transaction attempt.
+    pub(crate) fn clear_l1_overlay_state(&mut self) {
         self.inner
             .ctx_mut()
             .journaled_state
@@ -64,7 +64,9 @@ where
     L1: L1StorageReader,
     I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
 {
-    fn execute_inner(
+    /// Executes a transaction through Tempo, strips mirrored L1 fields from its state transition,
+    /// and clears transaction-local overlay bookkeeping before returning.
+    fn execute_and_sanitize(
         &mut self,
         execute: impl FnOnce(
             &mut TempoEvm<L1OverlayDB<DB, L1>, I>,
@@ -81,7 +83,7 @@ where
             Err(error) => Err(map_adapter_error(error)),
         };
 
-        self.reset_transaction_state();
+        self.clear_l1_overlay_state();
         result
     }
 }
@@ -118,7 +120,7 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
-        self.execute_inner(|evm| evm.transact_raw(tx))
+        self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 
     fn transact_system_call(
@@ -127,7 +129,7 @@ where
         contract: Address,
         data: Bytes,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        self.execute_inner(|evm| evm.transact_system_call(caller, contract, data))
+        self.execute_and_sanitize(|evm| evm.transact_system_call(caller, contract, data))
     }
 
     fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
@@ -219,7 +221,7 @@ mod tests {
 
         for execution_result in results {
             let mut evm = test_evm();
-            let result = evm.execute_inner(move |_| {
+            let result = evm.execute_and_sanitize(move |_| {
                 Ok(ResultAndState::new(execution_result, registry_write()))
             });
 
