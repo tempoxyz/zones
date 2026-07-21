@@ -349,7 +349,7 @@ provision_up() {
     local account_start="${ZONES_BENCH_ACCOUNT_START:-16}"
     local accounts="${ZONES_BENCH_ACCOUNTS:-100}"
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
-    local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-1000000000000}"
+    local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
     local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
     local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-0}"
     local bloat_balance="${ZONES_BENCH_BLOAT_BALANCE:-18446744073709551615}"

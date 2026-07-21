@@ -61,9 +61,10 @@ root, is required before treating storage-sensitive results as production
 comparable. The workflow records the runner CPU and block-device topology in
 its artifacts so this constraint is visible with each result.
 
-The pinned Tempo harness uses a `1,000,000,000,000` L1 gas limit; the provisioner
-sets that value for both the block and general non-payment transaction gas
-limits in genesis and for each validator's payload builder. Override
+The benchmark topology uses a `30,000,000` L1 gas limit to match the production
+limit. The provisioner sets that value for both the block and general
+non-payment transaction gas limits in genesis and for each validator's payload
+builder. Override
 `ZONES_BENCH_L1_GAS_LIMIT` or `ZONES_BENCH_L1_GENERAL_GAS_LIMIT` only when
 deliberately testing another Tempo setup. Keeping the general limit explicit is
 important because bridge deposits are non-payment calls.
