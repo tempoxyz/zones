@@ -95,6 +95,50 @@ preflight_phase() {
     "${command[@]}"
 }
 
+# Send one expiring-nonce approval per account. Each round is generated only
+# after bootstrap and immediately before it is sent, so slow provisioning cannot
+# consume the validity window. txgen gives setup steps a shared inclusion key,
+# which is right for dependent deployment setup but serializes unrelated account
+# approvals; drop only that synthetic barrier.
+send_zone_approval_round() {
+    local token_label="$1" token="$2"
+    local spec="$ZONES_BENCH_OUTPUT/zone-approval-${token_label}.yml"
+    local raw="$ZONES_BENCH_OUTPUT/zone-approval-${token_label}.serial.ndjson"
+    local stream="$ZONES_BENCH_OUTPUT/zone-approval-${token_label}.ndjson"
+    local actual
+
+    {
+        printf 'chain_id: %s\n\n' "$zone_chain_id"
+        printf 'gas:\n  max_fee_per_gas: %s\n  max_priority_fee_per_gas: %s\n\n' "$zone_fee" "$zone_fee"
+        printf 'accounts:\n  users:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    range: [%s, %s]\n  sponsor:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    index: %s\n\n' "$ZONES_BENCH_ACCOUNT_START" "$account_end" "$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX"
+        printf 'artifacts:\n  TIP20: txgen/abis/tip20.json\n\nsetup:\n  steps:\n'
+        for ((index = 0; index < 10#$ZONES_BENCH_ACCOUNTS; index++)); do
+            printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        expiring_nonce: true\n        valid_for_secs: 25\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$token_label" "$index" "$index" "$ZONES_BENCH_DLUSD" "$token"
+        done
+        # The txgen generator requires a positive mix even with --count 0.
+        printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    expiring_nonce: true\n    valid_for_secs: 25\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_DLUSD" "$token"
+    } >"$spec"
+
+    echo "Zone $token_label approval setup: generating $ZONES_BENCH_ACCOUNTS expiring-nonce transactions"
+    "$txgen_bin" generate --spec "$spec" --count 0 --seed "$ZONES_BENCH_SEED" --output "$raw"
+    actual="$(jq -s -r 'length' "$raw")"
+    [[ "$actual" == "$ZONES_BENCH_ACCOUNTS" ]] ||
+        die "Zone $token_label approval setup rendered $actual transactions; expected $ZONES_BENCH_ACCOUNTS"
+    jq -e -s --argjson expected "$ZONES_BENCH_ACCOUNTS" '
+        length == $expected and
+        all(.[]; .phase == "setup" and (.submission_keys | length) == 1 and (.inclusion_keys | length) == 1) and
+        ([.[].submission_keys[]] | unique | length) == $expected and
+        ([.[].inclusion_keys[]] | unique | length) == 1
+    ' "$raw" >/dev/null || die "Zone $token_label approval setup has invalid scheduling keys"
+    jq -c '.inclusion_keys = []' "$raw" >"$stream"
+    rm -f -- "$raw"
+
+    echo "Zone $token_label approval setup: sending up to $ZONES_BENCH_MAX_CONCURRENT concurrently"
+    "$bench_bin" send --input "$stream" --rpc-url "$ZONE_PRIVATE_RPC_URL" --query-rpc-url "$ZONE_RPC_URL" \
+        --sender-header-name X-Authorization-Token --sender-header-map "$secret_dir/zone-auth.json" \
+        --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
+}
+
 # The bootstrap gives the sequencer DLUSD for sponsored, untimed Zone approvals.
 preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
@@ -156,28 +200,8 @@ export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 
 # Approve both Zone assets before timing. EarnToken needs no user balance for approval;
 # the sequencer sponsors these setup transactions from its untimed bootstrap balance.
-zone_approval_spec="$ZONES_BENCH_OUTPUT/zone-approvals.yml"
-{
-    printf 'chain_id: %s\n\n' "$zone_chain_id"
-    printf 'gas:\n  max_fee_per_gas: %s\n  max_priority_fee_per_gas: %s\n\n' "$zone_fee" "$zone_fee"
-    printf 'accounts:\n  users:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    range: [%s, %s]\n  sponsor:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    index: 4\n\n' "$ZONES_BENCH_ACCOUNT_START" "$account_end"
-    # txgen resolves artifact paths relative to this generated spec, not the
-    # repository root. Keep the portable output tree self-contained.
-    printf 'artifacts:\n  TIP20: txgen/abis/tip20.json\n\nsetup:\n  steps:\n'
-    for ((index = 0; index < 10#$ZONES_BENCH_ACCOUNTS; index++)); do
-        for token in "$ZONES_BENCH_DLUSD" "$ZONES_BENCH_EARN_TOKEN"; do
-            printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$index" "${token: -1}" "$index" "$ZONES_BENCH_DLUSD" "$token"
-        done
-    done
-    # The pinned txgen requires a positive mix even with --count 0. This
-    # template is never emitted here; it makes the approval-only setup spec
-    # valid while generate emits the preceding setup steps.
-    printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_DLUSD" "$ZONES_BENCH_DLUSD"
-} >"$zone_approval_spec"
-"$txgen_bin" generate --spec "$zone_approval_spec" --count 0 --seed "$ZONES_BENCH_SEED" --output "$ZONES_BENCH_OUTPUT/zone-approvals.ndjson"
-"$bench_bin" send --input "$ZONES_BENCH_OUTPUT/zone-approvals.ndjson" --rpc-url "$ZONE_PRIVATE_RPC_URL" --query-rpc-url "$ZONE_RPC_URL" \
-    --sender-header-name X-Authorization-Token --sender-header-map "$secret_dir/zone-auth.json" \
-    --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
+send_zone_approval_round dlusd "$ZONES_BENCH_DLUSD"
+send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
 
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
