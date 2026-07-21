@@ -12,7 +12,9 @@
 #   ZONES_XTASK_BIN=/path/to/zones/target/profiling/tempo-xtask
 #   ZONE_BIN=/path/to/zones/target/profiling/tempo-zone
 #
-# `up` deliberately stops after node and contract readiness. It does not fund
+# `prepare-l1` builds the paired L1 baseline on a cache miss but deliberately
+# leaves Schelk promotion to the caller. `up` starts from a verified private
+# restored copy and stops after node and contract readiness. It does not fund
 # Zone accounts, submit benchmark deposits, or wait for benchmark bridge events.
 # On success the processes remain alive for a following run-phase.sh invocation.
 # Always call `cleanup` from the workflow's `if: always()` teardown step.
@@ -30,7 +32,6 @@ readonly LOCALNET_SIGNING_SECRET="tempo-localnet-signing-key-secret"
 
 provision_succeeded=0
 provision_pid_file=""
-provision_mnemonic_file=""
 
 die() {
     echo "error: $*" >&2
@@ -53,41 +54,6 @@ require_uint() {
     local name="$1"
     local value="${!name:-}"
     [[ "$value" =~ ^[0-9]+$ ]] || die "$name must be an unsigned integer"
-}
-
-available_mib() {
-    local path="$1"
-    df -Pm -- "$path" | awk 'NR == 2 { print $4 }'
-}
-
-check_bloat_free_space() {
-    local state_a_root="$1"
-    local state_b_root="$2"
-    local bloat_mib="$3"
-    (( bloat_mib > 0 )) || return 0
-
-    # Match pinned Tempo bench-e2e's allowance for the database, ETL, static
-    # file, and trie writes made while importing the binary dump.
-    local import_multiplier=7
-    local free_margin_mib=51200
-    local import_working_set_mib=$((bloat_mib * import_multiplier))
-    local required_a_mib=$((bloat_mib + import_working_set_mib + free_margin_mib))
-    local required_b_mib=$((import_working_set_mib + free_margin_mib))
-    local available_a_mib available_b_mib
-    available_a_mib="$(available_mib "$state_a_root")"
-    available_b_mib="$(available_mib "$state_b_root")"
-    [[ "$available_a_mib" =~ ^[0-9]+$ ]] \
-        || die "could not determine free space for $state_a_root"
-    [[ "$available_b_mib" =~ ^[0-9]+$ ]] \
-        || die "could not determine free space for $state_b_root"
-
-    echo "checking Tempo L1 bloat import free space"
-    echo "  validator A: available=$available_a_mib MiB required=$required_a_mib MiB"
-    echo "  validator B: available=$available_b_mib MiB required=$required_b_mib MiB"
-    (( available_a_mib >= required_a_mib )) \
-        || die "validator A bloat import needs at least $required_a_mib MiB, but $state_a_root has $available_a_mib MiB"
-    (( available_b_mib >= required_b_mib )) \
-        || die "validator B bloat import needs at least $required_b_mib MiB, but $state_b_root has $available_b_mib MiB"
 }
 
 rpc() {
@@ -239,9 +205,6 @@ cleanup_pid_file() {
 provision_on_exit() {
     local status=$?
     trap - EXIT INT TERM
-    if [[ -n "$provision_mnemonic_file" ]]; then
-        rm -f -- "$provision_mnemonic_file"
-    fi
     if (( provision_succeeded == 0 )) && [[ -n "$provision_pid_file" ]]; then
         cleanup_pid_file "$provision_pid_file"
     fi
@@ -329,12 +292,11 @@ provision_up() {
     require_command awk
     require_command cast
     require_command curl
-    require_command df
-    require_command forge
     require_command jq
     require_command taskset
 
-    [[ -n "${ZONES_BENCH_MNEMONIC:-}" ]] || die "ZONES_BENCH_MNEMONIC must be set"
+    [[ -n "${ZONES_BENCH_MNEMONIC_FILE:-}" ]] || die "ZONES_BENCH_MNEMONIC_FILE must be set"
+    require_file "$ZONES_BENCH_MNEMONIC_FILE"
     [[ -n "${TEMPO_ROOT:-}" ]] || die "TEMPO_ROOT must be set"
 
     TEMPO_BIN="${TEMPO_BIN:-$TEMPO_ROOT/target/profiling/tempo}"
@@ -348,6 +310,7 @@ provision_up() {
 
     local account_start="${ZONES_BENCH_ACCOUNT_START:-16}"
     local accounts="${ZONES_BENCH_ACCOUNTS:-200}"
+    local account_capacity="${ZONES_BENCH_ACCOUNT_CAPACITY:-10000}"
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
     local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
@@ -359,6 +322,7 @@ provision_up() {
 
     ZONES_BENCH_ACCOUNT_START="$account_start"
     ZONES_BENCH_ACCOUNTS="$accounts"
+    ZONES_BENCH_ACCOUNT_CAPACITY="$account_capacity"
     ZONES_BENCH_L1_CHAIN_ID="$l1_chain_id"
     ZONES_BENCH_L1_GAS_LIMIT="$l1_gas_limit"
     ZONES_BENCH_L1_GENERAL_GAS_LIMIT="$l1_general_gas_limit"
@@ -367,7 +331,8 @@ provision_up() {
     ZONES_BENCH_RPC_TIMEOUT_SECS="$rpc_timeout"
     ZONES_BENCH_ZONE_TIMEOUT_SECS="$zone_timeout"
     for name in \
-        ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_L1_CHAIN_ID \
+        ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY \
+        ZONES_BENCH_L1_CHAIN_ID \
         ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
         ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE \
         ZONES_BENCH_RPC_TIMEOUT_SECS ZONES_BENCH_ZONE_TIMEOUT_SECS
@@ -376,6 +341,7 @@ provision_up() {
     done
     account_start=$((10#$account_start))
     accounts=$((10#$accounts))
+    account_capacity=$((10#$account_capacity))
     l1_chain_id=$((10#$l1_chain_id))
     l1_gas_limit=$((10#$l1_gas_limit))
     l1_general_gas_limit=$((10#$l1_general_gas_limit))
@@ -383,6 +349,8 @@ provision_up() {
     rpc_timeout=$((10#$rpc_timeout))
     zone_timeout=$((10#$zone_timeout))
     (( accounts > 0 )) || die "ZONES_BENCH_ACCOUNTS must be greater than zero"
+    (( accounts <= account_capacity )) \
+        || die "ZONES_BENCH_ACCOUNTS exceeds the cached funded-account capacity"
     (( account_start >= 5 )) || die "ZONES_BENCH_ACCOUNT_START must be at least 5; indices 0-4 are reserved for the factory owner, two validator identities, portal admin, and sequencer"
     (( l1_chain_id > 0 )) || die "ZONES_BENCH_L1_CHAIN_ID must be greater than zero"
     (( l1_gas_limit > 0 )) || die "ZONES_BENCH_L1_GAS_LIMIT must be greater than zero"
@@ -391,7 +359,12 @@ provision_up() {
     (( rpc_timeout > 0 )) || die "ZONES_BENCH_RPC_TIMEOUT_SECS must be greater than zero"
     (( zone_timeout > 0 )) || die "ZONES_BENCH_ZONE_TIMEOUT_SECS must be greater than zero"
 
-    local genesis_accounts=$((account_start + accounts))
+    export ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY
+    export ZONES_BENCH_L1_CHAIN_ID ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT
+    export ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE
+
+    "$SCRIPT_DIR/l1-snapshot.sh" verify
+
     local control_root="${ZONES_BENCH_TOPOLOGY_DIR:-}"
     if [[ -z "$control_root" ]]; then
         control_root="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-benchmark-topology.XXXXXX")"
@@ -400,19 +373,19 @@ provision_up() {
         mkdir -p "$control_root"
     fi
 
-    local state_a_root="${ZONES_BENCH_STATE_A_ROOT:-/reth-bench-a/zones-benchmark-$run_key}"
-    local state_b_root="${ZONES_BENCH_STATE_B_ROOT:-/reth-bench-b/zones-benchmark-$run_key}"
-    [[ ! -e "$state_a_root" ]] || die "state path already exists: $state_a_root"
-    [[ ! -e "$state_b_root" ]] || die "state path already exists: $state_b_root"
-    mkdir -p "$state_a_root" "$state_b_root"
-    check_bloat_free_space "$state_a_root" "$state_b_root" "$bloat_mib"
+    local state_a_root="${ZONES_BENCH_STATE_A_ROOT:-/reth-bench-a/zones-l1-${bloat_mib}mb}"
+    local state_b_root="${ZONES_BENCH_STATE_B_ROOT:-/reth-bench-b/zones-l1-${bloat_mib}mb}"
+    [[ -d "$state_a_root" ]] || die "validator A L1 snapshot is missing: $state_a_root"
+    [[ -d "$state_b_root" ]] || die "validator B L1 snapshot is missing: $state_b_root"
+    local zone_state_root="${ZONES_BENCH_ZONE_STATE_ROOT:-/reth-bench-a/zones-runtime-$run_key}"
+    [[ ! -e "$zone_state_root" ]] || die "Zone runtime state path already exists: $zone_state_root"
+    mkdir -p "$zone_state_root"
 
-    local localnet_dir="$control_root/localnet"
-    local raw_genesis="$localnet_dir/genesis.json"
-    local patched_genesis="$control_root/tempo-genesis.json"
+    local localnet_dir="$state_a_root/localnet"
+    local patched_genesis="$state_a_root/tempo-genesis.json"
     local l1_a_db="$state_a_root/l1-a"
     local l1_b_db="$state_b_root/l1-b"
-    local zone_db="$state_a_root/zone"
+    local zone_db="$zone_state_root/zone"
     local zone_dir="$control_root/zone"
     local log_dir="$control_root/logs"
     local env_file="${ZONES_BENCH_ENV_FILE:-$control_root/topology.env}"
@@ -423,13 +396,10 @@ provision_up() {
 
     provision_succeeded=0
     provision_pid_file="$pid_file"
-    provision_mnemonic_file=""
     trap provision_on_exit EXIT
     trap 'exit 130' INT TERM
 
-    local mnemonic_file="$control_root/mnemonic"
-    provision_mnemonic_file="$mnemonic_file"
-    (umask 077; printf '%s\n' "$ZONES_BENCH_MNEMONIC" >"$mnemonic_file")
+    local mnemonic_file="$ZONES_BENCH_MNEMONIC_FILE"
     local owner_key sequencer_key owner_address admin_address sequencer_address
     owner_key="$(derive_key "$mnemonic_file" 0)"
     sequencer_key="$(derive_key "$mnemonic_file" 4)"
@@ -437,57 +407,7 @@ provision_up() {
     admin_address="$(derive_address "$mnemonic_file" 3)"
     sequencer_address="$(derive_address "$mnemonic_file" 4)"
 
-    echo "generating two-validator Tempo consensus genesis"
-    "$TEMPO_XTASK_BIN" generate-localnet \
-        --output "$localnet_dir" \
-        --accounts "$genesis_accounts" \
-        --mnemonic "$ZONES_BENCH_MNEMONIC" \
-        --chain-id "$l1_chain_id" \
-        --gas-limit "$l1_gas_limit" \
-        --general-gas-limit "$l1_general_gas_limit" \
-        --validators 127.0.0.2:8000,127.0.0.3:8100 \
-        --seed 42
-    rm -f -- "$mnemonic_file"
-    provision_mnemonic_file=""
-
-    echo "building and installing the canonical reference ZoneFactory"
-    forge build --root "$ZONES_ROOT/specs/ref-impls" --skip test
-    "$ZONES_XTASK_BIN" install-reference-zone-factory \
-        --genesis "$raw_genesis" \
-        --output "$patched_genesis" \
-        --owner "$owner_address" \
-        --specs-out "$ZONES_ROOT/specs/ref-impls/out"
-    [[ "$(jq -er '.config.generalGasLimit' "$patched_genesis")" == "$l1_general_gas_limit" ]] \
-        || die "generated Tempo genesis does not contain generalGasLimit=$l1_general_gas_limit"
-
-    mkdir -p "$l1_a_db" "$l1_b_db" "$zone_db" "$zone_dir"
-    "$TEMPO_BIN" init --chain "$patched_genesis" --datadir "$l1_a_db"
-    "$TEMPO_BIN" init --chain "$patched_genesis" --datadir "$l1_b_db"
-
-    if (( bloat_mib > 0 )); then
-        local bloat_tmp_dir="${ZONES_BENCH_BLOAT_TMP_DIR:-$state_a_root/.bloat-tmp}"
-        local bloat_file="$bloat_tmp_dir/state-bloat.bin"
-        mkdir -p "$bloat_tmp_dir"
-        local bloat_accounts_per_token=$(((bloat_mib * 1024 * 1024 - 4 * 104) / (64 * 4)))
-        (( bloat_accounts_per_token >= genesis_accounts )) \
-            || die "$bloat_mib MiB of four-token bloat covers only $bloat_accounts_per_token signable accounts per token; need at least $genesis_accounts"
-        echo "generating $bloat_mib MiB of four-token Tempo state bloat"
-        "$TEMPO_XTASK_BIN" generate-state-bloat \
-            --size "$bloat_mib" \
-            --out "$bloat_file" \
-            --mnemonic "$ZONES_BENCH_MNEMONIC" \
-            --balance "$bloat_balance" \
-            --signable-count "$genesis_accounts" \
-            --token 0 --token 1 --token 2 --token 3
-        "$TEMPO_BIN" init-from-binary-dump --chain "$patched_genesis" --datadir "$l1_a_db" "$bloat_file"
-        "$TEMPO_BIN" init-from-binary-dump --chain "$patched_genesis" --datadir "$l1_b_db" "$bloat_file"
-        rm -f -- "$bloat_file"
-        rmdir -- "$bloat_tmp_dir" 2>/dev/null || true
-    fi
-
-    # The validator processes never need the account mnemonic. Keep it out of
-    # their long-lived environments (and therefore out of /proc/<pid>/environ).
-    unset ZONES_BENCH_MNEMONIC
+    mkdir -p "$zone_db" "$zone_dir"
 
     local validator_a="$localnet_dir/127.0.0.2:8000"
     local validator_b="$localnet_dir/127.0.0.3:8100"
@@ -624,7 +544,7 @@ provision_up() {
         --log.file.directory "$log_dir/zone" \
         --ipcdisable \
         --sequencer
-    unset SEQUENCER_KEY sequencer_key owner_key ZONES_BENCH_MNEMONIC
+    unset SEQUENCER_KEY sequencer_key owner_key
 
     local zone_rpc="http://127.0.0.1:8546"
     local zone_private_rpc="http://127.0.0.1:8544"
@@ -658,7 +578,10 @@ provision_up() {
         ZONES_BENCH_L1_METRICS_URL "a:http://127.0.0.1:9001/metrics,b:http://127.0.0.1:9101/metrics" \
         ZONES_BENCH_ZONE_METRICS_URL "http://127.0.0.1:9201/metrics" \
         ZONES_BENCH_PID_FILE "$pid_file" \
-        ZONES_BENCH_TOPOLOGY_DIR "$control_root"
+        ZONES_BENCH_TOPOLOGY_DIR "$control_root" \
+        ZONES_BENCH_STATE_A_ROOT "$state_a_root" \
+        ZONES_BENCH_STATE_B_ROOT "$state_b_root" \
+        ZONES_BENCH_ZONE_STATE_ROOT "$zone_state_root"
 
     provision_succeeded=1
     provision_pid_file=""
@@ -670,16 +593,26 @@ provision_up() {
 usage() {
     cat <<'EOF'
 Usage:
+  contrib/bench/provision-topology.sh prepare-l1
+  contrib/bench/provision-topology.sh verify-l1
   contrib/bench/provision-topology.sh up
   contrib/bench/provision-topology.sh cleanup [PID_FILE]
 
-`up` leaves the provisioned nodes running and prints the generated non-secret
+`prepare-l1` builds both L1 baselines on the restored Schelk scratch volumes;
+the caller promotes and restores them before `verify-l1`. `up` leaves the
+provisioned nodes running and prints the generated non-secret
 environment file path. `cleanup` stops exactly the processes recorded in the
 PID file; pass it explicitly or set ZONES_BENCH_PID_FILE.
 EOF
 }
 
 case "${1:-}" in
+    prepare-l1)
+        "$SCRIPT_DIR/l1-snapshot.sh" prepare
+        ;;
+    verify-l1)
+        "$SCRIPT_DIR/l1-snapshot.sh" verify
+        ;;
     up)
         provision_up
         ;;

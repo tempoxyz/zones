@@ -41,16 +41,16 @@ on:
           - "1"
           - "10"
           - "100"
+      force-bloat:
+        description: Rebuild and replace the runner-local Tempo L1 virgin snapshot.
+        type: boolean
+        required: true
+        default: false
       deposit-amount:
         description: Gross amount for each L1 deposit.
         type: string
         required: true
         default: "2000000"
-      bootstrap-deposit-amount:
-        description: Untimed control-to-sequencer deposit used for fee setup and approval sponsorship.
-        type: string
-        required: true
-        default: "10000000"
       activity-amount:
         description: Amount for each ordinary Zone TIP-20 transfer.
         type: string
@@ -87,6 +87,7 @@ env:
   RUSTC_WRAPPER: sccache
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
+  ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -105,6 +106,7 @@ jobs:
       tps: ${{ steps.config.outputs.tps }}
       max-concurrent: ${{ steps.config.outputs.max-concurrent }}
       state-bloat-gib: ${{ steps.config.outputs.state-bloat-gib }}
+      force-bloat: ${{ steps.config.outputs.force-bloat }}
       deposit-amount: ${{ steps.config.outputs.deposit-amount }}
       bootstrap-deposit-amount: ${{ steps.config.outputs.bootstrap-deposit-amount }}
       activity-amount: ${{ steps.config.outputs.activity-amount }}
@@ -153,14 +155,15 @@ jobs:
           INPUT_TPS: ${{ inputs.tps || '20' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '200' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
+          INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
           INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
-          INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
+          INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: "10000000"
           INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_DRAIN_TIMEOUT: "300"
           INPUT_SEED: ""
           INPUT_TEMPO_REF: 436f6cf069a0c8aafa9a3a197ffa17488b5f1e81
-          INPUT_TXGEN_REF: f1fe55ea308b7f44b81bbc2322992a71d4522a03
+          INPUT_TXGEN_REF: 24840d0eaf8ff9a8e6e39ba3e5b268a1045f69a2
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -211,11 +214,20 @@ jobs:
             exit 1
           fi
           case "$INPUT_STATE_BLOAT_GIB" in 0|1|10|100) ;; *) exit 1 ;; esac
+          case "$INPUT_FORCE_BLOAT" in
+            true) INPUT_FORCE_BLOAT=1 ;;
+            false) INPUT_FORCE_BLOAT=0 ;;
+            *) echo "::error::force-bloat must be true or false"; exit 1 ;;
+          esac
           INPUT_ACCOUNTS=$((10#$INPUT_ACCOUNTS))
           INPUT_COUNT=$((10#$INPUT_COUNT))
           INPUT_TPS=$((10#$INPUT_TPS))
           INPUT_MAX_CONCURRENT=$((10#$INPUT_MAX_CONCURRENT))
           INPUT_STATE_BLOAT_GIB=$((10#$INPUT_STATE_BLOAT_GIB))
+          if (( INPUT_ACCOUNTS > 10000 )); then
+            echo "::error::accounts cannot exceed the cached funded-account capacity of 10000"
+            exit 1
+          fi
           for name in INPUT_TEMPO_REF INPUT_TXGEN_REF; do
             if ! [[ "${!name}" =~ ^[0-9a-fA-F]{40}$ ]]; then
               echo "::error::$name must be an exact 40-character commit SHA"
@@ -231,6 +243,7 @@ jobs:
             echo "tps=$INPUT_TPS"
             echo "max-concurrent=$INPUT_MAX_CONCURRENT"
             echo "state-bloat-gib=$INPUT_STATE_BLOAT_GIB"
+            echo "force-bloat=$INPUT_FORCE_BLOAT"
             echo "deposit-amount=$INPUT_DEPOSIT_AMOUNT"
             echo "bootstrap-deposit-amount=$INPUT_BOOTSTRAP_DEPOSIT_AMOUNT"
             echo "activity-amount=$INPUT_ACTIVITY_AMOUNT"
@@ -257,6 +270,7 @@ jobs:
       ZONES_BENCH_MAX_CONCURRENT: ${{ needs.authorize.outputs.max-concurrent }}
       ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT: ${{ needs.authorize.outputs.count }}
       ZONES_BENCH_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
+      ZONES_BENCH_FORCE_BLOAT: ${{ needs.authorize.outputs.force-bloat }}
       ZONES_BENCH_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.deposit-amount }}
       ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.bootstrap-deposit-amount }}
       ZONES_BENCH_ACTIVITY_AMOUNT: ${{ needs.authorize.outputs.activity-amount }}
@@ -284,6 +298,9 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Test L1 snapshot manifest handling
+        run: contrib/bench/tests/l1-snapshot.sh
+
       - name: Check out pinned Tempo L1
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -298,6 +315,13 @@ jobs:
           toolchain: stable
 
       - uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+
+      - name: Add file-backed mnemonic support to pinned Tempo xtask
+        run: |
+          set -euo pipefail
+          patch=contrib/bench/patches/tempo-xtask-mnemonic-file.patch
+          git -C "$TEMPO_ROOT" apply --check "$GITHUB_WORKSPACE/$patch"
+          git -C "$TEMPO_ROOT" apply "$GITHUB_WORKSPACE/$patch"
 
       - name: Prepare persistent build directories
         env:
@@ -324,19 +348,49 @@ jobs:
           nu "$TEMPO_ROOT/bench-schelk.nu" restore /var/lib/schelk/b.json /reth-bench-b
           nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/a.json
           nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/b.json
-          echo "ZONES_BENCH_STATE_A_ROOT=/reth-bench-a/zones-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
-          echo "ZONES_BENCH_STATE_B_ROOT=/reth-bench-b/zones-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_ENV"
+          bloat_mib=$((10#$ZONES_BENCH_BLOAT_GIB * 1000))
+          {
+            echo "ZONES_BENCH_BLOAT_MIB=$bloat_mib"
+            echo "ZONES_BENCH_STATE_A_ROOT=/reth-bench-a/zones-l1-${bloat_mib}mb"
+            echo "ZONES_BENCH_STATE_B_ROOT=/reth-bench-b/zones-l1-${bloat_mib}mb"
+            echo "ZONES_BENCH_ZONE_STATE_ROOT=/reth-bench-a/zones-runtime-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+            echo "ZONES_BENCH_L1_CACHE_STATUS_FILE=$GITHUB_WORKSPACE/target/zones-benchmark/l1-cache.env"
+          } >> "$GITHUB_ENV"
 
-      - name: Generate ephemeral private run identities
+      - name: Prepare private benchmark identity
+        env:
+          RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
         run: |
           set -euo pipefail
-          mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
-          if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
-            echo "::error::benchmark mnemonic is empty or the public Tempo development mnemonic"
+          identity_root="${RUNNER_TOOL_CACHE_DIR:?}/zones-benchmark/identity"
+          mnemonic_file="$identity_root/mnemonic"
+          mkdir -p "$identity_root"
+          chmod 700 "$identity_root"
+          if [ -L "$mnemonic_file" ]; then
+            echo "::error::runner-local benchmark mnemonic must not be a symbolic link"
             exit 1
           fi
+          if [ ! -s "$mnemonic_file" ]; then
+            temporary="$(mktemp "$identity_root/.mnemonic.XXXXXX")"
+            chmod 600 "$temporary"
+            mnemonic="$(cast wallet new-mnemonic --words 24 --accounts 0 --json | jq -r .mnemonic)"
+            printf '%s\n' "$mnemonic" > "$temporary"
+            mv -f -- "$temporary" "$mnemonic_file"
+          else
+            mnemonic="$(tr -d '\r\n' < "$mnemonic_file")"
+          fi
+          if [ "$(awk 'END { print NR }' "$mnemonic_file")" != 1 ]; then
+            echo "::error::runner-local benchmark mnemonic must contain exactly one line"
+            exit 1
+          fi
+          if [ -z "$mnemonic" ] || [ "$mnemonic" = "test test test test test test test test test test test junk" ]; then
+            echo "::error::runner-local benchmark mnemonic is empty or public"
+            exit 1
+          fi
+          chmod 600 "$mnemonic_file"
           echo "::add-mask::$mnemonic"
-          echo "ZONES_BENCH_MNEMONIC=$mnemonic" >> "$GITHUB_ENV"
+          echo "ZONES_BENCH_MNEMONIC_FILE=$mnemonic_file" >> "$GITHUB_ENV"
+          unset mnemonic
 
       - name: Build real L1 and Zone binaries
         run: |
@@ -354,6 +408,31 @@ jobs:
             echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
             echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
+          } >> "$GITHUB_ENV"
+
+      - name: Prepare or restore persistent Tempo L1 baseline
+        run: |
+          set -euo pipefail
+          contrib/bench/provision-topology.sh prepare-l1
+          # shellcheck source=/dev/null
+          source "$ZONES_BENCH_L1_CACHE_STATUS_FILE"
+          if [ "$ZONES_BENCH_L1_CACHE_REBUILT" = 1 ]; then
+            echo "promoting completed validator databases as the new virgin snapshot"
+            nu "$TEMPO_ROOT/bench-schelk.nu" promote /var/lib/schelk/a.json
+            nu "$TEMPO_ROOT/bench-schelk.nu" promote /var/lib/schelk/b.json
+            echo "restoring private writable copies of the promoted snapshot"
+            nu "$TEMPO_ROOT/bench-schelk.nu" restore /var/lib/schelk/a.json /reth-bench-a
+            nu "$TEMPO_ROOT/bench-schelk.nu" restore /var/lib/schelk/b.json /reth-bench-b
+            nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/a.json
+            nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/b.json
+            contrib/bench/provision-topology.sh verify-l1
+            # shellcheck source=/dev/null
+            source "$ZONES_BENCH_L1_CACHE_STATUS_FILE"
+          fi
+          {
+            echo "ZONES_BENCH_L1_CACHE_REBUILT=$ZONES_BENCH_L1_CACHE_REBUILT"
+            echo "ZONES_BENCH_L1_CACHE_KEY=$ZONES_BENCH_L1_CACHE_KEY"
+            echo "ZONES_BENCH_L1_CACHE_GENERATION=$ZONES_BENCH_L1_CACHE_GENERATION"
           } >> "$GITHUB_ENV"
 
       - name: Install pinned txgen
@@ -382,8 +461,6 @@ jobs:
       - name: Provision topology and run ${{ needs.authorize.outputs.phase }} workload
         run: |
           set -euo pipefail
-          # Match pinned Tempo bench-e2e's decimal bloat-preset-to-MiB conversion.
-          export ZONES_BENCH_BLOAT_MIB=$((10#$ZONES_BENCH_BLOAT_GIB * 1000))
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
           contrib/bench/provision-topology.sh up
           set -a
@@ -440,6 +517,10 @@ jobs:
             unit=Journeys
             rate="Target journey starts/s"
           fi
+          snapshot_status=hit
+          if [ "${ZONES_BENCH_L1_CACHE_REBUILT:-0}" = 1 ]; then
+            snapshot_status=rebuilt
+          fi
           {
             echo
             echo "## Run configuration"
@@ -450,6 +531,7 @@ jobs:
             echo "- Maximum concurrency: \`$ZONES_BENCH_MAX_CONCURRENT\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
             echo "- Tempo L1 state bloat: \`bloat=$SUMMARY_STATE_BLOAT_GIB\` (\`$((10#$SUMMARY_STATE_BLOAT_GIB * 1000)) MiB\` per validator)"
+            echo "- L1 snapshot: \`$snapshot_status\` (key \`${ZONES_BENCH_L1_CACHE_KEY:-unavailable}\`)"
             echo "- Target: \`${ZONES_BENCH_TARGET_ID:-unavailable}\`"
             echo "- Zones revision: \`$ZONES_BENCH_ZONES_REF\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
@@ -482,6 +564,10 @@ jobs:
             --arg senderCpus "$ZONES_BENCH_CPUSET" \
             --arg stateARoot "${ZONES_BENCH_STATE_A_ROOT:-}" \
             --arg stateBRoot "${ZONES_BENCH_STATE_B_ROOT:-}" \
+            --arg zoneStateRoot "${ZONES_BENCH_ZONE_STATE_ROOT:-}" \
+            --arg l1CacheKey "${ZONES_BENCH_L1_CACHE_KEY:-}" \
+            --arg l1CacheGeneration "${ZONES_BENCH_L1_CACHE_GENERATION:-}" \
+            --argjson l1CacheRebuilt "${ZONES_BENCH_L1_CACHE_REBUILT:-0}" \
             --argjson accounts "$((10#$ZONES_BENCH_ACCOUNTS))" \
             --argjson count "$((10#$ZONES_BENCH_COUNT))" \
             --argjson targetRate "$((10#$ZONES_BENCH_TPS))" \
@@ -508,8 +594,14 @@ jobs:
                 sender: $senderCpus
               },
               stateRoots: {
-                l1AndZoneA: $stateARoot,
-                l1B: $stateBRoot
+                l1A: $stateARoot,
+                l1B: $stateBRoot,
+                zone: $zoneStateRoot
+              },
+              l1Snapshot: {
+                key: $l1CacheKey,
+                generation: $l1CacheGeneration,
+                rebuilt: $l1CacheRebuilt
               },
               l1StateBloatMiB: $l1StateBloatMiB,
               zoneStateBloatMiB: 0,
@@ -527,7 +619,7 @@ jobs:
       - name: Collect invalid block diagnostics
         if: ${{ failure() && !cancelled() }}
         run: |
-          witness_dir="${ZONES_BENCH_STATE_A_ROOT:-}/zone/invalid_block_hooks/witness"
+          witness_dir="${ZONES_BENCH_ZONE_STATE_ROOT:-}/zone/invalid_block_hooks/witness"
           if [ -d "$witness_dir" ]; then
             output_dir=target/zones-benchmark/invalid-block-diagnostics
             mkdir -p "$output_dir"

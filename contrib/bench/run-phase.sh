@@ -24,13 +24,48 @@ require_positive_uint() {
     (( 10#${!name} > 0 )) || die "$name must be greater than zero"
 }
 
+load_benchmark_mnemonic() {
+    local mode
+
+    require_env ZONES_BENCH_MNEMONIC_FILE
+    [[ ! -L "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be a symbolic link"
+    [[ -f "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must be a regular file"
+    [[ -s "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be empty"
+    [[ -r "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must be readable"
+
+    mode="$(stat -c '%a' -- "$ZONES_BENCH_MNEMONIC_FILE")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
+        die "could not validate ZONES_BENCH_MNEMONIC_FILE permissions"
+    (( (8#$mode & 8#077) == 0 )) ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be accessible by group or other users"
+
+    ZONES_BENCH_MNEMONIC="$(<"$ZONES_BENCH_MNEMONIC_FILE")"
+    [[ "$ZONES_BENCH_MNEMONIC" =~ [^[:space:]] ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must contain a mnemonic"
+    export ZONES_BENCH_MNEMONIC
+}
+
+# bench enables these targets at DEBUG even under the default INFO filter.
+# Drop only per-request HTTP bookkeeping; benchmark diagnostics still pass through.
+filter_transport_debug() {
+    awk '
+        index($0, " DEBUG ") && index($0, "alloy_transport_http::reqwest_transport:") { next }
+        index($0, " DEBUG ") && index($0, "alloy_transport_http::hyper_transport:") { next }
+        { print; fflush() }
+    '
+}
+
 phase="${1:-}"
 case "$phase" in
     deposit | activity | withdrawal) ;;
     *) die "usage: $0 <deposit|activity|withdrawal>" ;;
 esac
 
-require_env ZONES_BENCH_MNEMONIC
+load_benchmark_mnemonic
 require_env L1_RPC_URL
 require_env ZONE_RPC_URL
 require_env ZONES_BENCH_TOKEN
@@ -157,6 +192,7 @@ cleanup() {
         rm -f -- "$auth_map" "${auth_temp_files[@]}"
         rmdir -- "$secret_dir" 2>/dev/null || true
     fi
+    unset ZONES_BENCH_MNEMONIC
     exit "$status"
 }
 trap cleanup EXIT
@@ -283,7 +319,9 @@ run_parallel_approval_setup() {
     (( remaining > 0 )) ||
         die "$label approval generation exhausted its ${ZONES_BENCH_APPROVAL_TIMEOUT_SECS}s setup window"
     if timeout --foreground --kill-after=5s "${remaining}s" \
-        "${send_command[@]}"; then
+        "${send_command[@]}" \
+            > >(filter_transport_debug) \
+            2> >(filter_transport_debug >&2); then
         send_status=0
     else
         send_status=$?
@@ -413,7 +451,9 @@ if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
     bench_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${bench_command[@]}")
 fi
 
-"${txgen_command[@]}" | "${bench_command[@]}"
+"${txgen_command[@]}" | "${bench_command[@]}" \
+    > >(filter_transport_debug) \
+    2> >(filter_transport_debug >&2)
 
 [[ -s "$ZONES_BENCH_REPORT" ]] || die "bench produced no report at $ZONES_BENCH_REPORT"
 if ! jq -e --argjson expected "$ZONES_BENCH_COUNT" \

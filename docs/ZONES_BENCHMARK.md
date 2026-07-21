@@ -14,7 +14,7 @@ provisioner follows Tempo's e2e benchmark shape and creates the benchmark target
 on the runner itself:
 
 1. `tempo-xtask generate-localnet` creates a two-validator Tempo genesis with
-   DKG material and an explicitly supplied private mnemonic.
+   DKG material and an explicitly supplied private mnemonic file.
 2. `tempo-xtask install-reference-zone-factory` installs the canonical EIP-2935
    history contract plus constructor-equivalent reference ZoneFactory,
    Verifier, and ZoneMessenger state before either validator database is
@@ -40,8 +40,37 @@ private keys.
 
 The default workflow dispatch uses Tempo's `bloat=1` preset: 1,000 MiB of
 storage across all four TIP-20s, imported identically into both Tempo L1
-databases. State bloat is never imported into the Zone genesis or datadir. On
-the 32-logical-CPU benchmark runner, the default partition is:
+databases. State bloat is never imported into the Zone genesis or datadir.
+
+The two L1 databases are a persistent, runner-local baseline. On a cache miss,
+the workflow generates and patches Tempo genesis, initializes both databases,
+imports the selected bloat, and promotes the completed Schelk scratch volumes
+as the new immutable virgin snapshots. On a cache hit, Schelk restores private
+writable copies of those snapshots and skips genesis and bloat generation. The
+baseline is accepted only when both volumes contain the same generation and a
+manifest matching the exact Tempo revision, mnemonic-derived public identities,
+patched genesis and reference-factory inputs, chain and gas limits, and bloat
+size, token layout, balance, and funded-account capacity. A missing or mismatched
+side rebuilds the pair; `force-bloat=true` deliberately rebuilds it even when the
+manifest matches. The shared generation identifier also makes a partially
+completed two-volume promotion a cache miss on the next run.
+
+The cached boundary is before validator startup, Zone creation, fee
+configuration, bootstrap deposits, and other fixtures. Every benchmark run
+therefore starts the validators on a private restored copy and creates a fresh
+Zone, portal, and runtime state on top. A run can mutate only its restored copy,
+never the cached virgin baseline. The snapshots stay on the benchmark runner;
+they are not uploaded to GitHub, included in workflow artifacts, or shared
+through the binary/build cache.
+
+The stable account identity needed by the cached funding state is held in a
+mode-0600 private mnemonic file on the runner. The file is reused with the
+baseline and is never passed as a command-line argument, copied into the
+topology output, or uploaded as an artifact. Rotating or replacing it changes
+the public-identity fingerprint in the manifest and forces the L1 pair to be
+rebuilt. There is no public test-mnemonic fallback.
+
+On the 32-logical-CPU benchmark runner, the default partition is:
 
 | Process | CPUs | HTTP RPC | Metrics |
 | --- | --- | --- | --- |
@@ -69,13 +98,14 @@ builder. Override
 deliberately testing another Tempo setup. Keeping the general limit explicit is
 important because bridge deposits are non-payment calls.
 
-The temporary bloat dump is also placed on validator A's benchmark volume, not
-the runner's root filesystem; `ZONES_BENCH_BLOAT_TMP_DIR` can override it.
-Before generating a nonzero dump, the provisioner applies Tempo's free-space
-rule: seven times the bloat size for each import plus a 51,200 MiB margin, with
-one additional dump size on validator A. The default 1,000 MiB run therefore
-requires 59,200 MiB free on A and 58,200 MiB on B, before additional Zone growth
-on A.
+On a baseline rebuild, the temporary bloat dump is placed on validator A's
+benchmark volume, not the runner's root filesystem;
+`ZONES_BENCH_BLOAT_TMP_DIR` can override it. Before generating a nonzero dump,
+the provisioner applies Tempo's free-space rule: seven times the bloat size for
+each import plus a 51,200 MiB margin, with one additional dump size on validator
+A. The default 1,000 MiB rebuild therefore requires 59,200 MiB free on A and
+58,200 MiB on B, before additional Zone growth on A. A matching cache hit does
+not regenerate the dump or perform either import.
 
 Independent `bench send` phases use `txpool_status` for their drain check. The
 selected trusted RPC must expose the `txpool` module, or the benchmark must
@@ -155,7 +185,14 @@ in a manual run, set the L1 bloat size to 1000 MiB. Direct script invocation
 defaults to zero for a faster topology smoke test.
 
 ```bash
+export ZONES_ROOT="$PWD"
 export TEMPO_ROOT="$HOME/projects/tempo"
+export TEMPO_REV='436f6cf069a0c8aafa9a3a197ffa17488b5f1e81'
+
+# Use a clean, dedicated Tempo checkout at TEMPO_REV for this benchmark.
+test "$(git -C "$TEMPO_ROOT" rev-parse HEAD)" = "$TEMPO_REV"
+git -C "$TEMPO_ROOT" apply \
+  "$ZONES_ROOT/contrib/bench/patches/tempo-xtask-mnemonic-file.patch"
 
 cargo build --profile profiling -p tempo-zone -p tempo-xtask
 cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" \
@@ -163,23 +200,65 @@ cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" \
 cargo build --manifest-path "$TEMPO_ROOT/Cargo.toml" \
   --profile profiling -p tempo-xtask
 
-export ZONE_BIN="$PWD/target/profiling/tempo-zone"
-export ZONES_XTASK_BIN="$PWD/target/profiling/tempo-xtask"
+export ZONE_BIN="$ZONES_ROOT/target/profiling/tempo-zone"
+export ZONES_XTASK_BIN="$ZONES_ROOT/target/profiling/tempo-xtask"
 export TEMPO_BIN="$TEMPO_ROOT/target/profiling/tempo"
 export TEMPO_XTASK_BIN="$TEMPO_ROOT/target/profiling/tempo-xtask"
-export ZONES_BENCH_MNEMONIC='<private mnemonic for this isolated run>'
+export ZONES_BENCH_MNEMONIC_FILE='/secure/runner-local/zones-benchmark-mnemonic'
 export ZONES_BENCH_ACCOUNT_START=16
 export ZONES_BENCH_ACCOUNTS=200
 export ZONES_BENCH_BLOAT_MIB=1000
 export ZONES_BENCH_TOPOLOGY_DIR="$PWD/target/zones-benchmark/topology"
-export ZONES_BENCH_STATE_A_ROOT='/reth-bench-a/zones-manual-<unique-run-id>'
-export ZONES_BENCH_STATE_B_ROOT='/reth-bench-b/zones-manual-<unique-run-id>'
+export ZONES_BENCH_STATE_A_ROOT='/reth-bench-a/zones-l1-1000mb'
+export ZONES_BENCH_STATE_B_ROOT='/reth-bench-b/zones-l1-1000mb'
+export ZONES_BENCH_ZONE_STATE_ROOT='/reth-bench-a/zones-runtime-<unique-run-id>'
+export ZONES_BENCH_L1_CACHE_STATUS_FILE="$PWD/target/zones-benchmark/l1-cache.env"
 export ZONES_BENCH_ENV_FILE="$PWD/target/zones-benchmark/topology.env"
 export ZONES_BENCH_PID_FILE="$PWD/target/zones-benchmark/topology.pids"
+
+nu "$TEMPO_ROOT/bench-schelk.nu" restore \
+  /var/lib/schelk/a.json /reth-bench-a
+nu "$TEMPO_ROOT/bench-schelk.nu" restore \
+  /var/lib/schelk/b.json /reth-bench-b
+nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/a.json
+nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/b.json
+
+contrib/bench/provision-topology.sh prepare-l1
+source "$ZONES_BENCH_L1_CACHE_STATUS_FILE"
+
+if [[ "$ZONES_BENCH_L1_CACHE_REBUILT" == 1 ]]; then
+  nu "$TEMPO_ROOT/bench-schelk.nu" promote /var/lib/schelk/a.json
+  nu "$TEMPO_ROOT/bench-schelk.nu" promote /var/lib/schelk/b.json
+  nu "$TEMPO_ROOT/bench-schelk.nu" restore \
+    /var/lib/schelk/a.json /reth-bench-a
+  nu "$TEMPO_ROOT/bench-schelk.nu" restore \
+    /var/lib/schelk/b.json /reth-bench-b
+  nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/a.json
+  nu "$TEMPO_ROOT/bench-schelk.nu" mark-dirty /var/lib/schelk/b.json
+  contrib/bench/provision-topology.sh verify-l1
+fi
 
 contrib/bench/provision-topology.sh up
 source "$ZONES_BENCH_ENV_FILE"
 ```
+
+The mnemonic file must contain only the private BIP-39 phrase and must be
+readable only by the benchmark user (`chmod 600`). Its path, not its contents,
+is passed to the provisioner. `prepare-l1` validates both baseline manifests and
+writes `ZONES_BENCH_L1_CACHE_REBUILT=0` or `1`, plus non-secret cache key and
+generation metadata, to `ZONES_BENCH_L1_CACHE_STATUS_FILE`. Set
+`ZONES_BENCH_FORCE_BLOAT=1` before `prepare-l1` to rebuild a matching baseline;
+the default is `0`.
+
+Promotion is deliberately outside the provisioner because it is a Schelk
+snapshot operation owned by the workflow. When `prepare-l1` reports a rebuild,
+promote both sides before starting any node, immediately restore new private
+copies, and run `verify-l1`. Do not call `up` between promotion and that restore:
+the post-promotion restore is what isolates runtime writes from the virgin
+baseline. On a cache hit, the initial workflow restore is already the private
+copy and no promotion is needed. `prepare-l1` and `verify-l1` never create a
+Zone; `up` always creates one under the unique
+`ZONES_BENCH_ZONE_STATE_ROOT`.
 
 `up` leaves all three node processes alive. It also configures nonzero portal
 deposit and bounce-back fee rates before declaring the topology ready and
@@ -203,21 +282,20 @@ SEQUENCER_KEY='<private sequencer key>' \
 Pass the sequencer key only through the environment. Do not place it in a
 scenario, rendered artifact, command-line option, or workflow input.
 
-Always stop the recorded processes with the matching PID file:
+Always stop the recorded processes with the matching PID file, then recover the
+two Schelk scratch volumes:
 
 ```bash
 contrib/bench/provision-topology.sh cleanup "$ZONES_BENCH_PID_FILE"
+nu "$TEMPO_ROOT/bench-schelk.nu" cleanup /var/lib/schelk/a.json
+nu "$TEMPO_ROOT/bench-schelk.nu" cleanup /var/lib/schelk/b.json
 ```
 
-The provisioner intentionally rejects existing topology and database paths. Use
-new paths for another run, or remove disposable paths only after cleanup.
-
-Tempo's current `generate-localnet` and `generate-state-bloat` commands accept a
-mnemonic only as a command-line value. The provisioner does not print commands,
-enables no shell tracing, masks the value in GitHub Actions, and excludes it from
-rendered artifacts, but the mnemonic is transiently visible to same-host process
-inspection while those Tempo commands execute. Eliminating that exposure needs
-an upstream Tempo environment- or file-based mnemonic option.
+The stable L1 paths are expected to exist across restored snapshots. The
+provisioner rejects a reused topology directory or Zone runtime path; choose a
+new value for each `up` run. The pinned Tempo xtask is patched at build time to
+accept `--mnemonic-file` for localnet and state-bloat generation, keeping the
+phrase out of process arguments. That patch is part of the L1 cache key.
 
 ## What the benchmark xtask does
 
@@ -257,7 +335,7 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='f1fe55ea308b7f44b81bbc2322992a71d4522a03'
+export TXGEN_REV='24840d0eaf8ff9a8e6e39ba3e5b268a1045f69a2'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
@@ -267,6 +345,13 @@ That commit is currently reachable through the public
 fresh `cargo install --rev` operations until the required txgen changes merge;
 afterward this workflow should be repinned to their reachable merge commit.
 
+The paired-manifest and safe-root checks are standalone and do not start nodes
+or build contracts:
+
+```bash
+contrib/bench/tests/l1-snapshot.sh
+```
+
 The render/generation compatibility test can be run with:
 
 ```bash
@@ -275,19 +360,20 @@ TXGEN_TEMPO_BIN="$(command -v txgen-tempo)" \
   txgen_generates_representative_local_transactions_when_installed
 ```
 
-For manual phase generation, keep the same private mnemonic used to provision
-the isolated network in the environment and load the provisioner's non-secret
-RPC/address output:
+For manual phase generation, point at the same private mnemonic file used to
+build the L1 baseline and load the provisioner's non-secret RPC/address output:
 
 ```bash
-export ZONES_BENCH_MNEMONIC='your secret benchmark mnemonic'
+export ZONES_BENCH_MNEMONIC_FILE='/secure/runner-local/zones-benchmark-mnemonic'
 source target/zones-benchmark/topology.env
 ```
 
 There is no fallback mnemonic, public test mnemonic, public write endpoint, or
-mainnet write endpoint. The provisioner funds the derived pool only inside the
-isolated Tempo genesis. The roundtrip uses real deposits for every Zone balance;
-preflight fails instead of silently funding or bridging an account.
+mainnet write endpoint. Preflight and the runners read the phrase from that file
+without printing or serializing it. The provisioner funds the derived pool only
+inside the isolated Tempo genesis. The roundtrip uses real deposits for every
+Zone balance; preflight fails instead of silently funding or bridging an
+account.
 
 ## Run preflight
 
@@ -577,24 +663,28 @@ class used by Tempo's e2e benchmark. It does not use a GitHub Actions
 environment, a pre-existing Zone, or an externally configured write RPC. Each
 job:
 
-1. restores the two isolated Schelk volumes and assigns unique state roots;
-2. checks out the exact Tempo revision and txgen commit
-   `f1fe55ea308b7f44b81bbc2322992a71d4522a03`, then builds Tempo and Zone
+1. loads the stable private mnemonic from a mode-0600 file under the runner tool
+   cache, generating it once when that runner has no identity file yet, without
+   putting the phrase in workflow arguments or artifacts;
+2. restores private writable copies of the two isolated Schelk virgin volumes;
+3. checks out the exact Tempo revision and txgen commit
+   `24840d0eaf8ff9a8e6e39ba3e5b268a1045f69a2`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
-3. generates a fresh private 24-word mnemonic for the run;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
    during teardown;
-5. generates the two-validator L1, optionally imports the selected four-token
-   state bloat into both L1 databases, creates an unbloated real Zone, and
-   starts all nodes;
-6. for `roundtrip`, performs the real control-to-sequencer bootstrap deposit and
+5. validates the paired L1 cache manifest and either reuses the restored
+   baseline or generates genesis and bloat once, promotes both volumes, restores
+   private copies again, and verifies the promoted pair;
+6. starts both validators from that private copy, creates a fresh unbloated real
+   Zone in a unique runtime path, and starts its sequencer;
+7. for `roundtrip`, performs the real control-to-sequencer bootstrap deposit and
    waits for its `DepositProcessed` and L1 `BatchSubmitted` events, configures
    the nonzero outbox fee, creates the short-lived sender-auth map, confirms
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
-7. for `deposit`, runs the independent preflight/generate/bench pipeline; and
-8. renders the JSON report into a Markdown results page on the workflow
+8. for `deposit`, runs the independent preflight/generate/bench pipeline; and
+9. renders the JSON report into a Markdown results page on the workflow
    overview, then uploads that page with the rendered non-secret assets,
    host/storage metadata, JSON reports, and node logs before stopping the nodes
    and restoring the benchmark volumes.
@@ -603,16 +693,21 @@ Repeat runs use the pinned Tempo benchmark's commit-and-feature-keyed MinIO
 cache for the `tempo` binary. Cache misses build from source and, when the
 runner's MinIO alias is available, populate it through `tempo.nu`. Separate
 Cargo target directories under the runner tool cache retain unchanged Zones and
-`tempo-xtask` artifacts across clean checkouts. These caches contain build
-outputs only; every run still generates fresh L1 databases, L1 state bloat,
-identities, contracts, and Zone state.
+`tempo-xtask` artifacts across clean checkouts. The binary/build cache is
+independent of the Schelk L1 baseline: skipping or missing one does not discard
+the other. The Schelk cache contains initialized Tempo L1 state only; every run
+still creates a new Zone, portal, fee configuration, bootstrap fixture, and
+Zone state.
 
 Tempo and txgen are fetched from public repositories at exact commits, so no
 dependency-access secret is required. No mnemonic, portal, chain ID, token,
-target ID, or RPC URL needs to be configured externally. The workflow never
-selects a public test mnemonic or a public/mainnet write endpoint. Its private
-sender-auth map is created outside the artifact tree with mode 0600 and deleted
-on exit.
+target ID, or RPC URL needs to be configured externally. A runner-local private
+mnemonic is generated once when its identity file does not exist. An operator
+may instead pre-provision the mode-0600
+`zones-benchmark/identity/mnemonic` file under `runner.tool_cache`. The workflow
+never selects a public test mnemonic or a public/mainnet write endpoint. Its
+mnemonic file, Schelk snapshots, and private sender-auth map are outside the
+artifact tree; the sender-auth map is mode 0600 and deleted on exit.
 
 After the workflow exists on the default branch, dispatch it from the Actions
 UI or CLI and select the branch/ref to test:
@@ -625,8 +720,15 @@ gh workflow run zones-benchmark.yml \
   -f count=3000 \
   -f tps=20 \
   -f max-concurrent=200 \
-  -f state-bloat-gib=1
+  -f state-bloat-gib=1 \
+  -f force-bloat=false
 ```
+
+Set `force-bloat=true` only to replace the paired L1 baseline for the selected
+configuration. Ordinary dispatches and PR runs default to `false` and reuse a
+matching baseline. This workflow does not provide an `init-only` mode: even
+after a rebuild it restores private copies, creates a fresh Zone, and runs the
+selected phase.
 
 GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
 file exists on the default branch. Before merge, opening, reopening, or pushing

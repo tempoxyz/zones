@@ -362,10 +362,9 @@ impl BenchmarkPreflight {
             "sequencer account index {} overlaps the benchmark pool",
             self.sequencer_account_index
         );
-        // Read the mnemonic only from the environment so it cannot accidentally be exposed in
-        // command-line process listings. It is never written to the rendered specs or report.
-        let mnemonic = std::env::var("ZONES_BENCH_MNEMONIC")
-            .wrap_err("ZONES_BENCH_MNEMONIC must be set for benchmark address derivation")?;
+        // Read the mnemonic from a private file when configured so it cannot appear in command
+        // line process listings. It is never written to the rendered specs or report.
+        let mnemonic = read_benchmark_mnemonic()?;
         let signers = derive_signers(&mnemonic, self.account_start, account_end)?;
         let control_signer = derive_signer(&mnemonic, self.control_account_index)?;
         let sequencer_signer = derive_signer(&mnemonic, self.sequencer_account_index)?;
@@ -987,6 +986,21 @@ impl BenchmarkPreflight {
 
         Ok(())
     }
+}
+
+fn read_benchmark_mnemonic() -> eyre::Result<String> {
+    let mnemonic = if let Some(path) = std::env::var_os("ZONES_BENCH_MNEMONIC_FILE") {
+        let path = PathBuf::from(path);
+        fs::read_to_string(&path).wrap_err_with(|| {
+            format!("failed reading benchmark mnemonic file {}", path.display())
+        })?
+    } else {
+        std::env::var("ZONES_BENCH_MNEMONIC")
+            .wrap_err("set ZONES_BENCH_MNEMONIC_FILE for benchmark address derivation")?
+    };
+    let mnemonic = mnemonic.trim().to_owned();
+    ensure!(!mnemonic.is_empty(), "benchmark mnemonic is empty");
+    Ok(mnemonic)
 }
 
 fn derive_signers(

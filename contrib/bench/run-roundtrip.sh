@@ -24,8 +24,45 @@ require_positive_uint() {
     (( 10#${!name} > 0 )) || die "$name must be greater than zero"
 }
 
+load_benchmark_mnemonic() {
+    local mode
+
+    require_env ZONES_BENCH_MNEMONIC_FILE
+    [[ ! -L "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be a symbolic link"
+    [[ -f "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must be a regular file"
+    [[ -s "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be empty"
+    [[ -r "$ZONES_BENCH_MNEMONIC_FILE" ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must be readable"
+
+    mode="$(stat -c '%a' -- "$ZONES_BENCH_MNEMONIC_FILE")"
+    [[ "$mode" =~ ^[0-7]{3,4}$ ]] ||
+        die "could not validate ZONES_BENCH_MNEMONIC_FILE permissions"
+    (( (8#$mode & 8#077) == 0 )) ||
+        die "ZONES_BENCH_MNEMONIC_FILE must not be accessible by group or other users"
+
+    ZONES_BENCH_MNEMONIC="$(<"$ZONES_BENCH_MNEMONIC_FILE")"
+    [[ "$ZONES_BENCH_MNEMONIC" =~ [^[:space:]] ]] ||
+        die "ZONES_BENCH_MNEMONIC_FILE must contain a mnemonic"
+    export ZONES_BENCH_MNEMONIC
+}
+
+# bench enables these targets at DEBUG even under the default INFO filter.
+# Drop only per-request HTTP bookkeeping; benchmark diagnostics still pass through.
+filter_transport_debug() {
+    awk '
+        index($0, " DEBUG ") && index($0, "alloy_transport_http::reqwest_transport:") { next }
+        index($0, " DEBUG ") && index($0, "alloy_transport_http::hyper_transport:") { next }
+        { print; fflush() }
+    '
+}
+
+load_benchmark_mnemonic
+
 for name in \
-    ZONES_BENCH_MNEMONIC L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
+    L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
     L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN ZONES_BENCH_SEED
 do
     require_env "$name"
@@ -140,9 +177,10 @@ cleanup() {
         shopt -s nullglob
         auth_temp_files=("$secret_dir"/.zone-auth.json.txgen-*.tmp)
         shopt -u nullglob
-        rm -f -- "$secret_dir/mnemonic" "$secret_dir/zone-auth.json" "${auth_temp_files[@]}"
+        rm -f -- "$secret_dir/zone-auth.json" "${auth_temp_files[@]}"
         rmdir -- "$secret_dir" 2>/dev/null || true
     fi
+    unset ZONES_BENCH_MNEMONIC
     exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -175,7 +213,9 @@ run_scenario() {
     if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
         command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${command[@]}")
     fi
-    "${command[@]}"
+    "${command[@]}" \
+        > >(filter_transport_debug) \
+        2> >(filter_transport_debug >&2)
 }
 
 run_parallel_approval_setup() {
@@ -247,7 +287,9 @@ run_parallel_approval_setup() {
         "${ZONES_BENCH_APPROVAL_SETUP_TIMEOUT_SECS}s"
         "${send_command[@]}"
     )
-    "${timed_send_command[@]}" &
+    "${timed_send_command[@]}" \
+        > >(filter_transport_debug) \
+        2> >(filter_transport_debug >&2) &
     setup_pid=$!
     (
         while true; do
@@ -592,12 +634,12 @@ jq -e '.started == 1 and .completed == 1 and .failed == 0' \
     "$ZONES_BENCH_BOOTSTRAP_REPORT" >/dev/null ||
     die "sequencer bootstrap scenario did not complete"
 
-# Derive the sequencer key through a mode-0600 file so neither mnemonic nor key enters argv.
+# Reuse the protected benchmark mnemonic file so the phrase never enters argv or a second file.
 secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-benchmark-auth.XXXXXX")"
 chmod 700 "$secret_dir"
-(umask 077; printf '%s\n' "$ZONES_BENCH_MNEMONIC" >"$secret_dir/mnemonic")
-sequencer_key="$(cast wallet private-key --mnemonic "$secret_dir/mnemonic" --mnemonic-index 4)"
-rm -f -- "$secret_dir/mnemonic"
+sequencer_key="$(cast wallet private-key \
+    --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
+    --mnemonic-index 4)"
 
 SEQUENCER_KEY="$sequencer_key" "${fee_cmd[@]}" \
     --l1-rpc-url "$L1_RPC_URL" \
@@ -728,7 +770,9 @@ scenario_command=(
 if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
     scenario_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${scenario_command[@]}")
 fi
-"${scenario_command[@]}" &
+"${scenario_command[@]}" \
+    > >(filter_transport_debug) \
+    2> >(filter_transport_debug >&2) &
 scenario_pid=$!
 
 if (( zone_health_enabled == 1 )); then
