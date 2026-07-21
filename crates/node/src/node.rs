@@ -38,7 +38,7 @@ use reth_transaction_pool::{
     Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
 use tempo_evm::TempoEvmConfig;
@@ -299,12 +299,8 @@ impl ZoneNode {
     pub fn with_l1_state_provider_retry_limits(
         mut self,
         transport_retries: u32,
-        sync_attempts: u32,
+        sync_attempts: NonZeroU32,
     ) -> Self {
-        assert!(
-            sync_attempts > 0,
-            "at least one synchronous attempt is required"
-        );
         self.l1_state_provider_config.max_retries = transport_retries;
         self.l1_state_provider_config.max_sync_attempts = Some(sync_attempts);
         self

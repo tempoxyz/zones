@@ -41,7 +41,7 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{cell::RefCell, num::NonZeroU32, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
@@ -273,7 +273,7 @@ impl ZoneEvmConfig {
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
         let config = L1StateProviderConfig {
-            max_sync_attempts: Some(1),
+            max_sync_attempts: Some(NonZeroU32::MIN),
             ..Default::default()
         };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);

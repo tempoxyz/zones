@@ -22,6 +22,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     net::{SocketAddr, TcpListener},
+    num::NonZeroU32,
     ops::Deref,
     pin::Pin,
     sync::{
@@ -946,7 +947,7 @@ impl ZoneTestNode {
         if is_local_dummy_l1 {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
-                .with_l1_state_provider_retry_limits(0, 1);
+                .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
