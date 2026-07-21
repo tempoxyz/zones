@@ -70,6 +70,8 @@ pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
 const BLOCK_SIZE_SAFETY_MARGIN: usize = 1024 * 1024;
 
 /// Stable diagnostic retained when the precompile stack stringifies an [`L1StateError`].
+const L1_STORAGE_UNAVAILABLE_ERROR_PREFIX: &str = "Tempo L1 storage unavailable";
+
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -525,6 +527,9 @@ fn is_l1_storage_unavailable(error: &(dyn Error + 'static)) -> bool {
         if error
             .downcast_ref::<L1StateError>()
             .is_some_and(L1StateError::is_storage_unavailable)
+            || error
+                .to_string()
+                .contains(L1_STORAGE_UNAVAILABLE_ERROR_PREFIX)
         {
             return true;
         }

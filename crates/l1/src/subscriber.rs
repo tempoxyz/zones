@@ -541,6 +541,7 @@ impl L1Subscriber {
                 let address = log.address();
 
                 if address == portal_address {
+                    invalidated.insert(address);
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
