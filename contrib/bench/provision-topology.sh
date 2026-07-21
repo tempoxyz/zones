@@ -26,7 +26,6 @@ readonly ZONES_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 readonly ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
 readonly PATH_USD="0x20C0000000000000000000000000000000000000"
 readonly DLUSD="0x20C0000000000000000000000000000000000001"
-readonly EARN_TOKEN="0x20C0000000000000000000000000000000000002"
 readonly TEMPO_STATE="0x1c00000000000000000000000000000000000000"
 readonly ZONE_CONFIG="0x1c00000000000000000000000000000000000003"
 readonly EIP2935_HISTORY_STORAGE="0x0000F90827F1C53a10cb7A02335B175320002935"
@@ -611,7 +610,6 @@ provision_up() {
                 --portal "$portal" \
                 --dlusd "$DLUSD" \
                 --pathusd "$PATH_USD" \
-                --earn-token "$EARN_TOKEN" \
                 --output "$fixture_metadata"
         require_file "$fixture_metadata"
         echo "configuring zero user bridge and withdrawal protocol fees"

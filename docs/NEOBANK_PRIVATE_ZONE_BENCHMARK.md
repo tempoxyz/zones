@@ -23,11 +23,11 @@ the Zone specs; benchmark provisioning never fetches or clones external source.
 ## Topology and policy
 
 Provision the existing two-validator L1 plus authenticated private Zone RPC.
-The local Tempo genesis supplies DLUSD, pathUSD, and EarnToken. The neobank
-profile makes DLUSD the initial Zone token, deploys the copied Earn proxy stack
-outside the measured interval, enables EarnToken on the portal, and keeps
-pathUSD as L1-only vault collateral. It does not replace those assets with
-ordinary ERC-20 test contracts.
+The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile creates
+EarnToken through the native TIP-20 factory, makes DLUSD the initial Zone token,
+deploys the copied Earn proxy stack outside the measured interval, enables
+EarnToken on the portal, and keeps pathUSD as L1-only vault collateral. It does
+not replace those assets with ordinary ERC-20 test contracts.
 
 The profile has zero user bridge and withdrawal protocol fees. It retains a
 separate generic profile with nonzero bootstrap fees. The token authorization

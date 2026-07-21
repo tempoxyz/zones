@@ -2,7 +2,7 @@
 
 use alloy::{
     network::{EthereumWallet, TransactionBuilder, primitives::ReceiptResponse},
-    primitives::{Address, Bytes, U256, Uint},
+    primitives::{Address, Bytes, U256, Uint, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
@@ -12,7 +12,8 @@ use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
 use std::{fs, path::PathBuf};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
-use tempo_contracts::precompiles::{IRolesAuth, ITIP20};
+use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
+use tempo_precompiles::TIP20_FACTORY_ADDRESS;
 use tempo_zone_contracts::ZonePortal;
 
 use crate::zone_utils::check;
@@ -121,10 +122,6 @@ pub(crate) struct DeployNeobankFixtures {
     #[arg(long, env = "ZONES_BENCH_PATHUSD")]
     pathusd: Address,
 
-    /// Native TIP-20 minted and burned by the copied Earn VaultAdapter fixture.
-    #[arg(long, env = "ZONES_BENCH_EARN_TOKEN")]
-    earn_token: Address,
-
     /// Directory containing Foundry artifacts for the copied Earn fixtures and bridge wallet.
     #[arg(long, default_value = "specs/ref-impls/out")]
     specs_out: PathBuf,
@@ -182,6 +179,8 @@ impl DeployNeobankFixtures {
             .await
             .wrap_err("failed querying ZonePortal zone ID")?;
         ensure!(messenger != Address::ZERO, "ZonePortal messenger is zero");
+        let earn_token =
+            create_earn_token(&deployer_provider, deployer_address, self.pathusd).await?;
 
         let swapper = deploy(
             &deployer_provider,
@@ -236,7 +235,7 @@ impl DeployNeobankFixtures {
         .await?;
         let initialization = FixtureVaultAdapter::initializeCall {
             engine_: engine,
-            shareToken_: self.earn_token,
+            shareToken_: earn_token,
             operator_: deployer_address,
             feeInit_: zero_fee_init(),
         }
@@ -254,12 +253,12 @@ impl DeployNeobankFixtures {
             "TestERC1967Proxy",
         )
         .await?;
-        let issuer_role = ITIP20::new(self.earn_token, &deployer_provider)
+        let issuer_role = ITIP20::new(earn_token, &deployer_provider)
             .ISSUER_ROLE()
             .call()
             .await
             .wrap_err("failed querying EarnToken issuer role")?;
-        let receipt = IRolesAuth::new(self.earn_token, &deployer_provider)
+        let receipt = IRolesAuth::new(earn_token, &deployer_provider)
             .grantRole(issuer_role, vault_adapter)
             .fee_token(self.pathusd)
             .send()
@@ -332,13 +331,13 @@ impl DeployNeobankFixtures {
 
         let admin_portal = ZonePortal::new(self.portal, &admin_provider);
         if !admin_portal
-            .isTokenEnabled(self.earn_token)
+            .isTokenEnabled(earn_token)
             .call()
             .await
             .wrap_err("failed querying EarnToken ZonePortal enablement")?
         {
             let receipt = admin_portal
-                .enableToken(self.earn_token)
+                .enableToken(earn_token)
                 .fee_token(self.pathusd)
                 .send()
                 .await
@@ -397,7 +396,7 @@ impl DeployNeobankFixtures {
             zone_id,
             dlusd: self.dlusd.to_string(),
             pathusd: self.pathusd.to_string(),
-            earn_token: self.earn_token.to_string(),
+            earn_token: earn_token.to_string(),
             direct_swap: swapper.to_string(),
             vault_adapter: vault_adapter.to_string(),
             gateway: gateway.to_string(),
@@ -425,6 +424,43 @@ fn signer_from_env(name: &str) -> eyre::Result<PrivateKeySigner> {
         .unwrap_or(&key)
         .parse()
         .wrap_err_with(|| format!("{name} is not a valid private key"))
+}
+
+async fn create_earn_token<P: Provider<TempoNetwork>>(
+    provider: &P,
+    owner: Address,
+    fee_token: Address,
+) -> eyre::Result<Address> {
+    let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, provider);
+    let salt = keccak256("zones-neobank-benchmark-earn-token");
+    let token = factory
+        .getTokenAddress(owner, salt)
+        .call()
+        .await
+        .wrap_err("failed computing benchmark EarnToken address")?;
+    let receipt = factory
+        .createToken_0(
+            "Neobank benchmark EarnToken".to_owned(),
+            "nbEARN".to_owned(),
+            "USD".to_owned(),
+            fee_token,
+            owner,
+            salt,
+        )
+        .fee_token(fee_token)
+        .send()
+        .await
+        .wrap_err("failed creating benchmark EarnToken")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting for benchmark EarnToken creation")?;
+    check(&receipt, "create benchmark EarnToken")?;
+    ensure!(
+        token != Address::ZERO,
+        "benchmark EarnToken address is zero"
+    );
+    println!("Created benchmark EarnToken: {token}");
+    Ok(token)
 }
 
 async fn deploy<P: Provider<TempoNetwork>>(
@@ -519,7 +555,7 @@ mod tests {
     use super::*;
     use clap::Parser as _;
 
-    fn required_args() -> [&'static str; 13] {
+    fn required_args() -> [&'static str; 11] {
         [
             "deploy-neobank-fixtures",
             "--l1-rpc-url",
@@ -530,8 +566,6 @@ mod tests {
             "0x20c0000000000000000000000000000000000001",
             "--pathusd",
             "0x20c0000000000000000000000000000000000000",
-            "--earn-token",
-            "0x20c0000000000000000000000000000000000002",
             "--output",
             "target/fixtures.json",
         ]
@@ -549,16 +583,12 @@ mod tests {
     }
 
     #[test]
-    fn fixture_deployment_uses_native_tip20_addresses_and_earn_token() {
+    fn fixture_deployment_uses_native_tip20_addresses() {
         let command = DeployNeobankFixtures::try_parse_from(required_args()).unwrap();
         assert_eq!(command.liquidity, 10_000_000_000);
         assert_eq!(
             command.dlusd.to_string(),
             "0x20C0000000000000000000000000000000000001"
-        );
-        assert_eq!(
-            command.earn_token.to_string(),
-            "0x20C0000000000000000000000000000000000002"
         );
     }
 
