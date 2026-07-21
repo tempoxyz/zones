@@ -61,7 +61,7 @@ use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
+    DepositQueue, L1BlockTracker, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
     state::{
         L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider,
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
@@ -182,6 +182,8 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: L1StateCache,
+    /// L1 anchors independently observed and applied by the subscriber.
+    l1_block_tracker: L1BlockTracker,
     /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](zone_l1::L1Subscriber)
     /// and read by the precompile during block building.
     policy_cache: PolicyCache,
@@ -215,12 +217,14 @@ impl ZoneNode {
 
         let policy_cache = PolicyCache::default();
         let l1_state_cache = L1StateCache::new(HashSet::from([portal_address]));
+        let l1_block_tracker = L1BlockTracker::default();
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
             policy_cache: policy_cache.clone(),
             l1_state_cache: l1_state_cache.clone(),
+            block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
         };
@@ -237,6 +241,7 @@ impl ZoneNode {
             l1_config,
             l1_state_provider_config,
             l1_state_cache,
+            l1_block_tracker,
             policy_cache,
             portal_address,
             initial_tokens: None,
@@ -320,6 +325,11 @@ impl ZoneNode {
     /// Returns the current l1 state cache
     pub fn l1_state_cache(&self) -> L1StateCache {
         self.l1_state_cache.clone()
+    }
+
+    /// Returns the L1 block observation tracker.
+    pub fn l1_block_tracker(&self) -> L1BlockTracker {
+        self.l1_block_tracker.clone()
     }
 
     /// Returns the current TIP-403 policy cache
@@ -490,16 +500,7 @@ where
 
         self.resolve_and_seed_tokens(&l1_provider).await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
-        if p2p_role == Some(Role::Follower) {
-            // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
-            // enqueueing. Followers import complete blocks from the leader and do not consume
-            // DepositQueue; starting the unified subscriber here would grow that queue forever.
-            // On promotion/restart the subscriber resumes from the tempoBlockNumber persisted in
-            // the follower's imported zone state.
-            info!(target: "reth::cli", "Skipping L1 deposit subscriber on follower");
-        } else {
-            self.spawn_l1_subscriber(&ctx);
-        }
+        self.spawn_l1_subscriber(&ctx, p2p_role == Some(Role::Follower));
         self.spawn_policy_tasks(&l1_provider, &ctx);
 
         let task_executor = ctx.node.task_executor().clone();
@@ -512,6 +513,8 @@ where
                 &task_executor,
                 ctx.node.provider().clone(),
                 ctx.beacon_engine_handle.clone(),
+                self.l1_config.block_tracker.clone(),
+                self.policy_cache.clone(),
             )?;
         }
 
@@ -568,6 +571,8 @@ where
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
         engine: ConsensusEngineHandle<ZonePayloadTypes>,
+        l1_block_tracker: L1BlockTracker,
+        policy_cache: PolicyCache,
     ) -> eyre::Result<()> {
         let role = config.role();
         let handle = spawn_p2p(config, network_id)?;
@@ -588,7 +593,15 @@ where
         }
         task_executor.spawn_critical_task(
             "zone-p2p-block-sync",
-            run_block_sync(role, provider, engine, events, commands),
+            run_block_sync(
+                role,
+                provider,
+                engine,
+                events,
+                commands,
+                l1_block_tracker,
+                policy_cache,
+            ),
         );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
@@ -683,15 +696,24 @@ where
         Ok(())
     }
 
-    /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
-    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
-        L1Subscriber::spawn(
-            self.l1_config.clone(),
-            ctx.node.provider().clone(),
-            self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
-        );
-        info!(target: "reth::cli", "Unified L1 subscriber started");
+    /// Spawn shared L1 observation, with deposit enqueueing only on leaders.
+    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>, observer_only: bool) {
+        if observer_only {
+            L1Subscriber::spawn_observer(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 observer started for follower");
+        } else {
+            L1Subscriber::spawn(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                self.deposit_queue.clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        }
     }
 
     /// Spawn TIP-403 policy resolution and pool prefetch tasks.

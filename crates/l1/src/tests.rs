@@ -149,15 +149,89 @@ fn test_subscriber(
             genesis_tempo_block_number,
             policy_cache: crate::PolicyCache::default(),
             l1_state_cache: crate::L1StateCache::new(HashSet::from([portal_address])),
+            block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
         },
         local_state,
-        deposit_queue: DepositQueue::default(),
+        deposit_queue: Some(DepositQueue::default()),
         tracked_tokens: vec![],
         tip403_metrics: Default::default(),
         subscriber_metrics: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn l1_block_tracker_waits_for_exact_observation() {
+    let tracker = L1BlockTracker::default();
+    let anchor = NumHash::new(10, B256::with_last_byte(0x10));
+    let waiting = tracker.clone();
+    let waiter = tokio::spawn(async move { waiting.wait_for(anchor).await });
+
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    tracker.record(anchor).unwrap();
+    waiter.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn l1_block_tracker_rejects_conflicts_and_missing_heights() {
+    let tracker = L1BlockTracker::default();
+    let block_10 = NumHash::new(10, B256::with_last_byte(0x10));
+    let block_11 = NumHash::new(11, B256::with_last_byte(0x11));
+    tracker.record(block_10).unwrap();
+    tracker.record(block_11).unwrap();
+    tracker.record(block_11).unwrap();
+
+    let conflict = NumHash::new(11, B256::with_last_byte(0xff));
+    assert!(tracker.wait_for(conflict).await.is_err());
+    assert!(
+        tracker
+            .record(NumHash::new(13, B256::with_last_byte(0x13)))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn l1_block_tracker_prunes_only_consumed_observations() {
+    let tracker = L1BlockTracker::default();
+    for number in 10..=12 {
+        tracker
+            .record(NumHash::new(number, B256::with_last_byte(number as u8)))
+            .unwrap();
+    }
+
+    tracker.prune_through(10);
+    assert_eq!(tracker.observed_hash(10), None);
+    assert_eq!(tracker.observed_hash(11), Some(B256::with_last_byte(11)));
+    assert_eq!(tracker.latest().unwrap().number, 12);
+    assert!(
+        tracker
+            .wait_for(NumHash::new(10, B256::with_last_byte(10)))
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn observer_mode_applies_state_and_records_without_a_deposit_sink() {
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    subscriber.deposit_queue = None;
+    let header = make_test_header(10);
+    let sealed = seal(header);
+    let anchor = sealed.num_hash();
+
+    subscriber.update_l1_state_anchor(10, anchor.hash, sealed.parent_hash(), &HashSet::new());
+    subscriber.apply_policy_events(10, &[]);
+    subscriber.config.block_tracker.record(anchor).unwrap();
+
+    assert_eq!(subscriber.config.l1_state_cache.read().anchor(), anchor);
+    assert_eq!(
+        subscriber.config.block_tracker.observed_hash(10),
+        Some(anchor.hash)
+    );
+    assert!(subscriber.deposit_queue.is_none());
 }
 
 fn make_test_header(number: u64) -> TempoHeader {
