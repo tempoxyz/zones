@@ -609,6 +609,7 @@ impl WithdrawalProcessor {
             token = %withdrawal.token,
             to = %withdrawal.to,
             amount = %withdrawal.amount,
+            gas_used = receipt.gas_used,
             "✅ Withdrawal confirmed on L1"
         );
         SubmitOutcome::Confirmed
