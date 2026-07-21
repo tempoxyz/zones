@@ -13,14 +13,12 @@ use crate::utils::{
     start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
-    network::{EthereumWallet, NetworkTransactionBuilder},
-    primitives::{Address, B256, U256, address, hex},
+    primitives::{Address, B256, TxKind, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
 use alloy_eips::eip2718::Encodable2718;
-use alloy_network::Ethereum;
 use alloy_provider::ProviderBuilder;
-use alloy_rpc_types_eth::TransactionRequest;
+use alloy_signer::SignerSync;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::SolCall;
 use futures::{SinkExt, StreamExt};
@@ -34,6 +32,10 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
+use tempo_primitives::{
+    TempoTxEnvelope,
+    transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
+};
 use tempo_zone_contracts::{
     EncryptedDepositPayload, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
 };
@@ -54,23 +56,36 @@ fn address_topic(address: Address) -> String {
     format!("{:#x}", B256::left_padding_from(address.as_slice()))
 }
 
-async fn signed_raw_transaction(signer: &PrivateKeySigner, chain_id: u64) -> eyre::Result<String> {
-    let request = TransactionRequest {
-        from: Some(signer.address()),
-        to: Some(signer.address().into()),
-        gas: Some(500_000),
-        max_fee_per_gas: Some(TEMPO_T0_BASE_FEE as u128),
-        max_priority_fee_per_gas: Some(TEMPO_T0_BASE_FEE as u128),
-        nonce: Some(0),
-        chain_id: Some(chain_id),
+fn signed_sponsored_raw_transaction(
+    signer: &PrivateKeySigner,
+    fee_payer: &PrivateKeySigner,
+    chain_id: u64,
+) -> eyre::Result<String> {
+    let mut transaction = TempoTransaction {
+        chain_id,
+        max_priority_fee_per_gas: TEMPO_T0_BASE_FEE as u128,
+        max_fee_per_gas: TEMPO_T0_BASE_FEE as u128,
+        gas_limit: 500_000,
+        calls: vec![Call {
+            to: TxKind::Call(signer.address()),
+            value: U256::ZERO,
+            input: Default::default(),
+        }],
+        fee_token: Some(PATH_USD_ADDRESS),
         ..Default::default()
     };
-    let wallet = EthereumWallet::from(signer.clone());
-    let signed =
-        <TransactionRequest as NetworkTransactionBuilder<Ethereum>>::build(request, &wallet)
-            .await?;
 
-    Ok(format!("0x{}", hex::encode(signed.encoded_2718())))
+    let fee_payer_hash = transaction.fee_payer_signature_hash(signer.address());
+    transaction.fee_payer_signature = Some(fee_payer.sign_hash_sync(&fee_payer_hash)?);
+
+    let signature = signer.sign_hash_sync(&transaction.signature_hash())?;
+    let signed = AASigned::new_unhashed(
+        transaction,
+        TempoSignature::Primitive(PrimitiveSignature::Secp256k1(signature)),
+    );
+    let envelope: TempoTxEnvelope = signed.into();
+
+    Ok(format!("0x{}", hex::encode(envelope.encoded_2718())))
 }
 
 fn assert_filter_not_found_error(response: &serde_json::Value) {
@@ -197,21 +212,34 @@ async fn test_auth_rejection() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Raw transactions require the authenticated sender to hold an enabled zone token.
+/// Pool admission requires the transaction sender to hold an enabled zone token.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_raw_transaction_requires_enabled_token_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let mut ctx = start_zone_with_private_rpc().await?;
     let user_signer = PrivateKeySigner::random();
-    let raw = signed_raw_transaction(&user_signer, ctx.config.chain_id).await?;
+    let fee_payer = PrivateKeySigner::random();
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        fee_payer.address(),
+        fee_payer.address(),
+        1_000_000,
+    )
+    .await?;
+    let raw = signed_sponsored_raw_transaction(&user_signer, &fee_payer, ctx.config.chain_id)?;
 
     for method in ["eth_sendRawTransaction", "eth_sendRawTransactionSync"] {
         let response = ctx.call_as_user(method, json!([raw]), &user_signer).await?;
         assert_eq!(
             response["error"]["code"].as_i64(),
-            Some(-32003),
+            Some(-32603),
             "{method} should reject a sender without enabled-token balance: {response}",
+        );
+        assert_eq!(
+            response["error"]["message"].as_str(),
+            Some("sender must hold a nonzero balance of an enabled zone token"),
+            "{method} should explain why the transaction was rejected: {response}",
         );
     }
 

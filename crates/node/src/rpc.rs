@@ -36,7 +36,7 @@ use tempo_alloy::{
 };
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20,
+    ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
 use tempo_primitives::TempoTxEnvelope;
@@ -134,8 +134,6 @@ async fn prune_filter_owners<Api: EthApiTypes + 'static>(
 /// - **Sender verification** — `eth_sendRawTransaction` checks that the
 ///   recovered transaction sender matches the authenticated account
 ///   (`-32003` on mismatch).
-/// - **Token balance gate** — raw transactions are accepted only when the
-///   authenticated account holds at least one enabled zone token.
 ///
 /// [`classify_method`]: zone_rpc::types::classify_method
 pub struct ZoneRpc<Api: EthApiTypes> {
@@ -331,22 +329,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             Ok(self.zone_sequencer().await? == caller)
         })
         .await
-    }
-
-    async fn ensure_enabled_token_balance(&self, account: Address) -> Result<(), JsonRpcError> {
-        for token in self.zone_tokens().await? {
-            let balance = ITIP20::new(token, &self.zone_provider)
-                .balanceOf(account)
-                .from(account)
-                .call()
-                .await
-                .map_err(internal)?;
-            if !balance.is_zero() {
-                return Ok(());
-            }
-        }
-
-        Err(JsonRpcError::transaction_rejected())
     }
 
     async fn terminal_event_for_deposit(
@@ -680,7 +662,6 @@ where
     fn send_raw_transaction(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
-            self.ensure_enabled_token_balance(auth.caller).await?;
 
             let hash = EthTransactions::send_raw_transaction(&self.eth.api, data)
                 .await
@@ -692,7 +673,6 @@ where
     fn send_raw_transaction_sync(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
-            self.ensure_enabled_token_balance(auth.caller).await?;
 
             let mut receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data, None)
                 .await

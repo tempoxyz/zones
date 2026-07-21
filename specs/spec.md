@@ -744,6 +744,8 @@ Sequencer encryption keys are already published (used for encrypted deposits), s
 
 Zone transactions specify which enabled TIP-20 token to use for gas fees via a `feeToken` field. The sequencer accepts all enabled tokens as gas. Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit.
 
+Transaction-pool admission requires the recovered sender to hold a nonzero balance of at least one token currently enabled for the zone. This is an admission policy, not a consensus validity rule.
+
 ### Block Structure
 
 Each zone block contains system transactions and user transactions in a fixed order:
@@ -889,7 +891,7 @@ The RPC uses a default-deny model. Any method not explicitly listed returns `-32
 
 - `eth_getBalance`, `eth_getTransactionCount`: return `0x0` for non-self queries (no error, to avoid leaking account existence).
 - `eth_getTransactionByHash`, `eth_getTransactionReceipt`: return `null` if the caller is not the sender.
-- `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account or the account has no balance in any enabled zone token.
+- `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account.
 - `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. State override sets and block override objects are rejected for non-sequencer callers.
 - `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`: filtered to TIP-20 events where the caller is a relevant party (see [Event Filtering](#event-filtering)).
 - `eth_newFilter`, `eth_newBlockFilter`, `eth_uninstallFilter`: allowed, filters are scoped to the authenticated account.
@@ -966,7 +968,7 @@ There are no state-changing methods via authorization token. Withdrawals require
 |------|---------|------|
 | `-32001` | Authorization token required | No token provided |
 | `-32002` | Authorization token expired | Token has expired |
-| `-32003` | Transaction rejected | Sender mismatch or no enabled-token balance on `eth_sendRawTransaction` |
+| `-32003` | Transaction rejected | Sender mismatch on `eth_sendRawTransaction` |
 | `-32004` | Account mismatch | `from` mismatch on `eth_call` / `eth_estimateGas` |
 | `-32005` | Sequencer only | Method requires sequencer access |
 | `-32006` | Method disabled | Method not available on zones |
