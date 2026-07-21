@@ -7,9 +7,14 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
+        ExecutableTx, GasOutput,
+    },
     eth::{EthBlockExecutor, EthTxResult},
 };
+use alloy_primitives::TxKind;
+use alloy_sol_types::SolCall;
 use reth_evm::block::StateDB;
 use reth_revm::Inspector;
 use revm::context::{ContextTr, JournalTr, Transaction};
@@ -19,6 +24,7 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::L1StorageReader;
@@ -31,6 +37,8 @@ use crate::{L1OverlayDB, ZoneEvm, tx_context};
 /// or end-of-block metadata system transaction requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
+    saw_advance_tempo: bool,
+    pending_advance_tempo: bool,
 }
 
 impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
@@ -52,6 +60,8 @@ where
                 chain_spec,
                 TempoReceiptBuilder::default(),
             ),
+            saw_advance_tempo: false,
+            pending_advance_tempo: false,
         }
     }
 
@@ -108,6 +118,23 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
+        let is_advance_tempo = tx_env.is_system_tx
+            && tx_env.tempo_tx_env.is_none()
+            && tx_env.kind() == TxKind::Call(ZONE_INBOX_ADDRESS)
+            && tx_env.data.get(..4) == Some(ZoneInbox::advanceTempoCall::SELECTOR.as_slice());
+        if self.inner.receipts.is_empty() {
+            if !is_advance_tempo {
+                return Err(validation_error(
+                    "advanceTempo must be the first transaction in every zone block",
+                ));
+            }
+        } else if is_advance_tempo {
+            return Err(validation_error(
+                "advanceTempo must appear exactly once in every zone block",
+            ));
+        }
+        self.pending_advance_tempo = is_advance_tempo;
+
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
         self.override_validator_token();
@@ -122,12 +149,19 @@ where
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
-        self.inner.commit_transaction(output)
+        let gas = self.inner.commit_transaction(output);
+        self.saw_advance_tempo |= std::mem::take(&mut self.pending_advance_tempo);
+        gas
     }
 
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        if !self.saw_advance_tempo {
+            return Err(validation_error(
+                "zone block is missing its required advanceTempo transaction",
+            ));
+        }
         self.inner.finish()
     }
 
@@ -142,6 +176,10 @@ where
     fn receipts(&self) -> &[Self::Receipt] {
         self.inner.receipts()
     }
+}
+
+fn validation_error(message: &'static str) -> BlockExecutionError {
+    BlockValidationError::msg(message).into()
 }
 
 #[cfg(test)]
