@@ -2,17 +2,18 @@
 
 use alloy::{
     network::{EthereumWallet, TransactionBuilder},
-    primitives::{Address, Bytes, U256},
+    primitives::{Address, Bytes, U256, Uint, keccak256},
     providers::{Provider, ProviderBuilder},
     rpc::types::TransactionRequest,
     signers::local::PrivateKeySigner,
-    sol_types::SolValue,
+    sol_types::{SolEvent, SolValue},
 };
 use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
 use std::{fs, path::PathBuf};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
-use tempo_contracts::precompiles::{IRolesAuth, ITIP20};
+use tempo_contracts::precompiles::ITIP20;
+use tempo_precompiles::TIP20_FACTORY_ADDRESS;
 use tempo_zone_contracts::ZonePortal;
 
 use crate::zone_utils::check;
@@ -21,6 +22,71 @@ alloy::sol! {
     #[sol(rpc)]
     interface ZonePortalMessengerView {
         function messenger() external view returns (address);
+    }
+
+    #[sol(rpc)]
+    interface EarnFactoryDeployment {
+        struct ControlInit {
+            address emergencyGuardian;
+            address asyncJanitor;
+            uint8 migrationMode;
+        }
+
+        struct FixedFeeRecipient {
+            address account;
+            uint96 rate;
+        }
+
+        struct ExcessReturnFee {
+            bool enabled;
+            address account;
+            uint96 annualTargetRate;
+            uint96 excessFeeRate;
+        }
+
+        struct FeeConfig {
+            uint8 fixedFeeCount;
+            FixedFeeRecipient[4] fixedFees;
+            ExcessReturnFee excess;
+        }
+
+        struct FeeInit {
+            address administrator;
+            address guardian;
+            uint96 fixedFeeCap;
+            uint96 excessFeeCap;
+            FeeConfig initialConfig;
+        }
+
+        struct DeployParams {
+            bytes32 deploymentId;
+            address engine;
+            address owner;
+            ControlInit controls;
+            FeeInit fees;
+        }
+
+        function deploy(DeployParams calldata params) external returns (address shareToken, address vaultAdapter);
+
+        event EarnStackDeployed(
+            address indexed vaultAdapter,
+            address indexed shareToken,
+            address indexed engine,
+            address asset,
+            address owner,
+            bytes32 deploymentId,
+            address emergencyGuardian,
+            address asyncJanitor,
+            uint8 migrationMode,
+            bytes32 shareSalt,
+            bytes32 controlConfigHash,
+            bytes32 feeConfigHash
+        );
+    }
+
+    #[sol(rpc)]
+    interface ERC4626EngineInitializer {
+        function initializeCore(address core) external;
     }
 }
 
@@ -42,13 +108,17 @@ pub(crate) struct DeployNeobankFixtures {
     #[arg(long, env = "ZONES_BENCH_PATHUSD")]
     pathusd: Address,
 
-    /// Native TIP-20 minted and burned by the vault fixture.
-    #[arg(long, env = "ZONES_BENCH_EARN_TOKEN")]
-    earn_token: Address,
+    /// Directory containing artifacts built from the pinned external Earn repository.
+    #[arg(long, env = "ZONES_BENCH_EARN_ARTIFACTS")]
+    earn_artifacts: PathBuf,
 
-    /// Directory containing Foundry artifacts for the fixture contracts.
+    /// Directory containing the pinned external repository's local direct-swap artifact.
+    #[arg(long, env = "ZONES_BENCH_EARN_LOCALNET_ARTIFACTS")]
+    earn_localnet_artifacts: PathBuf,
+
+    /// Directory containing the local terminal bridge-wallet fixture artifact.
     #[arg(long, default_value = "specs/ref-impls/out")]
-    specs_out: PathBuf,
+    bridge_specs_out: PathBuf,
 
     /// Non-secret fixture metadata written for rendering the runtime scenario.
     #[arg(long)]
@@ -78,6 +148,7 @@ impl DeployNeobankFixtures {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         ensure!(self.liquidity > 0, "--liquidity must be greater than zero");
         let deployer = signer_from_env("FIXTURE_DEPLOYER_KEY")?;
+        let deployer_address = deployer.address();
         let portal_admin = signer_from_env("PORTAL_ADMIN_KEY")?;
         let deployer_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(EthereumWallet::from(deployer))
@@ -105,69 +176,111 @@ impl DeployNeobankFixtures {
 
         let direct_swap = deploy(
             &deployer_provider,
-            load_bytecode(&self.specs_out, "DirectSwapFixture")?,
-            "DirectSwapFixture",
+            load_bytecode(
+                &self.earn_localnet_artifacts,
+                "LocalDirectSwap.sol/LocalDirectSwap",
+            )?,
+            "LocalDirectSwap",
         )
         .await?;
-        let vault_adapter = deploy(
+        let swapper = deploy(
             &deployer_provider,
             with_constructor(
-                load_bytecode(&self.specs_out, "VaultAdapterFixture")?,
-                (self.pathusd, self.earn_token).abi_encode(),
+                load_bytecode(
+                    &self.earn_artifacts,
+                    "BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter",
+                )?,
+                (direct_swap, self.dlusd, self.pathusd).abi_encode(),
             ),
-            "VaultAdapterFixture",
+            "BridgeStableSwapAdapter",
         )
         .await?;
+        let vault = deploy(
+            &deployer_provider,
+            with_constructor(
+                load_bytecode(&self.earn_artifacts, "Simple4626Vault.sol/Simple4626Vault")?,
+                (
+                    self.pathusd,
+                    "Neobank benchmark vault".to_owned(),
+                    "nbVAULT".to_owned(),
+                    U256::from(6),
+                )
+                    .abi_encode(),
+            ),
+            "Simple4626Vault",
+        )
+        .await?;
+        let engine = deploy(
+            &deployer_provider,
+            with_constructor(
+                load_bytecode(&self.earn_artifacts, "ERC4626Engine.sol/ERC4626Engine")?,
+                (vault, deployer_address, String::new(), String::new()).abi_encode(),
+            ),
+            "ERC4626Engine",
+        )
+        .await?;
+        let adapter_implementation = deploy(
+            &deployer_provider,
+            load_bytecode(&self.earn_artifacts, "VaultAdapter.sol/VaultAdapter")?,
+            "VaultAdapter implementation",
+        )
+        .await?;
+        let factory = deploy(
+            &deployer_provider,
+            with_constructor(
+                load_bytecode(&self.earn_artifacts, "EarnFactory.sol/EarnFactory")?,
+                (TIP20_FACTORY_ADDRESS, adapter_implementation).abi_encode(),
+            ),
+            "EarnFactory",
+        )
+        .await?;
+        let (earn_token, vault_adapter) =
+            deploy_earn_stack(&deployer_provider, factory, engine, deployer_address).await?;
+        let receipt = ERC4626EngineInitializer::new(engine, &deployer_provider)
+            .initializeCore(vault_adapter)
+            .fee_token(self.pathusd)
+            .send()
+            .await
+            .wrap_err("failed initializing the canonical ERC4626 engine")?
+            .get_receipt()
+            .await
+            .wrap_err("failed waiting for canonical ERC4626 engine initialization")?;
+        check(&receipt, "initialize canonical ERC4626 engine")?;
         let gateway = deploy(
             &deployer_provider,
             with_constructor(
-                load_bytecode(&self.specs_out, "ZoneGatewayFixture")?,
-                (vault_adapter, direct_swap, self.portal, messenger).abi_encode(),
+                load_bytecode(&self.earn_artifacts, "ZoneGateway.sol/ZoneGateway")?,
+                (
+                    vault_adapter,
+                    swapper,
+                    self.portal,
+                    messenger,
+                    deployer_address,
+                )
+                    .abi_encode(),
             ),
-            "ZoneGatewayFixture",
+            "ZoneGateway",
         )
         .await?;
         let bridge_wallet = deploy(
             &deployer_provider,
-            load_bytecode(&self.specs_out, "BridgeWalletFixture")?,
+            load_bytecode(
+                &self.bridge_specs_out,
+                "BridgeWalletFixture.sol/BridgeWalletFixture",
+            )?,
             "BridgeWalletFixture",
         )
         .await?;
 
-        let earn = ITIP20::new(self.earn_token, &deployer_provider);
-        let issuer_role = earn
-            .ISSUER_ROLE()
-            .call()
-            .await
-            .wrap_err("failed querying EarnToken issuer role")?;
-        let roles = IRolesAuth::new(self.earn_token, &deployer_provider);
-        if !roles
-            .hasRole(vault_adapter, issuer_role)
-            .call()
-            .await
-            .wrap_err("failed querying vault issuer role")?
-        {
-            let receipt = roles
-                .grantRole(issuer_role, vault_adapter)
-                .fee_token(self.pathusd)
-                .send()
-                .await
-                .wrap_err("failed granting the vault EarnToken issuer role")?
-                .get_receipt()
-                .await
-                .wrap_err("failed waiting for vault issuer-role receipt")?;
-            check(&receipt, "grant vault EarnToken issuer role")?;
-        }
-
         let admin_portal = ZonePortal::new(self.portal, &admin_provider);
         if !admin_portal
-            .isTokenEnabled(self.earn_token)
+            .isTokenEnabled(earn_token)
             .call()
             .await
             .wrap_err("failed querying EarnToken ZonePortal enablement")?
         {
             let receipt = admin_portal
-                .enableToken(self.earn_token)
+                .enableToken(earn_token)
                 .fee_token(self.pathusd)
                 .send()
                 .await
@@ -197,7 +310,7 @@ impl DeployNeobankFixtures {
             zone_id,
             dlusd: self.dlusd.to_string(),
             pathusd: self.pathusd.to_string(),
-            earn_token: self.earn_token.to_string(),
+            earn_token: earn_token.to_string(),
             direct_swap: direct_swap.to_string(),
             vault_adapter: vault_adapter.to_string(),
             gateway: gateway.to_string(),
@@ -255,8 +368,61 @@ fn with_constructor(mut bytecode: Vec<u8>, constructor: Vec<u8>) -> Vec<u8> {
     bytecode
 }
 
-fn load_bytecode(specs_out: &std::path::Path, contract: &str) -> eyre::Result<Vec<u8>> {
-    let artifact_path = specs_out.join(format!("NeobankFixtures.sol/{contract}.json"));
+async fn deploy_earn_stack<P: Provider<TempoNetwork>>(
+    provider: &P,
+    factory: Address,
+    engine: Address,
+    owner: Address,
+) -> eyre::Result<(Address, Address)> {
+    let zero_fee_recipient = EarnFactoryDeployment::FixedFeeRecipient {
+        account: Address::ZERO,
+        rate: Uint::<96, 2>::ZERO,
+    };
+    let params = EarnFactoryDeployment::DeployParams {
+        deploymentId: keccak256("zones-neobank-benchmark"),
+        engine,
+        owner,
+        controls: EarnFactoryDeployment::ControlInit {
+            emergencyGuardian: Address::ZERO,
+            asyncJanitor: Address::ZERO,
+            migrationMode: 0,
+        },
+        fees: EarnFactoryDeployment::FeeInit {
+            administrator: Address::ZERO,
+            guardian: Address::ZERO,
+            fixedFeeCap: Uint::<96, 2>::ZERO,
+            excessFeeCap: Uint::<96, 2>::ZERO,
+            initialConfig: EarnFactoryDeployment::FeeConfig {
+                fixedFeeCount: 0,
+                fixedFees: std::array::from_fn(|_| zero_fee_recipient.clone()),
+                excess: EarnFactoryDeployment::ExcessReturnFee {
+                    enabled: false,
+                    account: Address::ZERO,
+                    annualTargetRate: Uint::<96, 2>::ZERO,
+                    excessFeeRate: Uint::<96, 2>::ZERO,
+                },
+            },
+        },
+    };
+    let receipt = EarnFactoryDeployment::new(factory, provider)
+        .deploy_call(params)
+        .send()
+        .await
+        .wrap_err("failed deploying canonical Earn stack")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting for canonical Earn stack deployment")?;
+    check(&receipt, "deploy canonical Earn stack")?;
+    let deployed = receipt
+        .logs()
+        .iter()
+        .find_map(|log| EarnFactoryDeployment::EarnStackDeployed::decode_log(&log.inner).ok())
+        .ok_or_else(|| eyre!("canonical Earn stack deployment did not emit EarnStackDeployed"))?;
+    Ok((deployed.shareToken, deployed.vaultAdapter))
+}
+
+fn load_bytecode(artifacts: &std::path::Path, contract: &str) -> eyre::Result<Vec<u8>> {
+    let artifact_path = artifact_path(artifacts, contract);
     let artifact = fs::read_to_string(&artifact_path).wrap_err_with(|| {
         format!(
             "{contract} artifact not found at {}",
@@ -272,12 +438,16 @@ fn load_bytecode(specs_out: &std::path::Path, contract: &str) -> eyre::Result<Ve
         .wrap_err_with(|| format!("invalid bytecode in {}", artifact_path.display()))
 }
 
+fn artifact_path(artifacts: &std::path::Path, contract: &str) -> PathBuf {
+    artifacts.join(format!("{contract}.json"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::Parser as _;
 
-    fn required_args() -> [&'static str; 13] {
+    fn required_args() -> [&'static str; 15] {
         [
             "deploy-neobank-fixtures",
             "--l1-rpc-url",
@@ -288,8 +458,10 @@ mod tests {
             "0x20c0000000000000000000000000000000000001",
             "--pathusd",
             "0x20c0000000000000000000000000000000000000",
-            "--earn-token",
-            "0x20c0000000000000000000000000000000000002",
+            "--earn-artifacts",
+            "target/earn/out",
+            "--earn-localnet-artifacts",
+            "target/earn/out",
             "--output",
             "target/fixtures.json",
         ]
@@ -307,12 +479,26 @@ mod tests {
     }
 
     #[test]
-    fn fixture_deployment_uses_native_tip20_addresses_supplied_by_the_topology() {
+    fn fixture_deployment_uses_native_tip20_addresses_and_external_artifacts() {
         let command = DeployNeobankFixtures::try_parse_from(required_args()).unwrap();
         assert_eq!(command.liquidity, 10_000_000_000);
         assert_eq!(
             command.dlusd.to_string(),
             "0x20C0000000000000000000000000000000000001"
+        );
+        assert_eq!(command.earn_artifacts, PathBuf::from("target/earn/out"));
+    }
+
+    #[test]
+    fn fixture_deployment_uses_pinned_artifact_layouts() {
+        let out = PathBuf::from("target/earn/out");
+        assert_eq!(
+            artifact_path(&out, "ZoneGateway.sol/ZoneGateway"),
+            PathBuf::from("target/earn/out/ZoneGateway.sol/ZoneGateway.json")
+        );
+        assert_eq!(
+            artifact_path(&out, "LocalDirectSwap.sol/LocalDirectSwap"),
+            PathBuf::from("target/earn/out/LocalDirectSwap.sol/LocalDirectSwap.json")
         );
     }
 }

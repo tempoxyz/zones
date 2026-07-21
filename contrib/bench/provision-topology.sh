@@ -26,7 +26,6 @@ readonly ZONES_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd)"
 readonly ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
 readonly PATH_USD="0x20C0000000000000000000000000000000000000"
 readonly DLUSD="0x20C0000000000000000000000000000000000001"
-readonly EARN_TOKEN="0x20C0000000000000000000000000000000000002"
 readonly TEMPO_STATE="0x1c00000000000000000000000000000000000000"
 readonly ZONE_CONFIG="0x1c00000000000000000000000000000000000003"
 readonly EIP2935_HISTORY_STORAGE="0x0000F90827F1C53a10cb7A02335B175320002935"
@@ -46,6 +45,10 @@ require_command() {
 
 require_file() {
     [[ -f "$1" ]] || die "required file not found: $1"
+}
+
+require_dir() {
+    [[ -d "$1" ]] || die "required directory not found: $1"
 }
 
 require_executable() {
@@ -603,6 +606,12 @@ provision_up() {
 
     local fixture_metadata=""
     if [[ "$profile" == "neobank" ]]; then
+        local earn_artifacts="${ZONES_BENCH_EARN_ARTIFACTS:-}"
+        local earn_localnet_artifacts="${ZONES_BENCH_EARN_LOCALNET_ARTIFACTS:-}"
+        [[ -n "$earn_artifacts" ]] || die "ZONES_BENCH_EARN_ARTIFACTS must point to pinned Earn artifacts"
+        [[ -n "$earn_localnet_artifacts" ]] || die "ZONES_BENCH_EARN_LOCALNET_ARTIFACTS must point to pinned Earn localnet artifacts"
+        require_dir "$earn_artifacts"
+        require_dir "$earn_localnet_artifacts"
         fixture_metadata="$control_root/neobank-fixtures.json"
         echo "deploying and configuring private-Zone benchmark fixtures"
         FIXTURE_DEPLOYER_KEY="$owner_key" PORTAL_ADMIN_KEY="$admin_key" \
@@ -611,7 +620,8 @@ provision_up() {
                 --portal "$portal" \
                 --dlusd "$DLUSD" \
                 --pathusd "$PATH_USD" \
-                --earn-token "$EARN_TOKEN" \
+                --earn-artifacts "$earn_artifacts" \
+                --earn-localnet-artifacts "$earn_localnet_artifacts" \
                 --output "$fixture_metadata"
         require_file "$fixture_metadata"
         echo "configuring zero user bridge and withdrawal protocol fees"
@@ -656,7 +666,7 @@ provision_up() {
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_token" "$zone_timeout"
     if [[ "$profile" == "neobank" ]]; then
-        wait_for_zone_enabled_token "$zone_rpc" "$EARN_TOKEN" "$zone_timeout"
+        wait_for_zone_enabled_token "$zone_rpc" "$(jq -er '.earnToken' "$fixture_metadata")" "$zone_timeout"
     fi
     local queried_zone_chain_id
     queried_zone_chain_id="$(hex_to_dec "$(rpc "$zone_rpc" eth_chainId)")"
@@ -695,7 +705,7 @@ provision_up() {
         env_pairs+=(
             ZONES_BENCH_DLUSD "$DLUSD"
             ZONES_BENCH_PATHUSD "$PATH_USD"
-            ZONES_BENCH_EARN_TOKEN "$EARN_TOKEN"
+            ZONES_BENCH_EARN_TOKEN "$(jq -er '.earnToken' "$fixture_metadata")"
             ZONES_BENCH_GATEWAY "$(jq -er '.gateway' "$fixture_metadata")"
             ZONES_BENCH_BRIDGE_WALLET "$(jq -er '.bridgeWallet' "$fixture_metadata")"
             ZONES_BENCH_DIRECT_SWAP "$(jq -er '.directSwap' "$fixture_metadata")"
