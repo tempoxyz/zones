@@ -33,7 +33,7 @@ use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolCall, SolEvent, SolValue};
+use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain, sol};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
@@ -150,13 +150,30 @@ pub struct BatchData {
     pub withdrawal_queue_hash: B256,
 }
 
-struct SettlementAttestation<'a> {
+struct SettlementAttestationInput<'a> {
     batch: &'a BatchData,
     anchor_block_number: u64,
     anchor_block_hash: B256,
     block_transition: &'a BlockTransition,
     deposit_transition: &'a DepositQueueTransition,
     verifier_config: &'a Bytes,
+}
+
+sol! {
+    struct SettlementAttestation {
+        uint32 zoneId;
+        uint64 sequencerSetVersion;
+        uint256 zoneHeight;
+        uint256 withdrawalBatchIndex;
+        address verifier;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        bytes32 blockTransitionHash;
+        bytes32 depositQueueTransitionHash;
+        bytes32 withdrawalQueueHash;
+        bytes32 verifierConfigHash;
+    }
 }
 
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
@@ -398,7 +415,7 @@ impl BatchSubmitter {
         let signature = self
             .sign_settlement_attestation(
                 signer,
-                SettlementAttestation {
+                SettlementAttestationInput {
                     batch,
                     anchor_block_number,
                     anchor_block_hash,
@@ -483,9 +500,9 @@ impl BatchSubmitter {
     async fn sign_settlement_attestation(
         &self,
         signer: &PrivateKeySigner,
-        attestation: SettlementAttestation<'_>,
+        attestation: SettlementAttestationInput<'_>,
     ) -> Result<Bytes> {
-        let SettlementAttestation {
+        let SettlementAttestationInput {
             batch,
             anchor_block_number,
             anchor_block_hash,
@@ -515,48 +532,27 @@ impl BatchSubmitter {
         let verifier = self.portal.verifier().call().await?;
         let chain_id = self.l1_provider.get_chain_id().await?;
 
-        let domain_typehash = keccak256(
-            "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
-        );
-        let settlement_typehash = keccak256(
-            "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)",
-        );
-        let domain_separator = keccak256(
-            (
-                domain_typehash,
-                keccak256("ZonePortal"),
-                keccak256("1"),
-                U256::from(chain_id),
-                self.portal_address,
-            )
-                .abi_encode(),
-        );
-        let struct_hash = keccak256(
-            (
-                settlement_typehash,
-                zone_id,
-                sequencer_set_version,
-                U256::from(batch.zone_height),
-                U256::from(withdrawal_batch_index),
-                verifier,
-                batch.tempo_block_number,
-                anchor_block_number,
-                anchor_block_hash,
-                keccak256(block_transition.abi_encode()),
-                keccak256(deposit_transition.abi_encode()),
-                batch.withdrawal_queue_hash,
-                keccak256(verifier_config),
-            )
-                .abi_encode(),
-        );
-        let digest = keccak256(
-            [
-                b"\x19\x01".as_slice(),
-                domain_separator.as_slice(),
-                struct_hash.as_slice(),
-            ]
-            .concat(),
-        );
+        let domain = eip712_domain! {
+            name: "ZonePortal",
+            version: "1",
+            chain_id: chain_id,
+            verifying_contract: self.portal_address,
+        };
+        let message = SettlementAttestation {
+            zoneId: zone_id,
+            sequencerSetVersion: sequencer_set_version,
+            zoneHeight: U256::from(batch.zone_height),
+            withdrawalBatchIndex: U256::from(withdrawal_batch_index),
+            verifier,
+            tempoBlockNumber: batch.tempo_block_number,
+            anchorBlockNumber: anchor_block_number,
+            anchorBlockHash: anchor_block_hash,
+            blockTransitionHash: keccak256(block_transition.abi_encode()),
+            depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
+            withdrawalQueueHash: batch.withdrawal_queue_hash,
+            verifierConfigHash: keccak256(verifier_config),
+        };
+        let digest = message.eip712_signing_hash(&domain);
         let signature = signer.sign_hash_sync(&digest)?;
         let mut encoded = Vec::with_capacity(65);
         encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());

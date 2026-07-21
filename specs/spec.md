@@ -342,7 +342,7 @@ When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_
 
 The admin atomically replaces the active sequencer set and threshold with
 `ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero,
-unique, sorted in strictly increasing address order, and no more than eight. A replacement
+unique, and no more than eight; their order has no protocol meaning. A replacement
 increments `sequencerSetVersion`, including a threshold-only change, so certificates collected
 under the previous configuration cannot be replayed. The initial configuration uses nonce `0`.
 

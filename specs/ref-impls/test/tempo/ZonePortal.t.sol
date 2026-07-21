@@ -378,7 +378,6 @@ contract ZonePortalTest is BaseTest {
     }
 
     function _sequencerSet() internal returns (address[] memory signers) {
-        // vm.addr(2) < vm.addr(3) < vm.addr(1); the portal requires canonical address ordering.
         signers = new address[](3);
         signers[0] = vm.addr(SIGNER_A_KEY);
         signers[1] = vm.addr(SIGNER_B_KEY);
@@ -531,9 +530,27 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(IZonePortal.InvalidSequencerSet.selector);
         portal.setSequencerSet(tooMany, 1);
 
-        (signers[0], signers[1]) = (signers[1], signers[0]);
+        signers[1] = signers[0];
         vm.prank(admin);
         vm.expectRevert(IZonePortal.InvalidSequencerSet.selector);
+        portal.setSequencerSet(signers, 2);
+    }
+
+    function test_setSequencerSet_acceptsAnyOrderAndComparesMembership() public {
+        address[] memory signers = _sequencerSet();
+        (signers[0], signers[2]) = (signers[2], signers[0]);
+
+        vm.prank(admin);
+        portal.setSequencerSet(signers, 2);
+
+        for (uint256 i; i < signers.length; ++i) {
+            assertEq(portal.sequencerAt(i), signers[i]);
+            assertTrue(portal.isSequencer(signers[i]));
+        }
+
+        (signers[0], signers[1]) = (signers[1], signers[0]);
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.SequencerConfigurationUnchanged.selector);
         portal.setSequencerSet(signers, 2);
     }
 

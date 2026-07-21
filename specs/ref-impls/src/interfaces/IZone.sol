@@ -733,7 +733,7 @@ interface IZonePortal {
     function setRpcUrl(string calldata rpcUrl) external;
 
     /// @notice Atomically replace the sequencer set and settlement threshold. Only callable by admin.
-    /// @dev Signers must be nonzero, unique, and sorted in strictly ascending address order.
+    /// @dev Signers must be nonzero and unique; their order has no protocol meaning.
     function setSequencerSet(address[] calldata sequencers, uint8 threshold) external;
 
     /// @notice Start an admin transfer. Only callable by the current admin.

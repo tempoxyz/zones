@@ -245,21 +245,15 @@ contract ZonePortal is IZonePortal {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
 
-            if (rejectUnchanged) {
-                if (i > 0 && signer <= newSequencers[i - 1]) revert InvalidSequencerSet();
-            } else {
-                // The TIP-1091 native factory accepts unique creation-time sequencers in any
-                // order. Admin rotations remain sorted so quorum certificates stay canonical.
-                for (uint256 j = 0; j < i; ++j) {
-                    if (newSequencers[j] == signer) revert InvalidSequencerSet();
-                }
+            for (uint256 j = 0; j < i; ++j) {
+                if (newSequencers[j] == signer) revert InvalidSequencerSet();
             }
         }
 
         bool membersUnchanged = length == _sequencers.length;
         if (membersUnchanged) {
             for (uint256 i = 0; i < length; ++i) {
-                if (newSequencers[i] != _sequencers[i]) {
+                if (!isSequencer[newSequencers[i]]) {
                     membersUnchanged = false;
                     break;
                 }
@@ -971,32 +965,6 @@ contract ZonePortal is IZonePortal {
     )
         external
         onlySequencer
-    {
-        _submitBatch(
-            tempoBlockNumber,
-            recentTempoBlockNumber,
-            blockTransition,
-            depositQueueTransition,
-            withdrawalQueueHash,
-            verifierConfig,
-            proof,
-            nextZoneHeight,
-            signatures
-        );
-    }
-
-    function _submitBatch(
-        uint64 tempoBlockNumber,
-        uint64 recentTempoBlockNumber,
-        BlockTransition calldata blockTransition,
-        DepositQueueTransition calldata depositQueueTransition,
-        bytes32 withdrawalQueueHash,
-        bytes calldata verifierConfig,
-        bytes calldata proof,
-        uint256 nextZoneHeight,
-        bytes[] memory signatures
-    )
-        internal
     {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
