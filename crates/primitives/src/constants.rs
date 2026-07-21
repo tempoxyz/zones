@@ -12,7 +12,7 @@ pub const NO_QUEUE_INDEX: U256 = U256::MAX;
 /// Maximum callback gas a withdrawal may request.
 ///
 /// The L1 processor adds fixed overhead, so this value keeps the outer
-/// `processWithdrawal` transaction well below a 30M gas block.
+/// keeps the outer `processWithdrawals` transaction well below a 30M gas block.
 pub const MAX_WITHDRAWAL_GAS_LIMIT: u64 = 10_000_000;
 
 /// Maximum RLP-encoded block size.

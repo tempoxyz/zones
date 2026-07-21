@@ -501,7 +501,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // === STEP 8: Sequencer processes withdrawal on L1 ===
         uint256 aliceL1BalanceBefore = l2ZoneToken.balanceOf(alice);
-        l1Portal.processWithdrawal(w, bytes32(0)); // 0 = last item in slot
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0)); // 0 = last item in slot
 
         // Verify Alice received funds on L1
         assertEq(l2ZoneToken.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
@@ -566,10 +566,10 @@ contract ZoneBridgeTest is BaseTest {
         uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
         uint256 bobBefore = l2ZoneToken.balanceOf(bob);
 
-        l1Portal.processWithdrawal(w0, innerHash);
+        l1Portal.processWithdrawals(_singleWithdrawal(w0), innerHash);
         assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 500e6);
 
-        l1Portal.processWithdrawal(w1, bytes32(0)); // 0 = last item in slot
+        l1Portal.processWithdrawals(_singleWithdrawal(w1), bytes32(0)); // 0 = last item in slot
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
     }
 
@@ -623,7 +623,7 @@ contract ZoneBridgeTest is BaseTest {
             alice,
             "callback_data"
         );
-        l1Portal.processWithdrawal(w, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         // Verify callback was executed
         assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 500e6);
@@ -671,7 +671,7 @@ contract ZoneBridgeTest is BaseTest {
         Withdrawal memory w = _withdrawal(
             1, alice, address(withdrawalReceiver), 500e6, bytes32(0), 5_000_000, alice, ""
         );
-        l1Portal.processWithdrawal(w, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         // Verify receiver did NOT get funds (transfer reverted)
         assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 0);
@@ -1169,7 +1169,7 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 expectedQueueHash = keccak256(abi.encode(bounce, EMPTY_SENTINEL));
         assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
 
-        l1Portal.processWithdrawal(bounce, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(bounce), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(alice), aliceBeforeRefund + netAmount - bouncebackFee);
         assertEq(l2ZoneToken.balanceOf(address(l1Portal)), portalBeforeRefund - netAmount);
     }

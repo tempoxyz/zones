@@ -269,7 +269,7 @@ interface IAesGcmDecrypt {
 
 // Maximum callback gas a withdrawal may request.
 // The processor adds fixed overhead, so this value keeps the outer
-// `processWithdrawal` transaction well below a 30M gas L1 block
+// keeps the outer `processWithdrawals` transaction well below a 30M gas L1 block
 // limit.
 uint64 constant MAX_WITHDRAWAL_CALLBACK_GAS = 10_000_000;
 
@@ -839,7 +839,7 @@ interface IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
-    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+    function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
     function deliverWithdrawal(
         address token,

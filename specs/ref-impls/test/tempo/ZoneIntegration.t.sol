@@ -464,7 +464,7 @@ contract ZoneIntegrationTest is BaseTest {
         Withdrawal memory w = _withdrawal(
             1, alice, address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback"
         );
-        l1Portal.processWithdrawal(w, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         // Verify callback was executed
         assertEq(receiver.callCount(), 1);
@@ -596,17 +596,17 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
 
         Withdrawal memory w1 = _withdrawal(1, alice, bob, 1000e6, bytes32("to bob"), 0, alice, "");
-        l1Portal.processWithdrawal(w1, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w1), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
 
         Withdrawal memory w2 =
             _withdrawal(2, alice, charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
-        l1Portal.processWithdrawal(w2, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w2), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(charlie), charlieBefore + 2000e6);
 
         Withdrawal memory w3 =
             _withdrawal(3, alice, alice, 3000e6, bytes32("to self"), 0, alice, "");
-        l1Portal.processWithdrawal(w3, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w3), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 3000e6);
 
         // All processed
@@ -724,8 +724,8 @@ contract ZoneIntegrationTest is BaseTest {
         bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
         uint256 charlieBefore = l2ZoneToken.balanceOf(charlie);
 
-        l1Portal.processWithdrawal(w1, innerHash);
-        l1Portal.processWithdrawal(w2, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w1), innerHash);
+        l1Portal.processWithdrawals(_singleWithdrawal(w2), bytes32(0));
 
         assertEq(l2ZoneToken.balanceOf(charlie), charlieBefore + 3500e6);
     }

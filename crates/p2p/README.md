@@ -106,3 +106,16 @@ explicit `--p2p.bypass-ip-check` flag. The flag disables source-IP filtering for
 all inbound P2P connections, not only the DNS peer. Only use it when a network-level
 policy restricts the P2P port to the configured peers; Ed25519 manifest membership
 authentication remains enforced.
+
+## Block catch-up
+
+Every node probes for missing blocks when P2P starts and retries while its eligible peers are
+offline or a gap remains. Followers request blocks from the statically configured leader. A
+recovering leader requests blocks from the configured followers. Both roles can serve bounded
+64-block response pages from their persisted canonical chain.
+
+Backfilled blocks use the same RLP representation and import path as live replicated blocks. A
+node buffers out-of-order arrivals, then re-executes and canonicalizes only the next block after
+its local head. Parent linkage, execution results, block hash, and forkchoice validation therefore
+remain mandatory during catch-up; authenticated transport alone never makes a returned block
+canonical.

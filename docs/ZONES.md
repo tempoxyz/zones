@@ -519,7 +519,7 @@ graph TB
     end
 
     Portal -- "WSS subscription<br/>(deposits, headers)" --> Tasks
-    Tasks -- "submitBatch / processWithdrawal" --> Portal
+    Tasks -- "submitBatch / processWithdrawals" --> Portal
 ```
 
 ### Precompiles
