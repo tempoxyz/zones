@@ -47,31 +47,30 @@ leader_ed25519_public_key = "0xleader..."
 [[nodes]]
 name = "leader"
 ed25519_public_key = "0xleader..."
+secp256k1_address = "0x1111111111111111111111111111111111111111"
 address = "leader.zone.internal:9200"
-# Future on-chain quorum identity; not accepted by the schema yet:
-# secp256k1_address = "0x1111111111111111111111111111111111111111"
 
 [[nodes]]
 name = "follower-a"
 ed25519_public_key = "0xfa..."
+secp256k1_address = "0x2222222222222222222222222222222222222222"
 address = "follower-a.zone.internal:9200"
-# secp256k1_address = "0x2222222222222222222222222222222222222222"
 
 [[nodes]]
 name = "follower-b"
 ed25519_public_key = "0xfb..."
+secp256k1_address = "0x3333333333333333333333333333333333333333"
 address = "follower-b.zone.internal:9200"
-# secp256k1_address = "0x3333333333333333333333333333333333333333"
 ```
 
 The manifest loader validates that:
 
 - there are at least three nodes;
-- node names and Ed25519 public keys are unique;
+- node names, Ed25519 public keys, and secp256k1 addresses are unique;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
 - the manifest's `zone_id` matches `--zone.id`; and
-- the local private key corresponds to a manifest member.
+- both local private keys correspond to the same manifest member.
 
 ## Generate a Commonware identity
 
@@ -91,11 +90,13 @@ Add these arguments to the node's normal command:
 ```text
 --sequencer.manifest ./zone-manifest.toml
 --p2p.key ./leader-p2p.key
+--secp256k1.key ./leader-secp256k1.key
 --p2p.listen 0.0.0.0:9200
 --sequencer.role leader
 ```
 
-Use each node's own key file and listener address. 
+Use each node's own key files and listener address. The secp256k1 key is loaded
+and validated now but will only be used once zone-block quorum signing is wired.
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
 
@@ -105,3 +106,16 @@ explicit `--p2p.bypass-ip-check` flag. The flag disables source-IP filtering for
 all inbound P2P connections, not only the DNS peer. Only use it when a network-level
 policy restricts the P2P port to the configured peers; Ed25519 manifest membership
 authentication remains enforced.
+
+## Block catch-up
+
+Every node probes for missing blocks when P2P starts and retries while its eligible peers are
+offline or a gap remains. Followers request blocks from the statically configured leader. A
+recovering leader requests blocks from the configured followers. Both roles can serve bounded
+64-block response pages from their persisted canonical chain.
+
+Backfilled blocks use the same RLP representation and import path as live replicated blocks. A
+node buffers out-of-order arrivals, then re-executes and canonicalizes only the next block after
+its local head. Parent linkage, execution results, block hash, and forkchoice validation therefore
+remain mandatory during catch-up; authenticated transport alone never makes a returned block
+canonical.

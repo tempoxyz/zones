@@ -73,7 +73,7 @@ fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{AnchoredZoneDb, ZoneEvm};
+    use crate::{L1OverlayDB, ZoneEvm};
     use alloy_evm::{Evm, EvmEnv};
     use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use revm::{
@@ -92,7 +92,7 @@ mod tests {
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
     type TestDb = CacheDB<EmptyDB>;
-    type TestAdaptedDb = AnchoredZoneDb<TestDb, TestL1>;
+    type TestAdaptedDb = L1OverlayDB<TestDb, TestL1>;
 
     const TEST_DEPLOYER: Address = Address::new([0x42; 20]);
 
@@ -128,7 +128,7 @@ mod tests {
         db: TestDb,
         input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv>,
     ) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
-        let db = AnchoredZoneDb::new(db, TestL1::default());
+        let db = L1OverlayDB::new(db, TestL1::default());
         ZoneEvm::new(TempoEvm::new(db, input))
     }
 

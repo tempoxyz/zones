@@ -24,7 +24,7 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
     BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes,
-    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput, WithTxEnv},
 };
 use reth_node_api::{FullNodeTypes, NodeTypes};
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
@@ -34,8 +34,8 @@ use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
-    BestTransactions, BestTransactionsAttributes, TransactionPool, ValidPoolTransaction,
-    error::InvalidPoolTransactionError,
+    BestTransactions, BestTransactionsAttributes, PoolTransaction as _, TransactionPool,
+    ValidPoolTransaction, error::InvalidPoolTransactionError,
 };
 use std::{error::Error, sync::Arc, time::Instant};
 use tempo_evm::TempoNextBlockEnvAttributes;
@@ -44,16 +44,33 @@ use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
-use tempo_transaction_pool::{TempoTransactionPool, transaction::TempoPooledTransaction};
+use tempo_transaction_pool::{
+    TempoTransactionPool, transaction::TempoPooledTransaction, validator::ConfigureTempoPoolEvm,
+};
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
+use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Default empty-batch cadence: every 120 zone blocks (~60 sec at Tempo's 500 ms block time).
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
+
+/// Safety margin reserved out of [`MAX_RLP_BLOCK_SIZE`] for everything in the block other than
+/// pool transactions: the header, RLP list framing, `advanceTempo`, `finalizeWithdrawalBatch`
+/// and the outer RLP string header.
+///
+/// Note: `finalizeWithdrawalBatch` is not bounded(~200 bytes per withdrawal).
+/// So a large enough backlog can exceed this margin. OK because the cap is a soft target: block
+/// size is not consensus-validated, so an overshoot creates a
+/// warning, not a failed build. The p2p transport message cap `MAX_MESSAGE_SIZE` must stay comfortably above
+/// [`MAX_RLP_BLOCK_SIZE`] so such blocks still replicate.
+const BLOCK_SIZE_SAFETY_MARGIN: usize = 1024 * 1024;
+
+/// Stable diagnostic retained when the precompile stack stringifies an [`L1StateError`].
+const L1_STORAGE_UNAVAILABLE_ERROR_PREFIX: &str = "Tempo L1 storage unavailable";
 
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
@@ -87,7 +104,8 @@ impl Default for ZonePayloadFactory {
     }
 }
 
-impl<Node, EvmConfig> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, EvmConfig>
+impl<Node, EvmConfig>
+    PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider, EvmConfig>, EvmConfig>
     for ZonePayloadFactory
 where
     Node: FullNodeTypes,
@@ -99,7 +117,8 @@ where
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
+        > + ConfigureTempoPoolEvm
+        + 'static,
     <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
         EvmFactory<Tx = tempo_revm::TempoTxEnv>,
     BlockEnvFor<EvmConfig>: RevmBlock,
@@ -109,7 +128,7 @@ where
     async fn build_payload_builder(
         self,
         ctx: &BuilderContext<Node>,
-        pool: TempoTransactionPool<Node::Provider>,
+        pool: TempoTransactionPool<Node::Provider, EvmConfig>,
         evm_config: EvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
         Ok(ZonePayloadBuilder {
@@ -126,7 +145,7 @@ where
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     /// Transaction pool for selecting pool txs to include in the block.
-    pool: TempoTransactionPool<Provider>,
+    pool: TempoTransactionPool<Provider, EvmConfig>,
     /// State provider for reading chain state during block building.
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
@@ -143,7 +162,8 @@ where
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
+        > + ConfigureTempoPoolEvm
+        + 'static,
     <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
         EvmFactory<Tx = tempo_revm::TempoTxEnv>,
     BlockEnvFor<EvmConfig>: RevmBlock,
@@ -249,12 +269,19 @@ where
                 err
             })?;
 
-        // Execute pool transactions. The block executor owns gas-capacity accounting.
+        // Execute pool transactions until either all of them fit or their packed RLP bytes reach
+        // the size budget
+        // The block executor owns gas-capacity accounting.
+        let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
         let mut best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
-        if execute_pool_transactions(&mut builder, &mut best_txs, &cancel)?
-            == PoolExecutionOutcome::Cancelled
+        if execute_pool_transactions(
+            |tx| builder.execute_transaction(tx).map(|_| ()),
+            &mut best_txs,
+            &cancel,
+            pool_tx_size_budget,
+        )? == PoolExecutionOutcome::Cancelled
         {
             return Ok(BuildOutcome::Cancelled);
         }
@@ -280,8 +307,19 @@ where
             .then_some(execution_result.requests.clone());
 
         let sealed_block = Arc::new(block.sealed_block().clone());
-        let elapsed = start.elapsed();
+        let execution_block_encoded = EncodedBlock::default();
+        let execution_block_size_estimate = execution_block_encoded
+            .get_or_encode(sealed_block.as_ref())
+            .len();
+        if execution_block_size_estimate > MAX_RLP_BLOCK_SIZE {
+            warn!(
+                block_size_bytes = execution_block_size_estimate,
+                max_rlp_block_size = MAX_RLP_BLOCK_SIZE,
+                "built block exceeds the soft RLP size cap"
+            );
+        }
 
+        let elapsed = start.elapsed();
         info!(
             number = sealed_block.number(),
             l1_block = prepared.header.number(),
@@ -290,15 +328,12 @@ where
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
             tx_count = sealed_block.body().transactions.len(),
+            block_size_bytes = execution_block_size_estimate,
             ?elapsed,
             "Built zone payload"
         );
 
         let recovered_block = Arc::new(block);
-        let execution_block_encoded = EncodedBlock::default();
-        let execution_block_size_estimate = execution_block_encoded
-            .get_or_encode(sealed_block.as_ref())
-            .len();
         let eth_payload = EthBuiltPayload::new(recovered_block.clone(), U256::ZERO, requests, None);
 
         let execution_output = BlockExecutionOutput {
@@ -412,25 +447,42 @@ enum PoolExecutionOutcome {
     Cancelled,
 }
 
-fn execute_pool_transactions<B, T>(
-    builder: &mut B,
+/// Execute the best pool transactions, skipping any whose RLP size would push the packed pool
+/// transaction bytes past `pool_tx_size_budget`.
+fn execute_pool_transactions<T, F>(
+    mut execute_tx: F,
     best_txs: &mut T,
     cancel: &CancelOnDrop,
+    pool_tx_size_budget: usize,
 ) -> Result<PoolExecutionOutcome, PayloadBuilderError>
 where
-    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
-    <B::Executor as reth_evm::execute::BlockExecutor>::Evm:
-        alloy_evm::Evm<Tx = tempo_revm::TempoTxEnv>,
     T: BestTransactions<Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
+    F: FnMut(
+        WithTxEnv<tempo_revm::TempoTxEnv, Recovered<TempoTxEnvelope>>,
+    ) -> Result<(), reth_evm::block::BlockExecutionError>,
 {
+    let mut packed_tx_bytes = 0usize;
     while let Some(pool_tx) = best_txs.next() {
         if cancel.is_cancelled() {
             return Ok(PoolExecutionOutcome::Cancelled);
         }
 
+        let packed_bytes_with_tx =
+            packed_tx_bytes.saturating_add(pool_tx.transaction.encoded_length());
+        if packed_bytes_with_tx > pool_tx_size_budget {
+            best_txs.mark_invalid(
+                &pool_tx,
+                InvalidPoolTransactionError::OversizedData {
+                    size: packed_bytes_with_tx,
+                    limit: pool_tx_size_budget,
+                },
+            );
+            continue;
+        }
+
         let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-        match builder.execute_transaction(tx_with_env) {
-            Ok(_) => {}
+        match execute_tx(tx_with_env) {
+            Ok(_) => packed_tx_bytes = packed_bytes_with_tx,
             Err(reth_evm::block::BlockExecutionError::Validation(
                 reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
                     transaction_gas_limit,
@@ -475,6 +527,9 @@ fn is_l1_storage_unavailable(error: &(dyn Error + 'static)) -> bool {
         if error
             .downcast_ref::<L1StateError>()
             .is_some_and(L1StateError::is_storage_unavailable)
+            || error
+                .to_string()
+                .contains(L1_STORAGE_UNAVAILABLE_ERROR_PREFIX)
         {
             return true;
         }
@@ -698,11 +753,22 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 
 #[cfg(test)]
 mod tests {
-    use alloy_consensus::Header;
+    use alloy_consensus::{Header, Signed, TxLegacy};
     use alloy_primitives::{B256, U256, address};
     use alloy_sol_types::SolCall;
-    use reth_primitives_traits::SealedHeader;
-    use tempo_primitives::TempoHeader;
+    use reth_primitives_traits::{Recovered, SealedHeader};
+    use reth_revm::cancelled::CancelOnDrop;
+    use reth_transaction_pool::{
+        BestTransactions, TransactionOrigin, ValidPoolTransaction,
+        error::InvalidPoolTransactionError,
+        identifier::{SenderId, TransactionId},
+    };
+    use std::{collections::VecDeque, sync::Arc, time::Instant};
+    use tempo_primitives::{
+        TempoHeader, TempoTxEnvelope,
+        transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
+    };
+    use tempo_transaction_pool::transaction::TempoPooledTransaction;
 
     use crate::abi::{self, DepositType, ZoneInbox};
     use zone_l1::PreparedL1Block;
@@ -723,6 +789,108 @@ mod tests {
             super::ZonePayloadFactory::new(0).withdrawal_batch_interval_blocks,
             1
         );
+    }
+
+    /// A [`BestTransactions`] stream backed by a fixed queue that counts size-based rejections.
+    struct MockBestTransactions {
+        queue: VecDeque<Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
+        oversized_marked: usize,
+    }
+
+    impl Iterator for MockBestTransactions {
+        type Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.queue.pop_front()
+        }
+    }
+
+    impl BestTransactions for MockBestTransactions {
+        fn mark_invalid(&mut self, _tx: &Self::Item, kind: InvalidPoolTransactionError) {
+            if matches!(kind, InvalidPoolTransactionError::OversizedData { .. }) {
+                self.oversized_marked += 1;
+            }
+        }
+
+        fn no_updates(&mut self) {}
+
+        fn set_skip_blobs(&mut self, _skip_blobs: bool) {}
+    }
+
+    /// Build a pool transaction whose RLP-encoded length is dominated by `input_len` bytes of
+    /// calldata, so tests can assemble a block of a known size.
+    fn pool_tx_with_calldata(
+        input_len: usize,
+        nonce: u64,
+    ) -> Arc<ValidPoolTransaction<TempoPooledTransaction>> {
+        let tx = TxLegacy {
+            chain_id: None,
+            nonce,
+            gas_price: 0,
+            gas_limit: 0,
+            to: address!("0x0000000000000000000000000000000000009999").into(),
+            value: U256::ZERO,
+            input: vec![0u8; input_len].into(),
+        };
+        let envelope = TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE));
+        let recovered = Recovered::new_unchecked(envelope, TEMPO_SYSTEM_TX_SENDER);
+        Arc::new(ValidPoolTransaction {
+            transaction: TempoPooledTransaction::new(recovered),
+            transaction_id: TransactionId::new(SenderId::from(0u64), nonce),
+            propagate: false,
+            timestamp: Instant::now(),
+            origin: TransactionOrigin::External,
+            authority_ids: None,
+        })
+    }
+
+    /// Feed the pool loop far more large transactions than fit in the size budget, and assert it
+    /// stops including them once the packed bytes reach the budget — i.e. the block is actually
+    /// capped by the size gate rather than growing unbounded.
+    #[test]
+    fn pool_transactions_stop_at_size_budget() {
+        // ~1 MiB of calldata per transaction; each has an identical encoded length (the small
+        // nonces used below all encode to a single RLP byte).
+        let per_tx = pool_tx_with_calldata(1_000_000, 0).encoded_length();
+        assert!(
+            per_tx > 1_000_000,
+            "calldata should dominate the encoded size"
+        );
+
+        let budget = super::MAX_RLP_BLOCK_SIZE - super::BLOCK_SIZE_SAFETY_MARGIN;
+        // How many of these transactions fit in the budget.
+        let expected_fit = budget / per_tx;
+        // Offer clearly more than fit so the gate must reject the tail.
+        let total = expected_fit + 4;
+
+        let queue = (0..total)
+            .map(|i| pool_tx_with_calldata(1_000_000, i as u64))
+            .collect::<VecDeque<_>>();
+        assert!(queue.iter().all(|tx| tx.encoded_length() == per_tx));
+
+        let mut best_txs = MockBestTransactions {
+            queue,
+            oversized_marked: 0,
+        };
+        let mut executed = 0usize;
+        let cancel = CancelOnDrop::default();
+
+        let outcome = super::execute_pool_transactions(
+            |_tx| -> Result<(), reth_evm::block::BlockExecutionError> {
+                executed += 1;
+                Ok(())
+            },
+            &mut best_txs,
+            &cancel,
+            budget,
+        )
+        .expect("pool execution should not error");
+
+        assert_eq!(outcome, super::PoolExecutionOutcome::Complete);
+
+        // Only the transactions that fit were executed; the rest were rejected for size.
+        assert_eq!(executed, expected_fit);
+        assert_eq!(best_txs.oversized_marked, total - expected_fit);
     }
 
     /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed

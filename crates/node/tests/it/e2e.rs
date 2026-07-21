@@ -481,7 +481,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
 
     let zone_outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
 
-    let initial_batch_index = zone_outbox.withdrawalBatchIndex().call().await?;
+    let initial_batch_index = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
     // Local test nodes finalize empty batches every eight zone blocks.
     const BATCH_INTERVAL_BLOCKS: u64 = 8;
 
@@ -506,7 +506,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     .await?;
     assert_eq!(before_first_boundary, BATCH_INTERVAL_BLOCKS - 1);
     assert_eq!(
-        zone_outbox.withdrawalBatchIndex().call().await?,
+        zone_outbox.lastBatch().call().await?.withdrawalBatchIndex,
         initial_batch_index,
         "withdrawalBatchIndex should not advance before a block-number boundary"
     );
@@ -519,7 +519,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         || {
             let zone_outbox = &zone_outbox;
             async move {
-                let idx = zone_outbox.withdrawalBatchIndex().call().await?;
+                let idx = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
                 if idx == initial_batch_index + 1 {
                     Ok(Some(idx))
                 } else {
@@ -549,7 +549,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     )
     .await?;
 
-    let intermediate_batch_index = zone_outbox.withdrawalBatchIndex().call().await?;
+    let intermediate_batch_index = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
     assert_eq!(
         intermediate_batch_index,
         initial_batch_index + 1,
@@ -565,7 +565,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         || {
             let zone_outbox = &zone_outbox;
             async move {
-                let idx = zone_outbox.withdrawalBatchIndex().call().await?;
+                let idx = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
                 if idx == initial_batch_index + 2 {
                     Ok(Some(idx))
                 } else {
@@ -649,7 +649,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
     .await?;
     approve_outbox(&mut fixture, &zone, &provider).await?;
 
-    let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
+    let batch_index_before = outbox.lastBatch().call().await?.withdrawalBatchIndex;
     let withdrawal_block =
         submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 250_000).await?;
 
@@ -665,7 +665,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
         "withdrawal block {withdrawal_block} should defer BatchFinalized"
     );
     assert_eq!(
-        outbox.withdrawalBatchIndex().call().await?,
+        outbox.lastBatch().call().await?.withdrawalBatchIndex,
         batch_index_before,
         "withdrawalBatchIndex should not advance on deferred block"
     );
@@ -684,7 +684,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
         || {
             let outbox = &outbox;
             async move {
-                let index = outbox.withdrawalBatchIndex().call().await?;
+                let index = outbox.lastBatch().call().await?.withdrawalBatchIndex;
                 if index == batch_index_before + 1 {
                     Ok(Some(index))
                 } else {
@@ -783,7 +783,7 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
     .await?;
     approve_outbox(&mut fixture, &zone, &provider).await?;
 
-    let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
+    let batch_index_before = outbox.lastBatch().call().await?.withdrawalBatchIndex;
     let block_n = submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 250_000).await?;
     let deferred_logs = outbox
         .BatchFinalized_filter()
@@ -806,7 +806,7 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
         || {
             let outbox = &outbox;
             async move {
-                let index = outbox.withdrawalBatchIndex().call().await?;
+                let index = outbox.lastBatch().call().await?.withdrawalBatchIndex;
                 if index == batch_index_before + 1 {
                     Ok(Some(index))
                 } else {
@@ -890,7 +890,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
     // Local test nodes finalize empty batches every eight zone blocks.
     const BATCH_INTERVAL_BLOCKS: u64 = 8;
 
-    let batch_index = outbox.withdrawalBatchIndex().call().await?;
+    let batch_index = outbox.lastBatch().call().await?.withdrawalBatchIndex;
     fixture.inject_empty_blocks(zone.deposit_queue(), BATCH_INTERVAL_BLOCKS);
     poll_until(
         DEFAULT_TIMEOUT,
@@ -899,7 +899,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
         || {
             let outbox = &outbox;
             async move {
-                let idx = outbox.withdrawalBatchIndex().call().await?;
+                let idx = outbox.lastBatch().call().await?.withdrawalBatchIndex;
                 if idx == batch_index + 1 {
                     Ok(Some(idx))
                 } else {
@@ -953,7 +953,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
     );
     assert_eq!((observed_pre_boundary + 1) % BATCH_INTERVAL_BLOCKS, 0);
 
-    let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
+    let batch_index_before = outbox.lastBatch().call().await?.withdrawalBatchIndex;
     // The next block is a deterministic batch boundary, so it finalizes its
     // own withdrawal rather than deferring it to the following block.
     let withdrawal_block =
@@ -967,7 +967,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
         || {
             let outbox = &outbox;
             async move {
-                let index = outbox.withdrawalBatchIndex().call().await?;
+                let index = outbox.lastBatch().call().await?.withdrawalBatchIndex;
                 if index == batch_index_before + 1 {
                     Ok(Some(index))
                 } else {

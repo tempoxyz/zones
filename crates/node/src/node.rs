@@ -5,7 +5,7 @@
 
 use crate::{
     ZoneEngine,
-    replication::{broadcast_persisted_blocks, import_leader_blocks},
+    replication::{broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
 use alloy_primitives::Address;
@@ -15,7 +15,7 @@ use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
+    AddOnsContext, ConsensusEngineHandle, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
     PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_builder::{
@@ -38,10 +38,9 @@ use reth_transaction_pool::{
     Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoEvmConfig;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -73,10 +72,18 @@ use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequence
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
 /// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
+///
+/// Additional dev-schedule L1 chain IDs (devnets that activate all Tempo
+/// hardforks at genesis) can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
+/// environment variable as a comma-separated list.
 fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1337 | 31337 => Some(DEV.clone()),
-        _ => None,
+        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
+            .ok()?
+            .split(',')
+            .any(|id| id.trim().parse() == Ok(chain_id))
+            .then(|| DEV.clone()),
     })
 }
 
@@ -269,12 +276,8 @@ impl ZoneNode {
     pub fn with_l1_state_provider_retry_limits(
         mut self,
         transport_retries: u32,
-        sync_attempts: u32,
+        sync_attempts: NonZeroU32,
     ) -> Self {
-        assert!(
-            sync_attempts > 0,
-            "at least one synchronous attempt is required"
-        );
         self.l1_state_provider_config.max_retries = transport_retries;
         self.l1_state_provider_config.max_sync_attempts = Some(sync_attempts);
         self
@@ -526,7 +529,7 @@ where
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
-        engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+        engine: ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
         let role = config.role();
         let handle = spawn_p2p(config, network_id)?;
@@ -538,25 +541,17 @@ where
             events,
         } = handle.into_parts();
 
-        match role {
-            Role::Leader => {
-                task_executor.spawn_critical_task(
-                    "zone-p2p-block-broadcast",
-                    broadcast_persisted_blocks(provider, commands),
-                );
-                // Leaders do not receive block messages. Dropping this receiver is harmless: the
-                // runtime only emits BlockReceived on followers.
-                drop(events);
-            }
-            Role::Follower => {
-                // Keep the command sender alive so the runtime's command loop remains available
-                // for later ACK/backfill commands even though followers send nothing in this PR.
-                task_executor.spawn_critical_task(
-                    "zone-p2p-block-import",
-                    import_leader_blocks(provider, engine, events, commands),
-                );
-            }
+        if role == Role::Leader {
+            // Only a leader can build + broadcast blocks
+            task_executor.spawn_critical_task(
+                "zone-p2p-block-broadcast",
+                broadcast_persisted_blocks(provider.clone(), commands.clone()),
+            );
         }
+        task_executor.spawn_critical_task(
+            "zone-p2p-block-sync",
+            run_block_sync(role, provider, engine, events, commands),
+        );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
@@ -931,7 +926,7 @@ impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type Pool = TempoTransactionPool<Node::Provider>;
+    type Pool = TempoTransactionPool<Node::Provider, ZoneEvmConfig>;
 
     async fn build_pool(
         self,
@@ -944,23 +939,20 @@ where
 
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
-        let tempo_evm_config = TempoEvmConfig::new(evm_config.tempo_chain_spec().clone());
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
-        let mut validator = TransactionValidationTaskExecutor::eth_builder(
-            ctx.provider().clone(),
-            tempo_evm_config,
-        )
-        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-        .with_local_transactions_config(pool_config.local_transactions_config.clone())
-        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-        .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
-        .disable_balance_check()
-        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-        .with_custom_tx_type(TempoTxType::AA as u8)
-        .no_eip4844()
-        .build::<TempoPooledTransaction, _>(blob_store.clone());
+        let mut validator =
+            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
+                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+                .with_local_transactions_config(pool_config.local_transactions_config.clone())
+                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+                .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
+                .disable_balance_check()
+                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+                .with_custom_tx_type(TempoTxType::AA as u8)
+                .no_eip4844()
+                .build::<TempoPooledTransaction, _>(blob_store.clone());
 
         validator.set_additional_stateless_validation(|_origin, tx| {
             zone_evm::validate_transaction(
@@ -1050,6 +1042,13 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
+
+        // SAFETY: test-only env mutation; no other test reads this variable.
+        unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
+        assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
+        assert!(tempo_chain_spec_for_l1(999_999).is_none());
+        unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
     }
 
     #[test]

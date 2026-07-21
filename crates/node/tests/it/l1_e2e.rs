@@ -1011,7 +1011,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///   │                                         │
 ///   │   ◄──── requestWithdrawal ───── │
 ///   │   ◄──── submitBatch ────────  │
-///   │   processWithdrawal                     │
+///   │   processWithdrawals                     │
 ///   │            → tokens to L1              │
 /// ```
 ///
