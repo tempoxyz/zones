@@ -15,21 +15,19 @@ boundaries:
 5. a DLUSD off-ramp to the bridge-wallet fixture and its exact
    `WithdrawalProcessed` event.
 
-The gateway, vault adapter, engine, Earn factory, and bridge swap adapter are
-built from the exact `tempoxyz/earn` revision in
-[`contrib/bench/earn.lock`](../contrib/bench/earn.lock). The workflow verifies
-that revision after checkout and builds it with that repository's Foundry
-configuration. Zones runtime code consumes only the resulting artifacts; it
-does not fetch or clone external source.
+The gateway, vault adapter, engine, StablecoinDEX adapter, and proxy are the
+Earn boundary fixtures from #750 under
+`specs/ref-impls/test/fixtures/earn`. Foundry builds their artifacts alongside
+the Zone specs; benchmark provisioning never fetches or clones external source.
 
 ## Topology and policy
 
 Provision the existing two-validator L1 plus authenticated private Zone RPC.
-The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile makes
-DLUSD the initial Zone token, deploys the pinned Earn factory stack outside the
-measured interval, enables the factory-created EarnToken on the portal, and
-keeps pathUSD as L1-only vault collateral. It does not replace those assets
-with ordinary ERC-20 test contracts.
+The local Tempo genesis supplies DLUSD, pathUSD, and EarnToken. The neobank
+profile makes DLUSD the initial Zone token, deploys the copied Earn proxy stack
+outside the measured interval, enables EarnToken on the portal, and keeps
+pathUSD as L1-only vault collateral. It does not replace those assets with
+ordinary ERC-20 test contracts.
 
 The profile has zero user bridge and withdrawal protocol fees. It retains a
 separate generic profile with nonzero bootstrap fees. The token authorization
@@ -62,19 +60,14 @@ the scenario report or an artifact.
 
 The pinned transaction generator supports the required in-memory encrypted
 deposit preparation and named-tuple ABI encoding. The topology provisioner has
-a `neobank` profile which deploys and seeds the L1 stack outside the measured
-interval, enables the factory-created EarnToken, sets the bridge rates to zero,
-waits for Zone token ingestion, and writes only non-secret runtime metadata.
-Provide artifacts built from the pinned external source when running locally:
+a `neobank` profile which deploys and seeds the copied Earn stack and the
+L1 StablecoinDEX outside the measured interval, enables EarnToken, sets the
+bridge rates to zero, waits for Zone token ingestion, and writes only
+non-secret runtime metadata:
 
 ```bash
-earn_root=/path/to/earn-at-"$(sed -n 's/^EARN_REV=//p' contrib/bench/earn.lock)"
-forge build --root "$earn_root"
-forge build --root "$earn_root" "$earn_root/localnet/foundry/src/LocalDirectSwap.sol"
-ZONES_BENCH_PROFILE=neobank \
-ZONES_BENCH_EARN_ARTIFACTS="$earn_root/out" \
-ZONES_BENCH_EARN_LOCALNET_ARTIFACTS="$earn_root/out" \
-contrib/bench/provision-topology.sh up
+forge build --root specs/ref-impls
+ZONES_BENCH_PROFILE=neobank contrib/bench/provision-topology.sh up
 ```
 
 The dedicated runner renders the profile assets, prepares account approvals and
@@ -95,7 +88,6 @@ latency, and remove the temporary material on exit.
 
 The topology exercises real L1 and Zone nodes, portal deposits, outbox batches,
 authenticated private RPC, and receipt-scoped cross-chain correlation. The
-direct-swap liquidity and `Simple4626Vault` venue are pinned-source benchmark
-fixtures with 1:1 behavior. They do not represent final production economics,
-liquidity, policy administration, or a final vault venue. The external
-bytecode used here is not asserted to be the final production stack.
+StablecoinDEX liquidity and `Simple4626Vault` venue are benchmark fixtures.
+They do not represent final production economics, liquidity, policy
+administration, or a final vault venue.

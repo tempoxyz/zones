@@ -328,48 +328,6 @@ jobs:
 
       - uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
 
-      - name: Resolve pinned external Earn revision
-        if: needs.authorize.outputs.phase == 'neobank-e2e'
-        id: earn
-        run: |
-          set -euo pipefail
-          lock_file="$GITHUB_WORKSPACE/contrib/bench/earn.lock"
-          earn_rev="$(sed -n 's/^EARN_REV=//p' "$lock_file")"
-          if [ "$(sed -n 's/^EARN_REV=//p' "$lock_file" | wc -l)" -ne 1 ] \
-            || ! [[ "$earn_rev" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::earn.lock must contain exactly one 40-character EARN_REV"
-            exit 1
-          fi
-          echo "revision=$earn_rev" >> "$GITHUB_OUTPUT"
-
-      - name: Check out pinned external Earn contracts
-        if: needs.authorize.outputs.phase == 'neobank-e2e'
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: tempoxyz/earn
-          ref: ${{ steps.earn.outputs.revision }}
-          path: _benchmark-earn
-          token: ${{ secrets.DEREK_BENCH_TOKEN }}
-          persist-credentials: false
-          submodules: recursive
-
-      - name: Build pinned external Earn artifacts
-        if: needs.authorize.outputs.phase == 'neobank-e2e'
-        run: |
-          set -euo pipefail
-          earn_root="$GITHUB_WORKSPACE/_benchmark-earn"
-          earn_rev='${{ steps.earn.outputs.revision }}'
-          [ "$(git -C "$earn_root" rev-parse HEAD)" = "$earn_rev" ]
-          forge build --root "$earn_root"
-          forge build --root "$earn_root" "$earn_root/localnet/foundry/src/LocalDirectSwap.sol"
-          test -s "$earn_root/out/ZoneGateway.sol/ZoneGateway.json"
-          test -s "$earn_root/out/LocalDirectSwap.sol/LocalDirectSwap.json"
-          {
-            echo "ZONES_BENCH_EARN_ARTIFACTS=$earn_root/out"
-            echo "ZONES_BENCH_EARN_LOCALNET_ARTIFACTS=$earn_root/out"
-            echo "ZONES_BENCH_EARN_REV=$earn_rev"
-          } >> "$GITHUB_ENV"
-
       - name: Add file-backed mnemonic support to pinned Tempo xtask
         run: |
           set -euo pipefail
@@ -601,9 +559,6 @@ jobs:
             echo "- Zones revision: \`$ZONES_BENCH_ZONES_REF\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
-            if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
-              echo "- Earn revision: \`${ZONES_BENCH_EARN_REV:-unavailable}\`"
-            fi
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
           } >> "$summary"
