@@ -412,7 +412,8 @@ contract ZoneBridgeTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit to Tempo
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),

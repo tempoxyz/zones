@@ -352,7 +352,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Submit L1 batch for first deposit
         vm.roll(block.number + 1);
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -455,7 +456,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Submit L1 batch
         vm.roll(block.number + 1);
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -526,7 +528,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         bytes32 wHash1 = _finalizeWithdrawalBatch(type(uint256).max);
 
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -554,7 +557,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         bytes32 wHash2 = _finalizeWithdrawalBatch(type(uint256).max);
 
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -582,7 +586,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         bytes32 wHash3 = _finalizeWithdrawalBatch(type(uint256).max);
 
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -688,7 +693,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Submit batch with withdrawals
         vm.roll(block.number + 1);
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({

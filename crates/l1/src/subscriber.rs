@@ -81,7 +81,7 @@ impl L1Subscriber {
             "l1-deposit-subscriber",
             Box::pin(async move {
                 loop {
-                    if let Err(e) = subscriber.clone().run().await {
+                    if let Err(e) = subscriber.run().await {
                         let retry_interval = subscriber.config.retry_connection_interval;
                         subscriber.subscriber_metrics.reconnects.increment(1);
                         error!(
@@ -260,10 +260,7 @@ impl L1Subscriber {
 
     /// Backfill deposit events from the starting block to the current L1 tip.
     #[instrument(skip(self, l1_provider))]
-    async fn sync_to_l1_tip(
-        &mut self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<()> {
+    async fn sync_to_l1_tip(&self, l1_provider: &impl Provider<TempoNetwork>) -> eyre::Result<()> {
         let Some(mut from) = self.resolve_start_block().await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
@@ -431,7 +428,7 @@ impl L1Subscriber {
     /// prevents the zone from committing to an L1 tip that gets reorged away.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
-    pub async fn run(mut self) -> eyre::Result<()> {
+    pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
 
         // Backfill to the current tip before subscribing.

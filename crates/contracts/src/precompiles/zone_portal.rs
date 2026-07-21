@@ -175,7 +175,7 @@ crate::sol! {
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
-        function sequencerThreshold() external view returns (uint256);
+        function sequencerThreshold() external view returns (uint8);
         function zoneHeight() external view returns (uint256);
         function isSequencer(address account) external view returns (bool);
         function sequencerPubkey() external view returns (bytes32);

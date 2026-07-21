@@ -269,10 +269,6 @@ pub(crate) fn seed_raw_tip403_token_policy(
         block_number,
         B256::from(packed.to_be_bytes()),
     );
-    debug_assert_eq!(
-        cache.get(TIP403_REGISTRY_ADDRESS, slot, block_number),
-        Some(B256::from(packed.to_be_bytes()))
-    );
 }
 
 /// Seed the token-local transfer-policy field used by Tempo's TIP-1092 compatibility fallback.

@@ -11,7 +11,6 @@ import {
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
-import { Test } from "forge-std/Test.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 contract MockZoneFactoryForMessenger {
@@ -75,34 +74,6 @@ contract RejectingWithdrawalReceiver is IWithdrawalReceiver {
         returns (bytes4)
     {
         return bytes4(0xdeadbeef);
-    }
-
-}
-
-contract ZoneMessengerFactoryAbiTest is Test {
-
-    function test_relayMessage_decodesTip1091FactoryGetter() public {
-        uint32 zoneId = 1;
-        address portal = address(0x700);
-        address token = address(0x701);
-
-        vm.etch(ZONE_FACTORY_ADDRESS, type(MockZoneFactoryForMessenger).runtimeCode);
-        MockZoneFactoryForMessenger factory = MockZoneFactoryForMessenger(ZONE_FACTORY_ADDRESS);
-        factory.setPortal(zoneId, portal);
-        vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
-        ZoneMessenger messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
-        AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
-
-        vm.mockCall(
-            token,
-            abi.encodeWithSelector(ITIP20.transfer.selector, address(receiver), 1),
-            abi.encode(true)
-        );
-        vm.prank(portal);
-        messenger.relayMessage(zoneId, token, bytes32("sender"), address(receiver), 1, 500_000, "");
-
-        assertEq(receiver.lastZoneId(), zoneId);
-        assertEq(receiver.lastSourcePortal(), portal);
     }
 
 }

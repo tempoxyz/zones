@@ -595,8 +595,8 @@ contract ZonePortalTest is BaseTest {
     function test_submitBatch_requiresQuorumAfterActivation() public {
         address[] memory signers = _activateSequencerSet(2);
 
-        vm.prank(signers[0]);
         vm.expectRevert(IZonePortal.LegacyBatchSubmissionDisabled.selector);
+        vm.prank(signers[0]);
         portal.submitBatch(
             uint64(block.number),
             0,
@@ -1085,7 +1085,8 @@ contract ZonePortalTest is BaseTest {
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: newStateRoot }),
@@ -1114,7 +1115,8 @@ contract ZonePortalTest is BaseTest {
         emit IZonePortal.BatchSubmitted(
             1, NO_QUEUE_INDEX, bytes32(0), keccak256("state1"), bytes32(0), 0
         );
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1138,7 +1140,8 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectEmit(true, true, false, true);
         emit IZonePortal.BatchSubmitted(2, 0, bytes32(0), keccak256("state2"), withdrawalHash, 0);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1168,7 +1171,8 @@ contract ZonePortalTest is BaseTest {
         for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
             bytes32 nextState = keccak256(abi.encode("state", i));
             bytes32 withdrawalHash = i == 0 ? firstHash : keccak256(abi.encode("batch", i));
-            portal.submitBatch(
+            _submitBatch(
+                portal,
                 uint64(block.number - 1),
                 0,
                 BlockTransition({ prevBlockHash: previousState, nextBlockHash: nextState }),
@@ -1198,7 +1202,8 @@ contract ZonePortalTest is BaseTest {
             wrappedHash,
             0
         );
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: previousState, nextBlockHash: wrappedState }),
@@ -1223,7 +1228,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         vm.expectRevert(IZonePortal.InvalidProof.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1249,7 +1255,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 nextStateRoot = keccak256("state");
         vm.prank(alice); // Not sequencer
         vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: nextStateRoot }),
@@ -1278,7 +1285,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 prevBlockHash = portal.blockHash();
         bytes32 nextStateRoot = keccak256("state");
         vm.expectRevert(IZonePortal.InvalidProof.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: nextStateRoot }),
@@ -1317,7 +1325,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit batch that adds withdrawal to slot 0
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1372,7 +1381,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit batch adding both withdrawals to slot 0
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1429,7 +1439,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 batchQueueHash = keccak256(abi.encode(w1, innerHash));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1486,7 +1497,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1509,7 +1521,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1552,7 +1565,8 @@ contract ZonePortalTest is BaseTest {
         uint256 tailBefore = portal.withdrawalQueueTail();
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1602,7 +1616,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit batch adding withdrawal
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1659,7 +1674,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit batch
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1714,7 +1730,8 @@ contract ZonePortalTest is BaseTest {
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1764,7 +1781,8 @@ contract ZonePortalTest is BaseTest {
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1817,7 +1835,8 @@ contract ZonePortalTest is BaseTest {
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1856,7 +1875,8 @@ contract ZonePortalTest is BaseTest {
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1904,7 +1924,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 withdrawalQueue = keccak256(abi.encode(outer, remainingQueue));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -1966,7 +1987,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit batch - portal no longer tracks processed, just updates lastSyncedTempoBlockNumber
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -2005,7 +2027,8 @@ contract ZonePortalTest is BaseTest {
 
         bytes32 prevBlockHash = portal.blockHash();
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number + 1), // In future
             0,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
@@ -2027,7 +2050,8 @@ contract ZonePortalTest is BaseTest {
 
         bytes32 prevBlockHash = portal.blockHash();
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             genesisTempoBlockNumber, // Valid but beyond history window
             0,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
@@ -2050,7 +2074,8 @@ contract ZonePortalTest is BaseTest {
         uint64 oldTempoBlockNumber = genesisTempoBlockNumber;
         uint64 recentTempoBlockNumber = uint64(block.number - 1);
 
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             oldTempoBlockNumber,
             recentTempoBlockNumber,
             BlockTransition({
@@ -2076,7 +2101,8 @@ contract ZonePortalTest is BaseTest {
 
         bytes32 prevBlockHash = portal.blockHash();
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             tempoBlockNumber,
             tempoBlockNumber,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
@@ -2100,7 +2126,8 @@ contract ZonePortalTest is BaseTest {
 
         bytes32 prevBlockHash = portal.blockHash();
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             tempoBlockNumber,
             futureTempoBlockNumber,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
@@ -2121,7 +2148,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW);
 
         // Should still work at the window boundary
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             genesisTempoBlockNumber,
             0,
             BlockTransition({
@@ -2162,7 +2190,8 @@ contract ZonePortalTest is BaseTest {
 
         // Even though we pass a "wrong" prevProcessedHash, the implementation
         // constructs its own from _depositQueue.processed, so this will succeed
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -2195,7 +2224,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Process first deposit only
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -2217,7 +2247,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit second batch
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -2251,7 +2282,8 @@ contract ZonePortalTest is BaseTest {
         uint256 tailBefore = portal.withdrawalQueueTail();
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2289,7 +2321,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2309,7 +2342,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2") }),
@@ -2362,7 +2396,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2410,7 +2445,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2456,7 +2492,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2505,7 +2542,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2554,7 +2592,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2605,7 +2644,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalBatchIndex(), 0);
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2622,7 +2662,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalBatchIndex(), 1);
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2") }),
@@ -2639,7 +2680,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalBatchIndex(), 2);
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s3") }),
@@ -2701,7 +2743,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -2742,7 +2785,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
@@ -3691,7 +3735,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -3735,7 +3780,8 @@ contract ZonePortalTest is BaseTest {
         while (
             portal.withdrawalQueueTail() - portal.withdrawalQueueHead() < WITHDRAWAL_QUEUE_CAPACITY
         ) {
-            portal.submitBatch(
+            _submitBatch(
+                portal,
                 genesisTempoBlockNumber,
                 0,
                 BlockTransition({
@@ -3761,7 +3807,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 prevBlockHash = portal.blockHash();
         bytes32 depositQueueHash = portal.currentDepositQueueHash();
         vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
-        portal.submitBatch(
+        _submitBatch(
+            portal,
             genesisTempoBlockNumber,
             0,
             BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("full") }),

@@ -150,6 +150,15 @@ pub struct BatchData {
     pub withdrawal_queue_hash: B256,
 }
 
+struct SettlementAttestation<'a> {
+    batch: &'a BatchData,
+    anchor_block_number: u64,
+    anchor_block_hash: B256,
+    block_transition: &'a BlockTransition,
+    deposit_transition: &'a DepositQueueTransition,
+    verifier_config: &'a Bytes,
+}
+
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizedBatch {
@@ -275,9 +284,9 @@ fn resolve_ancestry_headers(
 }
 
 impl BatchSubmitter {
-    /// Create a new batch submitter from a shared L1 provider.
+    /// Create a batch submitter without a certificate signer.
     ///
-    /// The provider must already include the sequencer wallet for signing.
+    /// This is useful for read-only operations and tests. Batch submission returns an error.
     pub fn new(portal_address: Address, l1_provider: DynProvider<TempoNetwork>) -> Self {
         Self::with_anchor_config(portal_address, l1_provider, BatchAnchorConfig::default())
     }
@@ -389,12 +398,14 @@ impl BatchSubmitter {
         let signature = self
             .sign_settlement_attestation(
                 signer,
-                batch,
-                anchor_block_number,
-                anchor_block_hash,
-                &block_transition,
-                &deposit_transition,
-                &verifier_config,
+                SettlementAttestation {
+                    batch,
+                    anchor_block_number,
+                    anchor_block_hash,
+                    block_transition: &block_transition,
+                    deposit_transition: &deposit_transition,
+                    verifier_config: &verifier_config,
+                },
             )
             .await?;
 
@@ -472,18 +483,21 @@ impl BatchSubmitter {
     async fn sign_settlement_attestation(
         &self,
         signer: &PrivateKeySigner,
-        batch: &BatchData,
-        anchor_block_number: u64,
-        anchor_block_hash: B256,
-        block_transition: &BlockTransition,
-        deposit_transition: &DepositQueueTransition,
-        verifier_config: &Bytes,
+        attestation: SettlementAttestation<'_>,
     ) -> Result<Bytes> {
+        let SettlementAttestation {
+            batch,
+            anchor_block_number,
+            anchor_block_hash,
+            block_transition,
+            deposit_transition,
+            verifier_config,
+        } = attestation;
         let zone_id = self.portal.zoneId().call().await?;
         let sequencer_set_version = self.portal.sequencerSetVersion().call().await?;
         let sequencer_threshold = self.portal.sequencerThreshold().call().await?;
         eyre::ensure!(
-            sequencer_threshold == U256::ONE,
+            sequencer_threshold == 1,
             "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {sequencer_threshold}"
         );
         eyre::ensure!(

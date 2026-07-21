@@ -2,6 +2,9 @@
 pragma solidity ^0.8.13;
 
 import {
+    BlockTransition,
+    DepositQueueTransition,
+    IZonePortal,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
@@ -18,6 +21,7 @@ import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { IAccountKeychain } from "tempo-std/interfaces/IAccountKeychain.sol";
 import { IFeeManager } from "tempo-std/interfaces/IFeeManager.sol";
 import { INonce } from "tempo-std/interfaces/INonce.sol";
+import { ISignatureVerifier } from "tempo-std/interfaces/ISignatureVerifier.sol";
 import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP20Token } from "tempo-std/interfaces/ITIP20.sol";
@@ -28,6 +32,8 @@ import { IValidatorConfig } from "tempo-std/interfaces/IValidatorConfig.sol";
 /// @notice Base test framework for all spec tests
 /// pathUSD is just a TIP20 at a special address (0x20C0...) with token_id=0
 contract BaseTest is Test {
+
+    mapping(address portal => uint256 height) private _submittedZoneHeights;
 
     // Registry precompiles
     address internal constant _ACCOUNT_KEYCHAIN = StdPrecompiles.ACCOUNT_KEYCHAIN_ADDRESS;
@@ -162,6 +168,42 @@ contract BaseTest is Test {
     {
         withdrawals = new Withdrawal[](1);
         withdrawals[0] = withdrawal;
+    }
+
+    /// @notice Submit through the TIP-1091 overload while dedicated certificate tests exercise
+    ///         the real signature precompile behavior independently.
+    function _submitBatch(
+        IZonePortal portal,
+        uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
+        BlockTransition memory blockTransition,
+        DepositQueueTransition memory depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes memory verifierConfig,
+        bytes memory proof
+    )
+        internal
+    {
+        bytes[] memory signatures = new bytes[](1);
+        signatures[0] = hex"01";
+        vm.mockCall(
+            address(StdPrecompiles.SIGNATURE_VERIFIER),
+            abi.encodeWithSelector(ISignatureVerifier.recover.selector),
+            abi.encode(sequencer)
+        );
+        uint256 nextZoneHeight = _submittedZoneHeights[address(portal)] + 1;
+        portal.submitBatch(
+            tempoBlockNumber,
+            recentTempoBlockNumber,
+            blockTransition,
+            depositQueueTransition,
+            withdrawalQueueHash,
+            verifierConfig,
+            proof,
+            nextZoneHeight,
+            signatures
+        );
+        _submittedZoneHeights[address(portal)] = nextZoneHeight;
     }
 
 }
