@@ -13534,6 +13534,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "url",
+ "zeroize",
  "zone-chainspec",
  "zone-evm",
  "zone-l1",
