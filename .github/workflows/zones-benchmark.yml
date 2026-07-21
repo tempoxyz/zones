@@ -287,7 +287,6 @@ jobs:
       ZONES_BENCH_REPORT: target/zones-benchmark/report-${{ needs.authorize.outputs.phase }}.json
       ZONES_BENCH_TOPOLOGY_ENV: target/zones-benchmark/topology.env
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
-      ZONES_BENCH_PID_FILE: target/zones-benchmark/topology.pids
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -295,6 +294,20 @@ jobs:
           ref: ${{ needs.authorize.outputs.sha }}
           persist-credentials: false
           submodules: recursive
+
+      - name: Prepare persistent topology control path
+        env:
+          RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
+        run: |
+          set -euo pipefail
+          control_root="${RUNNER_TOOL_CACHE_DIR:?}/zones-benchmark"
+          mkdir -p "$control_root"
+          echo "ZONES_BENCH_PID_FILE=$control_root/topology.pids" >> "$GITHUB_ENV"
+
+      - name: Stop stale benchmark topology
+        run: |
+          set -euo pipefail
+          contrib/bench/provision-topology.sh cleanup "$ZONES_BENCH_PID_FILE"
 
       - name: Test L1 snapshot manifest handling
         run: contrib/bench/tests/l1-snapshot.sh

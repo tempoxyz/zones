@@ -204,6 +204,45 @@ cleanup_pid_file() {
     rm -f -- "$pid_file"
 }
 
+stop_stale_listener() {
+    local port="$1"
+    local expected="$2"
+    local label="$3"
+    local -a pids=()
+    local pid deadline
+
+    mapfile -t pids < <(lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | sort -u || true)
+    (( ${#pids[@]} == 0 )) && return 0
+
+    for pid in "${pids[@]}"; do
+        [[ "$pid" =~ ^[0-9]+$ ]] || continue
+        process_matches "$pid" "$expected" ||
+            die "TCP port $port is owned by PID $pid, not a stale $label process; refusing to signal it"
+        echo "stopping stale $label listener on TCP port $port (PID $pid)" >&2
+        kill -INT "$pid" 2>/dev/null || true
+    done
+
+    deadline=$((SECONDS + 30))
+    while (( SECONDS < deadline )); do
+        for pid in "${pids[@]}"; do
+            if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null \
+                && process_matches "$pid" "$expected"; then
+                sleep 1
+                continue 2
+            fi
+        done
+        return 0
+    done
+
+    for pid in "${pids[@]}"; do
+        if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null \
+            && process_matches "$pid" "$expected"; then
+            echo "forcing stale $label listener to stop on TCP port $port (PID $pid)" >&2
+            kill -KILL "$pid" 2>/dev/null || true
+        fi
+    done
+}
+
 provision_on_exit() {
     local status=$?
     trap - EXIT INT TERM
@@ -313,6 +352,7 @@ provision_up() {
     require_command cast
     require_command curl
     require_command jq
+    require_command lsof
     require_command taskset
 
     [[ -n "${ZONES_BENCH_MNEMONIC_FILE:-}" ]] || die "ZONES_BENCH_MNEMONIC_FILE must be set"
@@ -327,6 +367,13 @@ provision_up() {
     require_executable "$TEMPO_XTASK_BIN"
     require_executable "$ZONES_XTASK_BIN"
     require_executable "$ZONE_BIN"
+
+    # A cancelled workflow can prevent its checkout-scoped teardown from
+    # running. Only reclaim listeners owned by the exact benchmark binaries;
+    # fail rather than signal an unrelated process.
+    stop_stale_listener 8545 "$TEMPO_BIN" "Tempo validator A"
+    stop_stale_listener 8645 "$TEMPO_BIN" "Tempo validator B"
+    stop_stale_listener 8546 "$ZONE_BIN" "Zone"
 
     local account_start="${ZONES_BENCH_ACCOUNT_START:-16}"
     local accounts="${ZONES_BENCH_ACCOUNTS:-200}"
