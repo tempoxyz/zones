@@ -148,19 +148,13 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     };
 
     let nonce_before = alice_provider.get_transaction_count(alice).await?;
-    let pending = alice_provider.send_transaction(request).await?;
-    let tx_hash = *pending.tx_hash();
-
-    fixture.inject_empty_block(zone.deposit_queue());
-    zone.wait_for_tempo_block_number(anchor + 1, DEFAULT_TIMEOUT)
-        .await?;
-
+    let error = alice_provider
+        .send_transaction(request)
+        .await
+        .expect_err("L1-blacklisted fee payer transaction must be rejected by the pool");
     assert!(
-        alice_provider
-            .get_transaction_receipt(tx_hash)
-            .await?
-            .is_none(),
-        "L1-blacklisted fee payer transaction must not be included"
+        error.to_string().contains("PolicyForbids"),
+        "unexpected pool rejection: {error}"
     );
     assert_eq!(
         alice_provider.get_transaction_count(alice).await?,
