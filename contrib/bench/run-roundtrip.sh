@@ -53,8 +53,12 @@ load_benchmark_mnemonic() {
 # Drop only per-request HTTP bookkeeping; benchmark diagnostics still pass through.
 filter_transport_debug() {
     awk '
-        index($0, " DEBUG ") && index($0, "alloy_transport_http::reqwest_transport:") { next }
-        index($0, " DEBUG ") && index($0, "alloy_transport_http::hyper_transport:") { next }
+        {
+            normalized = $0
+            gsub(/\033\[[0-9;]*m/, "", normalized)
+        }
+        index(normalized, " DEBUG ") && index(normalized, "alloy_transport_http::reqwest_transport:") { next }
+        index(normalized, " DEBUG ") && index(normalized, "alloy_transport_http::hyper_transport:") { next }
         { print; fflush() }
     '
 }
