@@ -397,6 +397,10 @@ async fn deploy<P: Provider<TempoNetwork>>(
         .send_transaction(
             TransactionRequest::default()
                 .with_kind(alloy::primitives::TxKind::Create)
+                // Fixture constructors can make contract calls that Tempo's generic
+                // estimator underestimates. Keep this in sync with the #750 E2E
+                // deployer and the benchmark L1 block limit.
+                .with_gas_limit(30_000_000)
                 .input(Bytes::from(bytecode).into())
                 .into(),
         )
