@@ -39,6 +39,7 @@ use zone_spf::{
 const EIP2935_HISTORY_WINDOW: u64 = 8191;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const RPC_CONCURRENCY: usize = 8;
+const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(5);
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
@@ -97,8 +98,16 @@ struct GenerateInputArgs {
     from_block: Option<u64>,
 
     /// Override the final Zone block. Defaults to the current Zone tip.
-    #[arg(long)]
+    #[arg(long, conflicts_with = "zone_block_count")]
     to_block: Option<u64>,
+
+    /// Execute exactly this many Zone blocks, waiting for the target block if necessary.
+    #[arg(long, conflicts_with = "to_block")]
+    zone_block_count: Option<u64>,
+
+    /// Stop waiting for `--zone-block-count` after this many seconds.
+    #[arg(long, value_name = "SECONDS", requires = "zone_block_count")]
+    wait_timeout: Option<u64>,
 
     /// Write the complete JSON witness to this path.
     #[arg(long, short)]
@@ -138,6 +147,15 @@ struct Discovery {
     portal_tempo_block_number: u64,
     tempo_chain_id: u64,
     portal_block_hash: B256,
+}
+
+#[derive(Debug)]
+struct PortalSnapshot {
+    zone_id: u32,
+    sequencer: Address,
+    withdrawal_batch_index: u64,
+    tempo_block_number: u64,
+    block_hash: B256,
 }
 
 #[derive(Debug)]
@@ -189,9 +207,14 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         zone_id = args.zone_id,
         from_block = ?args.from_block,
         to_block = ?args.to_block,
+        zone_block_count = ?args.zone_block_count,
+        wait_timeout_seconds = ?args.wait_timeout,
         writes_output = args.output.is_some(),
         "generating SPF input"
     );
+    if args.zone_block_count == Some(0) {
+        bail!("--zone-block-count must be greater than zero");
+    }
 
     let started = start_phase("discovery");
     let tempo_provider = connect(&args.tempo_rpc_url, "Tempo").await?;
@@ -209,7 +232,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         args.zone_id,
         expected_zone_chain_id,
     )?;
-    let discovery = discover(
+    let mut discovery = discover(
         &tempo_provider,
         &private_zone_provider,
         args.zone_id,
@@ -229,8 +252,22 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("discovery", started, ());
 
     let started = start_phase("batch extraction");
-    let (parent_header, parent_number, extracted) =
-        discover_batch(&zone_provider, &discovery, args.from_block, args.to_block).await?;
+    let (parent_header, parent_number, extracted) = if let Some(block_count) = args.zone_block_count
+    {
+        let (updated_discovery, parent_header, parent_number, extracted) = discover_counted_batch(
+            &zone_provider,
+            &tempo_provider,
+            discovery,
+            args.from_block,
+            block_count,
+            args.wait_timeout.map(Duration::from_secs),
+        )
+        .await?;
+        discovery = updated_discovery;
+        (parent_header, parent_number, extracted)
+    } else {
+        discover_batch(&zone_provider, &discovery, args.from_block, args.to_block).await?
+    };
     let from_block = extracted
         .first()
         .expect("batch discovery returns a non-empty batch")
@@ -423,40 +460,67 @@ async fn discover(
     if portal_address == Address::ZERO {
         bail!("ZoneInbox reports a zero Tempo portal address");
     }
-    let portal = ZonePortal::new(portal_address, tempo.clone());
-    let portal_zone_id_call = portal.zoneId();
-    let sequencer_call = portal.sequencer();
-    let withdrawal_batch_index_call = portal.withdrawalBatchIndex();
-    let block_hash_call = portal.blockHash();
-    let tempo_block_number_call = portal.lastSyncedTempoBlockNumber();
-    let (
-        portal_zone_id,
-        sequencer,
-        withdrawal_batch_index,
-        portal_block_hash,
-        portal_tempo_block_number,
-    ) = tokio::try_join!(
-        portal_zone_id_call.call(),
-        sequencer_call.call(),
-        withdrawal_batch_index_call.call(),
-        block_hash_call.call(),
-        tempo_block_number_call.call(),
-    )?;
-    if portal_zone_id != zone_id {
+    let portal = read_portal_snapshot(tempo, portal_address).await?;
+    if portal.zone_id != zone_id {
         bail!(
-            "ZoneInbox points to Tempo portal {portal_address}, but that portal reports Zone ID {portal_zone_id} instead of {zone_id}"
+            "ZoneInbox points to Tempo portal {portal_address}, but that portal reports Zone ID {} instead of {zone_id}",
+            portal.zone_id
         );
     }
 
     Ok(Discovery {
         zone_id,
         portal: portal_address,
-        sequencer,
-        portal_withdrawal_batch_index: withdrawal_batch_index,
-        portal_tempo_block_number,
+        sequencer: portal.sequencer,
+        portal_withdrawal_batch_index: portal.withdrawal_batch_index,
+        portal_tempo_block_number: portal.tempo_block_number,
         tempo_chain_id,
-        portal_block_hash,
+        portal_block_hash: portal.block_hash,
     })
+}
+
+async fn read_portal_snapshot(
+    tempo: &DynProvider<TempoNetwork>,
+    portal_address: Address,
+) -> Result<PortalSnapshot> {
+    let portal = ZonePortal::new(portal_address, tempo.clone());
+    let zone_id_call = portal.zoneId();
+    let sequencer_call = portal.sequencer();
+    let withdrawal_batch_index_call = portal.withdrawalBatchIndex();
+    let block_hash_call = portal.blockHash();
+    let tempo_block_number_call = portal.lastSyncedTempoBlockNumber();
+    let (zone_id, sequencer, withdrawal_batch_index, block_hash, tempo_block_number) =
+        tokio::try_join!(
+            zone_id_call.call(),
+            sequencer_call.call(),
+            withdrawal_batch_index_call.call(),
+            block_hash_call.call(),
+            tempo_block_number_call.call(),
+        )
+        .wrap_err_with(|| format!("read Zone portal state from {portal_address}"))?;
+    Ok(PortalSnapshot {
+        zone_id,
+        sequencer,
+        withdrawal_batch_index,
+        tempo_block_number,
+        block_hash,
+    })
+}
+
+fn apply_portal_snapshot(discovery: &mut Discovery, snapshot: PortalSnapshot) -> Result<()> {
+    if snapshot.zone_id != discovery.zone_id {
+        bail!(
+            "Tempo portal {} changed from Zone ID {} to {}",
+            discovery.portal,
+            discovery.zone_id,
+            snapshot.zone_id
+        );
+    }
+    discovery.sequencer = snapshot.sequencer;
+    discovery.portal_withdrawal_batch_index = snapshot.withdrawal_batch_index;
+    discovery.portal_tempo_block_number = snapshot.tempo_block_number;
+    discovery.portal_block_hash = snapshot.block_hash;
+    Ok(())
 }
 
 async fn validate_unrestricted_zone(
@@ -483,14 +547,149 @@ async fn validate_unrestricted_zone(
     Ok(())
 }
 
-async fn discover_batch(
+async fn discover_counted_batch(
+    zone: &DynProvider<TempoNetwork>,
+    tempo: &DynProvider<TempoNetwork>,
+    mut discovery: Discovery,
+    from_override: Option<u64>,
+    block_count: u64,
+    wait_timeout: Option<Duration>,
+) -> Result<(Discovery, TempoHeader, u64, Vec<ExtractedBlock>)> {
+    let wait_started = Instant::now();
+
+    'selection: loop {
+        let from = match from_override {
+            Some(from) => from,
+            None => portal_parent_number(zone, &discovery)
+                .await?
+                .checked_add(1)
+                .ok_or_else(|| eyre!("Zone block number overflow after the portal commitment"))?,
+        };
+        let (_, to) = counted_range(from, block_count)?;
+        info!(
+            from_block = from,
+            to_block = to,
+            block_count,
+            committed_zone_hash = %discovery.portal_block_hash,
+            "waiting for counted Zone block range"
+        );
+
+        let mut last_logged_head = None;
+        loop {
+            let zone_head = if from_override.is_none() {
+                let portal = ZonePortal::new(discovery.portal, tempo.clone());
+                let block_hash_call = portal.blockHash();
+                let (zone_head, portal_block_hash) =
+                    tokio::join!(zone.get_block_number(), block_hash_call.call());
+                let zone_head = zone_head.context("read Zone head while waiting")?;
+                let portal_block_hash =
+                    portal_block_hash.context("read portal block hash while waiting")?;
+                if portal_block_hash != discovery.portal_block_hash {
+                    info!(
+                        old_committed_zone_hash = %discovery.portal_block_hash,
+                        new_committed_zone_hash = %portal_block_hash,
+                        "portal advanced while waiting; rebasing counted range"
+                    );
+                    let snapshot = read_portal_snapshot(tempo, discovery.portal).await?;
+                    apply_portal_snapshot(&mut discovery, snapshot)?;
+                    continue 'selection;
+                }
+                zone_head
+            } else {
+                zone.get_block_number().await?
+            };
+
+            if zone_head >= to {
+                info!(
+                    zone_head,
+                    target_zone_block = to,
+                    waited_ms = wait_started.elapsed().as_millis(),
+                    "counted Zone block range is available"
+                );
+                break;
+            }
+
+            if last_logged_head != Some(zone_head) {
+                info!(
+                    zone_head,
+                    target_zone_block = to,
+                    remaining_blocks = to - zone_head,
+                    waited_ms = wait_started.elapsed().as_millis(),
+                    "waiting for Zone head"
+                );
+                last_logged_head = Some(zone_head);
+            }
+
+            let sleep_for = match wait_timeout {
+                Some(timeout) => {
+                    let elapsed = wait_started.elapsed();
+                    if elapsed >= timeout {
+                        bail!(
+                            "timed out after {:.3}s waiting for Zone block {to}; current head is {zone_head}",
+                            elapsed.as_secs_f64()
+                        );
+                    }
+                    ZONE_HEAD_POLL_INTERVAL.min(timeout - elapsed)
+                }
+                None => ZONE_HEAD_POLL_INTERVAL,
+            };
+            tokio::time::sleep(sleep_for).await;
+        }
+
+        if from_override.is_none() {
+            let snapshot = read_portal_snapshot(tempo, discovery.portal).await?;
+            if snapshot.block_hash != discovery.portal_block_hash {
+                info!(
+                    old_committed_zone_hash = %discovery.portal_block_hash,
+                    new_committed_zone_hash = %snapshot.block_hash,
+                    "portal advanced after Zone target was reached; rebasing counted range"
+                );
+                apply_portal_snapshot(&mut discovery, snapshot)?;
+                continue;
+            }
+            apply_portal_snapshot(&mut discovery, snapshot)?;
+        }
+
+        let (parent_header, parent_number, blocks) =
+            discover_batch(zone, &discovery, from_override, Some(to)).await?;
+
+        if from_override.is_none() {
+            let snapshot = read_portal_snapshot(tempo, discovery.portal).await?;
+            if snapshot.block_hash != discovery.portal_block_hash {
+                info!(
+                    old_committed_zone_hash = %discovery.portal_block_hash,
+                    new_committed_zone_hash = %snapshot.block_hash,
+                    "portal advanced during batch extraction; discarding range and rebasing"
+                );
+                apply_portal_snapshot(&mut discovery, snapshot)?;
+                continue;
+            }
+            apply_portal_snapshot(&mut discovery, snapshot)?;
+        }
+
+        return Ok((discovery, parent_header, parent_number, blocks));
+    }
+}
+
+fn counted_range(from: u64, block_count: u64) -> Result<(u64, u64)> {
+    if from == 0 {
+        bail!("a batch cannot start at Zone genesis block 0");
+    }
+    if block_count == 0 {
+        bail!("--zone-block-count must be greater than zero");
+    }
+    let to = from
+        .checked_add(block_count - 1)
+        .ok_or_else(|| eyre!("Zone block range overflow"))?;
+    Ok((from, to))
+}
+
+async fn portal_parent_number(
     zone: &DynProvider<TempoNetwork>,
     discovery: &Discovery,
-    from_override: Option<u64>,
-    to_override: Option<u64>,
-) -> Result<(TempoHeader, u64, Vec<ExtractedBlock>)> {
-    let portal_parent = match zone.get_block_by_hash(discovery.portal_block_hash).await? {
-        Some(block) => block,
+) -> Result<u64> {
+    match zone.get_block_by_hash(discovery.portal_block_hash).await? {
+        Some(block) => Ok(block.header.number()),
         None => {
             let tip = zone.get_block_number().await?;
             let genesis_hash = zone_header(zone, 0).await?.hash_slow();
@@ -500,8 +699,16 @@ async fn discover_batch(
                 discovery.portal_block_hash
             );
         }
-    };
-    let portal_parent_number = portal_parent.header.number();
+    }
+}
+
+async fn discover_batch(
+    zone: &DynProvider<TempoNetwork>,
+    discovery: &Discovery,
+    from_override: Option<u64>,
+    to_override: Option<u64>,
+) -> Result<(TempoHeader, u64, Vec<ExtractedBlock>)> {
+    let portal_parent_number = portal_parent_number(zone, discovery).await?;
     let default_from = portal_parent_number
         .checked_add(1)
         .ok_or_else(|| eyre!("Zone block number overflow"))?;
@@ -1058,5 +1265,13 @@ mod tests {
     fn parses_hex_and_decimal_rpc_quantities() {
         assert_eq!(parse_quantity("0x10").unwrap(), 16);
         assert_eq!(parse_quantity("10").unwrap(), 10);
+    }
+
+    #[test]
+    fn derives_an_exact_counted_zone_range() {
+        assert_eq!(counted_range(501, 20).unwrap(), (501, 520));
+        assert!(counted_range(0, 20).is_err());
+        assert!(counted_range(501, 0).is_err());
+        assert!(counted_range(u64::MAX, 2).is_err());
     }
 }
