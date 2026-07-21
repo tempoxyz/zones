@@ -7,7 +7,8 @@ use revm::precompile::PrecompileResult;
 use tempo_precompiles::{storage::StorageCtx, test_util::TIP20Setup};
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::{
-    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_ROLE_SLOT, TEMPO_STATE_ADDRESS,
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_ROLE_SLOT, PORTAL_TEMPO_GAS_RATE_SLOT,
+    TEMPO_STATE_ADDRESS,
 };
 
 use crate::{
@@ -54,6 +55,12 @@ impl Harness {
             portal_token_config_slot(token).into(),
             ANCHOR,
             U256::ONE,
+        );
+        l1.insert(
+            PORTAL,
+            PORTAL_TEMPO_GAS_RATE_SLOT.into(),
+            ANCHOR,
+            U256::ZERO,
         );
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -162,14 +169,14 @@ impl Harness {
         self.call(ALICE, call.abi_encode())
     }
 
-    fn set_gas_rate(&mut self, rate: u128) -> PrecompileResult {
-        self.call(
-            SEQUENCER,
-            ZoneOutboxAbi::setTempoGasRateCall {
-                _tempoGasRate: rate,
-            }
-            .abi_encode(),
-        )
+    fn set_gas_rate(&self, rate: u128) -> eyre::Result<()> {
+        self.l1.insert(
+            PORTAL,
+            PORTAL_TEMPO_GAS_RATE_SLOT.into(),
+            ANCHOR,
+            U256::from(rate),
+        );
+        Ok(())
     }
 
     fn set_max_withdrawals(&mut self, max: u32) -> PrecompileResult {
@@ -277,13 +284,9 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
     assert_eq!(
         harness.l1.storage_requests(),
         vec![
-            (
-                PORTAL,
-                keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
-                ANCHOR
-            ),
             (PORTAL, portal_token_config_slot(harness.token), ANCHOR),
             (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
+            (PORTAL, PORTAL_TEMPO_GAS_RATE_SLOT, ANCHOR),
         ]
     );
     Ok(())
@@ -530,10 +533,6 @@ fn fee_rate_and_gas_limit_validation_match_reference() -> eyre::Result<()> {
             .abi_encode(),
         ),
         ZoneOutboxError::gas_limit_too_high(),
-    );
-    assert_revert(
-        harness.set_gas_rate(MAX_GAS_FEE_RATE + 1),
-        ZoneOutboxError::gas_fee_rate_too_high(),
     );
     Ok(())
 }

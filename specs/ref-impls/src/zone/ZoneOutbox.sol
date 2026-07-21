@@ -36,11 +36,6 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev The L1 processor adds fixed overhead around this value.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
-    /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
-    /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
-    ///      Any practical fee rate would be orders of magnitude lower.
-    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
-
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     /// @dev Covers processWithdrawals overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
@@ -58,11 +53,6 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Zone configuration (reads sequencer from L1)
     IZoneConfig public immutable config;
-
-    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
-    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
-    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
-    uint128 public tempoGasRate;
 
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
@@ -103,7 +93,6 @@ contract ZoneOutbox is IZoneOutbox {
 
     error InvalidFallbackRecipient();
     error CallbackDataTooLarge();
-    error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
     error InvalidBlockNumber();
@@ -128,16 +117,9 @@ contract ZoneOutbox is IZoneOutbox {
                             FEE CONFIGURATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Set Tempo gas rate. Only callable by sequencer.
-    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
-    ///      If actual Tempo gas is higher, sequencer covers the difference.
-    ///      If actual Tempo gas is lower, sequencer keeps the surplus.
-    /// @param _tempoGasRate Zone token units per gas unit on Tempo
-    function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
-        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
-        tempoGasRate = _tempoGasRate;
-        emit TempoGasRateUpdated(_tempoGasRate);
+    /// @notice Read the Tempo gas rate from finalized portal state.
+    function tempoGasRate() public view returns (uint128) {
+        return config.tempoGasRate();
     }
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
@@ -503,7 +485,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param gasLimit L1 callback gas limit included in the fee
     /// @return fee The total fee in zone token units
     function _calculateWithdrawalFee(uint64 gasLimit) internal view returns (uint128) {
-        return uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
+        return uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate();
     }
 
     function _validateRevealTo(bytes memory revealTo) internal view {

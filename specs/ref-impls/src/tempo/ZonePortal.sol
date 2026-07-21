@@ -51,8 +51,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
-    ///      This provides a stable pricing basis for deposits while allowing sequencer
-    ///      flexibility to adjust the zoneGasRate based on operational costs.
+    ///      This provides a stable pricing basis for deposits while allowing the admin
+    ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
@@ -159,6 +159,14 @@ contract ZonePortal is IZonePortal {
     /// @dev Solidity packs both enforcement booleans into slot 21.
     bool internal _isAccessEnforced;
     bool internal _isGatewayEnforced;
+
+    /// @dev Reserve the remainder of slot 21 so the cross-domain fee rate has a dedicated slot.
+    uint240 private _enforcementModesPadding;
+
+    /// @notice Tempo gas rate (zone token units per gas unit on Tempo).
+    /// @dev The zone-side outbox reads this value from finalized Tempo state.
+    ///      Withdrawal fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate.
+    uint128 public tempoGasRate;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -317,6 +325,16 @@ contract ZonePortal is IZonePortal {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
+    }
+
+    /// @notice Set Tempo gas rate. Only callable by admin.
+    /// @dev The zone-side outbox reads the finalized value and charges the resulting fee when a
+    ///      withdrawal is requested.
+    /// @param _tempoGasRate Zone token units per gas unit on Tempo
+    function setTempoGasRate(uint128 _tempoGasRate) external onlyAdmin {
+        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        tempoGasRate = _tempoGasRate;
+        emit TempoGasRateUpdated(_tempoGasRate);
     }
 
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.

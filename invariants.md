@@ -28,8 +28,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-ADMIN-NONZERO` | Portal `admin != address(0)` for every zone | 🟡 | Token governance can become permanently unavailable |
-| `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can call `enableToken`, `pauseDeposits`, and `resumeDeposits` | 🟡 | A sequencer or user can enable malicious assets or reopen paused deposits |
-| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set gas rates, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
+| `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can manage tokens, set `zoneGasRate`, `tempoGasRate`, and `bouncebackGas`, and change access configuration | 🟡 | A sequencer or user can enable malicious assets, reopen paused deposits, or misprice user fees |
+| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only an active sequencer can set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, settle, or drain queued work |
 | `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `tempoGasRate` never exceed `MAX_GAS_FEE_RATE` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
 
 ### Token Registry and Supply
@@ -74,7 +74,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-WITHDRAWAL-TOKEN-ENABLED` | Withdrawals can only be requested for enabled tokens | 🔴 | Users can burn unsupported assets with no corresponding portal escrow |
 | `TEMPO-ZONE-WITHDRAWAL-FALLBACK-NONZERO` | Every user withdrawal has a non-zero `zoneFallbackRecipient` | 🔴 | Failed Tempo-side withdrawals cannot return funds to the zone |
-| `TEMPO-ZONE-WITHDRAWAL-FEE-SNAPSHOT` | Withdrawal fee equals `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate` at request time and is burned with the amount | 🟢 | Fee changes retroactively alter user economics or underfund processing |
+| `TEMPO-ZONE-WITHDRAWAL-FEE-SNAPSHOT` | Withdrawal fee equals `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate` read from finalized portal state at request time and is burned with the amount | 🟢 | Fee changes retroactively alter user economics or underfund processing |
 | `TEMPO-ZONE-WITHDRAWAL-BURN-BEFORE-QUEUE` | `requestWithdrawal` burns `amount + fee` before appending the pending withdrawal | 🔴 | Portal can release funds without removing zone supply |
 | `TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS` | `gasLimit <= MAX_WITHDRAWAL_GAS_LIMIT`, callback data is bounded, and over-limit legacy withdrawals bounce back after dequeue | 🟡 | A withdrawal can exceed block gas limits or permanently block the FIFO queue |
 | `TEMPO-ZONE-SENDER-TAG-BINDING` | `senderTag == keccak256(abi.encodePacked(sender, txHash))`, where `txHash` is the current withdrawal request transaction hash | 🟡 | Authenticated withdrawals can reveal or misattribute the sender |

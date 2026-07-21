@@ -51,6 +51,14 @@ contract ZonePortalSymbolic is ZonePortalTest {
         } catch { }
     }
 
+    /// @notice The portal-owned Tempo gas rate is subject to the same cap as zoneGasRate.
+    function check_tempoGasRateAlwaysWithinCap(uint128 rate) external {
+        vm.prank(admin);
+        try portal.setTempoGasRate(rate) {
+            assertLe(uint256(portal.tempoGasRate()), uint256(portal.MAX_GAS_FEE_RATE()));
+        } catch { }
+    }
+
 }
 
 /// @notice Harness exposing the WithdrawalQueueLib ring-buffer over a storage queue so its
@@ -195,21 +203,11 @@ contract ZoneOutboxSymbolic is ZoneOutboxTest {
     function check_withdrawalFeeNeverOverflows(uint64 gasLimit) external {
         vm.assume(gasLimit <= outbox.MAX_WITHDRAWAL_GAS_LIMIT());
 
-        uint128 cap = outbox.MAX_GAS_FEE_RATE();
-        vm.prank(sequencer);
-        outbox.setTempoGasRate(cap);
+        uint128 cap = MAX_GAS_FEE_RATE;
+        _setTempoGasRate(cap);
 
         uint128 fee = outbox.calculateWithdrawalFee(gasLimit);
         assertLe(uint256(fee), uint256(type(uint128).max));
-    }
-
-    /// @notice The stored Tempo gas rate is always within the cap whenever `setTempoGasRate`
-    ///         succeeds, for any input (over-cap inputs revert and are pruned).
-    function check_tempoGasRateAlwaysWithinCap(uint128 rate) external {
-        vm.prank(sequencer);
-        try outbox.setTempoGasRate(rate) {
-            assertLe(uint256(outbox.tempoGasRate()), uint256(outbox.MAX_GAS_FEE_RATE()));
-        } catch { }
     }
 
     /// @notice `calculateWithdrawalFee` rejects any gas limit above MAX_WITHDRAWAL_GAS_LIMIT,

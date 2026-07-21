@@ -9,6 +9,7 @@ import {
     PORTAL_GATEWAY_MODE_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_ROLE_SLOT,
+    PORTAL_TEMPO_GAS_RATE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
     Role
 } from "../interfaces/IZone.sol";
@@ -113,6 +114,12 @@ contract ZoneConfig is IZoneConfig {
         bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, configSlot);
         // TokenConfig.enabled is the first bool in the struct (lowest byte)
         return uint8(uint256(value) & 0xff) != 0;
+    }
+
+    /// @notice Read the Tempo gas rate from the portal's dedicated storage slot.
+    function tempoGasRate() external view returns (uint128) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_TEMPO_GAS_RATE_SLOT);
+        return uint128(uint256(value));
     }
 
     /// @notice Read account allowlist enforcement from the dedicated packed mode slot.
