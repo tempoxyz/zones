@@ -1,6 +1,6 @@
 ---
 name: private-zone-rpc
-description: Interact with authenticated private Tempo Zone RPC endpoints, derive X-Authorization-Token zone auth tokens, identify zone IDs and chain IDs from ZoneFactory or repo metadata, and debug 401/403 auth failures. Use when calling rpc-zone-*-private endpoints, web3_clientVersion, eth_chainId, zone_getZoneInfo, or any private zone JSON-RPC method that needs a zone auth token.
+description: Interact with authenticated private Tempo Zone RPC endpoints, derive X-Authorization-Token zone auth tokens, identify zone IDs and chain IDs from ZoneFactory or repo metadata, and debug 401/403 auth failures. Use when calling rpc-zone-*-private endpoints, web3_clientVersion, eth_chainId, zone_getZoneInfo, zone_getEncryptionKey, or any private zone JSON-RPC method that needs a zone auth token.
 ---
 
 # Private Zone RPC
@@ -59,6 +59,27 @@ use the helper script for one-off calls:
 ```
 
 The helper prints the JSON-RPC body on success and keeps the token out of logs.
+
+## Reading The Active Encryption Key
+
+Any authenticated caller can read the active sequencer encryption key at the
+Zone's processed Tempo head:
+
+```bash
+cast rpc zone_getEncryptionKey \
+  --rpc-url https://private-zone-rpc.example.com \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+```
+
+The result contains JSON-RPC quantities for `keyIndex` and
+`tempoBlockNumber`, the canonical `portalAddress`, and a compressed secp256k1
+`publicKey` with `x` and a numeric `prefix` of `2` or `3`. The block number is
+the exact processed Tempo block used for the key lookup, so the result never
+claims a rotation newer than the Zone's observed L1 state.
+
+An authenticated request returns JSON-RPC error `-32007` when no encryption
+key can be resolved at that processed head. Missing or invalid authentication
+is rejected before method dispatch as described below.
 
 ## Finding Zone ID And Chain ID
 

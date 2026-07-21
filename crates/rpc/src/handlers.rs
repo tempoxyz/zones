@@ -182,6 +182,10 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `zone_getZoneInfo()` — returns zone metadata.
     fn zone_get_zone_info(&self, auth: AuthContext) -> BoxFut<'_>;
 
+    /// `zone_getEncryptionKey()` — returns the active encryption key resolved
+    /// at the Zone's processed Tempo head.
+    fn zone_get_encryption_key(&self, auth: AuthContext) -> BoxFut<'_>;
+
     /// `zone_getDepositStatus(tempoBlockNumber)` — returns per-caller deposit
     /// processing state for a Tempo L1 block.
     fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_>;
@@ -339,6 +343,11 @@ pub async fn dispatch(
             id,
             "zone_getZoneInfo",
             api.zone_get_zone_info(auth.clone()).await,
+        ),
+        "zone_getEncryptionKey" => api_result(
+            id,
+            "zone_getEncryptionKey",
+            api.zone_get_encryption_key(auth.clone()).await,
         ),
         "zone_getDepositStatus" => handle_zone_get_deposit_status(id, raw, auth, api).await,
         _ => {
@@ -859,6 +868,20 @@ mod tests {
             })
         }
 
+        fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
+            Box::pin(async move {
+                to_raw(&json!({
+                    "keyIndex": "0x2",
+                    "portalAddress": format!("{:#x}", Address::repeat_byte(0x33)),
+                    "publicKey": {
+                        "x": format!("{:#x}", B256::repeat_byte(0x44)),
+                        "prefix": 3,
+                    },
+                    "tempoBlockNumber": "0x2a",
+                }))
+            })
+        }
+
         fn zone_get_deposit_status(
             &self,
             tempo_block_number: u64,
@@ -961,6 +984,19 @@ mod tests {
             format!("{:#x}", Address::repeat_byte(0x22))
         );
         assert_eq!(body["chainId"], "0x2a");
+    }
+
+    #[tokio::test]
+    async fn dispatches_zone_get_encryption_key() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(&request("zone_getEncryptionKey", json!([])), &auth(), &api).await;
+
+        assert!(resp.error.is_none());
+        let body: serde_json::Value =
+            serde_json::from_str(resp.result.as_ref().unwrap().get()).unwrap();
+        assert_eq!(body["keyIndex"], "0x2");
+        assert_eq!(body["publicKey"]["prefix"], 3);
+        assert_eq!(body["tempoBlockNumber"], "0x2a");
     }
 
     #[tokio::test]

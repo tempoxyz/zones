@@ -11,6 +11,7 @@ use crate::utils::{
     DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, ZoneAccount, now_secs,
     start_zone_with_private_rpc, start_zone_with_private_rpc_l1,
     start_zone_with_private_rpc_l1_with_encryption,
+    start_zone_with_private_rpc_l1_without_encryption,
 };
 use alloy::{
     primitives::{Address, B256, U256, address, hex},
@@ -1172,6 +1173,120 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
             format!("{alpha_token:#x}")
         ],
     );
+
+    Ok(())
+}
+
+fn encryption_public_key(secret_key: &k256::SecretKey) -> (String, u8) {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let encoded = secret_key.public_key().to_encoded_point(true);
+    (
+        format!("{:#x}", B256::from_slice(encoded.x().unwrap())),
+        encoded.as_bytes()[0],
+    )
+}
+
+/// `zone_getEncryptionKey` is authenticated and returns a stable error when
+/// no key exists at the Zone's processed Tempo head.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_get_encryption_key_requires_auth_and_reports_missing_key() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1_without_encryption().await?;
+    let (status, _) = ctx
+        .call_no_auth("zone_getEncryptionKey", serde_json::json!([]))
+        .await?;
+    assert_eq!(status.as_u16(), 401, "missing auth should return 401");
+
+    let response = ctx
+        .call_as_user(
+            "zone_getEncryptionKey",
+            serde_json::json!([]),
+            &ctx.l1().user_signer(),
+        )
+        .await?;
+    assert_eq!(response["error"]["code"], -32007);
+    assert_eq!(response["error"]["message"], "Encryption key unavailable");
+    assert!(
+        response["error"]["data"]["tempoBlockNumber"]
+            .as_str()
+            .is_some()
+    );
+
+    Ok(())
+}
+
+/// The method resolves each key at the exact Tempo head processed by the Zone.
+/// After rotation it returns the new active key even while the previous key is
+/// still valid during the portal grace period.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_get_encryption_key_tracks_processed_key_rotation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1_with_encryption().await?;
+    let portal_address = ctx.portal_address();
+    let caller = ctx.l1().user_signer();
+    let first_key = k256::SecretKey::from(ctx.l1().dev_signer().credential());
+    let (first_x, first_prefix) = encryption_public_key(&first_key);
+
+    let first = ctx
+        .call_as_user("zone_getEncryptionKey", serde_json::json!([]), &caller)
+        .await?;
+    assert!(first.get("error").is_none(), "unexpected response: {first}");
+    assert_eq!(first["result"]["keyIndex"], "0x0");
+    assert_eq!(
+        first["result"]["portalAddress"],
+        format!("{portal_address:#x}")
+    );
+    assert_eq!(first["result"]["publicKey"]["x"], first_x);
+    assert_eq!(first["result"]["publicKey"]["prefix"], first_prefix);
+    let first_tempo_block = u64::from_str_radix(
+        first["result"]["tempoBlockNumber"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
+    )?;
+
+    let second_key = k256::SecretKey::from_slice(&[0x42; 32])?;
+    let second_key_block = ctx
+        .l1()
+        .set_sequencer_encryption_key(portal_address, &second_key)
+        .await?;
+    ctx.zone
+        .wait_for_tempo_block_number(second_key_block, DEFAULT_TIMEOUT)
+        .await?;
+
+    let old_key_valid = ZonePortal::new(portal_address, ctx.l1().provider())
+        .isEncryptionKeyValid(U256::ZERO)
+        .call()
+        .await?;
+    assert!(
+        old_key_valid.valid,
+        "the previous key should remain valid during the grace period"
+    );
+
+    let (second_x, second_prefix) = encryption_public_key(&second_key);
+    let second = ctx
+        .call_as_user("zone_getEncryptionKey", serde_json::json!([]), &caller)
+        .await?;
+    assert!(
+        second.get("error").is_none(),
+        "unexpected response: {second}"
+    );
+    assert_eq!(second["result"]["keyIndex"], "0x1");
+    assert_eq!(second["result"]["publicKey"]["x"], second_x);
+    assert_eq!(second["result"]["publicKey"]["prefix"], second_prefix);
+    let second_tempo_block = u64::from_str_radix(
+        second["result"]["tempoBlockNumber"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x"),
+        16,
+    )?;
+    assert!(second_tempo_block >= second_key_block);
+    assert!(second_tempo_block > first_tempo_block);
 
     Ok(())
 }

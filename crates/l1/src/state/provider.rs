@@ -17,6 +17,7 @@ use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
+use tempo_zone_contracts::ZonePortal;
 use tracing::{debug, info, warn};
 use zone_precompiles::{L1StorageReader, SequencerExt};
 
@@ -256,6 +257,24 @@ impl L1StateProvider {
         let value = self.fetch_slot(address, slot, block_number).await?;
         self.cache.write().set(address, slot, block_number, value);
         Ok(value)
+    }
+
+    /// Returns the canonical ZonePortal address configured for this Zone.
+    pub fn portal_address(&self) -> Address {
+        self.portal_address
+    }
+
+    /// Returns the active portal encryption key at an exact Tempo block.
+    pub async fn encryption_key_at(
+        &self,
+        block_id: BlockId,
+    ) -> Result<(
+        ZonePortal::sequencerEncryptionKeyReturn,
+        alloy_primitives::U256,
+    )> {
+        Ok(ZonePortal::new(self.portal_address, &self.provider)
+            .encryption_key_at(block_id)
+            .await?)
     }
 
     /// Expose the shared cache handle for external use (e.g. the engine).

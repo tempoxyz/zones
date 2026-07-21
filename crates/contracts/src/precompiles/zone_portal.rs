@@ -257,6 +257,7 @@ crate::sol! {
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function isEncryptionKeyValid(uint256 keyIndex) external view returns (bool valid, uint64 expiresAtBlock);
         function claimRefund(address token) external returns (uint128 amount);
     }
 }
@@ -311,8 +312,23 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         ),
         alloy_contract::Error,
     > {
-        let key_call = self.sequencerEncryptionKey();
-        let count_call = self.encryptionKeyCount();
+        self.encryption_key_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+    }
+
+    /// Fetches the active sequencer encryption key and its index at `block_id`.
+    pub async fn encryption_key_at(
+        &self,
+        block_id: alloy_rpc_types_eth::BlockId,
+    ) -> Result<
+        (
+            ZonePortal::sequencerEncryptionKeyReturn,
+            alloy_primitives::U256,
+        ),
+        alloy_contract::Error,
+    > {
+        let key_call = self.sequencerEncryptionKey().block(block_id);
+        let count_call = self.encryptionKeyCount().block(block_id);
         let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
         let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
         Ok((key, key_index))

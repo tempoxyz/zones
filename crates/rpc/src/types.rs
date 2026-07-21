@@ -140,6 +140,17 @@ impl JsonRpcError {
         }
     }
 
+    /// Encryption key unavailable at the Zone's processed Tempo head (-32007).
+    pub fn encryption_key_unavailable(tempo_block_number: u64) -> Self {
+        Self {
+            code: -32007,
+            message: "Encryption key unavailable".to_string(),
+            data: Some(serde_json::json!({
+                "tempoBlockNumber": U64::from(tempo_block_number),
+            })),
+        }
+    }
+
     /// Parse error — invalid JSON (-32700).
     pub fn parse_error(msg: impl Into<String>) -> Self {
         Self {
@@ -181,6 +192,29 @@ pub struct ZoneInfoResponse {
     pub sequencer: Address,
     /// The zone chain ID.
     pub chain_id: U64,
+}
+
+/// Response payload for `zone_getEncryptionKey`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncryptionKeyResponse {
+    /// Zero-based index of the active key at `tempo_block_number`.
+    pub key_index: U256,
+    /// The Zone's canonical L1 portal address.
+    pub portal_address: Address,
+    /// The active sequencer encryption public key.
+    pub public_key: EncryptionPublicKey,
+    /// The exact processed Tempo block against which the key was resolved.
+    pub tempo_block_number: U64,
+}
+
+/// SEC1 compressed public-key components used by viem's Zone actions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EncryptionPublicKey {
+    /// X-coordinate of the secp256k1 public key.
+    pub x: B256,
+    /// SEC1 compressed key prefix (`2` for even Y, `3` for odd Y).
+    pub prefix: u8,
 }
 
 /// Response payload for `zone_getDepositStatus`.
@@ -277,6 +311,7 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "web3_sha3"
         | "zone_getAuthorizationTokenInfo"
         | "zone_getZoneInfo"
+        | "zone_getEncryptionKey"
         | "zone_getDepositStatus" => Some(MethodTier::Public),
 
         // Fetch-then-check: public but redacted based on caller identity
@@ -348,4 +383,44 @@ pub fn to_raw<T: serde::Serialize>(value: &T) -> Result<Box<RawValue>, JsonRpcEr
 /// Shorthand for wrapping any `Display` error into a [`JsonRpcError::internal`].
 pub fn internal(e: impl std::fmt::Display) -> JsonRpcError {
     JsonRpcError::internal(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encryption_key_response_serializes_like_viem_zone_key() {
+        let response = EncryptionKeyResponse {
+            key_index: U256::from(2),
+            portal_address: Address::repeat_byte(0x11),
+            public_key: EncryptionPublicKey {
+                x: B256::repeat_byte(0x22),
+                prefix: 3,
+            },
+            tempo_block_number: U64::from(42),
+        };
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap(),
+            serde_json::json!({
+                "keyIndex": "0x2",
+                "portalAddress": format!("{:#x}", Address::repeat_byte(0x11)),
+                "publicKey": {
+                    "x": format!("{:#x}", B256::repeat_byte(0x22)),
+                    "prefix": 3,
+                },
+                "tempoBlockNumber": "0x2a",
+            })
+        );
+    }
+
+    #[test]
+    fn encryption_key_unavailable_includes_processed_tempo_head() {
+        let error = JsonRpcError::encryption_key_unavailable(42);
+
+        assert_eq!(error.code, -32007);
+        assert_eq!(error.message, "Encryption key unavailable");
+        assert_eq!(error.data.unwrap()["tempoBlockNumber"], "0x2a");
+    }
 }

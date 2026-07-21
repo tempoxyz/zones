@@ -316,6 +316,11 @@ impl ZoneEvmConfig {
     pub fn tempo_chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
     }
+
+    /// Returns the Zone's shared Tempo L1 state provider.
+    pub fn l1_state_provider(&self) -> &L1StateProvider {
+        &self.zone_factory.l1_reader
+    }
 }
 
 impl BlockExecutorFactory for ZoneEvmConfig {

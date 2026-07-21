@@ -330,6 +330,10 @@ cast rpc zone_getAuthorizationTokenInfo \
   --rpc-url http://localhost:8544 \
   --rpc-headers "X-Authorization-Token: $TOKEN"
 
+cast rpc zone_getEncryptionKey \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+
 cast rpc eth_blockNumber \
   --rpc-url http://localhost:8544 \
   --rpc-headers "X-Authorization-Token: $TOKEN"
