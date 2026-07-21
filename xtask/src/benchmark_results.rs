@@ -90,6 +90,8 @@ struct ScenarioReport {
     maximum_in_flight: usize,
     steps: Vec<StepReport>,
     total_scenario_latency: Latency,
+    #[serde(default)]
+    failures: Vec<FailureReport>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,6 +116,14 @@ struct StepReport {
     success: u64,
     failed: u64,
     latency: Latency,
+}
+
+#[derive(Debug, Deserialize)]
+struct FailureReport {
+    step_index: usize,
+    step_name: String,
+    classification: String,
+    count: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,7 +157,10 @@ struct ScenarioDefinition {
 
 #[derive(Debug, Deserialize)]
 struct ScenarioStep {
-    save: String,
+    #[serde(default)]
+    save: Option<String>,
+    #[serde(default, rename = "timeout")]
+    _timeout: Option<serde_yaml::Value>,
     #[serde(flatten)]
     operation: BTreeMap<String, serde_yaml::Value>,
 }
@@ -198,7 +211,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
         report.completed,
         report.failed,
         report.timed_out,
-        format_seconds(elapsed_secs),
+        format_seconds(report.elapsed_ms as f64 / 1_000.0),
     )?;
     writeln!(
         output,
@@ -209,7 +222,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     )?;
 
     writeln!(output, "## Throughput\n")?;
-    writeln!(output, "| Scope | Successful operations | Effective rate |")?;
+    writeln!(output, "| Scope | Count | Effective rate |")?;
     writeln!(output, "| --- | ---: | ---: |")?;
     writeln!(
         output,
@@ -218,23 +231,26 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     )?;
     writeln!(
         output,
-        "| All submitted user transactions | {submitted} | **{aggregate_tps:.3} TPS** |",
+        "| All successful user submit steps | {submitted} | **{aggregate_tps:.3} TPS** |",
     )?;
     for chain in &report.configuration.chains {
-        let successes = submit_steps
-            .iter()
-            .filter(|step| step.chain == chain.name)
-            .try_fold(0_u64, |total, step| {
-                total
-                    .checked_add(step.report.success)
-                    .ok_or_else(|| eyre::eyre!("successful chain submit count overflow"))
-            })?;
-        if successes == 0 {
+        let mut has_submit_step = false;
+        let mut successes = 0_u64;
+        for step in &submit_steps {
+            if step.chain != chain.name {
+                continue;
+            }
+            has_submit_step = true;
+            successes = successes
+                .checked_add(step.report.success)
+                .ok_or_else(|| eyre::eyre!("successful chain submit count overflow"))?;
+        }
+        if !has_submit_step {
             continue;
         }
         writeln!(
             output,
-            "| {} user transactions (chain ID {}) | {} | {:.3} TPS |",
+            "| {} successful user submit steps (chain ID {}) | {} | {:.3} TPS |",
             code(&chain.name),
             chain.chain_id,
             successes,
@@ -246,7 +262,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     writeln!(output, "### Transaction legs\n")?;
     writeln!(
         output,
-        "| Step | Chain | Successful | Failed | Effective TPS | RPC submit p50 | RPC submit p95 |"
+        "| Step | Chain | Successful | Failed | Effective TPS | Submit-step p50 | Submit-step p95 |"
     )?;
     writeln!(output, "| --- | --- | ---: | ---: | ---: | ---: | ---: |")?;
     for step in &submit_steps {
@@ -264,7 +280,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     }
     writeln!(output)?;
 
-    writeln!(output, "## End-to-end journey latency\n")?;
+    writeln!(output, "## Completed journey latency\n")?;
     write_latency_header(&mut output)?;
     write_latency_row(&mut output, &report.total_scenario_latency)?;
     writeln!(output)?;
@@ -295,9 +311,26 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     }
     writeln!(output)?;
 
+    if !report.failures.is_empty() {
+        writeln!(output, "## Failure classifications\n")?;
+        writeln!(output, "| Step | Classification | Count |")?;
+        writeln!(output, "| --- | --- | ---: |")?;
+        for failure in &report.failures {
+            writeln!(
+                output,
+                "| {} (# {}) | {} | {} |",
+                code(&failure.step_name),
+                failure.step_index,
+                code(&failure.classification),
+                failure.count
+            )?;
+        }
+        writeln!(output)?;
+    }
+
     writeln!(
         output,
-        "> Effective rates use the complete measured window, including ramp-up and drain. Aggregate user TPS sums submissions across chains and is not a single-chain saturation result. Setup outside the measured scenario is excluded. Submit latency ends at RPC acceptance; receipt and log waits capture subsequent execution and cross-chain progress."
+        "> Effective rates use the complete measured window, including ramp-up and drain. Aggregate user TPS sums submit steps across chains and is not a single-chain saturation result. Setup outside the measured scenario is excluded. A submit step ends at RPC acceptance by default, or at a successful receipt when configured with `await: receipt`; receipt and log wait steps capture subsequent execution and cross-chain progress."
     )?;
 
     Ok(output)
@@ -385,18 +418,22 @@ fn resolve_steps<'a>(
                 index
             );
             ensure!(
-                reported.name == rendered.save,
-                "report step {} is named {} but rendered scenario saves it as {}",
-                index,
-                reported.name,
-                rendered.save
-            );
-            ensure!(
                 rendered.operation.len() == 1,
                 "rendered scenario step {} must contain exactly one operation",
-                rendered.save
+                index + 1
             );
             let (kind, body) = rendered.operation.iter().next().expect("length checked");
+            let expected_name = rendered
+                .save
+                .clone()
+                .unwrap_or_else(|| format!("step_{}_{}", index + 1, kind));
+            ensure!(
+                reported.name == expected_name,
+                "report step {} is named {} but rendered scenario names it {}",
+                index,
+                reported.name,
+                expected_name
+            );
             ensure!(
                 reported.kind == *kind,
                 "report step {} has kind {} but rendered scenario uses {}",
@@ -407,19 +444,19 @@ fn resolve_steps<'a>(
             let body = body.as_mapping().ok_or_else(|| {
                 eyre::eyre!(
                     "rendered scenario step {} operation must be a mapping",
-                    rendered.save
+                    expected_name
                 )
             })?;
             let chain = body
                 .get(serde_yaml::Value::String("chain".to_owned()))
                 .and_then(serde_yaml::Value::as_str)
                 .ok_or_else(|| {
-                    eyre::eyre!("rendered scenario step {} has no chain", rendered.save)
+                    eyre::eyre!("rendered scenario step {} has no chain", expected_name)
                 })?;
             ensure!(
                 scenario.chains.contains_key(chain),
                 "rendered scenario step {} references unknown chain {}",
-                rendered.save,
+                expected_name,
                 chain
             );
             validate_latency(
@@ -474,7 +511,7 @@ fn render_phase_results(report: &PhaseReport) -> Result<String> {
         "phase measured time must be greater than zero"
     );
     validate_nonnegative_finite("phase TPS", report.tps)?;
-    validate_nonnegative_finite("phase success rate", report.success_rate)?;
+    validate_nonnegative_finite("phase acceptance rate", report.success_rate)?;
     ensure!(
         report.success <= report.sent,
         "successful count exceeds sent count"
@@ -483,17 +520,12 @@ fn render_phase_results(report: &PhaseReport) -> Result<String> {
         report.failed <= report.sent,
         "failed count exceeds sent count"
     );
-    ensure!(
-        report.success <= report.sent - report.failed,
-        "resolved count exceeds sent count"
-    );
-
     let mut output = String::new();
     writeln!(output, "# Zones benchmark results\n")?;
     writeln!(output, "## Outcome\n")?;
     writeln!(
         output,
-        "| Sent | Successful | Failed | Success rate | Measured time |"
+        "| Sent | RPC accepted | Failed | Acceptance rate | Measured time |"
     )?;
     writeln!(output, "| ---: | ---: | ---: | ---: | ---: |")?;
     writeln!(
@@ -516,7 +548,7 @@ fn render_phase_results(report: &PhaseReport) -> Result<String> {
     )?;
     writeln!(
         output,
-        "| Successful transactions | **{:.3} TPS** |\n",
+        "| RPC-accepted transactions | **{:.3} TPS** |\n",
         report.success as f64 / report.elapsed_secs
     )?;
 
@@ -528,7 +560,7 @@ fn render_phase_results(report: &PhaseReport) -> Result<String> {
         writeln!(
             output,
             "| {} | {} | {} | {} | {} | {} | {} |\n",
-            report.sent,
+            report.success,
             format_millis(latency.min_ms),
             format_millis(latency.mean_ms),
             format_millis(latency.p50_ms),
@@ -540,7 +572,7 @@ fn render_phase_results(report: &PhaseReport) -> Result<String> {
 
     writeln!(
         output,
-        "> Rates use the complete measured window, including ramp-up and drain. Latency ends when the RPC returns; setup transactions are excluded from the measured phase report."
+        "> Rates use the complete measured window, including ramp-up and drain. Latency ends when the RPC returns; setup transactions are excluded from the measured phase report. RPC-accepted and failed counts can overlap when an accepted transaction later reverts or its receipt wait fails."
     )?;
     Ok(output)
 }
@@ -698,9 +730,13 @@ scenario:
         let output = render_results(REPORT, Some(SCENARIO)).unwrap();
 
         assert!(output.contains("**5.000 journeys/s**"));
-        assert!(output.contains("All submitted user transactions | 299 | **14.950 TPS**"));
-        assert!(output.contains("`l1` user transactions (chain ID 1337) | 100 | 5.000 TPS"));
-        assert!(output.contains("`zone` user transactions (chain ID 421700001) | 199 | 9.950 TPS"));
+        assert!(output.contains("All successful user submit steps | 299 | **14.950 TPS**"));
+        assert!(
+            output.contains("`l1` successful user submit steps (chain ID 1337) | 100 | 5.000 TPS")
+        );
+        assert!(output.contains(
+            "`zone` successful user submit steps (chain ID 421700001) | 199 | 9.950 TPS"
+        ));
         assert!(output.contains("`withdrawal` | `zone` | 99 | 1 | 4.950"));
         assert!(output.contains("`deposit_processed` | `zone` | `wait_log`"));
         assert!(output.contains("4.100 s"));
@@ -710,7 +746,7 @@ scenario:
     fn rejects_a_report_that_does_not_match_the_rendered_scenario() {
         let mismatch = SCENARIO.replace("save: activity", "save: transfer");
         let error = render_results(REPORT, Some(&mismatch)).unwrap_err();
-        assert!(error.to_string().contains("saves it as transfer"));
+        assert!(error.to_string().contains("names it transfer"));
     }
 
     #[test]
@@ -720,11 +756,50 @@ scenario:
     }
 
     #[test]
+    fn accepts_optional_step_names_and_timeouts() {
+        let scenario = SCENARIO.replace("      save: withdrawal", "      timeout: 2s");
+        let report = REPORT.replace("\"name\": \"withdrawal\"", "\"name\": \"step_4_submit\"");
+        let output = render_results(&report, Some(&scenario)).unwrap();
+
+        assert!(output.contains("`step_4_submit` | `zone`"));
+    }
+
+    #[test]
+    fn renders_scenario_failure_classifications_without_sample_details() {
+        let report = REPORT.replace(
+            "\"timed_out\": 0,",
+            "\"timed_out\": 1, \"failures\": [{\"step_index\": 3, \"step_name\": \"withdrawal\", \"classification\": \"timeout\", \"count\": 1, \"sample_detail\": \"secret\"}],",
+        );
+        let output = render_results(&report, Some(SCENARIO)).unwrap();
+
+        assert!(output.contains("`withdrawal` (# 3) | `timeout` | 1"));
+        assert!(!output.contains("secret"));
+    }
+
+    #[test]
+    fn keeps_chains_whose_submit_steps_all_failed() {
+        let mut report: serde_json::Value = serde_json::from_str(REPORT).unwrap();
+        for step in report["steps"].as_array_mut().unwrap() {
+            if step["index"].as_u64().is_some_and(|index| index >= 2) {
+                step["success"] = 0.into();
+            }
+        }
+        let output =
+            render_results(&serde_json::to_string(&report).unwrap(), Some(SCENARIO)).unwrap();
+
+        assert!(
+            output.contains(
+                "`zone` successful user submit steps (chain ID 421700001) | 0 | 0.000 TPS"
+            )
+        );
+    }
+
+    #[test]
     fn renders_an_independent_phase_report() {
         let report = r#"{
           "sent": 100,
           "success": 99,
-          "failed": 1,
+          "failed": 100,
           "elapsed_secs": 10.0,
           "tps": 10.0,
           "success_rate": 99.0,
@@ -740,8 +815,8 @@ scenario:
         let output = render_results(report, None).unwrap();
 
         assert!(output.contains("Attempted transactions | **10.000 TPS**"));
-        assert!(output.contains("Successful transactions | **9.900 TPS**"));
-        assert!(output.contains("| 100 | 99 | 1 | 99.000% | 10.000 s |"));
+        assert!(output.contains("RPC-accepted transactions | **9.900 TPS**"));
+        assert!(output.contains("| 100 | 99 | 100 | 99.000% | 10.000 s |"));
     }
 
     #[test]

@@ -460,15 +460,17 @@ completed local run with:
 
 ```bash
 cargo run -p tempo-xtask -- benchmark-results \
-  --report target/zones-benchmark/roundtrip-report.json \
-  --scenario target/zones-benchmark/roundtrip-scenario.yml \
+  --report target/zones-benchmark/report-roundtrip.json \
+  --scenario target/zones-benchmark/roundtrip/roundtrip-scenario.yml \
   --output target/zones-benchmark/summary.md
 ```
 
 The renderer validates that the report and scenario steps still match before
 using each step's configured chain to calculate aggregate, per-chain, and
 per-submit user throughput. It does not need the benchmark mnemonic or RPC
-access.
+access. For an independent phase report, omit `--scenario`; the page then shows
+attempted and RPC-accepted transaction TPS plus RPC response latency when it
+was collected.
 
 ## Run one phase
 
@@ -658,17 +660,18 @@ Scenario mode writes its journey and per-step latency JSON report, but it does
 not scrape the node metric endpoints and has no ClickHouse benchmark reporter.
 The workflow combines that report with the rendered scenario to publish a
 scenario-native results page. It reports completed journeys per second,
-aggregate and per-chain submitted user TPS, whole-journey latency, and latency
-for every measured submit and wait step. The generated Markdown is also
-included in the run artifact.
+aggregate and per-chain successful submit-step TPS, completed-journey latency,
+and latency for every measured submit and wait step. The generated Markdown is
+also included in the run artifact.
 
 These rates cover the complete measured window, including ramp-up and drain;
 they are not a saturation or single-chain capacity claim. Aggregate user TPS
-sums successful submit steps across distinct chains. Submit-step latency ends
-when the RPC accepts the transaction, while receipt and log waits report the
-subsequent execution and cross-chain progress. Untimed bootstrap and approval
-setup is excluded. The page does not claim the node-metric/ClickHouse reporting
-available to Tempo's existing single-chain benchmark harness.
+sums successful submit steps across distinct chains. A submit step ends when
+the RPC accepts the transaction by default, or when a successful receipt arrives
+if the step uses `await: receipt`; receipt and log wait steps report subsequent
+execution and cross-chain progress. Untimed bootstrap and approval setup is
+excluded. The page does not claim the node-metric/ClickHouse reporting available
+to Tempo's existing single-chain benchmark harness.
 
 The pinned txgen scenario runtime currently serializes expiring-nonce activity
 submissions through one internal fee-uniqueness scheduling lane until each RPC

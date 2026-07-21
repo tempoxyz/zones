@@ -408,22 +408,31 @@ jobs:
           fi
 
       - name: Publish benchmark results
-        if: success()
+        if: ${{ !cancelled() }}
         env:
           SUMMARY_STATE_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
         run: |
           set -euo pipefail
           summary=target/zones-benchmark/summary.md
+          mkdir -p "$(dirname "$summary")"
           results_args=(
             --report "$ZONES_BENCH_REPORT"
             --output "$summary"
           )
-          if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
-            results_args+=(
-              --scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml"
-            )
+          if [ -s "$ZONES_BENCH_REPORT" ]; then
+            if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+              results_args+=(
+                --scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml"
+              )
+            fi
+            "$ZONES_XTASK_BIN" benchmark-results "${results_args[@]}"
+          else
+            {
+              echo "# Zones benchmark results"
+              echo
+              echo "> No txgen report was produced. See the benchmark and node logs for the setup or runtime failure."
+            } > "$summary"
           fi
-          "$ZONES_XTASK_BIN" benchmark-results "${results_args[@]}"
 
           unit=Transactions
           rate="Target TPS"
@@ -441,12 +450,12 @@ jobs:
             echo "- Maximum concurrency: \`$ZONES_BENCH_MAX_CONCURRENT\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
             echo "- Tempo L1 state bloat: \`bloat=$SUMMARY_STATE_BLOAT_GIB\` (\`$((10#$SUMMARY_STATE_BLOAT_GIB * 1000)) MiB\` per validator)"
-            echo "- Target: \`$ZONES_BENCH_TARGET_ID\`"
+            echo "- Target: \`${ZONES_BENCH_TARGET_ID:-unavailable}\`"
             echo "- Zones revision: \`$ZONES_BENCH_ZONES_REF\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
-            echo "- L1 block/general gas limits: \`$ZONES_BENCH_L1_GAS_LIMIT\` / \`$ZONES_BENCH_L1_GENERAL_GAS_LIMIT\`"
+            echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
           } >> "$summary"
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
 
