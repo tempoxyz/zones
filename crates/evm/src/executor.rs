@@ -3,11 +3,15 @@
 //! A simplified block executor for zone nodes that wraps [`EthBlockExecutor`] directly.
 //! Unlike the Tempo L1 [`TempoBlockExecutor`], this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
+//! It does enforce the Zone-specific `advanceTempo` / `finalizeWithdrawalBatch` sequence.
 
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
+        ExecutableTx, GasOutput,
+    },
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
@@ -21,14 +25,20 @@ use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 
-use crate::{ZoneEvm, tx_context};
+use crate::{
+    ZoneEvm, tx_context,
+    zone_evm::block::{ZoneBlockSequence, ZoneBlockTransactionKind, classify_transaction},
+};
 
 /// Simplified block executor for zone nodes.
 ///
 /// Wraps [`EthBlockExecutor`] without any subblock validation, gas-section tracking,
-/// or end-of-block metadata system transaction requirements.
+/// or Tempo end-of-block metadata system transaction requirements. Zone system transaction
+/// ordering is tracked separately from committed receipts.
 pub struct ZoneBlockExecutor<'a, DB: Database, I> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I>, &'a ZoneChainSpec, TempoReceiptBuilder>,
+    sequence: ZoneBlockSequence,
+    pending_transaction_kind: Option<ZoneBlockTransactionKind>,
 }
 
 impl<'a, DB, I> ZoneBlockExecutor<'a, DB, I>
@@ -49,6 +59,8 @@ where
                 chain_spec,
                 TempoReceiptBuilder::default(),
             ),
+            sequence: ZoneBlockSequence::default(),
+            pending_transaction_kind: None,
         }
     }
 
@@ -103,6 +115,16 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
+        let kind = classify_transaction(&tx_env).map_err(block_validation_error)?;
+        self.sequence
+            .validate_next(
+                kind,
+                self.inner.receipts.len(),
+                self.inner.ctx.tx_count_hint,
+            )
+            .map_err(block_validation_error)?;
+        self.pending_transaction_kind = Some(kind);
+
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
         self.override_validator_token();
@@ -113,12 +135,17 @@ where
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
-        self.inner.commit_transaction(output)
+        let gas = self.inner.commit_transaction(output);
+        if let Some(kind) = self.pending_transaction_kind.take() {
+            self.sequence.commit(kind);
+        }
+        gas
     }
 
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        self.sequence.finish().map_err(block_validation_error)?;
         self.inner.finish()
     }
 
@@ -133,6 +160,10 @@ where
     fn receipts(&self) -> &[Self::Receipt] {
         self.inner.receipts()
     }
+}
+
+fn block_validation_error(error: tempo_revm::TempoInvalidTransaction) -> BlockExecutionError {
+    BlockValidationError::msg(error.to_string()).into()
 }
 
 #[cfg(test)]

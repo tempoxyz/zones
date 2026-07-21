@@ -744,15 +744,17 @@ Sequencer encryption keys are already published (used for encrypted deposits), s
 
 Zone transactions specify which enabled TIP-20 token to use for gas fees via a `feeToken` field. The sequencer accepts all enabled tokens as gas. Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit.
 
+Public transaction-pool admission also requires the recovered transaction sender to hold a nonzero balance of at least one token currently enabled for the zone. Token enablement is tracked independently of TIP-403 policy-cache entries, because an enabled token can continue using the default transfer policy. This is an admission guardrail rather than a consensus balance rule: a transaction already in the pool may become ineligible for other state-dependent reasons before block construction.
+
 ### Block Structure
 
 Each zone block contains system transactions and user transactions in a fixed order:
 
-1. `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` (optional, at the start of the block). Advances the zone's view of Tempo, enables newly-bridged tokens, processes any pending deposits, and verifies encrypted deposit decryptions. If omitted, the zone's Tempo binding carries forward from the previous block.
+1. Exactly one `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` system transaction, as the first transaction in the block. It advances the zone's view of Tempo, enables newly-bridged tokens, processes any pending deposits, and verifies encrypted deposit decryptions.
 2. User transactions, executed in order.
-3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called at each batch boundary even if there are zero withdrawals so the batch index advances. The builder may execute it as a zone system transaction with `msg.sender == address(0)`.
+3. At most one `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` system transaction, which must be the final transaction when present. It is required in the final block of a batch and absent in intermediate blocks. It constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. It must be called at each batch boundary even if there are zero withdrawals so the batch index advances.
 
-A batch covers one or more zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The sequencer finalizes when withdrawals are present or when the current zone block number is a configured batch-cadence multiple (every 120 blocks by default). Intermediate blocks within a batch contain only `advanceTempo` (optional) and user transactions.
+A batch covers one or more zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The sequencer finalizes when withdrawals are present or when the current zone block number is a configured batch-cadence multiple (every 120 blocks by default). Intermediate blocks within a batch contain the required `advanceTempo` transaction followed by user transactions.
 
 ### Block Header Format
 
@@ -770,9 +772,10 @@ be recreated.
 
 ### Privacy Modifications
 
-Zone execution differs from standard Tempo execution in three areas. These changes are enforced at the EVM level, not just at the RPC layer, so they apply to all code paths including user transactions, `eth_call` simulations, and prover re-execution.
+Zone execution differs from standard Tempo execution in four areas. These changes are enforced at the EVM level, not just at the RPC layer, so they apply to all code paths including user transactions, `eth_call` simulations, and prover re-execution.
 
 - **Balance and allowance access control.** `balanceOf(account)` reverts unless `msg.sender` is the account owner or the sequencer. `allowance(owner, spender)` reverts unless `msg.sender` is the owner, the spender, or the sequencer.
+- **Restricted direct token operations.** A user transaction may call an enabled TIP-20 directly only through `transferFrom` or `approve`. All other direct TIP-20 selectors are rejected, including when they appear in any call of an account-abstraction batch. Calls to non-TIP-20 zone interfaces such as `ZoneOutbox.requestWithdrawal` remain available.
 - **Fixed gas for transfers.** All TIP-20 transfer and approve operations charge a fixed 100,000 gas regardless of storage layout. This eliminates a side channel where variable gas costs reveal whether a recipient has previously received tokens.
 - **Contract creation disabled.** `CREATE` and `CREATE2` revert. The zone runs only predeploys and TIP-20 token precompiles. Arbitrary contract deployment would allow users to circumvent the execution-level privacy controls.
 
@@ -800,7 +803,7 @@ Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a gene
 
 `ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo. This function decodes the RLP header, validates chain continuity (parent hash must match the previous finalized header, block number must increment by one), stores the new checkpoint, and emits the decoded state root in `TempoBlockFinalized`.
 
-If a block omits `advanceTempo`, the Tempo binding carries forward from the previous block. Multiple blocks can share the same Tempo binding.
+Every zone block imports the next finalized Tempo header through its required first `advanceTempo` transaction. The Tempo binding therefore advances once per zone block and cannot be reused by omitting the system transaction.
 
 ### Storage Reads
 
@@ -817,7 +820,7 @@ TIP-403 policy authorization on the zone is handled by a dedicated read-only pro
 
 ### Staleness and Finality
 
-The zone's view of Tempo is only as current as the most recent `advanceTempo` call. If the sequencer advances Tempo infrequently, zone-side reads of portal state (sequencer address, deposit queue, token registry) may lag behind Tempo.
+The zone's view of Tempo is bound by the required `advanceTempo` call at the start of each zone block. Zone-side reads of portal state (sequencer address, deposit queue, token registry) use that block's imported finalized Tempo state.
 
 The zone node must only finalize Tempo headers that have reached finality on Tempo. Proofs should only reference finalized Tempo blocks to avoid reorg risk.
 
@@ -995,7 +998,7 @@ The witness contains everything needed to re-execute the batch:
 
 - **PublicInputs**: `zone_id`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with. `prevBlockHash` is instead derived from `prev_block_header` and bound through the public `block_transition` output.
 - **BatchWitness**: the public inputs, the previous batch's Tempo block header, the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
-- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
+- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, required `tempo_header_rlp`, `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
 
 ### Input Schematic
@@ -1131,21 +1134,17 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
 
-    /// Tempo header RLP used by the call (ZoneInbox.advanceTempo).
-    /// If None, the block does not advance Tempo and the binding carries over.
-    pub tempo_header_rlp: Option<Vec<u8>>,
+    /// Tempo header RLP used by the required first ZoneInbox.advanceTempo call.
+    pub tempo_header_rlp: Vec<u8>,
 
     /// Deposits processed by the system tx (oldest first, unified queue).
-    /// Must be empty if tempo_header_rlp is None.
     pub deposits: Vec<QueuedDeposit>,
 
     /// Decryption data for encrypted deposits in the system tx.
-    /// Must be empty if tempo_header_rlp is None.
     pub decryptions: Vec<DecryptionData>,
 
     /// Tokens enabled by the system tx, in the exact calldata order passed to
     /// `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)`.
-    /// Must be empty if tempo_header_rlp is None.
     pub enabled_tokens: Vec<EnabledToken>,
 
     /// Sequencer-only: finalize a batch (only in final block, must be last)
@@ -1287,10 +1286,10 @@ The stateless execution function must reject the witness on any failed check, mi
    Compute `keccak256(rlp(node))` for each node in `tempo_state_proofs.node_pool` and build a hash-to-node index for proof traversal.
 
 4. **For each `zone_blocks[i]`, verify the block witness before executing it.**
-   Require `block.parent_hash == prev_block_hash`. Require `block.number == prev_header.number + 1`. Require `block.timestamp >= prev_header.timestamp`. Require `block.beneficiary == public_inputs.sequencer`. Require `finalize_withdrawal_batch_count` to be absent in intermediate blocks and present in the final block of the batch. If `tempo_header_rlp` is absent, require `deposits`, `decryptions`, and `enabled_tokens` to be empty. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
+   Require `block.parent_hash == prev_block_hash`. Require `block.number == prev_header.number + 1`. Require `block.timestamp >= prev_header.timestamp`. Require `block.beneficiary == public_inputs.sequencer`. The required `tempo_header_rlp` supplies exactly one first-position `advanceTempo` transaction. Require `finalize_withdrawal_batch_count` to be absent in intermediate blocks and present in the final block of the batch. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
 
-5. **Execute `advanceTempo` if the block imports a Tempo header.**
-   If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`.
+5. **Execute `advanceTempo` first.**
+   Call `TempoState.finalizeTempo(header)` through the block's required first `ZoneInbox.advanceTempo` system transaction. This validates header continuity, updates the bound `tempoBlockNumber` and `tempoBlockHash`, and makes the imported header's state root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`.
 
 6. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
    Using the now-bound Tempo root for this block, verify the Tempo-side reads needed by `ZoneInbox` such as the portal's current deposit queue hash. Execute `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` using `enabled_tokens` in the exact witness order; this order is part of the system transaction calldata and therefore affects the transaction root, receipts/logs root, and resulting state transition. Process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). For encrypted deposits, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification).

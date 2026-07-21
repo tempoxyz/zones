@@ -41,7 +41,10 @@ use alloy_primitives::Address;
 use alloy_provider::DynProvider;
 use derive_more::Deref;
 use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tracing::info;
@@ -92,6 +95,15 @@ impl PolicyCache {
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
 
+        // Token enablement is known independently of whether policy RPC reads succeed.
+        // Record it first so pool admission does not infer enablement from policy availability.
+        {
+            let mut cache = self.write();
+            for &token in tracked_tokens {
+                cache.track_enabled_token(token);
+            }
+        }
+
         let block_number = self.last_l1_block();
 
         let seeded = futures::future::join_all(tracked_tokens.iter().map(|token| {
@@ -134,6 +146,11 @@ impl PolicyCache {
 /// This allows the zone sequencer to evaluate transfer authorization without RPC round-trips.
 #[derive(Debug, Default)]
 pub struct PolicyCacheInner {
+    /// Tokens enabled for this zone by its L1 portal.
+    ///
+    /// This is tracked separately from policy data because a token using the default policy
+    /// remains enabled even if versioned policy entries are cleared during a resync.
+    enabled_tokens: HashSet<Address>,
     /// Per-token transfer policy ID.
     tokens: HashMap<Address, HeightVersioned<u64>>,
     /// Per-policy-ID records (type, policy set, compound data).
@@ -163,10 +180,23 @@ impl PolicyCacheInner {
 
     /// Sets the `transferPolicyId` for a token at the given block.
     pub fn set_token_policy(&mut self, token: Address, block_number: u64, policy_id: u64) {
+        self.enabled_tokens.insert(token);
         self.tokens
             .entry(token)
             .or_default()
             .set(block_number, policy_id);
+    }
+
+    /// Record a token enabled for this zone.
+    pub fn track_enabled_token(&mut self, token: Address) {
+        self.enabled_tokens.insert(token);
+    }
+
+    /// Returns every token enabled for this zone in deterministic address order.
+    pub fn enabled_tokens(&self) -> Vec<Address> {
+        let mut tokens: Vec<_> = self.enabled_tokens.iter().copied().collect();
+        tokens.sort_unstable();
+        tokens
     }
 
     /// Sets the policy type for a policy ID.
@@ -201,7 +231,7 @@ impl PolicyCacheInner {
 
     /// Returns all token addresses currently tracked by the cache.
     pub fn tracked_tokens(&self) -> Vec<Address> {
-        self.tokens.keys().copied().collect()
+        self.enabled_tokens()
     }
 
     /// Returns the number of token-to-policy mappings in the cache.
@@ -387,8 +417,9 @@ impl PolicyCacheInner {
         }
     }
 
-    /// Clears all cached policy data. `last_l1_block` is preserved — the engine
-    /// will advance it when it reprocesses blocks after a reorg.
+    /// Clears all versioned policy data. Enabled tokens and `last_l1_block` are preserved —
+    /// token enablement is append-only, while the engine will advance the height when it
+    /// reprocesses blocks after a reorg.
     pub fn clear(&mut self) {
         self.tokens.clear();
         self.policies.clear();
@@ -722,6 +753,20 @@ mod tests {
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
             None
         );
+        assert_eq!(cache.enabled_tokens(), vec![TOKEN]);
+    }
+
+    #[test]
+    fn tracks_enabled_tokens_without_policy_entries() {
+        let mut cache = PolicyCacheInner::default();
+        cache.track_enabled_token(USER_B);
+        cache.track_enabled_token(TOKEN);
+        cache.track_enabled_token(TOKEN);
+
+        let mut expected = vec![USER_B, TOKEN];
+        expected.sort_unstable();
+        assert_eq!(cache.enabled_tokens(), expected);
+        assert_eq!(cache.num_token_policies(), 0);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use crate::{
     replication::{broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
@@ -33,10 +33,13 @@ use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
+use reth_storage_api::{
+    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
+};
 use reth_transaction_pool::{
-    Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
-    error::InvalidPoolTransactionError,
+    Pool, PoolTransaction, TransactionValidationTaskExecutor,
+    blobstore::InMemoryBlobStore,
+    error::{InvalidPoolTransactionError, PoolTransactionError},
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
@@ -45,6 +48,7 @@ use tempo_evm::TempoEvmConfig;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
+use tempo_precompiles::tip20::TIP20Token;
 use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
@@ -350,7 +354,7 @@ impl ZoneNode {
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(ZonePoolBuilder)
+            .pool(ZonePoolBuilder::new(executor_builder.policy_cache.clone()))
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
@@ -1043,9 +1047,57 @@ where
 }
 
 /// Transaction pool builder for Zone - uses Tempo pool with defaults.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
-pub struct ZonePoolBuilder;
+pub struct ZonePoolBuilder {
+    policy_cache: PolicyCache,
+}
+
+impl ZonePoolBuilder {
+    /// Create a pool builder using the zone's shared enabled-token cache.
+    pub fn new(policy_cache: PolicyCache) -> Self {
+        Self { policy_cache }
+    }
+}
+
+#[derive(Debug)]
+struct ZonePoolAdmissionError(&'static str);
+
+impl std::fmt::Display for ZonePoolAdmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0)
+    }
+}
+
+impl std::error::Error for ZonePoolAdmissionError {}
+
+impl PoolTransactionError for ZonePoolAdmissionError {
+    fn is_bad_transaction(&self) -> bool {
+        false
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
+
+fn pool_admission_error(message: &'static str) -> InvalidPoolTransactionError {
+    InvalidPoolTransactionError::other(ZonePoolAdmissionError(message))
+}
+
+fn sender_has_enabled_token_balance<E>(
+    sender: Address,
+    enabled_tokens: &[Address],
+    mut balance_at: impl FnMut(Address, U256) -> Result<Option<U256>, E>,
+) -> Result<bool, E> {
+    for &token in enabled_tokens {
+        let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
+        if balance_at(token, slot)?.is_some_and(|balance| !balance.is_zero()) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
 
 impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
@@ -1087,7 +1139,36 @@ where
                 tx.tx_env(),
                 zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST,
             )
+            .map(|_| ())
             .map_err(|err| InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(err)))
+        });
+
+        let provider = ctx.provider().clone();
+        let policy_cache = self.policy_cache.clone();
+        validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
+            let enabled_tokens = policy_cache.read().enabled_tokens();
+            let state = provider.latest().map_err(|err| {
+                warn!(%err, "Failed to read latest state for zone token-balance admission check");
+                pool_admission_error("could not verify balance of an enabled zone token")
+            })?;
+
+            let sender = *tx.sender_ref();
+            let has_balance =
+                sender_has_enabled_token_balance(sender, &enabled_tokens, |token, slot| {
+                    state.storage(token, slot.into())
+                })
+                .map_err(|err| {
+                    warn!(%err, %sender, "Failed to read zone token balance during pool admission");
+                    pool_admission_error("could not verify balance of an enabled zone token")
+                })?;
+
+            if !has_balance {
+                return Err(pool_admission_error(
+                    "sender must hold a nonzero balance of an enabled zone token",
+                ));
+            }
+
+            Ok(())
         });
 
         let validator =
@@ -1139,7 +1220,7 @@ where
 mod tests {
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
-    use alloy_primitives::{Bytes, Signature, TxKind, U256};
+    use alloy_primitives::{Bytes, Signature, TxKind, U256, address};
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
     use tempo_primitives::transaction::{
@@ -1177,6 +1258,34 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
+    }
+
+    #[test]
+    fn enabled_token_balance_guard_accepts_any_nonzero_balance() {
+        let sender = Address::repeat_byte(0x11);
+        let tokens = [
+            address!("0x20c0000000000000000000000000000000000001"),
+            address!("0x20c0000000000000000000000000000000000002"),
+        ];
+        let funded_token = tokens[1];
+
+        let has_balance = sender_has_enabled_token_balance(sender, &tokens, |token, _slot| {
+            Ok::<_, std::convert::Infallible>((token == funded_token).then_some(U256::from(1)))
+        })
+        .unwrap();
+        assert!(has_balance);
+
+        let has_balance = sender_has_enabled_token_balance(sender, &tokens, |_token, _slot| {
+            Ok::<_, std::convert::Infallible>(Some(U256::ZERO))
+        })
+        .unwrap();
+        assert!(!has_balance);
+
+        let has_balance = sender_has_enabled_token_balance(sender, &[], |_token, _slot| {
+            Ok::<_, std::convert::Infallible>(Some(U256::from(1)))
+        })
+        .unwrap();
+        assert!(!has_balance);
     }
 
     #[test]

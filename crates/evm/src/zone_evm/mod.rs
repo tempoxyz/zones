@@ -1,6 +1,8 @@
 //! Zone runtime EVM and its private execution policies.
 
+pub(crate) mod block;
 pub(crate) mod contract_creation;
+mod transaction;
 
 use crate::TempoCtx;
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
@@ -9,6 +11,10 @@ use revm::context::result::{EVMError, ResultAndState};
 use tempo_evm::{TempoBlockEnv, TempoHaltReason, evm::TempoEvm};
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
+
+pub use transaction::{
+    AllowedTip20Operation, ValidatedZoneCall, ValidatedZoneTransaction, validate_transaction,
+};
 
 /// Zone runtime EVM.
 ///
@@ -65,7 +71,7 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
+        validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
         self.inner.transact_raw(tx)
     }
 

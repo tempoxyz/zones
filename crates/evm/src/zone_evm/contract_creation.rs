@@ -49,7 +49,7 @@ fn create<const IS_CREATE2: bool, DB: Database>(
 }
 
 /// Reject transaction-level contract creation unless its deployer is explicitly allowed.
-pub fn validate_transaction(
+pub(super) fn validate_transaction(
     tx: &TempoTxEnv,
     allowlist: &[Address],
 ) -> Result<(), TempoInvalidTransaction> {

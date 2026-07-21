@@ -118,7 +118,10 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
-| `TEMPO-ZONE-ADVANCE-TEMPO-FIRST` | When present, `advanceTempo` is the first transaction in a zone block | 🟡 | User transactions can execute against the wrong Tempo binding or stale config |
+| `TEMPO-ZONE-ADVANCE-TEMPO-FIRST` | Every zone block contains exactly one `advanceTempo` system transaction and it is first | 🟡 | User transactions can execute against the wrong Tempo binding or stale config |
+| `TEMPO-ZONE-FINALIZE-WITHDRAWAL-LAST` | `finalizeWithdrawalBatch` appears at most once per block and, when present, is the final system transaction | 🔴 | A committed withdrawal batch can omit or include later state transitions |
+| `TEMPO-ZONE-USER-TIP20-OPERATIONS` | Direct user TIP-20 calls permit only `transferFrom` and `approve`, including across every AA batch call | 🟡 | Users can invoke token operations outside the zone's intended private execution surface |
+| `TEMPO-ZONE-POOL-ENABLED-TOKEN-BALANCE` | Public pool admission requires the recovered sender to hold a nonzero balance of at least one currently enabled zone token | 🟢 | Unfunded identities can fill the zero-fee transaction pool |
 | `TEMPO-ZONE-CONTRACT-CREATION-DISABLED` | User `CREATE` and `CREATE2` always revert on zones | 🟡 | Users can deploy contracts that bypass privacy and system-token assumptions |
 | `TEMPO-ZONE-BALANCE-ALLOWANCE-PRIVACY` | `balanceOf` and `allowance` reveal values only to authorized callers or the sequencer | 🟡 | Account balances and approvals leak through token precompiles |
 | `TEMPO-ZONE-FIXED-TOKEN-GAS` | TIP-20 transfer and approve operations charge fixed gas independent of account storage layout | 🟢 | Gas timing leaks whether addresses have prior token activity |
