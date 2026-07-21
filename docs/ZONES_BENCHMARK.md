@@ -373,9 +373,10 @@ and deletes its authorization map on exit. It renders approval-only streams,
 submits each account's expiring-nonce approval concurrently, logs receipt-wait
 heartbeats and completion counts, then reruns preflight with setup disabled to
 verify every allowance. While the measured scenario runs, it prints the number
-of successful terminal `WithdrawalProcessed` events observed on L1 every 30
-seconds. On this fresh topology that is the externally visible completion
-count; txgen's authoritative journey report is still checked at the end.
+of successful events observed at every leg every 10 seconds by default. On this
+fresh topology the terminal L1 `WithdrawalProcessed` count is the externally
+visible completion count; txgen's authoritative journey report is still
+checked at the end.
 The same monitor fails fast on a dead Zone process, invalid payload, final state
 root mismatch, or panic. A recoverable asynchronous state-root mismatch is
 printed and recorded in `zone-state-root-fallbacks.log`, then left to Reth's
@@ -453,6 +454,21 @@ For a scenario, `--starts-per-second` is the number of complete journeys
 started per second, not raw transaction TPS. `--tx-rate` can independently cap
 submissions on each chain when that is useful. Each journey holds its leased
 account until its terminal L1 withdrawal event or failure.
+
+Render the same results page published on the GitHub workflow overview from a
+completed local run with:
+
+```bash
+cargo run -p tempo-xtask -- benchmark-results \
+  --report target/zones-benchmark/roundtrip-report.json \
+  --scenario target/zones-benchmark/roundtrip-scenario.yml \
+  --output target/zones-benchmark/summary.md
+```
+
+The renderer validates that the report and scenario steps still match before
+using each step's configured chain to calculate aggregate, per-chain, and
+per-submit user throughput. It does not need the benchmark mnemonic or RPC
+access.
 
 ## Run one phase
 
@@ -575,8 +591,10 @@ job:
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
 7. for `deposit`, runs the independent preflight/generate/bench pipeline; and
-8. uploads rendered non-secret assets, host/storage metadata, JSON reports, and node logs before
-   stopping the nodes and restoring the benchmark volumes.
+8. renders the JSON report into a Markdown results page on the workflow
+   overview, then uploads that page with the rendered non-secret assets,
+   host/storage metadata, JSON reports, and node logs before stopping the nodes
+   and restoring the benchmark volumes.
 
 Repeat runs use the pinned Tempo benchmark's commit-and-feature-keyed MinIO
 cache for the `tempo` binary. Cache misses build from source and, when the
@@ -638,9 +656,19 @@ does not spread L1 submissions across both validators.
 
 Scenario mode writes its journey and per-step latency JSON report, but it does
 not scrape the node metric endpoints and has no ClickHouse benchmark reporter.
-The workflow therefore uploads the scenario report and node logs without
-claiming the node-metric/ClickHouse reporting available to Tempo's existing
-single-chain benchmark harness.
+The workflow combines that report with the rendered scenario to publish a
+scenario-native results page. It reports completed journeys per second,
+aggregate and per-chain submitted user TPS, whole-journey latency, and latency
+for every measured submit and wait step. The generated Markdown is also
+included in the run artifact.
+
+These rates cover the complete measured window, including ramp-up and drain;
+they are not a saturation or single-chain capacity claim. Aggregate user TPS
+sums successful submit steps across distinct chains. Submit-step latency ends
+when the RPC accepts the transaction, while receipt and log waits report the
+subsequent execution and cross-chain progress. Untimed bootstrap and approval
+setup is excluded. The page does not claim the node-metric/ClickHouse reporting
+available to Tempo's existing single-chain benchmark harness.
 
 The pinned txgen scenario runtime currently serializes expiring-nonce activity
 submissions through one internal fee-uniqueness scheduling lane until each RPC

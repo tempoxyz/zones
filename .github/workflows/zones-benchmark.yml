@@ -407,11 +407,24 @@ jobs:
             contrib/bench/run-phase.sh "$ZONES_BENCH_PHASE"
           fi
 
-      - name: Write job summary
+      - name: Publish benchmark results
         if: success()
         env:
           SUMMARY_STATE_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
         run: |
+          set -euo pipefail
+          summary=target/zones-benchmark/summary.md
+          results_args=(
+            --report "$ZONES_BENCH_REPORT"
+            --output "$summary"
+          )
+          if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+            results_args+=(
+              --scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml"
+            )
+          fi
+          "$ZONES_XTASK_BIN" benchmark-results "${results_args[@]}"
+
           unit=Transactions
           rate="Target TPS"
           if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
@@ -419,11 +432,13 @@ jobs:
             rate="Target journey starts/s"
           fi
           {
-            echo "### Zones benchmark"
+            echo
+            echo "## Run configuration"
             echo
             echo "- Phase: \`$ZONES_BENCH_PHASE\`"
             echo "- $unit: \`$ZONES_BENCH_COUNT\`"
             echo "- $rate: \`$ZONES_BENCH_TPS\`"
+            echo "- Maximum concurrency: \`$ZONES_BENCH_MAX_CONCURRENT\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
             echo "- Tempo L1 state bloat: \`bloat=$SUMMARY_STATE_BLOAT_GIB\` (\`$((10#$SUMMARY_STATE_BLOAT_GIB * 1000)) MiB\` per validator)"
             echo "- Target: \`$ZONES_BENCH_TARGET_ID\`"
@@ -432,7 +447,8 @@ jobs:
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`$ZONES_BENCH_L1_GAS_LIMIT\` / \`$ZONES_BENCH_L1_GENERAL_GAS_LIMIT\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } >> "$summary"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect benchmark host metadata
         if: ${{ !cancelled() }}
@@ -521,6 +537,7 @@ jobs:
           path: |
             target/zones-benchmark/${{ needs.authorize.outputs.phase }}/
             target/zones-benchmark/*.json
+            target/zones-benchmark/*.md
             target/zones-benchmark/node-logs/
             target/zones-benchmark/invalid-block-diagnostics/
           if-no-files-found: warn
