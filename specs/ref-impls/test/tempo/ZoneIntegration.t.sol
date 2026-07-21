@@ -14,8 +14,9 @@ import {
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     QueuedDeposit,
     Withdrawal,
-    ZoneInfo,
-    ZoneParams
+    ZONE_MESSENGER_ADDRESS,
+    ZONE_VERIFIER_ADDRESS,
+    ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
@@ -63,8 +64,8 @@ contract MockZoneFactoryForIntegrationMessenger {
         _zones[zoneId].portal = portal;
     }
 
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
-        return _zones[zoneId];
+    function zones(uint32 id) external view returns (ZoneInfo memory) {
+        return _zones[id];
     }
 
 }
@@ -110,13 +111,9 @@ contract ZoneIntegrationTest is BaseTest {
 
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Deploy portal directly (bypass factory TIP20 prefix check), but use a
-        // mock factory registry so the shared messenger can authenticate the source portal.
-        MockZoneFactoryForIntegrationMessenger messengerFactory =
-            new MockZoneFactoryForIntegrationMessenger();
-        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
+        // Deploy portal directly (bypass factory TIP20 prefix check).
+        ZoneMessenger messengerContract = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         l1Portal = new ZonePortal();
-        address verifier = l1Factory.verifier();
         address[] memory sequencers = new address[](1);
         sequencers[0] = sequencer;
         vm.prank(_ZONE_FACTORY);
@@ -127,11 +124,25 @@ contract ZoneIntegrationTest is BaseTest {
             admin,
             sequencers,
             1,
-            verifier,
+            ZONE_VERIFIER_ADDRESS,
             ""
         );
         zoneId = 1;
-        messengerFactory.setPortal(zoneId, address(l1Portal));
+        vm.mockCall(
+            _ZONE_FACTORY,
+            abi.encodeWithSelector(IZoneFactory.zones.selector, zoneId),
+            abi.encode(
+                ZoneInfo({
+                    zoneId: zoneId,
+                    portal: address(l1Portal),
+                    admin: admin,
+                    sequencers: sequencers,
+                    threshold: 1,
+                    verifier: ZONE_VERIFIER_ADDRESS,
+                    rpcUrl: ""
+                })
+            )
+        );
 
         // L2 setup
         l2TempoState =
@@ -192,7 +203,6 @@ contract ZoneIntegrationTest is BaseTest {
             senderTag: _senderTag(sender, txSequence),
             to: to,
             amount: amount,
-            fee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackNonce: uint64(txSequence),

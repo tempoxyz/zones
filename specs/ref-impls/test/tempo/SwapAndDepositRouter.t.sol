@@ -64,8 +64,8 @@ contract MockZoneFactoryForRouter {
         return portalMap[portal];
     }
 
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
-        return _zones[zoneId];
+    function zones(uint32 id) external view returns (ZoneInfo memory) {
+        return _zones[id];
     }
 
 }

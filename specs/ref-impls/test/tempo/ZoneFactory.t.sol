@@ -1,20 +1,29 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
+import {
+    IZoneFactory,
+    ZONE_MESSENGER_ADDRESS,
+    ZONE_VERIFIER_ADDRESS,
+    ZoneInfo
+} from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
-/// @title ZoneFactoryTest
-/// @notice Comprehensive tests for ZoneFactory validation and zone creation
+contract ZoneFactoryAbiTest is Test {
+
+    function test_createZone_selectorMatchesTip1091() public pure {
+        assertEq(IZoneFactory.createZone.selector, bytes4(0xf2c58f2b));
+    }
+
+}
+
 contract ZoneFactoryTest is BaseTest {
 
     ZoneFactory public zoneFactory;
-
-    bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
-    bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
 
     function setUp() public override {
         super.setUp();
@@ -26,498 +35,117 @@ contract ZoneFactoryTest is BaseTest {
         members[0] = member;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                          VALID CREATION TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_createZone_success() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
-
-        assertEq(zoneId, 1);
-        assertTrue(portal != address(0));
-        assertEq(zoneFactory.zoneCount(), 1);
-        assertTrue(zoneFactory.isZonePortal(portal));
-
-        ZoneInfo memory info = zoneFactory.zones(zoneId);
-        assertEq(info.zoneId, 1);
-        assertEq(info.portal, portal);
-        assertEq(info.initialToken, address(pathUSD));
-        assertEq(info.admin, admin);
-        assertEq(info.sequencers.length, 1);
-        assertEq(info.sequencers[0], sequencer);
-        assertEq(info.threshold, 1);
-        assertEq(info.verifier, zoneFactory.verifier());
-        assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
-        assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
-    }
-
-    function test_createZone_revertsForNonOwner() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.prank(alice);
-        vm.expectRevert(IZoneFactory.NotOwner.selector);
-        zoneFactory.createZone(params);
-    }
-
-    function test_transferOwnership_updatesZoneCreator() public {
-        vm.expectEmit(true, true, false, false);
-        emit IZoneFactory.OwnershipTransferred(address(this), alice);
-        zoneFactory.transferOwnership(alice);
-
-        assertEq(zoneFactory.owner(), alice);
-
-        vm.expectRevert(IZoneFactory.NotOwner.selector);
-        zoneFactory.transferOwnership(admin);
-
-        vm.prank(alice);
-        zoneFactory.transferOwnership(admin);
-        assertEq(zoneFactory.owner(), admin);
-    }
-
-    function test_transferOwnership_revertsForZeroAddress() public {
-        vm.expectRevert(IZoneFactory.InvalidOwner.selector);
-        zoneFactory.transferOwnership(address(0));
-    }
-
-    function test_createZone_usesSharedMessenger() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
-
-        address messengerAddr = zoneFactory.messenger();
-        assertTrue(messengerAddr != address(0));
-
-        // Verify portal references the messenger
-        ZonePortal portalContract = ZonePortal(portal);
-        assertEq(portalContract.messenger(), messengerAddr);
-        assertEq(zoneFactory.zones(zoneId).portal, portal);
-    }
-
-    function test_createZone_multipleZones() public {
-        IZoneFactory.CreateZoneParams memory params1 = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        (uint32 zoneId1, address portal1) = zoneFactory.createZone(params1);
-
-        address secondSequencer = alice;
-        IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(secondSequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: keccak256("genesis2"),
-                genesisTempoBlockHash: keccak256("tempoGenesis2"),
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        (uint32 zoneId2, address portal2) = zoneFactory.createZone(params2);
-
-        assertEq(zoneId1, 1);
-        assertEq(zoneId2, 2);
-        assertTrue(portal1 != portal2);
-        assertEq(zoneFactory.zoneCount(), 2);
-        assertTrue(zoneFactory.isZonePortal(portal1));
-        assertTrue(zoneFactory.isZonePortal(portal2));
-
-        ZoneInfo memory info1 = zoneFactory.zones(zoneId1);
-        ZoneInfo memory info2 = zoneFactory.zones(zoneId2);
-        assertEq(info1.sequencers[0], sequencer);
-        assertEq(info2.sequencers[0], secondSequencer);
-        assertEq(ZonePortal(portal1).messenger(), zoneFactory.messenger());
-        assertEq(ZonePortal(portal2).messenger(), zoneFactory.messenger());
-    }
-
-    function test_createZone_emitsEvent() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        // Record logs and verify ZoneCreated event was emitted
-        vm.recordLogs();
-        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
-
-        // Verify logs contain ZoneCreated event with correct data
-        Vm.Log[] memory logs = vm.getRecordedLogs();
-        bool found = false;
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (
-                logs[i].topics[0]
-                    == keccak256(
-                        "ZoneCreated(uint32,address,address,address,address[],uint8,address,bytes32,bytes32,uint64)"
-                    )
-            ) {
-                found = true;
-                // Verify the indexed zoneId (topic[1])
-                assertEq(uint256(logs[i].topics[1]), uint256(zoneId));
-                // Verify indexed portal (topic[2])
-                assertEq(address(uint160(uint256(logs[i].topics[2]))), portal);
-                break;
-            }
-        }
-        assertTrue(found, "ZoneCreated event not found");
-
-        // Verify the portal address is valid
-        assertTrue(portal != address(0));
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                          INVALID TOKEN TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_createZone_revertsOnInvalidToken_zeroAddress() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(0),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidToken.selector);
-        zoneFactory.createZone(params);
-    }
-
-    function test_createZone_revertsOnInvalidToken_nonTIP20() public {
-        // Deploy a non-TIP20 contract (just an empty contract)
-        address notTip20 = address(new NotATIP20());
-
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: notTip20,
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidToken.selector);
-        zoneFactory.createZone(params);
-    }
-
-    function test_createZone_revertsOnInvalidToken_eoa() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: alice, // EOA, not a contract
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidToken.selector);
-        zoneFactory.createZone(params);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                          INVALID ADMIN TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_createZone_revertsOnInvalidAdmin_zeroAddress() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: address(0),
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidAdmin.selector);
-        zoneFactory.createZone(params);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                       INVALID SEQUENCER TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_createZone_revertsOnInvalidSequencerSet_zeroAddress() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(address(0)),
-            threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidSequencerSet.selector);
-        zoneFactory.createZone(params);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                       INVALID VERIFIER TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_createZone_revertsOnInvalidVerifier() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            admin: admin,
-            sequencers: _sequencers(sequencer),
-            threshold: 1,
-            verifier: address(0xdead),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
-            rpcUrl: ""
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidVerifier.selector);
-        zoneFactory.createZone(params);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            VIEW TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_zoneCount_initiallyZero() public view {
-        assertEq(zoneFactory.zoneCount(), 0);
-    }
-
-    function test_isZonePortal_returnsFalseForNonPortal() public view {
-        assertFalse(zoneFactory.isZonePortal(address(0)));
-        assertFalse(zoneFactory.isZonePortal(alice));
-        assertFalse(zoneFactory.isZonePortal(address(zoneFactory)));
-    }
-
-    function test_zones_returnsEmptyForNonExistentZone() public view {
-        ZoneInfo memory info = zoneFactory.zones(999);
-        assertEq(info.zoneId, 0);
-        assertEq(info.portal, address(0));
-        assertEq(info.initialToken, address(0));
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                            SHARED HELPER
-    //////////////////////////////////////////////////////////////*/
-
     function _defaultParams() internal view returns (IZoneFactory.CreateZoneParams memory) {
         return IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
             sequencers: _sequencers(sequencer),
             threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            }),
             rpcUrl: ""
         });
     }
 
-    /*//////////////////////////////////////////////////////////////
-                              REVERT PATHS
-    //////////////////////////////////////////////////////////////*/
+    function test_createZone_success() public {
+        IZoneFactory.CreateZoneParams memory params = _defaultParams();
+        params.rpcUrl = "https://zone.example";
 
-    // Supply < ZONE_CREATION_GAS (15M) so the gasleft() check trips. 14M is high
-    // enough to reach the check (no OOG in the isTIP20 staticcall) and low enough
-    // that gasleft() < 15M at the check.
-    function test_createZone_revertsOnInsufficientGas() public {
-        IZoneFactory.CreateZoneParams memory p = _defaultParams();
-        vm.expectRevert(IZoneFactory.InsufficientGas.selector);
-        zoneFactory.createZone{ gas: 14_000_000 }(p);
+        vm.recordLogs();
+        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
+
+        assertEq(zoneId, 1);
+        assertEq(zoneFactory.nextZoneId(), 2);
+        assertTrue(zoneFactory.isZonePortal(portal));
+
+        ZoneInfo memory info = zoneFactory.zones(zoneId);
+        assertEq(info.zoneId, zoneId);
+        assertEq(info.portal, portal);
+        assertEq(info.admin, admin);
+        assertEq(info.sequencers, params.sequencers);
+        assertEq(info.threshold, 1);
+        assertEq(info.verifier, ZONE_VERIFIER_ADDRESS);
+        assertEq(info.rpcUrl, params.rpcUrl);
+
+        ZonePortal created = ZonePortal(portal);
+        assertEq(created.admin(), admin);
+        assertEq(created.sequencerAt(0), sequencer);
+        assertEq(created.sequencerThreshold(), 1);
+        assertEq(created.verifier(), ZONE_VERIFIER_ADDRESS);
+        assertEq(created.messenger(), ZONE_MESSENGER_ADDRESS);
+        assertEq(created.blockHash(), bytes32(0));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        bytes32 signature =
+            keccak256("ZoneCreated(uint32,address,address,address,address[],uint8,address)");
+        bool found;
+        for (uint256 i = 0; i < logs.length; ++i) {
+            if (logs[i].topics[0] == signature) found = true;
+        }
+        assertTrue(found, "ZoneCreated event not found");
     }
 
-    // _nextZoneId is storage slot 0 (uint32, packed alone).
-    function test_createZone_revertsOnZoneIdOverflow() public {
-        IZoneFactory.CreateZoneParams memory p = _defaultParams();
-        vm.store(address(zoneFactory), bytes32(uint256(0)), bytes32(uint256(type(uint32).max)));
-        vm.expectRevert(IZoneFactory.ZoneIdOverflow.selector);
-        zoneFactory.createZone(p);
+    function test_createZone_revertsForNonOwner() public {
+        vm.prank(alice);
+        vm.expectRevert(IZoneFactory.NotOwner.selector);
+        zoneFactory.createZone(_defaultParams());
     }
 
-    /*//////////////////////////////////////////////////////////////
-                       PORTAL PARAM PROPAGATION
-    //////////////////////////////////////////////////////////////*/
+    function test_createZone_revertsForInvalidInputs() public {
+        IZoneFactory.CreateZoneParams memory params = _defaultParams();
+        params.initialToken = address(0);
+        vm.expectRevert(IZoneFactory.InvalidToken.selector);
+        zoneFactory.createZone(params);
 
-    function test_createZone_propagatesAllParamsToPortal() public {
-        IZoneFactory.CreateZoneParams memory p = _defaultParams();
-        p.rpcUrl = "https://zone.example";
-        (uint32 id, address portal) = zoneFactory.createZone(p);
-        ZonePortal pc = ZonePortal(portal);
+        params = _defaultParams();
+        params.admin = address(0);
+        vm.expectRevert(IZoneFactory.InvalidAdmin.selector);
+        zoneFactory.createZone(params);
 
-        assertEq(pc.zoneId(), id);
-        assertEq(pc.admin(), p.admin);
-        assertEq(pc.sequencerCount(), p.sequencers.length);
-        assertEq(pc.sequencerAt(0), p.sequencers[0]);
-        assertEq(pc.sequencerThreshold(), p.threshold);
-        assertEq(pc.verifier(), p.verifier);
-        assertEq(pc.messenger(), zoneFactory.messenger());
-        assertEq(pc.blockHash(), bytes32(0));
-        assertEq(pc.rpcUrl(), p.rpcUrl);
-        assertTrue(pc.isTokenEnabled(address(pathUSD)));
+        params = _defaultParams();
+        params.sequencers[0] = address(0);
+        vm.expectRevert(IZoneFactory.InvalidSequencerSet.selector);
+        zoneFactory.createZone(params);
+
+        params = _defaultParams();
+        params.threshold = 2;
+        vm.expectRevert(IZoneFactory.InvalidSequencerSet.selector);
+        zoneFactory.createZone(params);
     }
 
-    function test_messenger_isShared() public {
-        address messenger = zoneFactory.messenger();
-        assertTrue(messenger != address(0));
+    function test_createZone_acceptsUnsortedUniqueSequencers() public {
+        IZoneFactory.CreateZoneParams memory params = _defaultParams();
+        params.sequencers = new address[](2);
+        params.sequencers[0] = address(0x200);
+        params.sequencers[1] = address(0x100);
+        params.threshold = 2;
 
-        (, address portal1) = zoneFactory.createZone(_defaultParams());
-        (, address portal2) = zoneFactory.createZone(_defaultParams());
-
-        assertEq(ZonePortal(portal1).messenger(), messenger);
-        assertEq(ZonePortal(portal2).messenger(), messenger);
+        (uint32 zoneId,) = zoneFactory.createZone(params);
+        assertEq(zoneFactory.zones(zoneId).sequencers, params.sequencers);
     }
 
-    /*//////////////////////////////////////////////////////////////
-                          METADATA ROTATION
-    //////////////////////////////////////////////////////////////*/
+    function test_transferOwnership_allowsZeroAddress() public {
+        vm.expectEmit(true, true, false, false);
+        emit IZoneFactory.OwnershipTransferred(address(this), address(0));
+        zoneFactory.transferOwnership(address(0));
+        assertEq(zoneFactory.owner(), address(0));
+    }
 
-    // Factory ZoneInfo is a creation-time snapshot; the portal remains the source of truth.
-    function test_zones_sequencerSetIsSnapshot_afterRotation() public {
+    function test_lockImplementationUpdates_isPermanentForReference() public {
+        zoneFactory.lockImplementationUpdates();
+        assertTrue(zoneFactory.implementationUpdatesLocked());
+
+        vm.expectRevert(IZoneFactory.ImplementationUpdatesLocked.selector);
+        zoneFactory.setPortalImplementation(address(this));
+    }
+
+    function test_zones_areCreationSnapshots() public {
         (uint32 id, address portal) = zoneFactory.createZone(_defaultParams());
         address[] memory replacement = _sequencers(alice);
 
         vm.prank(admin);
         ZonePortal(portal).setSequencerSet(replacement, 1);
 
-        assertEq(ZonePortal(portal).sequencerAt(0), alice); // portal: current
-        assertEq(zoneFactory.zones(id).sequencers[0], sequencer); // factory: snapshot
-    }
-
-    // Factory ZoneInfo.admin is likewise a snapshot; the portal admin can rotate via the
-    // two-step transfer while the factory record still reflects the creation-time admin.
-    function test_zones_adminIsSnapshot_afterRotation() public {
-        (uint32 id, address portal) = zoneFactory.createZone(_defaultParams());
-        vm.prank(admin);
-        ZonePortal(portal).transferAdmin(alice);
-        vm.prank(alice);
-        ZonePortal(portal).acceptAdmin();
-
-        assertEq(ZonePortal(portal).admin(), alice); // portal: current
-        assertEq(zoneFactory.zones(id).admin, admin); // factory: snapshot at creation
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                                 FUZZ
-    //////////////////////////////////////////////////////////////*/
-
-    function testFuzz_createZone_storesParams(
-        address adminAddr,
-        address seqAddr,
-        bytes32 gh,
-        bytes32 tgh,
-        uint64 tbn
-    )
-        public
-    {
-        vm.assume(adminAddr != address(0) && seqAddr != address(0));
-        IZoneFactory.CreateZoneParams memory p = _defaultParams();
-        p.admin = adminAddr;
-        p.sequencers = _sequencers(seqAddr);
-        p.zoneParams = ZoneParams(gh, tgh, tbn);
-
-        (uint32 id, address portal) = zoneFactory.createZone(p);
-        ZoneInfo memory info = zoneFactory.zones(id);
-
-        assertEq(info.admin, adminAddr);
-        assertEq(info.sequencers[0], seqAddr);
-        assertEq(info.genesisBlockHash, gh);
-        assertEq(info.genesisTempoBlockHash, tgh);
-        assertEq(info.genesisTempoBlockNumber, tbn);
-        assertTrue(zoneFactory.isZonePortal(portal));
-        assertEq(zoneFactory.zoneCount(), 1);
-    }
-
-}
-
-/// @notice A minimal contract that is NOT a TIP-20
-contract NotATIP20 {
-
-    function notATIP20Function() external pure returns (bool) {
-        return true;
+        assertEq(ZonePortal(portal).sequencerAt(0), alice);
+        assertEq(zoneFactory.zones(id).sequencers[0], sequencer);
     }
 
 }

@@ -1369,29 +1369,12 @@ impl L1TestNode {
         let l1_provider = self.dev_provider();
         let factory = ZoneFactory::new(factory_address, &l1_provider);
 
-        // Capture genesis anchor from the current L1 header
-        let l1_tempo_provider =
-            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(self.http_url.clone());
-        let block = l1_tempo_provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
-        let l1_header: &TempoHeader = block.header.as_ref();
-
-        let mut rlp_buf = Vec::new();
-        l1_header.encode(&mut rlp_buf);
-        let genesis_tempo_block_hash = keccak256(&rlp_buf);
-
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
-                sequencer,
-                zoneParams: ZoneFactory::ZoneParams {
-                    genesisBlockHash: B256::ZERO,
-                    genesisTempoBlockHash: genesis_tempo_block_hash,
-                    genesisTempoBlockNumber: l1_header.inner.number,
-                },
+                sequencers: vec![sequencer],
+                threshold: 1,
                 rpcUrl: String::new(),
             })
             .send()

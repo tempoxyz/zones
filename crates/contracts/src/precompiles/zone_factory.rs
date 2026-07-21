@@ -18,37 +18,47 @@ crate::sol! {
         struct ZoneInfo {
             uint32 zoneId;
             address portal;
-            address initialToken;
             address admin;
-            address sequencer;
-            bytes32 genesisBlockHash;
-            bytes32 genesisTempoBlockHash;
-            uint64 genesisTempoBlockNumber;
+            address[] sequencers;
+            uint8 threshold;
+            address verifier;
             string rpcUrl;
-        }
-        struct ZoneParams {
-            bytes32 genesisBlockHash;
-            bytes32 genesisTempoBlockHash;
-            uint64 genesisTempoBlockNumber;
         }
         struct CreateZoneParams {
             address initialToken;
             address admin;
-            address sequencer;
-            ZoneParams zoneParams;
+            address[] sequencers;
+            uint8 threshold;
             string rpcUrl;
         }
+        event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+        event PortalUpdated(address indexed source, bytes32 indexed codeHash);
+        event MessengerUpdated(address indexed source, bytes32 indexed codeHash);
+        event VerifierUpdated(address indexed source, bytes32 indexed codeHash);
         event ZoneCreated(
             uint32 indexed zoneId,
             address indexed portal,
             address initialToken,
             address admin,
-            address sequencer,
-            address verifier,
-            bytes32 genesisBlockHash,
-            bytes32 genesisTempoBlockHash,
-            uint64 genesisTempoBlockNumber
+            address[] sequencers,
+            uint8 threshold,
+            address verifier
         );
+        error InvalidToken();
+        error NotOwner();
+        error InvalidAdmin();
+        error InvalidSequencerSet();
+        error InvalidPortalImplementation();
+        error InvalidZoneMessengerImplementation();
+        error InvalidVerifierImplementation();
+        error ImplementationUpdatesLocked();
+        function owner() external view returns (address);
+        function implementationUpdatesLocked() external view returns (bool);
+        function transferOwnership(address newOwner) external;
+        function lockImplementationUpdates() external;
+        function setPortalImplementation(address source) external;
+        function setZoneMessengerImplementation(address source) external;
+        function setVerifierImplementation(address source) external;
         function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
         function zones(uint32 zoneId) external view returns (ZoneInfo memory);
         function nextZoneId() external view returns (uint32);

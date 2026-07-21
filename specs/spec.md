@@ -18,7 +18,7 @@
     - [Token Management](#token-management)
     - [Gas Rate Configuration](#gas-rate-configuration)
     - [Encryption Key Management](#encryption-key-management)
-    - [Sequencer Transfer](#sequencer-transfer)
+    - [Sequencer Set Rotation](#sequencer-set-rotation)
     - [Admin Transfer](#admin-transfer)
   - [Deposits](#deposits)
     - [Regular Deposits](#regular-deposits)
@@ -169,7 +169,7 @@ sequenceDiagram
 
 ## Access Control
 
-Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal): an **admin** and a **sequencer**. The roles are intentionally separated so that mission-critical governance powers can be held in a cold key (or multisig) while day-to-day block production runs from a hot operational key. The two roles MAY be held by the same address; the protocol does not enforce separation.
+Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal): an **admin** and a set of **sequencers**. The roles are intentionally separated so that mission-critical governance powers can be held in a cold key (or multisig) while day-to-day block production runs from operational keys. An admin MAY also be a sequencer; the protocol does not enforce separation.
 
 ### Roles
 
@@ -181,16 +181,16 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
 - Cannot be renounced. 
 
-**Sequencer.**
+**Sequencers.**
 
 - Operates the zone: collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs.
-- Expected to be an online operational key.
-- Rotatable via a two-step transfer. (see [Sequencer Transfer](#sequencer-transfer))
-- Cannot be renounced.
-- Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
-- Holds the encryption private key used to decrypt [encrypted deposits](#encrypted-deposits).
+- Are equal online operational keys; there is no primary sequencer.
+- Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero threshold no greater than the set size.
+- May be replaced atomically by the admin together with the threshold. Each replacement increments `sequencerSetVersion` and invalidates certificates from earlier versions.
+- Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
+- Hold the encryption private keys used to decrypt [encrypted deposits](#encrypted-deposits).
 
-A zone MAY be deployed with `admin == sequencer`. In that case the same address holds both roles, but the protocol still treats each privileged call as belonging to its role.
+A zone MAY include its admin in the sequencer set. The protocol still treats each privileged call as belonging to its role.
 
 ### Permission Matrix
 
@@ -203,14 +203,13 @@ The following table lists every privileged action and the role authorized to inv
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
-| `transferSequencer(newSequencer)` | [`ZonePortal`](#izoneportal) | **sequencer** |
-| `acceptSequencer()` | [`ZonePortal`](#izoneportal) | **pending sequencer** |
-| `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **sequencer** |
-| `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **sequencer** |
-| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
-| `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **sequencer** |
-| `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
-| `processWithdrawals(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
+| `setSequencerSet(sequencers, threshold)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer with a threshold certificate** |
+| `processWithdrawals(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `setTempoGasRate(rate)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `setMaxWithdrawalsPerBlock(limit)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `finalizeWithdrawalBatch(...)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
@@ -233,13 +232,29 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | Parameter | Description |
 |-----------|-------------|
 | `initialToken` | The first TIP-20 token to enable. The admin can enable additional tokens later. |
-| `admin` | The address that holds the admin role for the zone (token enablement, deposit pause/resume). MUST NOT be the zero address. May be the same as `sequencer`. See [Access Control](#access-control). |
-| `sequencer` | The address that will operate the zone (block production, batch submission, withdrawal processing). |
-| `verifier` | The `IVerifier` contract used to validate batch proofs. |
+| `admin` | The nonzero address that holds the admin role for the zone. |
+| `sequencers` | One to eight unique, nonzero equal sequencer addresses. Creation-time order is not significant. |
+| `threshold` | The number of distinct active-sequencer signatures required for settlement. MUST be nonzero and no greater than `sequencers.length`. |
+| `rpcUrl` | The public RPC endpoint advertised for the zone. |
 
-The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal), initializes it with the shared [`ZoneMessenger`](#izonemessenger), and enables the initial token. The portal's `blockHash` is initialized to zero. Neither the zone genesis block hash nor an initial Tempo block hash or number is supplied at deployment: the zone genesis hash depends on the newly assigned `zoneId` through its chain ID, and anchoring zone creation to a Tempo block in the same transaction would create a circular dependency. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
+The native factory assigns a unique `zoneId`, etches the TIP-1091 proxy runtime at its reserved vanity address, initializes the portal storage with the fixed messenger and verifier, sets `blockHash` to zero, installs sequencer-set version 1, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
 
-The first accepted proof bootstraps the portal from `blockHash == 0` to the last block hash of the first batch, which must start with the zone genesis block. The state transition function constructs the predefined genesis block for the assigned `zoneId` and rejects any other first block. All genesis fields are identical across zones except the chain ID.
+The shared portal runtime MUST preserve the native factory's constructor-equivalent storage suffix:
+
+| Slot | Offset | Value |
+|------|-------:|-------|
+| 17 | 0 | `zoneId` |
+| 17 | 4 | `messenger` |
+| 18 | 0 | `verifier` |
+| 18 | 20 | `_initialized` |
+| 18 | 21 | `sequencerSetVersion` |
+| 18 | 29 | `sequencerThreshold` |
+| 19 | 0 | `zoneHeight` |
+| 20 | 0 | `_sequencers` |
+| 21 | 0 | `isSequencer` |
+
+The factory performs this initialization natively in the portal account; the Solidity
+`initialize` function documents and tests the equivalent state transition.
 
 ### Chain ID
 
@@ -323,14 +338,17 @@ The portal stores all historical encryption keys in an append-only list. Users s
 
 When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_PERIOD` (86,400 blocks). After that, deposits using the old key are rejected. The current key never expires. Users can call `isEncryptionKeyValid(keyIndex)` before signing to check validity.
 
-### Sequencer Transfer
+### Sequencer Set Rotation
 
-The sequencer can transfer control to a new address via a two-step process on Tempo:
+The admin atomically replaces the active sequencer set and threshold with
+`ZonePortal.setSequencerSet(sequencers, threshold)`. Replacement members must be nonzero,
+unique, sorted in strictly increasing address order, and no more than eight. A replacement
+increments `sequencerSetVersion`, including a threshold-only change, so certificates collected
+under the previous configuration cannot be replayed.
 
-1. Current sequencer calls `ZonePortal.transferSequencer(newSequencer)` to nominate a new sequencer. Calling it with `address(0)` cancels a pending transfer.
-2. New sequencer calls `ZonePortal.acceptSequencer()` to accept the transfer.
-
-Sequencer management happens exclusively on Tempo. Zone-side contracts read the sequencer address from the portal via `ZoneConfig`, so the transfer takes effect on the zone once `advanceTempo` imports the Tempo block containing the accepted transfer. The two-step pattern prevents accidental transfers to incorrect addresses.
+The legacy `sequencer()` getter and two-step transfer functions remain ABI compatibility surfaces
+for portals created before versioned sets. They do not grant a distinguished sequencer authority
+on TIP-1091 portals, which are initialized at version 1.
 
 ### Admin Transfer
 
@@ -1349,7 +1367,7 @@ The state transition function runs in any backend that can execute the `no_std` 
 
 ## Batch Submission
 
-The sequencer submits batches to Tempo via `ZonePortal.submitBatch()`. Each batch covers one or more zone blocks and includes a proof that the state transition was executed correctly.
+Any active sequencer may submit a batch to Tempo via `ZonePortal.submitBatch()`. Each batch covers one or more zone blocks, includes a proof that the state transition was executed correctly, and carries a threshold certificate from the active sequencer set.
 
 ### submitBatch
 
@@ -1364,14 +1382,23 @@ The call takes the following parameters:
 | `withdrawalQueueHash` | Hash chain of withdrawals finalized in this batch (`0` if none) |
 | `verifierConfig` | Opaque payload for the verifier (domain separation, attestation data) |
 | `proof` | The proof or attestation produced by the proving backend |
+| `zoneHeight` | Strictly increasing zone height committed by the certificate |
+| `signatures` | Distinct active-sequencer signatures meeting `sequencerThreshold` |
+
+The EIP-712 settlement commitment binds the Tempo chain, portal, zone ID, sequencer-set version,
+zone height, withdrawal batch index, verifier, Tempo anchor, block transition, deposit transition,
+withdrawal queue hash, and verifier configuration. Duplicate, malformed, unregistered, or
+stale-version signatures are rejected. The transaction submitter has no distinguished authority
+beyond being an active sequencer.
 
 On success, the portal:
 
 1. Updates `blockHash` to `nextBlockHash`.
 2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
 3. Advances `withdrawalBatchIndex`.
-4. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to physical slot `tail % WITHDRAWAL_QUEUE_CAPACITY`, and advances `tail`.
-5. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for an empty batch.
+4. Updates `zoneHeight`.
+5. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to physical slot `tail % WITHDRAWAL_QUEUE_CAPACITY`, and advances `tail`.
+6. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for an empty batch.
 
 ### Verifier Interface
 
@@ -1385,7 +1412,6 @@ interface IVerifier {
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
-        address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash,
@@ -1395,7 +1421,7 @@ interface IVerifier {
 }
 ```
 
-The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)), and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex` and the registered `sequencer` address. The `verifierConfig` and `proof` are opaque to the portal.
+The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)), and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex`. The `verifierConfig` and `proof` are opaque to the portal. Sequencer authorization is enforced separately by the portal's versioned threshold certificate.
 
 ### Anchor Block Validation
 
@@ -1418,7 +1444,7 @@ The proof must validate:
 3. The zone's `tempoBlockHash` matches `anchorBlockHash` (direct), or the parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber` is valid (ancestry).
 4. `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`.
 5. `ZoneOutbox.lastBatch().withdrawalQueueHash` matches the submitted `withdrawalQueueHash`.
-6. Every non-genesis zone block `beneficiary` matches `sequencer`; the bootstrap block must match the canonical genesis header in full.
+6. Every zone block `beneficiary` is an active member of the versioned sequencer set committed by the settlement certificate.
 7. Deposit processing is correct: deposits are processed oldest-first and contiguously from `prevProcessedHash`, `nextProcessedHash` equals the post-state `ZoneInbox.processedDepositQueueHash`, `nextDepositNumber` equals the post-state processed deposit number, and the proof shows `nextProcessedHash` equals the portal's `currentDepositQueueHash` read from Tempo state.
 
 For the first proof, requirement 1 specifically means a transition from `prevBlockHash == 0` to the canonical zone genesis block derived from `zoneId`. For the first Tempo import, requirement 3 also includes the non-zero portal sequencer storage proof described above.
@@ -1584,19 +1610,11 @@ address constant ZONE_MESSENGER_ADDRESS = 0x5A4d00000000000000000000000000000000
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address initialToken;
     address admin;
-    address sequencer;
-    bytes32 genesisBlockHash;
-    bytes32 genesisTempoBlockHash;
-    uint64 genesisTempoBlockNumber;
+    address[] sequencers;
+    uint8 threshold;
+    address verifier;
     string rpcUrl;
-}
-
-struct ZoneParams {
-    bytes32 genesisBlockHash;
-    bytes32 genesisTempoBlockHash;
-    uint64 genesisTempoBlockNumber;
 }
 
 struct LastBatch {
@@ -1612,18 +1630,24 @@ interface IZoneFactory {
     struct CreateZoneParams {
         address initialToken;
         address admin;
-        address sequencer;
-        ZoneParams zoneParams;
+        address[] sequencers;
+        uint8 threshold;
         string rpcUrl;
     }
 
     event ZoneCreated(
         uint32 indexed zoneId, address indexed portal,
-        address initialToken, address admin, address sequencer, address verifier
+        address initialToken, address admin, address[] sequencers,
+        uint8 threshold, address verifier
     );
 
     function owner() external view returns (address);
+    function implementationUpdatesLocked() external view returns (bool);
     function transferOwnership(address newOwner) external;
+    function lockImplementationUpdates() external;
+    function setPortalImplementation(address source) external;
+    function setZoneMessengerImplementation(address source) external;
+    function setVerifierImplementation(address source) external;
     function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     function nextZoneId() external view returns (uint32);
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
@@ -2028,25 +2052,14 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its read method
 
 ## Network Upgrades and Hard Fork Activation
 
-> **Note:** The verifier rotation mechanism described below is the target design. The current `ZonePortal` stores `verifier` in portal state, but rotation is not yet implemented. This section will be updated when the upgrade contracts are deployed.
-
 Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
 
-The portal will maintain two verifier slots (`verifier` and `forkVerifier`). At each fork, verifiers rotate: the previous fork verifier is promoted to `verifier`, and the new fork verifier takes the `forkVerifier` slot. At most two verifiers are active at any time. The `IVerifier` interface is unchanged across forks. New proof parameters are passed via the opaque `verifierConfig` bytes.
+TIP-1091 installs the shared portal implementation, verifier, and messenger runtimes at fixed protocol-managed addresses. The factory owner may replace those runtimes with `setPortalImplementation`, `setVerifierImplementation`, and `setZoneMessengerImplementation`. Replacing the portal implementation upgrades every portal proxy and therefore MUST preserve the portal storage layout. `lockImplementationUpdates` permanently disables these replacements.
 
 Zone nodes and provers select execution rules from the imported Tempo block and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
 
-No onchain action is required from zone operators. The new verifier is deployed and rotated as part of the Tempo hard fork. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically.
-
-The portal will enforce a `forkActivationBlock` cutoff where batches targeting the old `verifier` must have `tempoBlockNumber < forkActivationBlock`. This prevents post-fork batches from being submitted against old verification rules.
-
-The Tempo hard fork block executes the following as system transactions:
-
-1. Deploy the new `IVerifier` contract.
-2. Call `ZoneFactory.setForkVerifier(forkVerifier)`, which for each registered portal promotes `forkVerifier` to `verifier`, installs the new verifier as `forkVerifier`, and sets `forkActivationBlock = block.number`.
+No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements must be coordinated with that activation and use verified source deployments.
 
 If the fork changes zone predeploy behavior, the zone node injects new bytecode at the predeploy addresses before `advanceTempo` executes in the first post-fork zone block.
-
-The two-verifier invariant means only the two most recent verifiers are active at any time. A zone that falls more than one full fork cycle behind loses the ability to submit its oldest unproven batches once the N-2 verifier is deprecated.
 
 If the operator does not upgrade before the fork, the zone node detects that it does not support the active Tempo fork and halts cleanly. If the node is upgraded but the prover is stale, zone execution continues but settlement pauses until the new prover is installed. In both cases, user funds remain safe in the portal.

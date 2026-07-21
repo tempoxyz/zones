@@ -4,76 +4,20 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, address, keccak256},
+    primitives::{Address, address, keccak256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
-    sol,
+    sol_types::SolEvent,
 };
 use alloy_rlp::Encodable;
 use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory};
 use zone_primitives::constants::zone_chain_id;
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
-
-sol! {
-    struct ZoneParams {
-        bytes32 genesisBlockHash;
-        bytes32 genesisTempoBlockHash;
-        uint64 genesisTempoBlockNumber;
-    }
-
-    struct CreateZoneParams {
-        address initialToken;
-        address admin;
-        address sequencer;
-        address verifier;
-        ZoneParams zoneParams;
-        string rpcUrl;
-    }
-
-    #[sol(rpc)]
-    contract ZoneFactory {
-        event ZoneCreated(
-            uint32 indexed zoneId,
-            address indexed portal,
-            address initialToken,
-            address admin,
-            address sequencer,
-            address verifier,
-            bytes32 genesisBlockHash,
-            bytes32 genesisTempoBlockHash,
-            uint64 genesisTempoBlockNumber
-        );
-
-        function verifier() external view returns (address);
-        function messenger() external view returns (address);
-        function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
-    }
-
-    /// `createZone` params of the native ZoneFactory precompile (TIP-1091).
-    /// Unlike the reference Solidity factory, the precompile has no `verifier`
-    /// field: the verifier and messenger are protocol constants.
-    struct NativeCreateZoneParams {
-        address initialToken;
-        address admin;
-        address sequencer;
-        ZoneParams zoneParams;
-        string rpcUrl;
-    }
-
-    #[sol(rpc)]
-    contract NativeZoneFactory {
-        function createZone(NativeCreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
-    }
-}
-
-/// Verifier protocol constant baked into the native ZoneFactory precompile.
-const NATIVE_ZONE_VERIFIER: Address = address!("0x5A56000000000000000000000000000000000000");
-/// Messenger protocol constant baked into the native ZoneFactory precompile.
-const NATIVE_ZONE_MESSENGER: Address = address!("0x5A4D000000000000000000000000000000000000");
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -140,28 +84,8 @@ impl CreateZone {
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
 
-        // The native ZoneFactory precompile (TIP-1091) has no real bytecode
-        // (only the 0xef stub Tempo places at precompile addresses) and no
-        // verifier()/messenger() getters: both are protocol constants.
-        let factory_code = provider
-            .get_code_at(self.zone_factory)
-            .await
-            .wrap_err("failed fetching ZoneFactory code")?;
-        let native = factory_code.is_empty() || factory_code.as_ref() == [0xef];
-        let (verifier, messenger) = if native {
-            println!(
-                "ZoneFactory at {} has no bytecode; using native precompile interface",
-                self.zone_factory
-            );
-            (NATIVE_ZONE_VERIFIER, NATIVE_ZONE_MESSENGER)
-        } else {
-            println!("Fetching verifier address from ZoneFactory...");
-            let verifier = Address::from(factory.verifier().call().await?.0);
-            let messenger = Address::from(factory.messenger().call().await?.0);
-            (verifier, messenger)
-        };
-        println!("Verifier: {verifier}");
-        println!("Messenger: {messenger}");
+        println!("Verifier: {ZONE_VERIFIER_ADDRESS}");
+        println!("Messenger: {ZONE_MESSENGER_ADDRESS}");
 
         // Anchor before createZone so the zone replays the creation block and its
         // initial TokenEnabled event during L1 backfill.
@@ -179,37 +103,20 @@ impl CreateZone {
         println!("Admin: {}", self.admin);
         println!("Sequencer: {}", self.sequencer);
 
-        let zone_params = ZoneParams {
-            genesisBlockHash: B256::ZERO,
-            genesisTempoBlockHash: anchor_hash,
-            genesisTempoBlockNumber: anchor_block_number,
-        };
-
         println!(
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
         );
-        let receipt = if native {
-            let native_factory = NativeZoneFactory::new(self.zone_factory, &provider);
-            let params = NativeCreateZoneParams {
+        let receipt = factory
+            .createZone(ZoneFactory::CreateZoneParams {
                 initialToken: self.initial_token,
                 admin: self.admin,
-                sequencer: self.sequencer,
-                zoneParams: zone_params,
+                sequencers: vec![self.sequencer],
+                threshold: 1,
                 rpcUrl: self.rpc_url.clone(),
-            };
-            native_factory.createZone(params).send_sync().await?
-        } else {
-            let params = CreateZoneParams {
-                initialToken: self.initial_token,
-                admin: self.admin,
-                sequencer: self.sequencer,
-                verifier,
-                zoneParams: zone_params,
-                rpcUrl: self.rpc_url.clone(),
-            };
-            factory.createZone(params).send_sync().await?
-        };
+            })
+            .send_sync()
+            .await?;
         println!("Transaction confirmed in block {:?}", receipt.block_number);
         println!("Status: {}", receipt.status());
         println!("Gas used: {:?}", receipt.gas_used);
@@ -225,11 +132,7 @@ impl CreateZone {
             .inner
             .logs()
             .iter()
-            .find_map(|log| {
-                log.log_decode::<ZoneFactory::ZoneCreated>()
-                    .ok()
-                    .map(|decoded| decoded.inner.data)
-            })
+            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
             .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
 
         let zone_id = event.zoneId;
@@ -265,7 +168,7 @@ impl CreateZone {
             "zoneId": zone_id,
             "chainId": chain_id,
             "portal": format!("{portal}"),
-            "messenger": format!("{messenger}"),
+            "messenger": format!("{ZONE_MESSENGER_ADDRESS}"),
             "initialToken": format!("{}", self.initial_token),
             "admin": format!("{}", self.admin),
             "sequencer": format!("{}", self.sequencer),
@@ -284,7 +187,7 @@ impl CreateZone {
         println!("  Zone ID: {zone_id}");
         println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
-        println!("  Messenger: {messenger}");
+        println!("  Messenger: {ZONE_MESSENGER_ADDRESS}");
         println!("  Initial Token: {}", self.initial_token);
         println!("  Admin: {}", self.admin);
         println!("  Sequencer: {}", self.sequencer);

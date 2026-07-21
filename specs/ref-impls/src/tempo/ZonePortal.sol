@@ -64,7 +64,8 @@ contract ZonePortal is IZonePortal {
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
     /// @notice Maximum number of independently countable settlement signers.
-    uint256 public constant MAX_SEQUENCERS = 32;
+    /// @dev Matches the creation and replacement bound fixed by TIP-1091.
+    uint256 public constant MAX_SEQUENCERS = 8;
 
     bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
         "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
@@ -266,11 +267,19 @@ contract ZonePortal is IZonePortal {
             revert InvalidSequencerSet();
         }
 
-        address previous = address(0);
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
-            if (signer == address(0) || signer <= previous) revert InvalidSequencerSet();
-            previous = signer;
+            if (signer == address(0)) revert InvalidSequencerSet();
+
+            if (rejectUnchanged) {
+                if (i > 0 && signer <= newSequencers[i - 1]) revert InvalidSequencerSet();
+            } else {
+                // The TIP-1091 native factory accepts unique creation-time sequencers in any
+                // order. Admin rotations remain sorted so quorum certificates stay canonical.
+                for (uint256 j = 0; j < i; ++j) {
+                    if (newSequencers[j] == signer) revert InvalidSequencerSet();
+                }
+            }
         }
 
         bool membersUnchanged = length == _sequencers.length;
@@ -834,11 +843,6 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
-        }
-
-        // Split the fee equally across the active sequencer set.
-        if (withdrawal.fee > 0) {
-            _distributeSequencerFee(_token, withdrawal.fee);
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {

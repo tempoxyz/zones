@@ -1,9 +1,7 @@
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{
-    ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
-};
+use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZoneFactory, ZonePortal};
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
@@ -56,12 +54,11 @@ impl ZoneInfoCmd {
         println!("Zone {}", info.zoneId);
         println!("  Portal:                {}", info.portal);
         println!("  Messenger:             {ZONE_MESSENGER_ADDRESS}");
-        println!("  Initial Token:         {}", info.initialToken);
-        println!("  Sequencer:             {}", info.sequencer);
-        println!("  Verifier:              {ZONE_VERIFIER_ADDRESS}");
-        println!("  Genesis Block Hash:    {}", info.genesisBlockHash);
-        println!("  Genesis Tempo Hash:    {}", info.genesisTempoBlockHash);
-        println!("  Genesis Tempo Block:   {}", info.genesisTempoBlockNumber);
+        println!("  Admin:                 {}", info.admin);
+        println!("  Sequencers:            {:?}", info.sequencers);
+        println!("  Threshold:             {}", info.threshold);
+        println!("  Verifier:              {}", info.verifier);
+        println!("  RPC URL:               {}", info.rpcUrl);
 
         // Query live portal state
         let portal = ZonePortal::new(info.portal, &provider);

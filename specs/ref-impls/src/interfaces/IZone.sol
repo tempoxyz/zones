@@ -3,6 +3,10 @@ pragma solidity ^0.8.13;
 
 // Protocol-managed ZoneFactory precompile defined by TIP-1091.
 address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
+bytes12 constant ZONE_PORTAL_PREFIX = 0x5AD000000000000000000000;
+address constant ZONE_PORTAL_IMPL_ADDRESS = 0x5AD1000000000000000000000000000000000000;
+address constant ZONE_VERIFIER_ADDRESS = 0x5a56000000000000000000000000000000000000;
+address constant ZONE_MESSENGER_ADDRESS = 0x5A4d000000000000000000000000000000000000;
 
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
@@ -24,22 +28,11 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address admin;
     address[] sequencers;
     uint8 threshold;
     address verifier;
-    bytes32 genesisBlockHash;
-    bytes32 genesisTempoBlockHash;
-    uint64 genesisTempoBlockNumber;
     string rpcUrl;
-}
-
-/// @notice Zone creation parameters stored in genesis
-struct ZoneParams {
-    bytes32 genesisBlockHash;
-    bytes32 genesisTempoBlockHash;
-    uint64 genesisTempoBlockNumber;
 }
 
 /// @notice Block transition for zone batch proofs
@@ -279,7 +272,6 @@ struct Withdrawal {
     bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
-    uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
@@ -293,7 +285,6 @@ struct PendingWithdrawal {
     bytes32 txHash; // hash of the zone transaction that requested the withdrawal
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
-    uint128 fee; // processing fee for sequencer (calculated at request time)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     uint64 fallbackNonce; // resolves to the zone bounce-back recipient in ZoneOutbox
@@ -423,10 +414,14 @@ interface IZoneFactory {
         address admin;
         address[] sequencers;
         uint8 threshold;
-        address verifier;
-        ZoneParams zoneParams;
         string rpcUrl;
     }
+
+    event PortalUpdated(address indexed source, bytes32 indexed codeHash);
+
+    event MessengerUpdated(address indexed source, bytes32 indexed codeHash);
+
+    event VerifierUpdated(address indexed source, bytes32 indexed codeHash);
 
     event ZoneCreated(
         uint32 indexed zoneId,
@@ -435,62 +430,57 @@ interface IZoneFactory {
         address admin,
         address[] sequencers,
         uint8 threshold,
-        address verifier,
-        bytes32 genesisBlockHash,
-        bytes32 genesisTempoBlockHash,
-        uint64 genesisTempoBlockNumber
+        address verifier
     );
 
     error InvalidToken();
-    error InvalidOwner();
     error NotOwner();
     error InvalidAdmin();
-    error InvalidSequencer();
     error InvalidSequencerSet();
-    error InvalidVerifier();
-    error InsufficientGas();
-    error ZoneIdOverflow();
+    error InvalidPortalImplementation();
+    error InvalidZoneMessengerImplementation();
+    error InvalidVerifierImplementation();
+    error ImplementationUpdatesLocked();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
 
+    /// @notice Returns whether shared runtime updates have been permanently disabled.
+    function implementationUpdatesLocked() external view returns (bool);
+
     /// @notice Transfers zone-creation authority to `newOwner`.
     function transferOwnership(address newOwner) external;
 
-    /// @notice Returns whether a verifier contract is approved for zone creation.
-    /// @param verifier The verifier contract address to check.
-    /// @return valid True if `verifier` can be passed to `createZone`.
-    function isValidVerifier(address verifier) external view returns (bool);
+    /// @notice Permanently disables updates to the shared protocol-managed runtimes.
+    function lockImplementationUpdates() external;
 
-    /// @notice Returns the default verifier deployed by the factory.
-    /// @return verifier The default verifier contract address.
-    function verifier() external view returns (address);
+    /// @notice Copies a deployed runtime to the protocol-managed portal implementation account.
+    function setPortalImplementation(address source) external;
+
+    /// @notice Copies a deployed runtime to the protocol-managed messenger account.
+    function setZoneMessengerImplementation(address source) external;
+
+    /// @notice Copies a deployed runtime to the protocol-managed verifier account.
+    function setVerifierImplementation(address source) external;
 
     /// @notice Creates a new zone and deploys its portal contract.
-    /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
+    /// @param params The initial token, admin, sequencer set, threshold, and RPC URL.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
     function createZone(CreateZoneParams calldata params)
         external
         returns (uint32 zoneId, address portal);
 
-    /// @notice Returns the number of zones created so far.
-    /// @return count The total number of created zones, excluding reserved zone ID 0.
-    function zoneCount() external view returns (uint32);
+    /// @notice Returns the next zone ID that will be assigned.
+    function nextZoneId() external view returns (uint32);
 
     /// @notice Returns the stored metadata for a zone.
-    /// @param zoneId The zone ID to query.
-    /// @return info The zone metadata recorded for `zoneId`.
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory);
+    function zones(uint32 id) external view returns (ZoneInfo memory info);
 
     /// @notice Returns whether an address is a portal deployed by this factory.
     /// @param portal The portal address to check.
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
-
-    /// @notice Returns the shared messenger used for withdrawal callbacks.
-    /// @return messenger The shared messenger contract address.
-    function messenger() external view returns (address);
 
 }
 

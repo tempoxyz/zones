@@ -146,9 +146,10 @@ contract BaseTest is Test {
         vm.etch(ZONE_VERIFIER_ADDRESS, type(Verifier).runtimeCode);
         vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
         vm.setNonce(ZONE_FACTORY_ADDRESS, 1);
-        vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(0)), bytes32(uint256(1)));
         vm.store(
-            ZONE_FACTORY_ADDRESS, bytes32(uint256(3)), bytes32(uint256(uint160(address(this))))
+            ZONE_FACTORY_ADDRESS,
+            bytes32(uint256(0)),
+            bytes32((uint256(uint160(address(this))) << 32) | 1)
         );
 
         zoneFactory = ZoneFactory(ZONE_FACTORY_ADDRESS);

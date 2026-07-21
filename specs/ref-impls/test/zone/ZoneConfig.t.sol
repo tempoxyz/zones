@@ -8,8 +8,7 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
     PORTAL_SEQUENCER_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT,
-    ZoneParams
+    PORTAL_TOKEN_CONFIGS_SLOT
 } from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
@@ -42,12 +41,6 @@ contract ZoneConfigTest is BaseTest {
             admin: admin,
             sequencers: sequencers,
             threshold: 1,
-            verifier: zoneFactory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: genesisTempoBlockNumber
-            }),
             rpcUrl: "https://rpc.test-zone.example"
         });
 

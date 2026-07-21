@@ -94,18 +94,13 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("anchor header {anchor_block_number} not found"))?
         .inner
         .inner;
-    let anchor_block_hash = anchor_header.hash_slow();
 
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
             admin: dev_address,
-            sequencer: dev_address,
-            zoneParams: ZoneFactory::ZoneParams {
-                genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: anchor_block_hash,
-                genesisTempoBlockNumber: anchor_block_number,
-            },
+            sequencers: vec![dev_address],
+            threshold: 1,
             rpcUrl: rpc_url,
         })
         .send()
