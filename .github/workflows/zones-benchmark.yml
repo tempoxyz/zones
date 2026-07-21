@@ -278,6 +278,7 @@ jobs:
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
       ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
       ZONES_BENCH_ZONES_REF: ${{ needs.authorize.outputs.sha }}
+      ZONES_BENCH_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       ZONES_BENCH_BUILD_PROFILE: profiling
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23

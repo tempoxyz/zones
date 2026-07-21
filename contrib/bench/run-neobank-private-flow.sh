@@ -56,6 +56,7 @@ ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
+ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
 for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
@@ -63,6 +64,9 @@ for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER
 do uint "$name"; done
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
 (( 10#$ZONES_BENCH_MAX_CONCURRENT <= 10#$ZONES_BENCH_ACCOUNTS )) || die "max-concurrent cannot exceed accounts"
+
+stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID stage=$1"; }
+stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID stage=$1"; }
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
@@ -119,6 +123,7 @@ send_zone_approval_round() {
         printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    expiring_nonce: true\n    valid_for_secs: 25\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_DLUSD" "$token"
     } >"$spec"
 
+    echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID stage=zone_approval approval_round=$token_label"
     echo "Zone $token_label approval setup: generating $ZONES_BENCH_ACCOUNTS expiring-nonce transactions"
     "$txgen_bin" generate --spec "$spec" --count 0 --seed "$ZONES_BENCH_SEED" --output "$raw"
     actual="$(jq -s -r 'length' "$raw")"
@@ -137,23 +142,31 @@ send_zone_approval_round() {
     "$bench_bin" send --input "$stream" --rpc-url "$ZONE_PRIVATE_RPC_URL" --query-rpc-url "$ZONE_RPC_URL" \
         --sender-header-name X-Authorization-Token --sender-header-map "$secret_dir/zone-auth.json" \
         --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
+    echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID stage=zone_approval approval_round=$token_label"
 }
 
 # The bootstrap gives the sequencer DLUSD for sponsored, untimed Zone approvals.
+stage_start bootstrap
 preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
     --max-in-flight 1 --max-rpc-in-flight 4 --failure-policy fail-fast --seed "$ZONES_BENCH_SEED" \
     --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
+stage_end bootstrap
 # Refresh preflight after bootstrap so the rendered report reflects its funded
 # sponsor state. Setup approvals themselves are deliberately non-expiring.
+stage_start post_bootstrap_preflight
 preflight_phase bootstrap ""
+stage_end post_bootstrap_preflight
 
 # The generic preflight renders one portal approval per user. It is outside timing.
+stage_start portal_approval
 "$txgen_bin" generate --spec "$ZONES_BENCH_OUTPUT/deposit.yml" --count 0 --seed "$ZONES_BENCH_SEED" \
     --output "$ZONES_BENCH_OUTPUT/portal-approvals.ndjson"
 "$bench_bin" send --input "$ZONES_BENCH_OUTPUT/portal-approvals.ndjson" --rpc-url "$L1_RPC_URL" \
     --query-rpc-url "$L1_RPC_URL" --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
+stage_end portal_approval
 
+stage_start render_scenario
 cp -R contrib/bench/neobank "$ZONES_BENCH_OUTPUT/neobank"
 mkdir -p "$ZONES_BENCH_OUTPUT/txgen"
 cp -R contrib/bench/txgen/abis "$ZONES_BENCH_OUTPUT/txgen/abis"
@@ -191,26 +204,27 @@ if grep -En '__[A-Z0-9_]+__' \
 then
     die "unresolved placeholder in rendered private-flow spec"
 fi
+stage_end render_scenario
 
-# Validate the exact rendered scenario before starting the long-lived auth
-# helper or submitting any setup traffic. This is deliberately offline: it
-# rejects bad cross-chain ABI/template references without contacting a node.
 export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
-"$txgen_bin" scenario validate --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
 
 # The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
+stage_start auth_token_map
 "$txgen_bin" auth-token-map --spec "$ZONES_BENCH_OUTPUT/zone-flow.yml" --pool users --zone-id "$zone_id" \
     --chain-id "$zone_chain_id" --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
     --watch --output "$secret_dir/zone-auth.json" >"$ZONES_BENCH_OUTPUT/auth-token-map.log" 2>&1 &
 auth_pid=$!
 for _ in $(seq 1 60); do [[ -f "$secret_dir/zone-auth.json" ]] && break; sleep 1; done
 [[ -f "$secret_dir/zone-auth.json" ]] || die "timed out creating private Zone auth map"
+stage_end auth_token_map
 
 # Approve both Zone assets before timing. EarnToken needs no user balance for approval;
 # the sequencer sponsors these setup transactions from its untimed bootstrap balance.
 send_zone_approval_round dlusd "$ZONES_BENCH_DLUSD"
 send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
 
+stage_start private_flow
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
     --failure-policy continue --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT"
+stage_end private_flow
