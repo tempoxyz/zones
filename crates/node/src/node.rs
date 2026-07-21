@@ -364,7 +364,7 @@ impl ZoneNode {
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(ZonePoolBuilder::new(executor_builder.policy_cache.clone()))
+            .pool(ZonePoolBuilder)
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
@@ -1045,18 +1045,9 @@ where
 }
 
 /// Transaction pool builder for Zone - uses Tempo pool with defaults.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
-pub struct ZonePoolBuilder {
-    policy_cache: PolicyCache,
-}
-
-impl ZonePoolBuilder {
-    /// Create a pool builder using the zone's shared enabled-token cache.
-    pub fn new(policy_cache: PolicyCache) -> Self {
-        Self { policy_cache }
-    }
-}
+pub struct ZonePoolBuilder;
 
 #[derive(Debug)]
 struct ZonePoolAdmissionError(&'static str);
@@ -1116,6 +1107,7 @@ where
         let blob_store = InMemoryBlobStore::default();
         let additional_tasks = ctx.config().txpool.additional_validation_tasks;
         let task_executor = ctx.task_executor().clone();
+        let l1_provider = evm_config.l1_reader().clone();
         let mut validator =
             TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
                 .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
@@ -1138,13 +1130,21 @@ where
         });
 
         let provider = ctx.provider().clone();
-        let policy_cache = self.policy_cache;
         validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
-            let enabled_tokens = policy_cache.read().enabled_tokens();
             let state = provider.latest().map_err(|err| {
                 warn!(%err, "Failed to read latest state for zone token-balance admission check");
                 pool_admission_error("could not verify balance of an enabled zone token")
             })?;
+            let tempo_block_number = state.tempo_block_number().map_err(|err| {
+                warn!(%err, "Failed to read Tempo checkpoint for zone token-balance admission check");
+                pool_admission_error("could not verify balance of an enabled zone token")
+            })?;
+            let enabled_tokens = l1_provider
+                .enabled_tokens_at(tempo_block_number)
+                .map_err(|err| {
+                    warn!(%err, tempo_block_number, "Failed to read enabled tokens during pool admission");
+                    pool_admission_error("could not verify balance of an enabled zone token")
+                })?;
 
             let sender = *tx.sender_ref();
             let has_balance =

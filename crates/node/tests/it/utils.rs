@@ -54,7 +54,7 @@ use tempo_precompiles::{
     },
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{PORTAL_ENABLED_TOKENS_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
@@ -3692,6 +3692,7 @@ impl L1Fixture {
     ) {
         let mut cache = cache_handle.write();
         let deposit_queue_hash_slot = B256::with_last_byte(5);
+        let enabled_tokens_base = keccak256(PORTAL_ENABLED_TOKENS_SLOT);
         let refunds_slot = B256::with_last_byte(10);
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
@@ -3719,6 +3720,18 @@ impl L1Fixture {
             // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
+            cache.set(
+                portal_address,
+                PORTAL_ENABLED_TOKENS_SLOT,
+                block,
+                B256::from(U256::ONE),
+            );
+            cache.set(
+                portal_address,
+                enabled_tokens_base,
+                block,
+                PATH_USD_ADDRESS.into_word(),
+            );
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
