@@ -720,8 +720,9 @@ where
 /// - Processes deposits from the queue (minting zone tokens to recipients)
 /// - Validates the deposit hash chain against Tempo state
 ///
-/// Takes a [`PreparedL1Block`] where all ECIES decryption, TIP-403 policy checks,
-/// and ABI encoding have already been performed.
+/// Takes a [`PreparedL1Block`] where all ECIES decryption and ABI encoding have
+/// already been performed. TIP-403 policy is enforced during `advanceTempo` when
+/// the deposits mint TIP-20 tokens.
 pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
     let mut header_rlp = Vec::new();
