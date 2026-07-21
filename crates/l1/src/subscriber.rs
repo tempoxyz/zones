@@ -1,4 +1,5 @@
 use super::*;
+use tempo_precompiles::storage::StorageKey;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -819,25 +820,14 @@ pub(crate) fn apply_membership_events_to_cache(
     membership_events: &[L1MembershipEvent],
 ) {
     for event in membership_events {
-        let (member, base_slot, enabled) = match *event {
-            L1MembershipEvent::ZoneGatewayUpdated { gateway, enabled } => {
-                (gateway, PORTAL_ZONE_GATEWAY_SLOT, enabled)
-            }
-            L1MembershipEvent::AllowedAccountUpdated { account, enabled } => {
-                (account, PORTAL_ALLOWED_ACCOUNT_SLOT, enabled)
-            }
-        };
+        let L1MembershipEvent::RoleUpdated { account, role } = *event;
         cache.set(
             portal_address,
-            mapping_storage_slot(member, base_slot),
+            account.mapping_slot(PORTAL_ROLE_SLOT.into()).into(),
             block_number,
-            B256::with_last_byte(u8::from(enabled)),
+            B256::with_last_byte(role),
         );
     }
-}
-
-pub(crate) fn mapping_storage_slot(key: Address, base_slot: B256) -> B256 {
-    keccak256((key, U256::from_be_bytes(base_slot.0)).abi_encode())
 }
 
 pub(crate) fn address_to_storage_value(address: Address) -> B256 {

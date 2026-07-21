@@ -4,12 +4,12 @@ pragma solidity ^0.8.13;
 import {
     ITempoState,
     IZoneConfig,
-    PORTAL_ALLOWED_ACCOUNT_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     PORTAL_SEQUENCER_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
-    PORTAL_ZONE_GATEWAY_SLOT
+    Role
 } from "../interfaces/IZone.sol";
 
 /// @title ZoneConfig
@@ -133,14 +133,16 @@ contract ZoneConfig is IZoneConfig {
 
     /// @notice Check account membership in the portal's admin-managed closed-loop allowlist.
     function isAllowedAccount(address account) external view returns (bool) {
-        bytes32 accountSlot = keccak256(abi.encode(account, PORTAL_ALLOWED_ACCOUNT_SLOT));
-        return uint256(tempoState.readTempoStorageSlot(tempoPortal, accountSlot)) != 0;
+        bytes32 accountSlot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        return uint256(tempoState.readTempoStorageSlot(tempoPortal, accountSlot))
+            == uint256(Role.Account);
     }
 
     /// @notice Check whether an address is a registered callback-only ZoneGateway.
     function isZoneGateway(address gateway) external view returns (bool) {
-        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ZONE_GATEWAY_SLOT));
-        return uint256(tempoState.readTempoStorageSlot(tempoPortal, gatewaySlot)) != 0;
+        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
+        return uint256(tempoState.readTempoStorageSlot(tempoPortal, gatewaySlot))
+            == uint256(Role.CallbackGateway);
     }
 
 }

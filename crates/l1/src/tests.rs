@@ -1,7 +1,7 @@
 use super::*;
 use crate::abi::{
-    DepositType, PORTAL_ALLOWED_ACCOUNT_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
-    PORTAL_ZONE_GATEWAY_SLOT,
+    DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_ROLE_SLOT, PORTAL_SEQUENCER_SLOT,
+    ZonePortal::Role,
 };
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, FixedBytes, address};
@@ -14,6 +14,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::rpc::TempoTransactionReceipt;
+use tempo_precompiles::storage::StorageKey;
 use tempo_primitives::{TempoReceipt, TempoTxType};
 
 #[derive(Deserialize)]
@@ -631,9 +632,10 @@ fn test_push_log_decodes_membership_updates() {
         .push_log(
             &make_portal_log(
                 portal_address,
-                ZoneGatewayUpdated {
-                    gateway,
-                    enabled: false,
+                RoleUpdated {
+                    account: gateway,
+                    prev: Role::CallbackGateway,
+                    next: Role::None,
                 },
             ),
             123,
@@ -643,9 +645,10 @@ fn test_push_log_decodes_membership_updates() {
         .push_log(
             &make_portal_log(
                 portal_address,
-                AllowedAccountUpdated {
+                RoleUpdated {
                     account,
-                    enabled: true,
+                    prev: Role::None,
+                    next: Role::Account,
                 },
             ),
             123,
@@ -655,14 +658,11 @@ fn test_push_log_decodes_membership_updates() {
     assert_eq!(
         events.membership_events,
         vec![
-            L1MembershipEvent::ZoneGatewayUpdated {
-                gateway,
-                enabled: false,
+            L1MembershipEvent::RoleUpdated {
+                account: gateway,
+                role: 0,
             },
-            L1MembershipEvent::AllowedAccountUpdated {
-                account,
-                enabled: true,
-            },
+            L1MembershipEvent::RoleUpdated { account, role: 1 },
         ]
     );
 }
@@ -764,8 +764,8 @@ fn test_apply_portal_state_events_overrides_cached_membership() {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
     let gateway = address!("0x00000000000000000000000000000000000000A1");
     let account = address!("0x00000000000000000000000000000000000000B2");
-    let gateway_slot = mapping_storage_slot(gateway, PORTAL_ZONE_GATEWAY_SLOT);
-    let account_slot = mapping_storage_slot(account, PORTAL_ALLOWED_ACCOUNT_SLOT);
+    let gateway_slot: B256 = gateway.mapping_slot(PORTAL_ROLE_SLOT.into()).into();
+    let account_slot: B256 = account.mapping_slot(PORTAL_ROLE_SLOT.into()).into();
     let enabled = B256::with_last_byte(1);
     let subscriber = test_subscriber(
         Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::new())),
@@ -781,14 +781,11 @@ fn test_apply_portal_state_events_overrides_cached_membership() {
         42,
         &L1PortalEvents {
             membership_events: vec![
-                L1MembershipEvent::ZoneGatewayUpdated {
-                    gateway,
-                    enabled: false,
+                L1MembershipEvent::RoleUpdated {
+                    account: gateway,
+                    role: 0,
                 },
-                L1MembershipEvent::AllowedAccountUpdated {
-                    account,
-                    enabled: false,
-                },
+                L1MembershipEvent::RoleUpdated { account, role: 0 },
             ],
             ..Default::default()
         },
