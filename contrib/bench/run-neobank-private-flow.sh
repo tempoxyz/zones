@@ -15,6 +15,7 @@ do need "$name"; done
 
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
 ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
+ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
 ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-100}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-10}"
 ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-100}"
@@ -28,7 +29,7 @@ ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
-for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_COUNT ZONES_BENCH_TPS \
+for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
     ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_SEED
@@ -38,7 +39,7 @@ do uint "$name"; done
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
-for command in "$txgen_bin" "$bench_bin" cast jq sed; do command -v "$command" >/dev/null || die "missing $command"; done
+for command in "$txgen_bin" "$bench_bin" cast jq rg sed; do command -v "$command" >/dev/null || die "missing $command"; done
 if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark-preflight); else preflight=(cargo run --profile release -p tempo-xtask -- benchmark-preflight); fi
 
 mkdir -p "$ZONES_BENCH_OUTPUT"
@@ -91,10 +92,12 @@ zone_chain_id="$(cast chain-id --rpc-url "$ZONE_RPC_URL")"
 l1_fee="$(cast gas-price --rpc-url "$L1_RPC_URL")"
 zone_fee="$(cast gas-price --rpc-url "$ZONE_RPC_URL")"
 account_end=$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))
+sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
 for file in l1-onramp.yml zone-flow.yml private-flow-scenario.yml; do
     sed \
         -e "s|__L1_CHAIN_ID__|$l1_chain_id|g" -e "s|__ZONE_CHAIN_ID__|$zone_chain_id|g" \
         -e "s|__ZONE_ID__|$zone_id|g" -e "s|__ACCOUNT_START__|$ZONES_BENCH_ACCOUNT_START|g" -e "s|__ACCOUNT_END__|$account_end|g" \
+        -e "s|__SEQUENCER_ACCOUNT_INDEX__|$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX|g" -e "s|__SEQUENCER_ACCOUNT_END__|$sequencer_account_end|g" \
         -e "s|__L1_MAX_FEE_PER_GAS__|$l1_fee|g" -e "s|__L1_MAX_PRIORITY_FEE_PER_GAS__|$l1_fee|g" \
         -e "s|__ZONE_MAX_FEE_PER_GAS__|$zone_fee|g" -e "s|__ZONE_MAX_PRIORITY_FEE_PER_GAS__|$zone_fee|g" \
         -e "s|__PORTAL__|$L1_PORTAL_ADDRESS|g" -e "s|__INBOX__|0x1c00000000000000000000000000000000000001|g" -e "s|__OUTBOX__|0x1c00000000000000000000000000000000000002|g" \
@@ -106,6 +109,13 @@ for file in l1-onramp.yml zone-flow.yml private-flow-scenario.yml; do
         -e 's|__DEPOSIT_GAS_LIMIT__|2000000|g' -e 's|__ACTIVITY_GAS_LIMIT__|500000|g' -e 's|__WITHDRAWAL_TX_GAS_LIMIT__|10000000|g' \
         "$ZONES_BENCH_OUTPUT/neobank/$file" >"$ZONES_BENCH_OUTPUT/$file"
 done
+if rg -n '__[A-Z0-9_]+__' \
+    "$ZONES_BENCH_OUTPUT/l1-onramp.yml" \
+    "$ZONES_BENCH_OUTPUT/zone-flow.yml" \
+    "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
+then
+    die "unresolved placeholder in rendered private-flow spec"
+fi
 
 # The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
 "$txgen_bin" auth-token-map --spec "$ZONES_BENCH_OUTPUT/zone-flow.yml" --pool users --zone-id "$zone_id" \
