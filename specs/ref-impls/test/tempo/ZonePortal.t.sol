@@ -1108,6 +1108,12 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_processWithdrawals_processesQueueInOrder() public {
+        uint128 depositAmount = 1200e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
         Withdrawal memory w1 =
             _withdrawal(address(pathUSD), alice, bob, 300e6, bytes32(0), 0, alice, "");
         Withdrawal memory w2 =
