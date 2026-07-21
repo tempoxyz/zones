@@ -756,20 +756,17 @@ A batch covers one or more zone blocks and ends with exactly one `finalizeWithdr
 
 ### Block Header Format
 
-Zone blocks use a simplified header with fewer fields than a standard Ethereum header:
+Zone blocks use Tempo's canonical `TempoHeader` type, field derivation, RLP encoding, and
+block-hash function. A zone does not define or persist a second, simplified header type.
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `parentHash` | `bytes32` | Hash of the parent block header |
-| `beneficiary` | `address` | Sequencer address (must match the registered sequencer) |
-| `stateRoot` | `bytes32` | MPT root of the zone state after executing all transactions |
-| `transactionsRoot` | `bytes32` | Root computed over the ordered list of block transactions |
-| `receiptsRoot` | `bytes32` | Root computed over the ordered list of transaction receipts |
-| `number` | `uint64` | Block number |
-| `timestamp` | `uint64` | Block timestamp (must be non-decreasing) |
-| `protocolVersion` | `uint64` | Zone protocol version |
+The block hash is `keccak256(rlp(tempo_header))`. Batch proofs commit to block hash transitions
+(`prevBlockHash` to `nextBlockHash`), not raw state roots, so the proof covers the complete Tempo
+header. All header fields and fork-dependent optional fields are constructed and validated
+according to the Tempo rules active for that zone block.
 
-The block hash is `keccak256` of the RLP-encoded header. Batch proofs commit to block hash transitions (`prevBlockHash` to `nextBlockHash`), not raw state roots, so the proof covers the full header structure.
+This header rule is a clean break: implementations do not support legacy simplified zone headers
+or fork-gated dual hashing, and databases containing blocks produced under older header rules must
+be recreated.
 
 ### Privacy Modifications
 
@@ -997,8 +994,8 @@ It takes a complete witness of zone blocks and their dependencies, executes EVM 
 The witness contains everything needed to re-execute the batch:
 
 - **PublicInputs**: `zone_id`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with. `prevBlockHash` is instead derived from `prev_block_header` and bound through the public `block_transition` output.
-- **BatchWitness**: the public inputs, the previous batch's block header, the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
-- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
+- **BatchWitness**: the public inputs, the previous batch's Tempo block header, the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
+- **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
 
 ### Input Schematic
@@ -1012,11 +1009,11 @@ flowchart TB
 
         PI["PublicInputs<br/>zone_id<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
 
-        PH["ZoneHeader<br/>parent_hash<br/>beneficiary<br/>state_root<br/>transactions_root<br/>receipts_root<br/>number<br/>timestamp<br/>protocol_version"]
+        PH["TempoHeader<br/>canonical Tempo fields"]
 
         subgraph ZBL["zone_blocks"]
             direction TB
-            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>beneficiary<br/>protocol_version<br/>tempo_header_rlp<br/>enabled_tokens<br/>finalize_withdrawal_batch_count<br/>finalize_withdrawal_batch_encrypted_senders<br/>transactions"]
+            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>beneficiary<br/>tempo_header_rlp<br/>enabled_tokens<br/>finalize_withdrawal_batch_count<br/>finalize_withdrawal_batch_encrypted_senders<br/>transactions"]
 
             subgraph DEP["deposits"]
                 direction TB
@@ -1104,8 +1101,8 @@ pub struct BatchWitness {
     /// Public inputs committed by the proof system
     pub public_inputs: PublicInputs,
 
-    /// Previous batch's block header (for state-root binding)
-    pub prev_block_header: ZoneHeader,
+    /// Previous batch's canonical Tempo header (for state-root binding)
+    pub prev_block_header: TempoHeader,
 
     /// Zone blocks to execute
     pub zone_blocks: Vec<ZoneBlock>,
@@ -1121,17 +1118,6 @@ pub struct BatchWitness {
     pub tempo_ancestry_headers: Vec<Vec<u8>>,
 }
 
-pub struct ZoneHeader {
-    pub parent_hash: B256,
-    pub beneficiary: Address,
-    pub state_root: B256,
-    pub transactions_root: B256,
-    pub receipts_root: B256,
-    pub number: u64,
-    pub timestamp: u64,
-    pub protocol_version: u64,
-}
-
 pub struct ZoneBlock {
     /// Block number
     pub number: u64,
@@ -1144,9 +1130,6 @@ pub struct ZoneBlock {
 
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
-
-    /// Protocol version encoded into the zone block header
-    pub protocol_version: u64,
 
     /// Tempo header RLP used by the call (ZoneInbox.advanceTempo).
     /// If None, the block does not advance Tempo and the binding carries over.
@@ -1295,7 +1278,7 @@ The state transition function produces:
 The stateless execution function must reject the witness on any failed check, missing read, or inconsistent state transition. A correct implementation proceeds in the following order:
 
 1. **Derive the previous block hash and bind the predecessor state.**
-   Compute `initial_prev_block_hash = keccak256(rlp(prev_block_header))` and initialize `prev_block_hash` to that value. Require `prev_block_header.state_root == initial_zone_state.state_root`. The returned `block_transition.prev_block_hash` must equal `initial_prev_block_hash`; the verifier binds it to the submitted `BlockTransition`, whose `prevBlockHash` the portal checks against its stored `blockHash`. These checks ensure that the witness starts from the exact predecessor block already committed on Tempo without duplicating that hash in `PublicInputs`.
+   Compute `initial_prev_block_hash` with Tempo's canonical `TempoHeader` hash function and initialize `prev_block_hash` to that value. Require `prev_block_header.state_root == initial_zone_state.state_root`. The returned `block_transition.prev_block_hash` must equal `initial_prev_block_hash`; the verifier binds it to the submitted `BlockTransition`, whose `prevBlockHash` the portal checks against its stored `blockHash`. These checks ensure that the witness starts from the exact predecessor block already committed on Tempo without duplicating that hash in `PublicInputs`.
 
 2. **Verify and materialize the initial zone state.**
    Apply the [shared trie proof format](#shared-trie-proof-format) to `initial_zone_state`: index each node in `initial_zone_state.node_pool` by `keccak256(rlp(node))`, prove each `ZoneAccountRead` and `ZoneStorageRead` against `initial_zone_state.state_root`, require `keccak256(code) == code_hash` for every supplied account-code preimage, interpret non-membership as the canonical empty account or zero storage, and load the decoded results into the prover's in-memory execution state. After this step, ordinary zone-state reads during execution come from the materialized state, not from repeated Merkle-proof checks.
@@ -1319,7 +1302,7 @@ The stateless execution function must reject the witness on any failed check, mi
    If `finalize_withdrawal_batch_count` is present, execute `ZoneOutbox.finalizeWithdrawalBatch(count, block.number, finalize_withdrawal_batch_encrypted_senders)` as the final zone system transaction after all user transactions in that block. This call uses the zone system caller (`msg.sender == address(0)`) and must update the outbox's last-batch state and compute the `withdrawal_queue_hash` committed by the batch. The encrypted-sender array is derived deterministically as specified in [Authenticated Withdrawals](#authenticated-withdrawals), and it is part of each public `Withdrawal` encoded into the withdrawal hash chain. Intermediate blocks must not execute this call.
 
 9. **Compute the resulting block header and carry it forward.**
-    After block execution, compute the `transactionsRoot` and `receiptsRoot` over the full ordered list of transactions and receipts for that block. Construct the simplified `ZoneHeader` from `parent_hash`, `beneficiary`, `state_root`, `transactions_root`, `receipts_root`, `number`, `timestamp`, and `protocol_version`, then compute `next_block_hash = keccak256(rlp(header))`. Set `prev_block_hash = next_block_hash` and `prev_header = header` before moving to the next block.
+    After block execution, use the canonical Tempo block assembler and the active Tempo fork rules to derive the complete `TempoHeader`, including the transaction root, receipt root, logs bloom, state root, gas fields, millisecond timestamp, and applicable optional fields. Compute `next_block_hash` with Tempo's canonical header hash function, then set `prev_block_hash = next_block_hash` and `prev_header = header` before moving to the next block.
 
 10. **Extract the final batch commitments from the post-state.**
     Read the final `ZoneInbox.processedDepositQueueHash`, `ZoneOutbox.lastBatch`, `TempoState.tempoBlockNumber`, and `TempoState.tempoBlockHash` from the executed state.
@@ -2044,13 +2027,13 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its `isAuthoriz
 
 ## Network Upgrades and Hard Fork Activation
 
-> **Note:** The verifier rotation and protocol version mechanisms described below are the target design. The current `ZonePortal` stores `verifier` in portal state, but the rotation mechanism is not yet implemented. This section will be updated when the upgrade contracts are deployed.
+> **Note:** The verifier rotation mechanism described below is the target design. The current `ZonePortal` stores `verifier` in portal state, but rotation is not yet implemented. This section will be updated when the upgrade contracts are deployed.
 
 Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
 
 The portal will maintain two verifier slots (`verifier` and `forkVerifier`). At each fork, verifiers rotate: the previous fork verifier is promoted to `verifier`, and the new fork verifier takes the `forkVerifier` slot. At most two verifiers are active at any time. The `IVerifier` interface is unchanged across forks. New proof parameters are passed via the opaque `verifierConfig` bytes.
 
-`ZoneFactory` will maintain a `protocolVersion` counter incremented at each fork. Zone nodes embed the highest protocol version they support and halt cleanly if the imported Tempo block bumps `protocolVersion` beyond their supported version, preventing an outdated node from producing blocks under incorrect rules.
+Zone nodes and provers select execution rules from the imported Tempo block and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
 
 No onchain action is required from zone operators. The new verifier is deployed and rotated as part of the Tempo hard fork. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically.
 
@@ -2060,10 +2043,9 @@ The Tempo hard fork block executes the following as system transactions:
 
 1. Deploy the new `IVerifier` contract.
 2. Call `ZoneFactory.setForkVerifier(forkVerifier)`, which for each registered portal promotes `forkVerifier` to `verifier`, installs the new verifier as `forkVerifier`, and sets `forkActivationBlock = block.number`.
-3. Increment `ZoneFactory.protocolVersion`.
 
 If the fork changes zone predeploy behavior, the zone node injects new bytecode at the predeploy addresses before `advanceTempo` executes in the first post-fork zone block.
 
 The two-verifier invariant means only the two most recent verifiers are active at any time. A zone that falls more than one full fork cycle behind loses the ability to submit its oldest unproven batches once the N-2 verifier is deprecated.
 
-If the operator does not upgrade before the fork, the zone node detects the unsupported protocol version and halts cleanly. If the node is upgraded but the prover is stale, zone execution continues but settlement pauses until the new prover is installed. In both cases, user funds remain safe in the portal.
+If the operator does not upgrade before the fork, the zone node detects that it does not support the active Tempo fork and halts cleanly. If the node is upgraded but the prover is stale, zone execution continues but settlement pauses until the new prover is installed. In both cases, user funds remain safe in the portal.
