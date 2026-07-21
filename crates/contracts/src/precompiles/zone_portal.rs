@@ -13,6 +13,11 @@ crate::sol! {
     #[derive(Debug)]
     contract ZonePortal {
         // -- Shared types --
+        enum Role {
+            None,
+            Account,
+            CallbackGateway
+        }
 
         struct Withdrawal {
             address token;
@@ -158,8 +163,7 @@ crate::sol! {
             address indexed newAdmin
         );
 
-        event ZoneGatewayUpdated(address indexed gateway, bool enabled);
-        event AllowedAccountUpdated(address indexed account, bool enabled);
+        event RoleUpdated(address indexed account, Role prev, Role next);
 
         // -- Errors --
 
@@ -181,10 +185,8 @@ crate::sol! {
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
         function messenger() external view returns (address);
-        function zoneGateway(address gateway) external view returns (bool);
-        function allowedAccount(address account) external view returns (bool);
-        function setZoneGateway(address gateway, bool enabled) external;
-        function setAllowedAccount(address account, bool enabled) external;
+        function role(address account) external view returns (Role);
+        function setRole(address account, Role role) external;
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerPubkey() external view returns (bytes32);

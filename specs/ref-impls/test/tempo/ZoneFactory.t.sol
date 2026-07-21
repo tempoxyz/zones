@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
+import { IZoneFactory, Role, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -57,8 +57,10 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
-        assertTrue(ZonePortal(portal).zoneGateway(address(zoneGateway)));
-        assertFalse(ZonePortal(portal).allowedAccount(address(zoneGateway)));
+        assertEq(
+            uint8(ZonePortal(portal).role(address(zoneGateway))),
+            uint8(Role.CallbackGateway)
+        );
     }
 
     function test_createZone_supportsMultipleGateways() public {
@@ -82,8 +84,13 @@ contract ZoneFactoryTest is BaseTest {
         });
 
         (, address portal) = zoneFactory.createZone(params);
-        assertTrue(ZonePortal(portal).zoneGateway(address(zoneGateway)));
-        assertTrue(ZonePortal(portal).zoneGateway(replacement));
+        assertEq(
+            uint8(ZonePortal(portal).role(address(zoneGateway))),
+            uint8(Role.CallbackGateway)
+        );
+        assertEq(
+            uint8(ZonePortal(portal).role(replacement)), uint8(Role.CallbackGateway)
+        );
     }
 
     function test_createZone_revertsWhenGatewayIsAllowedAccount() public {
@@ -155,8 +162,11 @@ contract ZoneFactoryTest is BaseTest {
 
         (, address portal) = zoneFactory.createZone(params);
 
-        assertTrue(ZonePortal(portal).allowedAccount(alice));
-        assertTrue(ZonePortal(portal).zoneGateway(address(zoneGateway)));
+        assertEq(uint8(ZonePortal(portal).role(alice)), uint8(Role.Account));
+        assertEq(
+            uint8(ZonePortal(portal).role(address(zoneGateway))),
+            uint8(Role.CallbackGateway)
+        );
     }
 
     function test_createZone_acceptsZeroAllowedAccount() public {
@@ -179,10 +189,10 @@ contract ZoneFactoryTest is BaseTest {
 
         (, address portal) = zoneFactory.createZone(params);
 
-        assertTrue(ZonePortal(portal).allowedAccount(address(0)));
+        assertEq(uint8(ZonePortal(portal).role(address(0))), uint8(Role.Account));
         vm.prank(admin);
-        ZonePortal(portal).setAllowedAccount(address(0), false);
-        assertFalse(ZonePortal(portal).allowedAccount(address(0)));
+        ZonePortal(portal).setRole(address(0), Role.None);
+        assertEq(uint8(ZonePortal(portal).role(address(0))), uint8(Role.None));
     }
 
     function test_createZone_acceptsZeroGateway() public {
@@ -205,10 +215,12 @@ contract ZoneFactoryTest is BaseTest {
 
         (, address portal) = zoneFactory.createZone(params);
 
-        assertTrue(ZonePortal(portal).zoneGateway(address(0)));
+        assertEq(
+            uint8(ZonePortal(portal).role(address(0))), uint8(Role.CallbackGateway)
+        );
         vm.prank(admin);
-        ZonePortal(portal).setZoneGateway(address(0), false);
-        assertFalse(ZonePortal(portal).zoneGateway(address(0)));
+        ZonePortal(portal).setRole(address(0), Role.None);
+        assertEq(uint8(ZonePortal(portal).role(address(0))), uint8(Role.None));
     }
 
     function test_createZone_revertsForNonOwner() public {

@@ -118,8 +118,8 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
-| Allowed account | An address currently enabled in the portal's admin-managed closed-loop membership mapping. It may initiate deposits and receive Tempo-side refunds and plain withdrawals. |
-| ZoneGateway | A callback-only Tempo contract registered in a portal's separate gateway mapping. A gateway is never an allowed plain-withdrawal recipient. |
+| Allowed account | An address assigned the portal's `Account` role. It may initiate deposits and receive Tempo-side refunds and plain withdrawals. |
+| ZoneGateway | A callback-only Tempo contract assigned the portal's `CallbackGateway` role. A gateway is never an allowed plain-withdrawal recipient. |
 
 <br>
 
@@ -203,8 +203,7 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setZoneGateway(gateway, enabled)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setAllowedAccount(account, enabled)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setRole(account, role)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
 | `transferSequencer(newSequencer)` | [`ZonePortal`](#izoneportal) | **sequencer** |
@@ -244,7 +243,7 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | `verifier` | The `IVerifier` contract used to validate batch proofs. |
 | `zoneParams` | Genesis configuration: genesis block hash, genesis Tempo block hash, and genesis Tempo block number. |
 
-The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal), initializes it with the shared [`ZoneMessenger`](#izonemessenger), records the account and gateway mappings, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
+The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal), initializes it with the shared [`ZoneMessenger`](#izonemessenger), assigns the initial `Account` and `CallbackGateway` roles, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
 
 ### Chain ID
 
@@ -264,7 +263,7 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 |----------|---------|
 | [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 
-The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. Gateway implementations are managed with `setZoneGateway(gateway, enabled)`. Closed-loop membership is managed with `setAllowedAccount(account, enabled)`. An allowed account cannot also be an active ZoneGateway or the messenger.
+The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. Portal roles are managed atomically with `setRole(account, role)`. An account has exactly one of `None`, `Account`, or `CallbackGateway`; the messenger cannot have the `Account` role.
 
 Account and gateway membership is evaluated when each portal or zone-side action executes. Revoked in-flight destinations and gateways bounce back, while revoked refund recipients have funds parked until membership is restored.
 
@@ -280,7 +279,7 @@ Each zone has five system contracts deployed at genesis at fixed addresses:
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
-`ZoneConfig` reads the sequencer address, token registry, allowed-account mapping, and ZoneGateway mapping from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
+`ZoneConfig` reads the sequencer address, token registry, and account roles from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
 ### Zone Token Model
 
@@ -664,7 +663,7 @@ For a plain withdrawal (`gasLimit == 0`), the portal requires `to` to be an allo
 
 ### Withdrawal Callbacks
 
-For withdrawals with `gasLimit > 0`, `to` must be present in the portal's `zoneGateway[address]` mapping. The withdrawal queue hash is verified and dequeued by `ZonePortal.processWithdrawal` before the callback reaches the messenger. The portal snapshots `currentDepositQueueHash`, transfers exactly `amount` to its fixed `ZoneMessenger`, and asks the messenger to relay the callback. The messenger authenticates the source portal through `ZoneFactory`, independently confirms `to` against that portal's gateway mapping, transfers the funds to the gateway, invokes `onWithdrawalReceived`, and requires the expected selector.
+For withdrawals with `gasLimit > 0`, `to` must have the portal's `CallbackGateway` role. The withdrawal queue hash is verified and dequeued by `ZonePortal.processWithdrawal` before the callback reaches the messenger. The portal snapshots `currentDepositQueueHash`, transfers exactly `amount` to its fixed `ZoneMessenger`, and asks the messenger to relay the callback. The messenger authenticates the source portal through `ZoneFactory`, independently confirms `to` has that portal role, transfers the funds to the gateway, invokes `onWithdrawalReceived`, and requires the expected selector.
 
 The self-call requires `currentDepositQueueHash` to change, proving that a deposit was synchronously appended to the source zone. This does not bind the deposit's token or amount, so soundness rests on the configured `ZoneGateway`. Any callback failure rolls back the self-call and enqueues a bounce-back while advancing the withdrawal FIFO.
 
@@ -1596,6 +1595,12 @@ struct LastBatch {
 ### IZoneFactory
 
 ```solidity
+enum Role {
+    None,
+    Account,
+    CallbackGateway
+}
+
 interface IZoneFactory {
     struct CreateZoneParams {
         address initialToken;
@@ -1696,8 +1701,7 @@ interface IZonePortal {
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
-    event ZoneGatewayUpdated(address indexed gateway, bool enabled);
-    event AllowedAccountUpdated(address indexed account, bool enabled);
+    event RoleUpdated(address indexed account, Role prev, Role next);
 
     error NotSequencer();
     error NotAdmin();
@@ -1740,10 +1744,8 @@ interface IZonePortal {
     function enabledTokenAt(uint256 index) external view returns (address);
 
     // Closed-loop configuration
-    function allowedAccount(address account) external view returns (bool);
-    function setAllowedAccount(address account, bool enabled) external; // admin-only
-    function zoneGateway(address gateway) external view returns (bool);
-    function setZoneGateway(address gateway, bool enabled) external; // admin-only
+    function role(address account) external view returns (Role);
+    function setRole(address account, Role role) external; // admin-only
 
     // Zone RPC endpoint. Published on-chain so clients can discover how to reach the zone.
     event RpcUrlUpdated(string rpcUrl);

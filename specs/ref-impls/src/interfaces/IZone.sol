@@ -4,6 +4,13 @@ pragma solidity ^0.8.13;
 // Protocol-managed ZoneFactory precompile defined by TIP-1091.
 address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
 
+/// @notice Mutually exclusive authorization role assigned to a Tempo account.
+enum Role {
+    None,
+    Account,
+    CallbackGateway
+}
+
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
@@ -352,8 +359,7 @@ interface IZoneTxContext {
 //   slot 16: _withdrawalReentrancyStatus (uint256)
 //   slot 17: zoneId (uint32) + messenger (address) [packed]
 //   slot 18: verifier (address) + genesisTempoBlockNumber (uint64) + _initialized (bool) [packed]
-//   slot 19: zoneGateway (mapping(address => bool))
-//   slot 20: allowedAccount (mapping(address => bool))
+//   slot 19: role (mapping(address => Role))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -367,8 +373,7 @@ bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(8));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(9));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(15));
-bytes32 constant PORTAL_ZONE_GATEWAY_SLOT = bytes32(uint256(19));
-bytes32 constant PORTAL_ALLOWED_ACCOUNT_SLOT = bytes32(uint256(20));
+bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(19));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -617,11 +622,8 @@ interface IZonePortal {
     /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
-    /// @notice Emitted when the admin enables or disables a callback-only ZoneGateway.
-    event ZoneGatewayUpdated(address indexed gateway, bool enabled);
-
-    /// @notice Emitted when the admin enables or disables a closed-loop account.
-    event AllowedAccountUpdated(address indexed account, bool enabled);
+    /// @notice Emitted when an account's portal role changes.
+    event RoleUpdated(address indexed account, Role prev, Role next);
 
     error NotSequencer();
     error NotAdmin();
@@ -683,15 +685,10 @@ interface IZonePortal {
     /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
 
-    function zoneGateway(address gateway) external view returns (bool);
+    function role(address account) external view returns (Role);
 
-    /// @notice Enable or disable a callback-only gateway. Only callable by the admin.
-    function setZoneGateway(address gateway, bool enabled) external;
-
-    function allowedAccount(address account) external view returns (bool);
-
-    /// @notice Enable or disable a closed-loop account. Only callable by the admin.
-    function setAllowedAccount(address account, bool enabled) external;
+    /// @notice Assign an account's portal role. Only callable by the admin.
+    function setRole(address account, Role role) external;
 
     function sequencer() external view returns (address);
 

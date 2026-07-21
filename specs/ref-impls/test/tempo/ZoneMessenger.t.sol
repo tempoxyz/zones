@@ -5,6 +5,7 @@ import {
     IWithdrawalReceiver,
     IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
+    Role,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
@@ -114,8 +115,8 @@ contract ZoneMessengerTest is BaseTest {
     function _allowGateway(address target) internal {
         vm.mockCall(
             portal,
-            abi.encodeWithSelector(IZonePortal.zoneGateway.selector, target),
-            abi.encode(true)
+            abi.encodeWithSelector(IZonePortal.role.selector, target),
+            abi.encode(Role.CallbackGateway)
         );
     }
 
@@ -236,8 +237,8 @@ contract ZoneMessengerTest is BaseTest {
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         vm.mockCall(
             portal,
-            abi.encodeWithSelector(IZonePortal.zoneGateway.selector, address(receiver)),
-            abi.encode(false)
+            abi.encodeWithSelector(IZonePortal.role.selector, address(receiver)),
+            abi.encode(Role.None)
         );
 
         vm.prank(portal);

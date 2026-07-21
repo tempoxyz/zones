@@ -4,7 +4,8 @@ pragma solidity ^0.8.13;
 import {
     EncryptedDepositPayload,
     IWithdrawalReceiver,
-    IZonePortal
+    IZonePortal,
+    Role
 } from "../../src/interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
@@ -55,11 +56,13 @@ contract MockZoneGateway is IWithdrawalReceiver {
     {
         IZonePortal portal = IZonePortal(sourcePortal);
         if (msg.sender != portal.messenger()) revert UnauthorizedMessenger();
-        if (!portal.zoneGateway(address(this))) revert UnregisteredGateway();
+        if (portal.role(address(this)) != Role.CallbackGateway) {
+            revert UnregisteredGateway();
+        }
 
         GatewayCallbackData memory callback = abi.decode(callbackData, (GatewayCallbackData));
         if (callback.outputToken != token) revert InvalidOutputToken();
-        if (!portal.allowedAccount(callback.tempoRefundRecipient)) {
+        if (portal.role(callback.tempoRefundRecipient) != Role.Account) {
             revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);
         }
         if (amount < callback.minOutputAmount) {

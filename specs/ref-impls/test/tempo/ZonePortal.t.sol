@@ -19,13 +19,13 @@ import {
     IZoneMessenger,
     IZonePortal,
     PORTAL_ADMIN_SLOT,
-    PORTAL_ALLOWED_ACCOUNT_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     PORTAL_SEQUENCER_SLOT,
-    PORTAL_ZONE_GATEWAY_SLOT,
+    Role,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZoneInfo,
@@ -399,8 +399,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.messenger(), address(messenger));
         assertEq(portal.bouncebackGas(), 0);
         assertEq(portal.calculateBouncebackFee(), 0);
-        assertTrue(portal.zoneGateway(address(zoneGateway)));
-        assertFalse(portal.allowedAccount(address(zoneGateway)));
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
     }
 
     function test_zoneFactoryTracksZones() public view {
@@ -606,91 +605,90 @@ contract ZonePortalTest is BaseTest {
         address replacement = makeAddr("replacement gateway");
 
         vm.expectEmit(true, false, false, true);
-        emit IZonePortal.ZoneGatewayUpdated(replacement, true);
+        emit IZonePortal.RoleUpdated(replacement, Role.None, Role.CallbackGateway);
         vm.prank(admin);
-        portal.setZoneGateway(replacement, true);
+        portal.setRole(replacement, Role.CallbackGateway);
 
-        assertTrue(portal.zoneGateway(address(zoneGateway)));
-        assertTrue(portal.zoneGateway(replacement));
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
 
         vm.prank(admin);
-        portal.setZoneGateway(address(zoneGateway), false);
-        assertFalse(portal.zoneGateway(address(zoneGateway)));
-        assertTrue(portal.zoneGateway(replacement));
+        portal.setRole(address(zoneGateway), Role.None);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.None));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
     }
 
-    function test_setZoneGateway_revertsForAllowedAccount() public {
+    function test_setPortalRole_changesAccountToCallbackGatewayAtomically() public {
         vm.prank(admin);
-        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
-        portal.setZoneGateway(alice, true);
+        portal.setRole(alice, Role.CallbackGateway);
+        assertEq(uint8(portal.role(alice)), uint8(Role.CallbackGateway));
     }
 
     function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
         vm.startPrank(admin);
-        portal.setZoneGateway(address(0), true);
-        assertTrue(portal.zoneGateway(address(0)));
-        portal.setZoneGateway(address(0), false);
+        portal.setRole(address(0), Role.CallbackGateway);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.CallbackGateway));
+        portal.setRole(address(0), Role.None);
         vm.stopPrank();
 
-        assertFalse(portal.zoneGateway(address(0)));
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
     }
 
     function test_setZoneGateway_revertsIfNotAdmin() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setZoneGateway(makeAddr("replacement gateway"), true);
+        portal.setRole(makeAddr("replacement gateway"), Role.CallbackGateway);
     }
 
     function test_setAllowedAccount_enablesAndDisablesMembership() public {
         address account = makeAddr("managed account");
 
         vm.expectEmit(true, false, false, true);
-        emit IZonePortal.AllowedAccountUpdated(account, true);
+        emit IZonePortal.RoleUpdated(account, Role.None, Role.Account);
         vm.prank(admin);
-        portal.setAllowedAccount(account, true);
-        assertTrue(portal.allowedAccount(account));
+        portal.setRole(account, Role.Account);
+        assertEq(uint8(portal.role(account)), uint8(Role.Account));
 
         vm.prank(admin);
-        portal.setAllowedAccount(account, false);
-        assertFalse(portal.allowedAccount(account));
+        portal.setRole(account, Role.None);
+        assertEq(uint8(portal.role(account)), uint8(Role.None));
     }
 
-    function test_setAllowedAccount_revertsForEnabledGateway() public {
+    function test_setPortalRole_changesCallbackGatewayToAccountAtomically() public {
         vm.prank(admin);
-        vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
-        portal.setAllowedAccount(address(zoneGateway), true);
+        portal.setRole(address(zoneGateway), Role.Account);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.Account));
     }
 
     function test_setAllowedAccount_revertsForMessenger() public {
         vm.prank(admin);
         vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
-        portal.setAllowedAccount(address(messenger), true);
+        portal.setRole(address(messenger), Role.Account);
     }
 
-    function test_setAllowedAccount_allowsRoleChangeAfterGatewayDisabled() public {
-        vm.startPrank(admin);
-        portal.setZoneGateway(address(zoneGateway), false);
-        portal.setAllowedAccount(address(zoneGateway), true);
-        vm.stopPrank();
-
-        assertFalse(portal.zoneGateway(address(zoneGateway)));
-        assertTrue(portal.allowedAccount(address(zoneGateway)));
+    function test_setPortalRole_eventIncludesold() public {
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(
+            address(zoneGateway), Role.CallbackGateway, Role.Account
+        );
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
     }
 
     function test_setAllowedAccount_enablesAndDisablesZeroAddress() public {
         vm.startPrank(admin);
-        portal.setAllowedAccount(address(0), true);
-        assertTrue(portal.allowedAccount(address(0)));
-        portal.setAllowedAccount(address(0), false);
+        portal.setRole(address(0), Role.Account);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.Account));
+        portal.setRole(address(0), Role.None);
         vm.stopPrank();
 
-        assertFalse(portal.allowedAccount(address(0)));
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
     }
 
     function test_setAllowedAccount_revertsIfNotAdmin() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setAllowedAccount(makeAddr("managed account"), true);
+        portal.setRole(makeAddr("managed account"), Role.Account);
     }
 
     function test_acceptSequencer_revertsWhenNoPendingSequencer() public {
@@ -716,7 +714,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_deposit_allowsUnlistedZoneRecipient() public {
         address outsider = makeAddr("outsider");
-        assertFalse(portal.allowedAccount(outsider));
+        assertEq(uint8(portal.role(outsider)), uint8(Role.None));
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1);
@@ -1398,7 +1396,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_zoneGateway_rejectsWhenNoLongerRegistered() public {
         vm.prank(admin);
-        portal.setZoneGateway(address(zoneGateway), false);
+        portal.setRole(address(zoneGateway), Role.None);
 
         vm.prank(address(messenger));
         vm.expectRevert(MockZoneGateway.UnregisteredGateway.selector);
@@ -1489,7 +1487,7 @@ contract ZonePortalTest is BaseTest {
     function test_callbackWithdrawal_returnsFundsAndChangesDepositQueue() public {
         uint128 amount = 500e6;
         _fundCallbackWithdrawal(amount);
-        assertFalse(portal.allowedAccount(address(zoneGateway)));
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.None));
 
         Withdrawal memory withdrawal = _withdrawal(
             address(pathUSD),
@@ -1586,7 +1584,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
         uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
         vm.prank(admin);
-        portal.setAllowedAccount(bob, false);
+        portal.setRole(bob, Role.None);
 
         portal.processWithdrawal(withdrawal, bytes32(0));
 
@@ -1612,7 +1610,7 @@ contract ZonePortalTest is BaseTest {
         _enqueueWithdrawal(withdrawal);
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
         vm.prank(admin);
-        portal.setZoneGateway(address(zoneGateway), false);
+        portal.setRole(address(zoneGateway), Role.None);
 
         portal.processWithdrawal(withdrawal, bytes32(0));
 
@@ -1640,7 +1638,7 @@ contract ZonePortalTest is BaseTest {
         });
         _enqueueWithdrawal(withdrawal);
         vm.prank(admin);
-        portal.setAllowedAccount(alice, false);
+        portal.setRole(alice, Role.None);
 
         portal.processWithdrawal(withdrawal, bytes32(0));
 
@@ -1651,7 +1649,7 @@ contract ZonePortalTest is BaseTest {
         portal.claimRefund(address(pathUSD));
 
         vm.prank(admin);
-        portal.setAllowedAccount(alice, true);
+        portal.setRole(alice, Role.Account);
         vm.prank(alice);
         assertEq(portal.claimRefund(address(pathUSD)), amount);
     }
@@ -3063,8 +3061,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
     ///        slot 17: zoneId (uint32) + messenger (address) [packed]
     ///        slot 18: verifier + genesisTempoBlockNumber + _initialized [packed]
-    ///        slot 19: zoneGateway mapping
-    ///        slot 20: allowedAccount mapping
+    ///        slot 19: portalRole mapping
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: sequencer ---
         bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
@@ -3149,12 +3146,19 @@ contract ZonePortalTest is BaseTest {
         );
         assertEq(uint8(uint256(slot18) >> 224), 1, "slot 18: initialized mismatch");
 
-        bytes32 gatewaySlot =
-            keccak256(abi.encode(address(zoneGateway), uint256(PORTAL_ZONE_GATEWAY_SLOT)));
-        assertEq(uint256(vm.load(address(portal), gatewaySlot)), 1, "slot 19: gateway mismatch");
+        bytes32 gatewaySlot = keccak256(abi.encode(address(zoneGateway), uint256(PORTAL_ROLE_SLOT)));
+        assertEq(
+            uint256(vm.load(address(portal), gatewaySlot)),
+            uint256(Role.CallbackGateway),
+            "slot 19: gateway role mismatch"
+        );
 
-        bytes32 accountSlot = keccak256(abi.encode(alice, uint256(PORTAL_ALLOWED_ACCOUNT_SLOT)));
-        assertEq(uint256(vm.load(address(portal), accountSlot)), 1, "slot 20: account mismatch");
+        bytes32 accountSlot = keccak256(abi.encode(alice, uint256(PORTAL_ROLE_SLOT)));
+        assertEq(
+            uint256(vm.load(address(portal), accountSlot)),
+            uint256(Role.Account),
+            "slot 19: account role mismatch"
+        );
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ZONE_FACTORY_ADDRESS, ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
+import { Role, ZONE_FACTORY_ADDRESS, ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
 import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/tempo/Verifier.sol";
 import { ZoneFactory } from "../src/tempo/ZoneFactory.sol";

@@ -18,8 +18,7 @@ pub enum L1SequencerEvent {
 /// A closed-loop membership update emitted by the L1 portal.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum L1MembershipEvent {
-    ZoneGatewayUpdated { gateway: Address, enabled: bool },
-    AllowedAccountUpdated { account: Address, enabled: bool },
+    RoleUpdated { account: Address, role: u8 },
 }
 
 /// Result of attempting to enqueue an L1 block into the deposit queue.
@@ -74,15 +73,14 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 8] = [
+    const SIGNATURE_HASHES: [B256; 7] = [
         DepositMade::SIGNATURE_HASH,
         EncryptedDepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerTransferStarted::SIGNATURE_HASH,
         SequencerTransferred::SIGNATURE_HASH,
-        ZoneGatewayUpdated::SIGNATURE_HASH,
-        AllowedAccountUpdated::SIGNATURE_HASH,
+        RoleUpdated::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -185,31 +183,17 @@ impl L1PortalEvents {
                     new_sequencer: event.newSequencer,
                 });
             }
-            ZonePortalEvents::ZoneGatewayUpdated(event) => {
-                info!(
-                    l1_block = block_number,
-                    gateway = %event.gateway,
-                    enabled = event.enabled,
-                    "Zone gateway membership updated on L1"
-                );
-                self.membership_events
-                    .push(L1MembershipEvent::ZoneGatewayUpdated {
-                        gateway: event.gateway,
-                        enabled: event.enabled,
-                    });
-            }
-            ZonePortalEvents::AllowedAccountUpdated(event) => {
+            ZonePortalEvents::RoleUpdated(event) => {
                 info!(
                     l1_block = block_number,
                     account = %event.account,
-                    enabled = event.enabled,
-                    "Allowed account membership updated on L1"
+                    role = u8::from(event.next),
+                    "Portal role updated on L1"
                 );
-                self.membership_events
-                    .push(L1MembershipEvent::AllowedAccountUpdated {
-                        account: event.account,
-                        enabled: event.enabled,
-                    });
+                self.membership_events.push(L1MembershipEvent::RoleUpdated {
+                    account: event.account,
+                    role: event.next.into(),
+                });
             }
             _ => {}
         }

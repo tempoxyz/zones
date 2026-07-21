@@ -2,9 +2,9 @@
 pragma solidity ^0.8.13;
 
 import {
-    PORTAL_ALLOWED_ACCOUNT_SLOT,
+    PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
-    PORTAL_ZONE_GATEWAY_SLOT
+    Role
 } from "../../src/interfaces/IZone.sol";
 
 /// @title MockTempoState
@@ -47,13 +47,15 @@ contract MockTempoState {
     }
 
     function setMockAccountAllowed(address portal, address account, bool allowed) external {
-        bytes32 slot = keccak256(abi.encode(account, PORTAL_ALLOWED_ACCOUNT_SLOT));
-        mockStorageValues[portal][slot] = allowed ? bytes32(uint256(1)) : bytes32(0);
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        mockStorageValues[portal][slot] =
+            allowed ? bytes32(uint256(Role.Account)) : bytes32(0);
     }
 
     function setMockZoneGateway(address portal, address gateway, bool enabled) external {
-        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ZONE_GATEWAY_SLOT));
-        mockStorageValues[portal][gatewaySlot] = bytes32(uint256(enabled ? 1 : 0));
+        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
+        mockStorageValues[portal][gatewaySlot] =
+            enabled ? bytes32(uint256(Role.CallbackGateway)) : bytes32(0);
     }
 
     /// @notice Mock finalizeTempo - just advances block number

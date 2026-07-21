@@ -5,12 +5,11 @@ import {
     IZoneConfig,
     IZoneFactory,
     IZonePortal,
-    PORTAL_ALLOWED_ACCOUNT_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     PORTAL_SEQUENCER_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
-    PORTAL_ZONE_GATEWAY_SLOT,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
@@ -75,12 +74,12 @@ contract ZoneConfigTest is BaseTest {
     }
 
     function _syncAllowedAccount(address account) internal {
-        bytes32 slot = keccak256(abi.encode(account, PORTAL_ALLOWED_ACCOUNT_SLOT));
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
         tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
     }
 
     function _syncZoneGateway(address gateway) internal {
-        bytes32 slot = keccak256(abi.encode(gateway, PORTAL_ZONE_GATEWAY_SLOT));
+        bytes32 slot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
         tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
     }
 
