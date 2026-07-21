@@ -701,7 +701,6 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint128 fee, uint128 netAmount)
     {
-        // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
         fee = calculateDepositFee();
         uint128 bouncebackFee = calculateBouncebackFee();
         if (amount < fee + bouncebackFee) revert DepositTooSmall();
@@ -879,7 +878,6 @@ contract ZonePortal is IZonePortal {
     /// @dev Withdrawals must be supplied in queue order. `remainingQueue` is the queue suffix
     ///      after the last supplied withdrawal, or zero if the batch exhausts the current slot.
     ///      Plain-transfer and callback failures bounce back without blocking the FIFO.
-    // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
     function processWithdrawals(
         Withdrawal[] calldata withdrawals,
         bytes32 remainingQueue
