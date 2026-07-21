@@ -1,7 +1,7 @@
 //! Zone block executor.
 //!
 //! A simplified block executor for zone nodes that wraps [`EthBlockExecutor`] directly.
-//! Unlike the Tempo L1 [`TempoBlockExecutor`], this executor does **not** enforce subblock
+//! Unlike the Tempo L1 `TempoBlockExecutor`, this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
 use alloy_consensus::transaction::TxHashRef;
@@ -20,25 +20,28 @@ use tempo_precompiles::{
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
+use zone_l1::state::L1StateProvider;
+use zone_precompiles::L1StorageReader;
 
-use crate::{ZoneEvm, tx_context};
+use crate::{L1OverlayDB, ZoneEvm, tx_context};
 
 /// Simplified block executor for zone nodes.
 ///
 /// Wraps [`EthBlockExecutor`] without any subblock validation, gas-section tracking,
 /// or end-of-block metadata system transaction requirements.
-pub struct ZoneBlockExecutor<'a, DB: Database, I> {
-    inner: EthBlockExecutor<'a, ZoneEvm<DB, I>, &'a ZoneChainSpec, TempoReceiptBuilder>,
+pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
+    inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
 }
 
-impl<'a, DB, I> ZoneBlockExecutor<'a, DB, I>
+impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<DB>>,
+    L1: L1StorageReader,
+    I: Inspector<TempoContext<L1OverlayDB<DB, L1>>>,
 {
     /// Create a zone block executor for `evm` and the current block context.
     pub fn new(
-        evm: ZoneEvm<DB, I>,
+        evm: ZoneEvm<DB, I, L1>,
         ctx: TempoBlockExecutionCtx<'a>,
         chain_spec: &'a ZoneChainSpec,
     ) -> Self {
@@ -54,6 +57,7 @@ where
 
     /// Overrides `validatorTokens[beneficiary]` to match the resolved fee token
     /// so the handler skips FeeAMM.
+    // TODO: Remove this override once ZoneFeeManager lands.
     fn override_validator_token(&mut self) {
         let ctx = self.inner.evm.ctx_mut();
         let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());
@@ -79,14 +83,15 @@ where
     }
 }
 
-impl<'a, DB, I> BlockExecutor for ZoneBlockExecutor<'a, DB, I>
+impl<'a, DB, I, L1> BlockExecutor for ZoneBlockExecutor<'a, DB, I, L1>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<DB>>,
+    L1: L1StorageReader,
+    I: Inspector<TempoContext<L1OverlayDB<DB, L1>>>,
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type Evm = ZoneEvm<DB, I>;
+    type Evm = ZoneEvm<DB, I, L1>;
     type Result = EthTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
@@ -97,15 +102,23 @@ where
         &mut self,
         tx: impl ExecutableTx<Self>,
     ) -> Result<Self::Result, BlockExecutionError> {
-        let (tx_env, recovered) = tx.into_parts();
+        let (mut tx_env, recovered) = tx.into_parts();
+        // Remove any prewarming-specific context that was added to the tx env.
+        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+            tempo_tx_env.expiring_nonce_idx = None;
+        }
 
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
         self.override_validator_token();
 
         let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
-        self.inner
-            .execute_transaction_without_commit((tx_env, recovered))
+        let result = self
+            .inner
+            .execute_transaction_without_commit((tx_env, recovered));
+
+        self.evm_mut().clear_l1_overlay_state();
+        result
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
@@ -140,6 +153,27 @@ mod tests {
         test_util::TIP20Setup,
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
+    use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+
+    #[test]
+    fn clears_only_prewarming_expiring_nonce_index() {
+        let mut tx_env = TempoTxEnv {
+            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
+                valid_before: Some(123),
+                expiring_nonce_idx: Some(3),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        if let Some(tempo_tx_env) = tx_env.tempo_tx_env.as_mut() {
+            tempo_tx_env.expiring_nonce_idx = None;
+        }
+
+        let tempo_tx_env = tx_env.tempo_tx_env.unwrap();
+        assert_eq!(tempo_tx_env.expiring_nonce_idx, None);
+        assert_eq!(tempo_tx_env.valid_before, Some(123));
+    }
 
     /// Simulates the zone executor's per-tx validator token override and runs
     /// the full fee lifecycle across multiple TIP-20 tokens, verifying:

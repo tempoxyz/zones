@@ -44,9 +44,11 @@ alloy-sol-types.workspace = true
 revm.workspace = true
 
 # misc
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 eyre.workspace = true
+zone-precompiles = { workspace = true, features = ["std", "test-utils"] }
 tempo-precompiles = { workspace = true, features = ["test-utils"] }

@@ -228,6 +228,10 @@ impl ZoneRpcApi for MockZoneRpcApi {
         })
     }
 
+    fn zone_get_encryption_key(&self, _auth: zone_rpc::auth::AuthContext) -> BoxFut<'_> {
+        Box::pin(async { Err(zone_rpc::types::JsonRpcError::internal("not implemented")) })
+    }
+
     fn zone_get_deposit_status(
         &self,
         tempo_block_number: u64,

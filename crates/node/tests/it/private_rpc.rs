@@ -312,6 +312,7 @@ fn classify_public_methods() {
         "web3_sha3",
         "zone_getAuthorizationTokenInfo",
         "zone_getZoneInfo",
+        "zone_getEncryptionKey",
         "zone_getDepositStatus",
     ] {
         assert_eq!(

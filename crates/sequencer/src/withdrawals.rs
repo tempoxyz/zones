@@ -4,10 +4,10 @@
 //!
 //! - [`WithdrawalStore`] — an in-memory store that holds [`abi::Withdrawal`] structs grouped by
 //!   batch index. The L1 portal queue only stores hashes, so the sequencer must retain the actual
-//!   withdrawal data to provide it when calling `processWithdrawal`.
+//!   withdrawal data to provide it when calling `processWithdrawals`.
 //!
 //! - [`WithdrawalProcessor`] — a background task that polls the ZonePortal withdrawal queue on
-//!   **Tempo L1** and processes withdrawals by calling `processWithdrawal(withdrawal, remainingQueue)`.
+//!   **Tempo L1** and processes withdrawals by calling `processWithdrawals(withdrawals, remainingQueue)`.
 //!
 //! ## Data flow
 //!
@@ -87,7 +87,7 @@ pub struct WithdrawalProcessorConfig {
 /// In-memory store for withdrawal data grouped by batch index.
 ///
 /// The L1 portal queue only stores hash chains. The sequencer must keep the actual
-/// [`abi::Withdrawal`] structs so it can provide them when calling `processWithdrawal`.
+/// [`abi::Withdrawal`] structs so it can provide them when calling `processWithdrawals`.
 ///
 /// Withdrawals are grouped by batch index, where each batch is a `Vec<Withdrawal>` in FIFO order
 /// (oldest first). The batch index corresponds to the portal's withdrawal queue slot index.
@@ -175,7 +175,7 @@ impl Default for WithdrawalStore {
 
 /// Compute the remaining queue hash after removing the first `processed_count` withdrawals.
 ///
-/// This value is passed as `remainingQueue` to `processWithdrawal` on the portal contract.
+/// This value is passed as `remainingQueue` to `processWithdrawals` on the portal contract.
 ///
 /// - If `processed_count >= withdrawals.len()`, returns `B256::ZERO` (no remaining items).
 /// - Otherwise, computes the hash chain over `withdrawals[processed_count..]` via
@@ -203,21 +203,12 @@ struct StoreSnapshot {
     withdrawals: Option<Vec<abi::Withdrawal>>,
 }
 
-/// Return the extra outer-frame gas needed for EIP-150's 63/64 forwarding rule.
-///
-/// `ZonePortal.processWithdrawal` must keep enough gas in the caller frame for the
-/// callback CALL to receive at least `gas_limit`. The cushion is `ceil(gas_limit / 63)`,
-/// which compensates for the 1/64 of remaining gas that EIP-150 withholds from the call.
-const fn eip150_cushion(gas_limit: u64) -> u64 {
-    gas_limit / 63 + if gas_limit.is_multiple_of(63) { 0 } else { 1 }
-}
-
 /// Return the outer transaction gas limit for a callback withdrawal.
 ///
 /// The callback portion is capped at [`MAX_WITHDRAWAL_GAS_LIMIT`] before adding the
-/// fixed portal/messenger overhead and the EIP-150 cushion. This keeps legacy over-cap
-/// withdrawals submit-able so the portal can dequeue and bounce them instead of letting
-/// the RPC reject the transaction before it reaches L1 execution.
+/// fixed portal/messenger overhead. This keeps legacy over-cap withdrawals submit-able
+/// so the portal can dequeue and bounce them instead of letting the RPC reject the
+/// transaction before it reaches L1 execution.
 const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
     let bounded_callback_gas = if callback_gas_limit > MAX_WITHDRAWAL_GAS_LIMIT {
         MAX_WITHDRAWAL_GAS_LIMIT
@@ -225,12 +216,10 @@ const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
         callback_gas_limit
     };
 
-    bounded_callback_gas
-        + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
-        + eip150_cushion(bounded_callback_gas)
+    bounded_callback_gas + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
 }
 
-/// Outcome of submitting and confirming one `processWithdrawal` transaction.
+/// Outcome of submitting and confirming one `processWithdrawals` transaction.
 enum SubmitOutcome {
     /// The transaction was included on L1 and succeeded.
     Confirmed,
@@ -492,7 +481,7 @@ impl WithdrawalProcessor {
         }
     }
 
-    /// Submit one `processWithdrawal` transaction and wait for its receipt.
+    /// Submit one `processWithdrawals` transaction and wait for its receipt.
     async fn submit_and_confirm(
         &self,
         slot: u64,
@@ -510,14 +499,13 @@ impl WithdrawalProcessor {
             token = %withdrawal.token,
             to = %withdrawal.to,
             amount = %withdrawal.amount,
-            fee = %withdrawal.fee,
             has_callback = withdrawal.gasLimit > 0,
             "📤 Submitting withdrawal to L1"
         );
 
         let call = self
             .portal
-            .processWithdrawal(withdrawal.clone(), remaining_queue)
+            .processWithdrawals(vec![withdrawal.clone()], remaining_queue)
             .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY);
 
         // When the withdrawal has a callback (`gasLimit > 0`), we must
@@ -525,11 +513,10 @@ impl WithdrawalProcessor {
         // revert / bounce-back path, which is much cheaper than the happy
         // path where the callback actually executes.
         //
-        // The tx gas limit is composed of three parts:
+        // The tx gas limit is composed of two parts:
         //
         //   txGas = min(gasLimit, MAX_WITHDRAWAL_GAS_LIMIT)
         //         + CALLBACK_OVERHEAD
-        //         + eip150_cushion
         //
         // 1. `gasLimit`          — gas the user requested for their callback.
         // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
@@ -537,10 +524,6 @@ impl WithdrawalProcessor {
         //    verification, TIP-20 transfers, messenger relay
         //    setup, fee payment, event emission, and the bounce-back path
         //    if the callback reverts.
-        // 3. EIP-150 cushion     — the 63/64 forwarding rule means the
-        //    caller must hold back 1/64 of remaining gas. To guarantee
-        //    the inner CALL receives at least `gasLimit`, the outer frame
-        //    needs an extra `ceil(bounded_callback_gas / 63)`.
         //
         // `MAX_WITHDRAWAL_GAS_LIMIT` mirrors the contract-level cap. It
         // also bounds legacy over-cap withdrawals so RPC nodes do not
@@ -574,7 +557,7 @@ impl WithdrawalProcessor {
                     to = %withdrawal.to,
                     amount = %withdrawal.amount,
                     error = %e,
-                    "processWithdrawal tx failed to send, stopping batch processing"
+                    "processWithdrawals tx failed to send, stopping batch processing"
                 );
                 return SubmitOutcome::Unconfirmed;
             }
@@ -597,7 +580,7 @@ impl WithdrawalProcessor {
                     to = %withdrawal.to,
                     amount = %withdrawal.amount,
                     error = %e,
-                    "processWithdrawal tx not confirmed, stopping batch processing"
+                    "processWithdrawals tx not confirmed, stopping batch processing"
                 );
                 return SubmitOutcome::Unconfirmed;
             }
@@ -613,7 +596,7 @@ impl WithdrawalProcessor {
                 to = %withdrawal.to,
                 amount = %withdrawal.amount,
                 expected_remaining_queue = %remaining_queue,
-                "processWithdrawal tx was included but reverted; keeping batch in store and requesting repair"
+                "processWithdrawals tx was included but reverted; keeping batch in store and requesting repair"
             );
             return SubmitOutcome::Reverted;
         }
@@ -699,7 +682,6 @@ mod tests {
             senderTag: B256::repeat_byte(0x11),
             to,
             amount,
-            fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackNonce: 1,
@@ -741,7 +723,6 @@ mod tests {
             senderTag: B256::repeat_byte(0x22),
             to: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
             amount: 500_000,
-            fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackNonce: 1,
@@ -795,9 +776,7 @@ mod tests {
         assert_eq!(at_cap, MAX_PROCESS_WITHDRAWAL_TX_GAS);
         assert_eq!(
             at_cap,
-            MAX_WITHDRAWAL_GAS_LIMIT
-                + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
-                + MAX_WITHDRAWAL_GAS_LIMIT.div_ceil(63)
+            MAX_WITHDRAWAL_GAS_LIMIT + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
         );
         assert!(at_cap < 30_000_000);
     }

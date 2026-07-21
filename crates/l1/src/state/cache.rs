@@ -8,8 +8,8 @@
 //! ## Storage model
 //!
 //! Each `(contract_address, slot_key)` pair maps to a [`BTreeMap<u64, B256>`] of
-//! `block_number → value`. A lookup for block N returns the most recent entry whose
-//! block number is ≤ N, reflecting the value that was current at that height.
+//! `block_number → value`. A lookup for block N may inherit the most recent earlier value only
+//! when verified receipt coverage and mutation barriers prove that it remained current.
 //!
 //! ## Write path
 //!
@@ -28,7 +28,7 @@ use alloy_primitives::{Address, B256};
 use derive_more::Deref;
 use parking_lot::RwLock;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     sync::Arc,
 };
 
@@ -55,15 +55,24 @@ impl L1StateCache {
 /// i.e. the value that was current at that height. This allows the zone to read L1 state at
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
-/// The anchor tracks the latest L1 block the cache has received data for, used by the
-/// [`L1Subscriber`](crate::l1::L1Subscriber) for reorg detection.
+/// Inherited values are valid only when the subscriber has processed every intervening L1 block
+/// and no log from the owning contract indicates a possible mutation. The non-advancing floor
+/// excludes historical reads from before the subscriber's contiguous observation range.
+///
+/// The anchor tracks the latest L1 block whose receipts the
+/// [`L1Subscriber`](crate::l1::L1Subscriber) has processed, and is also used for reorg detection.
 #[derive(Debug, Default)]
 pub struct L1StateCacheInner {
     tracked_contracts: HashSet<Address>,
     /// Per-slot value history: `(address, slot) → { block_number → value }`.
     /// The `BTreeMap` enables efficient range lookups for "latest value at or before block N".
     slots: HashMap<(Address, B256), BTreeMap<u64, B256>>,
-    /// Latest L1 block the cache has received data for, used for reorg detection.
+    /// Per-address mutation barriers. A value at V cannot serve a read at N when a barrier exists
+    /// in `(V, N]`.
+    invalidations: HashMap<Address, BTreeSet<u64>>,
+    /// Initial canonical Zone L1 anchor. Values below it are never admitted to the forward cache.
+    block_floor: u64,
+    /// Latest contiguous L1 block whose receipts the subscriber has processed.
     anchor: NumHash,
 }
 
@@ -78,23 +87,61 @@ impl L1StateCacheInner {
 
     /// Returns the cached value for a storage slot at the given block number.
     ///
-    /// Returns the most recent value at or before `block_number`, or `None` if no
-    /// value has been cached for this slot at or before the requested block.
+    /// An exact-height value is always valid. A value inherited from an earlier height is returned
+    /// only when the subscriber has processed receipts through `block_number` and no mutation
+    /// barrier exists after the value was populated.
     pub fn get(&self, address: Address, slot: B256, block_number: u64) -> Option<B256> {
-        self.slots
-            .get(&(address, slot))
-            .and_then(|history| history.range(..=block_number).next_back().map(|(_, v)| *v))
+        let (&cached_block, &value) = self
+            .slots
+            .get(&(address, slot))?
+            .range(..=block_number)
+            .next_back()?;
+        let invalidated = self
+            .invalidations
+            .get(&address)
+            .and_then(|blocks| blocks.range(..=block_number).next_back())
+            .is_some_and(|&invalidated_at| invalidated_at > cached_block);
+
+        let is_exact = cached_block == block_number;
+        let can_inherit = block_number <= self.anchor.number && !invalidated;
+        let is_cache_valid = cached_block >= self.block_floor && (is_exact || can_inherit);
+        is_cache_valid.then_some(value)
     }
 
-    /// Sets a storage slot value in the cache at the given block number.
+    /// Sets a storage slot value in the forward cache at the given block number.
+    ///
+    /// Values below the initial canonical floor are deliberately not admitted, so historical
+    /// reads cannot later be inherited by canonical execution.
     pub fn set(&mut self, address: Address, slot: B256, block_number: u64, value: B256) {
+        if block_number < self.block_floor {
+            return;
+        }
         self.slots
             .entry((address, slot))
             .or_default()
             .insert(block_number, value);
     }
 
-    /// Updates the anchor block that this cache has received data up to.
+    /// Prevents values populated before the current contiguous receipt-coverage baseline from
+    /// entering the forward cache. Initialized at startup and rebased after a coverage reset.
+    pub fn initialize_floor(&mut self, block_number: u64) {
+        self.block_floor = self.block_floor.max(block_number);
+    }
+
+    /// Returns the non-advancing cache floor.
+    pub const fn block_floor(&self) -> u64 {
+        self.block_floor
+    }
+
+    /// Invalidates inherited values for `address` starting at `block_number`.
+    pub fn invalidate(&mut self, address: Address, block_number: u64) {
+        self.invalidations
+            .entry(address)
+            .or_default()
+            .insert(block_number);
+    }
+
+    /// Updates the latest contiguous block whose receipts have been processed.
     pub fn update_anchor(&mut self, anchor: NumHash) {
         self.anchor = anchor;
     }
@@ -109,9 +156,10 @@ impl L1StateCacheInner {
         self.tracked_contracts.contains(address)
     }
 
-    /// Clears all cached slot values but retains the tracked-contract set.
+    /// Clears chain-derived data while retaining the tracked-contract set and initial floor.
     pub fn clear(&mut self) {
         self.slots.clear();
+        self.invalidations.clear();
         self.anchor = NumHash::default();
     }
 
@@ -142,6 +190,10 @@ mod tests {
 
     const PORTAL: Address = address!("0x0000000000000000000000000000000000004242");
 
+    fn cover_through(cache: &mut L1StateCacheInner, block_number: u64) {
+        cache.update_anchor(NumHash::new(block_number, B256::with_last_byte(1)));
+    }
+
     #[test]
     fn get_returns_none_for_missing_slot() {
         let cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
@@ -165,6 +217,7 @@ mod tests {
 
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
         cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
+        cover_through(&mut cache, 25);
 
         assert_eq!(
             cache.get(PORTAL, slot, 10),
@@ -194,10 +247,58 @@ mod tests {
     }
 
     #[test]
-    fn clear_removes_slots_and_resets_anchor() {
+    fn inherited_value_requires_receipt_coverage() {
+        let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
+        let slot = B256::with_last_byte(1);
+        let value = B256::with_last_byte(0x0a);
+        cache.set(PORTAL, slot, 10, value);
+
+        assert_eq!(cache.get(PORTAL, slot, 11), None);
+        cover_through(&mut cache, 11);
+        assert_eq!(cache.get(PORTAL, slot, 11), Some(value));
+    }
+
+    #[test]
+    fn invalidation_blocks_inheritance_until_refetched() {
+        let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
+        let slot = B256::with_last_byte(1);
+        let old = B256::with_last_byte(0x0a);
+        let new = B256::with_last_byte(0x0b);
+        cache.set(PORTAL, slot, 10, old);
+        cache.invalidate(PORTAL, 11);
+        cover_through(&mut cache, 12);
+
+        assert_eq!(cache.get(PORTAL, slot, 11), None);
+        assert_eq!(cache.get(PORTAL, slot, 12), None);
+
+        cache.set(PORTAL, slot, 11, new);
+        assert_eq!(cache.get(PORTAL, slot, 11), Some(new));
+        assert_eq!(cache.get(PORTAL, slot, 12), Some(new));
+    }
+
+    #[test]
+    fn floor_rejects_historical_cache_admission() {
+        let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
+        let slot = B256::with_last_byte(1);
+        cache.initialize_floor(10);
+        cache.set(PORTAL, slot, 9, B256::with_last_byte(9));
+        cover_through(&mut cache, 11);
+
+        assert_eq!(cache.get(PORTAL, slot, 9), None);
+        assert_eq!(cache.get(PORTAL, slot, 11), None);
+
+        let current = B256::with_last_byte(10);
+        cache.set(PORTAL, slot, 10, current);
+        assert_eq!(cache.get(PORTAL, slot, 11), Some(current));
+    }
+
+    #[test]
+    fn clear_removes_chain_data_and_preserves_floor() {
         let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
 
+        cache.initialize_floor(90);
         cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1));
+        cache.invalidate(PORTAL, 101);
         cache.update_anchor(NumHash {
             number: 100,
             hash: B256::with_last_byte(0xab),
@@ -206,7 +307,9 @@ mod tests {
         cache.clear();
 
         assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
+        assert!(cache.invalidations.is_empty());
         assert_eq!(cache.anchor(), NumHash::default());
+        assert_eq!(cache.block_floor(), 90);
     }
 
     #[test]
@@ -262,6 +365,7 @@ mod tests {
         cache.set(PORTAL, slot, 5, B256::with_last_byte(0x05));
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
         cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
+        cover_through(&mut cache, 20);
 
         cache.prune_before(15);
 

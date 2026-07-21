@@ -19,11 +19,11 @@ graph TD
     L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
     DQ["DepositQueue"]
     Cache["L1StateCache"]
-    PolicyCache["PolicyCache"]
+    PolicyCache["PolicyCache<br/><i>encrypted deposits only</i>"]
 
     Engine["ZoneEngine"]
     Builder["PayloadBuilder<br/><i>advanceTempo + pool txs</i>"]
-    PolicyPrefetch["PolicyResolutionTask<br/><i>pool pre-warm</i>"]
+    PolicyPrefetch["PolicyResolutionTask<br/><i>legacy cache pre-warm</i>"]
 
     Monitor["ZoneMonitor"]
     Batch["BatchSubmitter"]
@@ -119,31 +119,29 @@ header chain linking back to the target block.
 3. At batch finalization, withdrawals are hashed into a chain and submitted to
    L1 as part of the batch proof.
 4. The `WithdrawalProcessor` polls the L1 portal queue and calls
-   `processWithdrawal` for each pending withdrawal.
+   `processWithdrawals` for each pending withdrawal.
 
 ## TIP-403 Policy Enforcement
 
 The zone enforces TIP-403 transfer policies (whitelist, blacklist, compound)
-identically to L1. Policy state is mirrored via:
+using Tempo's upstream policy implementation over anchored raw L1 state:
 
-1. **L1Subscriber** — extracts `PolicyCreated`, `WhitelistUpdated`,
-   `BlacklistUpdated`, `CompoundPolicyCreated`, and `TransferPolicyUpdate`
-   events from L1 block receipts (via `eth_getBlockReceipts`) and applies
-   them to the in-memory `PolicyCache`.
-2. **PolicyProvider** — cache-first, RPC-fallback resolution. On cache miss
-   it queries L1 via `block_in_place` and populates the cache for subsequent
-   lookups.
-3. **ZoneTip403ProxyRegistry** — a read-only precompile at the same address
-   as the L1 `TIP403Registry` (`0x403C…0000`). It intercepts `isAuthorized`,
-   `policyData`, `compoundPolicyData`, etc. and serves them from the
-   `PolicyProvider`. Mutating calls are reverted.
-4. **Pool pre-fetching** — the `PolicyResolutionTask` pre-warms the cache for
-   pending pool transactions so payload building doesn't block on RPC.
+1. **L1StateProvider** — resolves storage slots at an explicit L1 block through
+   the block-versioned `L1StateCache`, falling back to an exact-block L1 RPC
+   read and caching the result.
+2. **AnchoredZoneDb** — composes ordinary zone EVM storage with the raw L1
+   reader at the exact finalized block recorded in `TempoState`. TIP-403
+   registry state and each token's L1-owned transfer-policy field come from L1;
+   balances and all other TIP-20 state remain zone-local. Mirrored reads retain
+   normal EVM gas, warming, and storage accounting, while persistent writes to
+   L1-owned slots are rejected.
+3. **Tempo TIP-20 and TIP-403 precompiles** — execute the upstream business
+   logic against that composed storage view, replacing the zone's duplicated
+   policy dispatch. Missing or invalid anchored state fails closed, and zone
+   privacy, bridge authorization, admission, and fixed-gas rules remain in the
+   surrounding execution layer.
 
-The payload builder checks sender/recipient authorization during
-`advanceTempo` deposit processing. Encrypted deposits that fail policy checks
-are included with a zeroed-out amount (the deposit hash chain must still
-match L1).
+> NOTE: encrypted-deposit checks temporarily retain the legacy `PolicyProvider` and `PolicyCache`; they will move to the same anchored raw-state path before that pipeline is removed. Encrypted deposits that fail policy checks are included with a zeroed-out amount so the deposit hash chain still matches L1.
 
 ## Demo: Token Creation with Transfer Policy
 
@@ -228,8 +226,8 @@ just send-deposit 1000000 "" $TOKEN
 
 ### 7. Test enforcement on the zone
 
-Transfers to blacklisted addresses will be rejected by the zone's
-`ZoneTip403ProxyRegistry` precompile, which mirrors L1 policy state.
+Transfers to blacklisted addresses will be rejected by upstream TIP-20 policy
+logic reading raw L1 policy state at the zone's finalized Tempo anchor.
 
 ```bash
 # Check balance on zone
@@ -265,7 +263,7 @@ just set-transfer-policy $TOKEN <M>
 | `0x1C00…0100` | `ChaumPedersenVerify` | Verify DLOG equality proofs for ECDH |
 | `0x1C00…0101` | `AesGcmDecrypt` | AES-256-GCM authenticated decryption |
 | `0x20FC…0000` | `ZoneTokenFactory` | Initialize TIP-20 tokens on the zone |
-| `0x403C…0000` | `ZoneTip403ProxyRegistry` | Read-only proxy mirroring L1 TIP-403 policy state |
+| `0x403C…0000` | `TIP403Registry` | Upstream read-only execution over exact-block raw L1 policy state |
 
 ## EVM Configuration
 
@@ -275,9 +273,9 @@ L1 with these differences:
 - The **TIP20Factory** precompile is replaced by `ZoneTokenFactory`, which only
   supports `enableToken` (no `createToken`) since zone tokens are always bridged
   from L1.
-- The **TIP403Registry** precompile is replaced by `ZoneTip403ProxyRegistry`,
-  a storage-less read-only proxy that resolves authorization from the in-memory
-  policy cache rather than on-chain storage.
+- The **TIP403Registry** uses upstream Tempo execution through a read-only
+  storage overlay anchored at the finalized L1 block recorded in `TempoState`.
+  Policy mutations revert because registry state is owned by L1.
 - The **block executor** is simplified: no subblock ordering, shared-gas
   accounting, or end-of-block metadata system transactions — those are L1-only
   concerns.

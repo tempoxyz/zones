@@ -43,9 +43,6 @@ alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 
-# revm
-revm.workspace = true
-
 # misc
 derive_more = { workspace = true, features = ["deref"] }
 eyre.workspace = true

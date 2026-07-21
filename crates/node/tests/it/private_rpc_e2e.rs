@@ -1176,6 +1176,51 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
     Ok(())
 }
 
+fn encryption_public_key(secret_key: &k256::SecretKey) -> (String, u8) {
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let encoded = secret_key.public_key().to_encoded_point(true);
+    (
+        format!("{:#x}", B256::from_slice(encoded.x().unwrap())),
+        encoded.as_bytes()[0],
+    )
+}
+
+/// The method returns the latest key on Tempo L1 without waiting for the Zone
+/// to process the key rotation.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_get_encryption_key_reads_latest_l1_key() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1_with_encryption().await?;
+    let portal_address = ctx.portal_address();
+    let caller = ctx.l1().user_signer();
+
+    let second_key = k256::SecretKey::from_slice(&[0x42; 32])?;
+    ctx.l1()
+        .set_sequencer_encryption_key(portal_address, &second_key)
+        .await?;
+
+    let (second_x, second_prefix) = encryption_public_key(&second_key);
+    let second = ctx
+        .call_as_user("zone_getEncryptionKey", serde_json::json!([]), &caller)
+        .await?;
+    assert!(
+        second.get("error").is_none(),
+        "unexpected response: {second}"
+    );
+    assert_eq!(
+        second["result"],
+        serde_json::json!({
+            "x": second_x,
+            "yParity": second_prefix,
+            "keyIndex": "0x1",
+        })
+    );
+
+    Ok(())
+}
+
 /// `zone_getDepositStatus` returns relevant regular deposits for both the sender
 /// and the plaintext recipient, and returns an empty list for unrelated callers.
 #[tokio::test(flavor = "multi_thread")]

@@ -1,7 +1,7 @@
 //! Sequencer-side ECIES operations for encrypted deposit decryption.
 //!
 //! These functions run **off-chain** in the payload builder to produce the
-//! [`DecryptionData`] that the on-chain ZoneInbox contract verifies via the
+//! `DecryptionData` that the on-chain ZoneInbox contract verifies via the
 //! Chaum-Pedersen and AES-GCM precompiles.
 
 use alloc::vec::Vec;

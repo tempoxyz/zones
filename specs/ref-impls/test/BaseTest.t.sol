@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ZONE_FACTORY_ADDRESS, ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
+import { Withdrawal, ZONE_FACTORY_ADDRESS, ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
 import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/tempo/Verifier.sol";
 import { ZoneFactory } from "../src/tempo/ZoneFactory.sol";
@@ -159,6 +159,15 @@ contract BaseTest is Test {
         vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(7)), bytes32(uint256(3)));
 
         zoneFactory = ZoneFactory(ZONE_FACTORY_ADDRESS);
+    }
+
+    function _singleWithdrawal(Withdrawal memory withdrawal)
+        internal
+        pure
+        returns (Withdrawal[] memory withdrawals)
+    {
+        withdrawals = new Withdrawal[](1);
+        withdrawals[0] = withdrawal;
     }
 
 }
