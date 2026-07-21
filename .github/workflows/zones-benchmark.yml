@@ -258,9 +258,6 @@ jobs:
     name: ${{ needs.authorize.outputs.phase }}
     needs: authorize
     runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
-    concurrency:
-      group: zones-benchmark-host
-      cancel-in-progress: false
     timeout-minutes: 300
     env:
       ZONES_BENCH_PHASE: ${{ needs.authorize.outputs.phase }}
