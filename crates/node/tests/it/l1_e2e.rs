@@ -168,12 +168,11 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
     let latest_l1_block = l1.provider().get_block_number().await?;
     assert!(latest_l1_block > provisioned.anchor_block_number);
 
-    let zone = ZoneTestNode::start_from_l1_at_block_with_initial_tokens(
+    let zone = ZoneTestNode::start_from_l1_at_block(
         l1.http_url(),
         l1.ws_url(),
         provisioned.portal,
         provisioned.anchor_block_number,
-        None,
     )
     .await?;
     zone.wait_for_l2_tempo_finalized(latest_l1_block, L1_TIMEOUT)
@@ -453,18 +452,6 @@ async fn test_cross_zone_encrypted_router_bounceback_recipient() -> eyre::Result
     let encryption_key = k256::SecretKey::from(seq_b_signer.credential());
     l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())
         .await?;
-
-    {
-        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
-        let l1_block = l1.provider().get_block_number().await?;
-        for policy_cache in [zone_a.policy_cache(), zone_b.policy_cache()] {
-            let mut cache = policy_cache.write();
-            cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
-            cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
-            cache.set_policy_status(policy_id, blacklisted_recipient, l1_block, true);
-        }
-    }
 
     let mut alice = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
     let deposit_amount: u128 = 2_000_000;
@@ -1171,12 +1158,10 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
 ///
 ///  1. Start L1 dev node, deploy zone, register encryption key.
 ///  2. Create a blacklist policy, assign to pathUSD, blacklist the recipient.
-///  3. Fund the policy cache so the zone knows about the blacklist.
-///  4. Make an encrypted deposit targeting the blacklisted recipient.
-///  5. Verify the deposit is refunded to the sender on L1.
+///  3. Make an encrypted deposit targeting the blacklisted recipient.
+///  4. Verify upstream TIP-20 mint enforcement fails and refunds the sender on L1.
 ///
-/// NOTE: This test validates the builder-level policy check in `build_encrypted_deposit`.
-/// The zone's policy cache must be pre-populated for the check to trigger.
+/// `L1OverlayDB` exposes finalized L1 policy state directly to upstream Tempo execution.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1210,23 +1195,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     l1.set_sequencer_encryption_key(portal_address, &encryption_key)
         .await?;
 
-    // --- Step 5: Pre-populate zone's policy cache ---
-    // The builder checks PolicyCacheInner during encrypted deposit processing.
-    // Since the L1 subscriber may not have caught up yet, seed it manually.
-    {
-        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
-        let policy_cache = zone.policy_cache();
-        // Fetch L1 block number before acquiring the write lock to avoid
-        // holding a parking_lot guard across an await point.
-        let l1_block = l1.provider().get_block_number().await?;
-        let mut cache = policy_cache.write();
-        cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
-        cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
-        cache.set_policy_status(policy_id, blacklisted_recipient, l1_block, true);
-    }
-
-    // --- Step 6: Make an encrypted deposit targeting the blacklisted recipient ---
+    // --- Step 5: Make an encrypted deposit targeting the blacklisted recipient ---
     let depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
     let deposit_amount: u128 = 1_000_000;
     l1.fund_user(depositor.address(), deposit_amount).await?;
@@ -1296,7 +1265,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     )
     .await?;
 
-    // The blacklisted recipient should NOT have received the deposit
+    // The blacklisted recipient should NOT have received the deposit.
     let recipient_balance = zone
         .balance_of(ZONE_TOKEN_ADDRESS, blacklisted_recipient)
         .await?;
@@ -1359,26 +1328,6 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     // --- Step 3: Start zone connected to L1 ---
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-
-    // Seed the policy cache manually so it has policy data before test execution.
-    {
-        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
-
-        let l1_block = l1.provider().get_block_number().await?;
-        let mut cache = zone.policy_cache().write();
-        cache.set_token_policy(PATH_USD_ADDRESS, l1_block, compound_policy_id);
-        cache.set_policy_type(compound_policy_id, PolicyType::COMPOUND);
-        cache.set_compound(
-            compound_policy_id,
-            zone_l1::state::tip403::CompoundData {
-                sender_policy_id,
-                recipient_policy_id: 1,
-                mint_recipient_policy_id: 1,
-            },
-        );
-        cache.set_policy_type(sender_policy_id, PolicyType::BLACKLIST);
-        cache.set_policy_status(sender_policy_id, alice, l1_block, true);
-    }
 
     // --- Step 4: Deposit to Alice via the dev account ---
     // Alice is blacklisted as a sender, so she can't transfer pathUSD on L1

@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, time::Duration};
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use zone_l1::{L1BlockTracker, PolicyCache, TempoStateExt as _};
+use zone_l1::{L1BlockTracker, TempoStateExt as _};
 use zone_p2p::{P2pCommand, P2pEvent, Role};
 use zone_payload::{
     ZonePayloadTypes,
@@ -349,7 +349,6 @@ pub(crate) async fn run_block_sync<P>(
     events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
     l1_block_tracker: L1BlockTracker,
-    policy_cache: PolicyCache,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -363,15 +362,7 @@ pub(crate) async fn run_block_sync<P>(
     match role {
         Role::Leader => run_leader_backfill_server(provider, events, commands).await,
         Role::Follower => {
-            run_follower_block_sync(
-                provider,
-                engine,
-                events,
-                commands,
-                l1_block_tracker,
-                policy_cache,
-            )
-            .await
+            run_follower_block_sync(provider, engine, events, commands, l1_block_tracker).await
         }
     }
 }
@@ -432,7 +423,6 @@ async fn run_follower_block_sync<P>(
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
     l1_block_tracker: L1BlockTracker,
-    policy_cache: PolicyCache,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -497,7 +487,6 @@ async fn run_follower_block_sync<P>(
                                         &provider,
                                         &engine,
                                         &l1_block_tracker,
-                                        &policy_cache,
                                         &block,
                                     ).await {
                                         tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
@@ -515,7 +504,6 @@ async fn run_follower_block_sync<P>(
                                     &provider,
                                     &engine,
                                     &l1_block_tracker,
-                                    &policy_cache,
                                     &mut pending,
                                 ).await {
                                     tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
@@ -606,7 +594,6 @@ async fn drain_pending_blocks<P>(
     provider: &P,
     engine: &ConsensusEngineHandle<ZonePayloadTypes>,
     l1_block_tracker: &L1BlockTracker,
-    policy_cache: &PolicyCache,
     pending: &mut BTreeMap<u64, Vec<u8>>,
 ) -> eyre::Result<()>
 where
@@ -623,7 +610,7 @@ where
         let Some(block) = pending.remove(&next) else {
             return Ok(());
         };
-        import_peer_block(provider, engine, l1_block_tracker, policy_cache, &block).await?;
+        import_peer_block(provider, engine, l1_block_tracker, &block).await?;
     }
 }
 
@@ -631,7 +618,6 @@ async fn import_peer_block<P>(
     provider: &P,
     engine: &ConsensusEngineHandle<ZonePayloadTypes>,
     l1_block_tracker: &L1BlockTracker,
-    policy_cache: &PolicyCache,
     encoded: &[u8],
 ) -> eyre::Result<()>
 where
@@ -729,7 +715,6 @@ where
     }
 
     // Mirror the leader engine only after the block is canonical locally.
-    policy_cache.advance(anchor.number);
     l1_block_tracker.prune_through(anchor.number);
 
     info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");

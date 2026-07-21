@@ -66,7 +66,7 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
 
 impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AnchoredZoneDb")
+        f.debug_struct("L1OverlayDB")
             .field("inner", &self.inner)
             .field("l1", &self.l1)
             .finish_non_exhaustive()
@@ -247,6 +247,7 @@ mod tests {
         let slot = U256::from(7);
         let expected = U256::from(99);
         let l1 = TestL1::default();
+        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor - 1, U256::from(98));
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
         let mut db = L1OverlayDB::new(test_db(anchor), l1);
 

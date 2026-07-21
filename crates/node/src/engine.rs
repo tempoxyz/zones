@@ -51,7 +51,7 @@ use tempo_primitives::TempoHeader;
 use tracing::{error, warn};
 
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
+use zone_l1::{DepositQueue, L1BlockDeposits, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Engine that drives L2 block production from L1 events.
@@ -84,9 +84,6 @@ pub struct ZoneEngine {
     sequencer_key: k256::SecretKey,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
-    /// Cache-first, RPC-fallback TIP-403 policy provider for authorization checks
-    /// on encrypted deposit recipients during preparation.
-    policy_provider: PolicyProvider,
 }
 
 impl ZoneEngine {
@@ -99,7 +96,6 @@ impl ZoneEngine {
         fee_recipient: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
-        policy_provider: PolicyProvider,
     ) -> Self {
         Self {
             chain_spec,
@@ -110,7 +106,6 @@ impl ZoneEngine {
             fee_recipient,
             sequencer_key,
             portal_address,
-            policy_provider,
         }
     }
 
@@ -182,17 +177,12 @@ impl ZoneEngine {
         }
     }
 
-    /// Decrypt encrypted deposits, check TIP-403 policy authorization, and
-    /// ABI-encode everything into a [`PreparedL1Block`] ready for the payload
-    /// builder. Errors (e.g. policy RPC failures) are propagated so the engine
-    /// retries rather than allowing unauthorized deposits through.
+    /// Decrypt encrypted deposits and ABI-encode them into a [`PreparedL1Block`] ready for
+    /// the payload builder. Mint-recipient policy is enforced during upstream TIP-20 execution
+    /// against the finalized L1 anchor.
     async fn prepare_l1_block(&self, l1_block: L1BlockDeposits) -> eyre::Result<PreparedL1Block> {
         l1_block
-            .prepare(
-                &self.sequencer_key,
-                self.portal_address,
-                &self.policy_provider,
-            )
+            .prepare(&self.sequencer_key, self.portal_address)
             .await
     }
 
@@ -270,12 +260,6 @@ impl ZoneEngine {
         if self.deposit_queue.confirm(l1_num_hash).is_none() {
             warn!(target: "zone::engine", ?l1_num_hash, "L1 block was purged from queue during build");
         }
-
-        // GC stale versioned entries from the policy cache. Only the engine
-        // drives this — the subscriber must not advance past blocks the engine
-        // hasn't processed yet, otherwise policy lookups for in-flight blocks
-        // could return wrong results.
-        self.policy_provider.cache().advance(l1_num_hash.number);
 
         self.last_header = header;
 

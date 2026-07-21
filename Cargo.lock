@@ -13469,21 +13469,16 @@ dependencies = [
  "reth-provider",
  "reth-storage-api",
  "reth-tasks",
- "reth-transaction-pool",
  "serde",
  "serde_json",
  "tempo-alloy",
  "tempo-contracts",
- "tempo-precompiles",
  "tempo-primitives",
- "tempo-revm",
- "tempo-transaction-pool",
  "tempo-zone-contracts",
  "tokio",
  "tracing",
  "url",
  "zone-precompiles",
- "zone-primitives",
 ]
 
 [[package]]

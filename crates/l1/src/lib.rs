@@ -76,7 +76,7 @@ use crate::{
             SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
         },
     },
-    state::{cache::L1StateCacheInner, tip403::PolicyEvent},
+    state::cache::L1StateCacheInner,
 };
 
 mod block;
@@ -93,7 +93,7 @@ pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
 pub use event::{EnabledToken, L1PortalEvents, L1SequencerEvent};
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
-pub use state::{L1StateCache, PolicyCache, PolicyProvider};
+pub use state::L1StateCache;
 pub use subscriber::{L1BlockTracker, L1Subscriber, L1SubscriberConfig};
 
 pub(crate) use event::EnqueueOutcome;

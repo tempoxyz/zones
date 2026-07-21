@@ -14,7 +14,6 @@ use tempo_contracts::precompiles::{
     ITIP403Registry::{self, PolicyType},
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, TIP403_REGISTRY_ADDRESS};
-use zone_l1::state::tip403::PolicyEvent;
 
 use crate::utils::{
     DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip20_policy_id,
@@ -23,8 +22,7 @@ use crate::utils::{
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
 ///
-/// TIP-20 transfers use the default `transferPolicyId` of 1 (allow all),
-/// so they always succeed regardless of the policy cache state.
+/// TIP-20 transfers use the default anchored `transferPolicyId` of 1 (allow all).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -491,61 +489,6 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     // Policy 10 should exist
     let exists = registry.policyExists(10).call().await?;
     assert!(exists, "compound policy 10 should exist");
-
-    Ok(())
-}
-
-/// `TokenPolicyChanged` event updates the token→policy mapping in the cache.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_token_policy_change_via_events() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
-    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
-
-    let token = address!("0x0000000000000000000000000000000000BEEF01");
-
-    // Apply a token policy change event
-    {
-        let cache = zone.policy_cache();
-        cache.write().apply_events(
-            1,
-            &[PolicyEvent::TokenPolicyChanged {
-                token,
-                policy_id: 5,
-            }],
-        );
-    }
-
-    // Verify via cache read that the token policy was set
-    {
-        let cache = zone.policy_cache();
-        let r = cache.read();
-        let policy_id = r.get_token_policy(token, u64::MAX);
-        assert_eq!(policy_id, Some(5), "token should map to policy 5");
-    }
-
-    // Update the token's policy to 7
-    {
-        let cache = zone.policy_cache();
-        cache.write().apply_events(
-            2,
-            &[PolicyEvent::TokenPolicyChanged {
-                token,
-                policy_id: 7,
-            }],
-        );
-    }
-
-    // Verify the update took effect
-    {
-        let cache = zone.policy_cache();
-        let r = cache.read();
-        let policy_id = r.get_token_policy(token, u64::MAX);
-        assert_eq!(policy_id, Some(7), "token should now map to policy 7");
-    }
 
     Ok(())
 }
