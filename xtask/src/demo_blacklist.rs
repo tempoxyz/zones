@@ -75,7 +75,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
 };
 use tempo_zone_contracts::{
-    DepositType, EncryptedDepositPayload, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZonePortal,
+    EncryptedDepositPayload, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZonePortal,
 };
 use zone_precompiles::ecies::encrypt_deposit;
 
@@ -807,11 +807,6 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
         .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
         .from_block(from_block);
-    let rejected_filter = Filter::new()
-        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(ZoneInbox::DepositRejected::SIGNATURE_HASH)
-        .from_block(from_block);
-
     for _ in 0..120 {
         let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
         for log in &logs {
@@ -829,18 +824,6 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
         for log in &logs {
             if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
                 && event.data.sender == sender
-                && event.data.token == token
-                && event.data.amount == amount
-            {
-                return Ok(true);
-            }
-        }
-
-        let logs = l2.get_logs(&rejected_filter).await.unwrap_or_default();
-        for log in &logs {
-            if let Ok(event) = ZoneInbox::DepositRejected::decode_log(&log.inner)
-                && event.data.sender == sender
-                && event.data.depositType == DepositType::Encrypted
                 && event.data.token == token
                 && event.data.amount == amount
             {

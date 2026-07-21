@@ -18,7 +18,8 @@ impl L1BlockDeposits {
     ///
     /// Decrypts encrypted deposits and ABI-encodes into the types the `advanceTempo` call expects.
     /// Mint-recipient policy is enforced by upstream TIP-20 after the L1 state is anchored.
-    /// The resulting [`PreparedL1Block`] is ready to be passed via payload attributes to the builder.
+    /// The resulting [`PreparedL1Block`] is ready to be passed via payload attributes to the
+    /// builder.
     pub async fn prepare(
         self,
         sequencer_key: &k256::SecretKey,
@@ -46,7 +47,6 @@ impl L1BlockDeposits {
                     queued_deposits.push(abi::QueuedDeposit {
                         depositType: abi::DepositType::Regular,
                         depositData: Bytes::from(deposit.abi_encode()),
-                        rejected: false,
                     });
                 }
                 L1Deposit::Encrypted(d) => {
@@ -69,7 +69,6 @@ impl L1BlockDeposits {
                             }
                             .abi_encode(),
                         ),
-                        rejected: false,
                     };
 
                     // Attempt full ECIES decryption.
@@ -193,7 +192,7 @@ pub struct PreparedL1Block {
     /// ABI-encoded queued deposits (regular + encrypted).
     #[serde(skip)]
     pub queued_deposits: Vec<abi::QueuedDeposit>,
-    /// Decryption data for encrypted deposits accepted for on-chain verification, in order.
+    /// Decryption data for every encrypted deposit submitted for on-chain verification, in order.
     #[serde(skip)]
     pub decryptions: Vec<abi::DecryptionData>,
     /// Tokens newly enabled for bridging in this block.

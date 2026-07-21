@@ -2,6 +2,7 @@
 
 pub use ZoneInbox::{
     ChaumPedersenProof, DecryptionData, Deposit, DepositType, EnabledToken, QueuedDeposit,
+    ZoneInboxErrors as ZoneInboxError, ZoneInboxEvents as ZoneInboxEvent,
 };
 
 crate::sol! {
@@ -32,11 +33,10 @@ crate::sol! {
             Encrypted,
         }
 
-        /// A queued deposit (regular or encrypted) passed to `advanceTempo`.
+        /// A canonical deposit (regular or encrypted) passed to `advanceTempo`.
         struct QueuedDeposit {
             DepositType depositType;
             bytes depositData;
-            bool rejected;
         }
 
         /// Chaum-Pedersen proof for ECDH shared secret derivation.
@@ -91,15 +91,6 @@ crate::sol! {
             bytes32 indexed depositHash,
             address indexed sender,
             address indexed to,
-            address token,
-            uint128 amount,
-            address tempoRefundRecipient
-        );
-
-        event DepositRejected(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            DepositType depositType,
             address token,
             uint128 amount,
             address tempoRefundRecipient

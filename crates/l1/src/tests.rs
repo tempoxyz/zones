@@ -1001,10 +1001,6 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         prepared.queued_deposits[0].depositType,
         DepositType::Encrypted
     );
-    assert!(
-        !prepared.queued_deposits[0].rejected,
-        "policy is enforced by upstream TIP-20 mint execution"
-    );
     assert_eq!(
         prepared.decryptions.len(),
         1,

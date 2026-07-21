@@ -96,7 +96,6 @@ mod tests {
         let qd = QueuedDeposit {
             depositType: DepositType::Regular,
             depositData: deposit_data,
-            rejected: false,
         };
 
         println!(
