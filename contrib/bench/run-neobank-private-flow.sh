@@ -141,7 +141,10 @@ zone_approval_spec="$ZONES_BENCH_OUTPUT/zone-approvals.yml"
             printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$index" "${token: -1}" "$index" "$ZONES_BENCH_DLUSD" "$token"
         done
     done
-    printf '\ntemplates: {}\nmix: []\n'
+    # The pinned txgen requires a positive mix even with --count 0. This
+    # template is never emitted here; it makes the approval-only setup spec
+    # valid while generate emits the preceding setup steps.
+    printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_DLUSD" "$ZONES_BENCH_DLUSD"
 } >"$zone_approval_spec"
 "$txgen_bin" generate --spec "$zone_approval_spec" --count 0 --seed "$ZONES_BENCH_SEED" --output "$ZONES_BENCH_OUTPUT/zone-approvals.ndjson"
 "$bench_bin" send --input "$ZONES_BENCH_OUTPUT/zone-approvals.ndjson" --rpc-url "$ZONE_PRIVATE_RPC_URL" --query-rpc-url "$ZONE_RPC_URL" \
