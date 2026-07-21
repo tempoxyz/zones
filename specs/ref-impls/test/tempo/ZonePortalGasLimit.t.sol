@@ -93,7 +93,6 @@ contract ZonePortalGasLimitTest is Test {
             senderTag: keccak256("sender"),
             to: recipient,
             amount: 500e6,
-            fee: 0,
             memo: bytes32(0),
             gasLimit: portal.MAX_WITHDRAWAL_GAS_LIMIT() + 1,
             fallbackNonce: 1,
@@ -109,7 +108,7 @@ contract ZonePortalGasLimitTest is Test {
         emit IZonePortal.WithdrawalBounceBack(bytes32(0), 1, address(token), 500e6, 1);
         vm.expectEmit(true, true, false, true, address(portal));
         emit IZonePortal.WithdrawalProcessed(recipient, w.senderTag, address(token), 500e6, false);
-        portal.processWithdrawal(w, bytes32(0));
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
@@ -127,7 +126,7 @@ contract ZonePortalGasLimitTest is Test {
 
         vm.expectEmit(true, false, false, true, address(portal));
         emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
-        portal.processWithdrawal(w, bytes32(0));
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         assertEq(token.balanceOf(address(this)), bouncebackFee);
         assertEq(token.balanceOf(recipient), refundAmount);
@@ -150,7 +149,7 @@ contract ZonePortalGasLimitTest is Test {
 
         vm.expectEmit(true, false, false, true, address(portal));
         emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
-        portal.processWithdrawal(w, bytes32(0));
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         assertEq(token.balanceOf(address(this)), 0);
         assertEq(token.balanceOf(recipient), refundAmount);
@@ -173,7 +172,7 @@ contract ZonePortalGasLimitTest is Test {
         emit IZonePortal.DepositBounceBackPending(
             recipient, address(token), refundAmount, bouncebackFee
         );
-        portal.processWithdrawal(w, bytes32(0));
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         assertEq(token.balanceOf(address(this)), bouncebackFee);
         assertEq(token.balanceOf(recipient), 0);
@@ -205,7 +204,6 @@ contract ZonePortalGasLimitTest is Test {
             senderTag: keccak256(abi.encodePacked(address(0), bytes32(0))),
             to: recipient,
             amount: amount,
-            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackNonce: 0,
@@ -217,6 +215,15 @@ contract ZonePortalGasLimitTest is Test {
     function _storeSingleWithdrawal(Withdrawal memory w) internal {
         vm.store(address(portal), bytes32(WITHDRAWAL_QUEUE_TAIL_SLOT), bytes32(uint256(1)));
         vm.store(address(portal), _withdrawalQueueSlot(0), keccak256(abi.encode(w, EMPTY_SENTINEL)));
+    }
+
+    function _singleWithdrawal(Withdrawal memory withdrawal)
+        internal
+        pure
+        returns (Withdrawal[] memory withdrawals)
+    {
+        withdrawals = new Withdrawal[](1);
+        withdrawals[0] = withdrawal;
     }
 
 }

@@ -11,9 +11,15 @@ pub const NO_QUEUE_INDEX: U256 = U256::MAX;
 
 /// Maximum callback gas a withdrawal may request.
 ///
-/// The L1 processor adds fixed overhead plus an EIP-150 cushion, so this value
-/// keeps the outer `processWithdrawal` transaction well below a 30M gas block.
+/// The L1 processor adds fixed overhead, so this value keeps the outer
+/// keeps the outer `processWithdrawals` transaction well below a 30M gas block.
 pub const MAX_WITHDRAWAL_GAS_LIMIT: u64 = 10_000_000;
+
+/// Maximum RLP-encoded block size.
+///
+/// This follows EIP-7934's `MAX_BLOCK_SIZE - SAFETY_MARGIN` and matches
+/// `reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE`.
+pub const MAX_RLP_BLOCK_SIZE: usize = 8_388_608;
 
 /// TempoState predeploy address on Zone L2.
 pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");

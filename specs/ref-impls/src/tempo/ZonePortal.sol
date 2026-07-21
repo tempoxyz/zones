@@ -23,7 +23,11 @@ import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "../libraries/EncryptedDeposit.sol";
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
-import { WithdrawalQueue, WithdrawalQueueLib } from "../libraries/WithdrawalQueueLib.sol";
+import {
+    EMPTY_SENTINEL,
+    WithdrawalQueue,
+    WithdrawalQueueLib
+} from "../libraries/WithdrawalQueueLib.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
@@ -53,12 +57,15 @@ contract ZonePortal is IZonePortal {
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
     /// @notice Maximum gas a withdrawal callback may request
-    /// @dev Over-cap legacy withdrawals are dequeued and bounced back in `processWithdrawal`.
+    /// @dev Over-cap legacy withdrawals are dequeued and bounced back in `processWithdrawals`.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @dev The fixed account holding the shared portal logic contract runtime.
+    address internal constant ZONE_PORTAL_LOGIC_ADDRESS =
+        0x5AD1000000000000000000000000000000000000;
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -152,6 +159,7 @@ contract ZonePortal is IZonePortal {
         string calldata _rpcUrl
     )
         external
+        onlyDelegateCall
     {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
@@ -173,6 +181,12 @@ contract ZonePortal is IZonePortal {
     /*//////////////////////////////////////////////////////////////
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev Initialization is valid only in a portal proxy's storage context.
+    modifier onlyDelegateCall() {
+        if (address(this) == ZONE_PORTAL_LOGIC_ADDRESS) revert MustDelegateCall();
+        _;
+    }
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
@@ -708,18 +722,32 @@ contract ZonePortal is IZonePortal {
                              WITHDRAWALS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    /// @dev Fee transfer to the sequencer is best-effort.
-    ///      On withdrawal failure, only the amount (not fee) is bounced back.
-    ///      The token to transfer is read from the withdrawal struct.
-    function processWithdrawal(
-        Withdrawal calldata withdrawal,
+    /// @notice Process multiple withdrawals from the queue in a single transaction.
+    /// @dev Withdrawals must be supplied in queue order. `remainingQueue` is the queue suffix
+    ///      after the last supplied withdrawal, or zero if the batch exhausts the current slot.
+    function processWithdrawals(
+        Withdrawal[] calldata withdrawals,
         bytes32 remainingQueue
     )
         external
         onlySequencer
         nonReentrantWithdrawal
     {
+        bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
+        bytes32 nextQueue = remainingQueue;
+
+        for (uint256 i = withdrawals.length; i > 0; --i) {
+            remainingQueues[i - 1] = nextQueue;
+            bytes32 encodedQueue = nextQueue == bytes32(0) ? EMPTY_SENTINEL : nextQueue;
+            nextQueue = keccak256(abi.encode(withdrawals[i - 1], encodedQueue));
+        }
+
+        for (uint256 i; i < withdrawals.length; ++i) {
+            _processWithdrawal(withdrawals[i], remainingQueues[i]);
+        }
+    }
+
+    function _processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) internal {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
@@ -728,13 +756,6 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
-        }
-
-        // Transfer fee to sequencer.
-        if (withdrawal.fee > 0) {
-            // Fee transfer can fail for e.g. TIP-403 blacklist. The sequencer
-            // forgoes the fee so the withdrawal itself does not stall.
-            _tryTransfer(_token, sequencer, withdrawal.fee);
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
@@ -776,7 +797,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Only callable by this portal. It transfers only the current withdrawal amount to
     ///      the shared messenger, then asks the messenger to call the target. If delivery
     ///      fails, this call reverts and rolls back the transfer to the messenger. The outer
-    ///      processWithdrawal catches the revert and records a bounce-back.
+    ///      processWithdrawals catches the revert and records a bounce-back.
     function deliverWithdrawal(
         address token,
         address target,

@@ -5,6 +5,7 @@ use std::{
     path::Path,
 };
 
+use alloy_primitives::Address as EthereumAddress;
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Address, Ingress};
@@ -96,9 +97,7 @@ impl std::str::FromStr for ManifestAddress {
 pub struct ManifestNode {
     name: String,
     ed25519_public_key: PublicKey,
-    // TODO: Add `secp256k1_address`, from this
-    // node's individual L1/attestation key. It is distinct from the Commonware
-    // Ed25519 identity above and will be used for the on-chain quorum.
+    secp256k1_address: EthereumAddress,
     address: ManifestAddress,
 }
 
@@ -111,6 +110,11 @@ impl ManifestNode {
     /// Node's Ed25519 public key used to authenticate Commonware traffic.
     pub const fn ed25519_public_key(&self) -> &PublicKey {
         &self.ed25519_public_key
+    }
+
+    /// Address derived from this node's individual secp256k1 key.
+    pub const fn secp256k1_address(&self) -> EthereumAddress {
+        self.secp256k1_address
     }
 
     /// Node's advertised P2P address.
@@ -139,6 +143,7 @@ impl ZoneManifest {
             parse_ed25519_public_key("leader_ed25519_public_key", &raw.leader_ed25519_public_key)?;
         let mut names = BTreeSet::new();
         let mut ed25519_public_keys = BTreeSet::new();
+        let mut secp256k1_addresses = BTreeSet::new();
         let mut nodes = Vec::with_capacity(raw.nodes.len());
 
         for raw_node in raw.nodes {
@@ -159,6 +164,18 @@ impl ZoneManifest {
                 ));
             }
 
+            let secp256k1_address = raw_node
+                .secp256k1_address
+                .parse::<EthereumAddress>()
+                .map_err(|source| ManifestError::InvalidSecp256k1Address {
+                    node: raw_node.name.clone(),
+                    address: raw_node.secp256k1_address.clone(),
+                    reason: source.to_string(),
+                })?;
+            if !secp256k1_addresses.insert(secp256k1_address) {
+                return Err(ManifestError::DuplicateSecp256k1Address(secp256k1_address));
+            }
+
             let address =
                 raw_node
                     .address
@@ -171,6 +188,7 @@ impl ZoneManifest {
             nodes.push(ManifestNode {
                 name: raw_node.name,
                 ed25519_public_key,
+                secp256k1_address,
                 address,
             });
         }
@@ -203,6 +221,7 @@ impl ZoneManifest {
         &self,
         expected_zone_id: u32,
         local_ed25519_public_key: &PublicKey,
+        local_secp256k1_address: EthereumAddress,
         asserted_role: Option<Role>,
     ) -> Result<Role, ManifestError> {
         if self.zone_id != expected_zone_id {
@@ -212,9 +231,22 @@ impl ZoneManifest {
             });
         }
 
-        let role = self.role_of(local_ed25519_public_key).ok_or_else(|| {
-            ManifestError::LocalNodeNotFound(local_ed25519_public_key.to_string())
-        })?;
+        let local_node = self
+            .node_by_ed25519_public_key(local_ed25519_public_key)
+            .ok_or_else(|| {
+                ManifestError::LocalNodeNotFound(local_ed25519_public_key.to_string())
+            })?;
+        if local_node.secp256k1_address != local_secp256k1_address {
+            return Err(ManifestError::LocalSecp256k1AddressMismatch {
+                manifest: local_node.secp256k1_address,
+                local: local_secp256k1_address,
+            });
+        }
+        let role = if local_ed25519_public_key == &self.leader_ed25519_public_key {
+            Role::Leader
+        } else {
+            Role::Follower
+        };
         if let Some(asserted) = asserted_role
             && asserted != role
         {
@@ -243,14 +275,19 @@ impl ZoneManifest {
 
     /// Returns the role of a manifest member, or `None` for an unknown Ed25519 key.
     pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Option<Role> {
-        self.nodes
-            .iter()
-            .any(|node| node.ed25519_public_key() == ed25519_public_key)
+        self.node_by_ed25519_public_key(ed25519_public_key)
+            .is_some()
             .then_some(if ed25519_public_key == &self.leader_ed25519_public_key {
                 Role::Leader
             } else {
                 Role::Follower
             })
+    }
+
+    fn node_by_ed25519_public_key(&self, ed25519_public_key: &PublicKey) -> Option<&ManifestNode> {
+        self.nodes
+            .iter()
+            .find(|node| node.ed25519_public_key() == ed25519_public_key)
     }
 
     pub(crate) fn has_dns_addresses(&self) -> bool {
@@ -271,6 +308,7 @@ struct RawManifest {
 struct RawManifestNode {
     name: String,
     ed25519_public_key: String,
+    secp256k1_address: String,
     address: String,
 }
 
@@ -312,8 +350,18 @@ pub enum ManifestError {
     #[error("duplicate sequencer manifest Ed25519 public key `{0}`")]
     DuplicateEd25519PublicKey(String),
 
+    #[error("duplicate sequencer manifest secp256k1 address `{0}`")]
+    DuplicateSecp256k1Address(EthereumAddress),
+
     #[error("invalid Ed25519 public key in `{field}`: {reason}")]
     InvalidEd25519PublicKey { field: String, reason: String },
+
+    #[error("invalid secp256k1 address `{address}` for node `{node}`: {reason}")]
+    InvalidSecp256k1Address {
+        node: String,
+        address: String,
+        reason: String,
+    },
 
     #[error("invalid address `{address}` for node `{node}`: {reason}")]
     InvalidAddress {
@@ -331,6 +379,14 @@ pub enum ManifestError {
     #[error("this node's Ed25519 public key `{0}` is not present in the sequencer manifest")]
     LocalNodeNotFound(String),
 
+    #[error(
+        "this node's secp256k1 address `{local}` does not match its manifest address `{manifest}`"
+    )]
+    LocalSecp256k1AddressMismatch {
+        manifest: EthereumAddress,
+        local: EthereumAddress,
+    },
+
     #[error("--sequencer.role asserts `{asserted}`, but the manifest assigns `{manifest}`")]
     RoleMismatch { asserted: Role, manifest: Role },
 }
@@ -346,6 +402,10 @@ mod tests {
         const_hex::encode_prefixed(key.as_ref())
     }
 
+    fn secp256k1_address(seed: u64) -> String {
+        format!("0x{seed:040x}")
+    }
+
     fn manifest(leader: u64, nodes: &[(u64, &str, &str)]) -> String {
         let mut value = format!(
             "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
@@ -353,8 +413,9 @@ mod tests {
         );
         for (key, name, address) in nodes {
             value.push_str(&format!(
-                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
-                ed25519_public_key(*key)
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                ed25519_public_key(*key),
+                secp256k1_address(*key),
             ));
         }
         value
@@ -375,12 +436,19 @@ mod tests {
         let follower = PrivateKey::from_seed(2).public_key();
 
         assert_eq!(
-            manifest.validate_node(7, &leader, None).unwrap(),
+            manifest
+                .validate_node(7, &leader, secp256k1_address(1).parse().unwrap(), None)
+                .unwrap(),
             Role::Leader
         );
         assert_eq!(
             manifest
-                .validate_node(7, &follower, Some(Role::Follower))
+                .validate_node(
+                    7,
+                    &follower,
+                    secp256k1_address(2).parse().unwrap(),
+                    Some(Role::Follower),
+                )
                 .unwrap(),
             Role::Follower
         );
@@ -438,17 +506,27 @@ mod tests {
         .unwrap();
         let follower = PrivateKey::from_seed(2).public_key();
         assert!(matches!(
-            valid.validate_node(7, &follower, Some(Role::Leader)),
+            valid.validate_node(
+                7,
+                &follower,
+                secp256k1_address(2).parse().unwrap(),
+                Some(Role::Leader),
+            ),
             Err(ManifestError::RoleMismatch { .. })
         ));
         assert!(matches!(
-            valid.validate_node(8, &follower, None),
+            valid.validate_node(8, &follower, secp256k1_address(2).parse().unwrap(), None,),
             Err(ManifestError::ZoneIdMismatch { .. })
         ));
         let unknown = PrivateKey::from_seed(99).public_key();
         assert!(matches!(
-            valid.validate_node(7, &unknown, None),
+            valid.validate_node(7, &unknown, secp256k1_address(99).parse().unwrap(), None,),
             Err(ManifestError::LocalNodeNotFound(_))
+        ));
+
+        assert!(matches!(
+            valid.validate_node(7, &follower, secp256k1_address(3).parse().unwrap(), None,),
+            Err(ManifestError::LocalSecp256k1AddressMismatch { .. })
         ));
     }
 }

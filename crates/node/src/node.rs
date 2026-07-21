@@ -6,7 +6,7 @@
 use crate::{
     ZoneEngine,
     fee_token_validator::ZoneFeeTokenValidator,
-    replication::{broadcast_persisted_blocks, import_leader_blocks},
+    replication::{broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
 use alloy_primitives::Address;
@@ -16,7 +16,7 @@ use k256::SecretKey;
 use reth_chainspec::EthChainSpec;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
+    AddOnsContext, ConsensusEngineHandle, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
     PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_builder::{
@@ -79,10 +79,18 @@ use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequence
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
 /// Tempo Anvil uses chain ID 31337 and the same hardfork schedule as Tempo DEV (1337).
+///
+/// Additional dev-schedule L1 chain IDs (devnets that activate all Tempo
+/// hardforks at genesis) can be allowed via the `ZONE_L1_DEV_CHAIN_IDS`
+/// environment variable as a comma-separated list.
 fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
     chainspec_from_chain_id(chain_id).or_else(|| match chain_id {
         1337 | 31337 => Some(DEV.clone()),
-        _ => None,
+        _ => std::env::var("ZONE_L1_DEV_CHAIN_IDS")
+            .ok()?
+            .split(',')
+            .any(|id| id.trim().parse() == Ok(chain_id))
+            .then(|| DEV.clone()),
     })
 }
 
@@ -546,7 +554,7 @@ where
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
-        engine: reth_node_builder::ConsensusEngineHandle<ZonePayloadTypes>,
+        engine: ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
         let role = config.role();
         let handle = spawn_p2p(config, network_id)?;
@@ -558,25 +566,17 @@ where
             events,
         } = handle.into_parts();
 
-        match role {
-            Role::Leader => {
-                task_executor.spawn_critical_task(
-                    "zone-p2p-block-broadcast",
-                    broadcast_persisted_blocks(provider, commands),
-                );
-                // Leaders do not receive block messages. Dropping this receiver is harmless: the
-                // runtime only emits BlockReceived on followers.
-                drop(events);
-            }
-            Role::Follower => {
-                // Keep the command sender alive so the runtime's command loop remains available
-                // for later ACK/backfill commands even though followers send nothing in this PR.
-                task_executor.spawn_critical_task(
-                    "zone-p2p-block-import",
-                    import_leader_blocks(provider, engine, events, commands),
-                );
-            }
+        if role == Role::Leader {
+            // Only a leader can build + broadcast blocks
+            task_executor.spawn_critical_task(
+                "zone-p2p-block-broadcast",
+                broadcast_persisted_blocks(provider.clone(), commands.clone()),
+            );
         }
+        task_executor.spawn_critical_task(
+            "zone-p2p-block-sync",
+            run_block_sync(role, provider, engine, events, commands),
+        );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
@@ -1184,6 +1184,13 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
+
+        // SAFETY: test-only env mutation; no other test reads this variable.
+        unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
+        assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
+        assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
+        assert!(tempo_chain_spec_for_l1(999_999).is_none());
+        unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
     }
 
     #[test]

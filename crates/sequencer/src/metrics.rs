@@ -21,7 +21,7 @@ pub(crate) struct WithdrawalProcessorMetrics {
     /// Number of withdrawal batches currently stored in memory.
     pub(crate) store_batch_count: Gauge,
 
-    /// Number of `processWithdrawal` attempts started.
+    /// Number of `processWithdrawals` attempts started.
     pub(crate) withdrawals_processed_total: Counter,
 
     /// Number of withdrawals confirmed on L1.
@@ -30,7 +30,7 @@ pub(crate) struct WithdrawalProcessorMetrics {
     /// Number of withdrawals that failed to send, confirm, or reverted after inclusion.
     pub(crate) withdrawals_failed_total: Counter,
 
-    /// Number of `processWithdrawal` transactions that were included on L1 but reverted.
+    /// Number of `processWithdrawals` transactions that were included on L1 but reverted.
     pub(crate) withdrawals_reverted_total: Counter,
 
     /// Time spent processing a withdrawal queue slot.
