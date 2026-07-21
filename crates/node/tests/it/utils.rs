@@ -3755,6 +3755,23 @@ impl L1Fixture {
         }
     }
 
+    /// Extend the fixture caches' contiguous receipt coverage through a generated block.
+    ///
+    /// `seed_l1_cache` may seed only the blocks a test normally needs. Tests that subsequently
+    /// cross that horizon still need unchanged slots to inherit their last seeded value rather
+    /// than falling back to the deliberately unavailable dummy L1 RPC.
+    fn extend_cache_coverage(&self, block_number: u64) {
+        for cache in self.caches.lock().unwrap().iter() {
+            let mut cache = cache.write();
+            if block_number > cache.anchor().number {
+                cache.update_anchor(NumHash {
+                    number: block_number,
+                    hash: B256::ZERO,
+                });
+            }
+        }
+    }
+
     /// Build a [`TempoHeader`] for the next L1 block.
     fn next_header(&mut self) -> TempoHeader {
         let number = self.next_block_number;
@@ -3778,6 +3795,7 @@ impl L1Fixture {
         self.last_hash = keccak256(&rlp_buf);
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
+        self.extend_cache_coverage(number);
 
         header
     }
