@@ -49,20 +49,6 @@ load_benchmark_mnemonic() {
     export ZONES_BENCH_MNEMONIC
 }
 
-# bench enables these targets at DEBUG even under the default INFO filter.
-# Drop only per-request HTTP bookkeeping; benchmark diagnostics still pass through.
-filter_transport_debug() {
-    awk '
-        {
-            normalized = $0
-            gsub(/\033\[[0-9;]*m/, "", normalized)
-        }
-        index(normalized, " DEBUG ") && index(normalized, "alloy_transport_http::reqwest_transport:") { next }
-        index(normalized, " DEBUG ") && index(normalized, "alloy_transport_http::hyper_transport:") { next }
-        { print; fflush() }
-    '
-}
-
 load_benchmark_mnemonic
 
 for name in \
@@ -217,9 +203,7 @@ run_scenario() {
     if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
         command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${command[@]}")
     fi
-    "${command[@]}" \
-        > >(filter_transport_debug) \
-        2> >(filter_transport_debug >&2)
+    "${command[@]}"
 }
 
 run_parallel_approval_setup() {
@@ -291,9 +275,7 @@ run_parallel_approval_setup() {
         "${ZONES_BENCH_APPROVAL_SETUP_TIMEOUT_SECS}s"
         "${send_command[@]}"
     )
-    "${timed_send_command[@]}" \
-        > >(filter_transport_debug) \
-        2> >(filter_transport_debug >&2) &
+    "${timed_send_command[@]}" &
     setup_pid=$!
     (
         while true; do
@@ -774,9 +756,7 @@ scenario_command=(
 if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
     scenario_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${scenario_command[@]}")
 fi
-"${scenario_command[@]}" \
-    > >(filter_transport_debug) \
-    2> >(filter_transport_debug >&2) &
+"${scenario_command[@]}" &
 scenario_pid=$!
 
 if (( zone_health_enabled == 1 )); then

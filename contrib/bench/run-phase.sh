@@ -49,20 +49,6 @@ load_benchmark_mnemonic() {
     export ZONES_BENCH_MNEMONIC
 }
 
-# bench enables these targets at DEBUG even under the default INFO filter.
-# Drop only per-request HTTP bookkeeping; benchmark diagnostics still pass through.
-filter_transport_debug() {
-    awk '
-        {
-            normalized = $0
-            gsub(/\033\[[0-9;]*m/, "", normalized)
-        }
-        index(normalized, " DEBUG ") && index(normalized, "alloy_transport_http::reqwest_transport:") { next }
-        index(normalized, " DEBUG ") && index(normalized, "alloy_transport_http::hyper_transport:") { next }
-        { print; fflush() }
-    '
-}
-
 phase="${1:-}"
 case "$phase" in
     deposit | activity | withdrawal) ;;
@@ -323,9 +309,7 @@ run_parallel_approval_setup() {
     (( remaining > 0 )) ||
         die "$label approval generation exhausted its ${ZONES_BENCH_APPROVAL_TIMEOUT_SECS}s setup window"
     if timeout --foreground --kill-after=5s "${remaining}s" \
-        "${send_command[@]}" \
-            > >(filter_transport_debug) \
-            2> >(filter_transport_debug >&2); then
+        "${send_command[@]}"; then
         send_status=0
     else
         send_status=$?
@@ -455,9 +439,7 @@ if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
     bench_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${bench_command[@]}")
 fi
 
-"${txgen_command[@]}" | "${bench_command[@]}" \
-    > >(filter_transport_debug) \
-    2> >(filter_transport_debug >&2)
+"${txgen_command[@]}" | "${bench_command[@]}"
 
 [[ -s "$ZONES_BENCH_REPORT" ]] || die "bench produced no report at $ZONES_BENCH_REPORT"
 if ! jq -e --argjson expected "$ZONES_BENCH_COUNT" \
