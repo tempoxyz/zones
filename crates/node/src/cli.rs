@@ -8,7 +8,7 @@ use clap::{Args, CommandFactory, FromArgMatches};
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
-use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
+use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
@@ -31,13 +31,13 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
 
 /// Tempo Zone CLI entry point.
 pub enum ZoneCli {
-    Node(Box<Cli<TempoChainSpecParser, ZoneArgs>>),
+    Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
     Dev(DevCommand),
 }
 
 impl ZoneCli {
     fn command() -> clap::Command {
-        Cli::<TempoChainSpecParser, ZoneArgs>::command()
+        Cli::<ZoneChainSpecParser, ZoneArgs>::command()
             .about("Tempo Zone")
             .subcommand(DevCommand::command())
     }
@@ -84,11 +84,11 @@ impl ZoneCli {
 }
 
 /// Main entry point for the `node` command.
-fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
+fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 
-    let components = |spec: Arc<TempoChainSpec>| {
+    let components = |spec: Arc<ZoneChainSpec>| {
         (
             ZoneEvmConfig::new_without_l1(spec),
             NoopConsensus::default(),
@@ -107,9 +107,13 @@ fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
                     eyre::eyre!("--p2p.key is required with --sequencer.manifest")
                 })?;
+                let secp256k1_key_path = args.secp256k1_key.as_ref().ok_or_else(|| {
+                    eyre::eyre!("--secp256k1.key is required with --sequencer.manifest")
+                })?;
                 P2pConfig::load(
                     manifest_path,
                     ed25519_key_path,
+                    secp256k1_key_path,
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
                     args.zone_id,
@@ -123,12 +127,19 @@ fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 target: "reth::cli",
                 role = %config.role(),
                 ed25519_public_key = %config.ed25519_public_key(),
+                secp256k1_address = %config.secp256k1_address(),
                 listen = %config.listen(),
                 "Validated multi-sequencer manifest and local identity"
             );
         }
 
         let manifest_mode = p2p_config.is_some();
+        if manifest_mode {
+            // Replicate only durable blocks. Persist every block immediately so followers can
+            // acknowledge each block without waiting for Reth's in-memory buffer to fill.
+            builder.config_mut().engine.persistence_threshold = 0;
+            builder.config_mut().engine.memory_block_buffer_target = 0;
+        }
         let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_role);
         let sequencer_signer = (should_sequence_blocks || manifest_mode)
             .then(|| {
@@ -212,7 +223,7 @@ pub struct ZoneArgs {
         long = "sequencer.manifest",
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
-        requires = "p2p_key",
+        requires_all = ["p2p_key", "secp256k1_key"],
         conflicts_with = "enable_sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
@@ -225,6 +236,15 @@ pub struct ZoneArgs {
         requires = "sequencer_manifest"
     )]
     pub p2p_key: Option<PathBuf>,
+
+    /// Path to this node's hex-encoded individual secp256k1 private key.
+    #[arg(
+        long = "secp256k1.key",
+        env = "SECP256K1_KEY",
+        value_name = "PATH",
+        requires = "sequencer_manifest"
+    )]
+    pub secp256k1_key: Option<PathBuf>,
 
     /// Socket address bound for multi-sequencer Commonware traffic.
     #[arg(
@@ -388,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_requires_a_p2p_key_and_conflicts_with_legacy_sequencer() {
+    fn manifest_mode_requires_node_keys_and_conflicts_with_legacy_sequencer() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -410,11 +430,25 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
 
+        let missing_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+        ]))
+        .unwrap_err();
+        assert_eq!(
+            missing_secp256k1_key.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
         let conflict = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
             "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
             "--sequencer",
         ]))
         .unwrap_err();
@@ -466,6 +500,8 @@ mod tests {
             "zone.toml",
             "--p2p.key",
             "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
             "--p2p.bypass-ip-check",
         ]))
         .unwrap();

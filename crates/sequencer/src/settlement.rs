@@ -34,6 +34,8 @@ use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
+use parking_lot::RwLock;
+use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tracing::{info, instrument, warn};
 
@@ -45,6 +47,12 @@ const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
+
+/// Maximum number of encoded L1 headers retained between ancestry submissions.
+///
+/// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
+/// map overhead while covering more than the current Zone E recovery gap.
+const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
 
 /// EIP-2935 anchor limits used by the batch submitter.
 ///
@@ -170,6 +178,18 @@ pub struct BatchSubmitter {
     l1_fetch_concurrency: usize,
     /// EIP-2935 history and safety-margin limits used for anchor decisions.
     anchor_config: BatchAnchorConfig,
+    /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
+    /// requests. Settlement batches are submitted in order, so later requests
+    /// can reuse almost the entire preceding range.
+    ancestry_header_cache: RwLock<LruMap<u64, CachedAncestryHeader>>,
+}
+
+/// One validated L1 header retained for ancestry proof construction.
+#[derive(Debug, Clone)]
+struct CachedAncestryHeader {
+    parent_hash: B256,
+    hash: B256,
+    encoded: Bytes,
 }
 
 impl BatchSubmitter {
@@ -204,6 +224,9 @@ impl BatchSubmitter {
             genesis_tempo_block_number,
             l1_fetch_concurrency: 16,
             anchor_config,
+            ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
+                DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
+            ))),
         }
     }
 
@@ -403,7 +426,7 @@ impl BatchSubmitter {
     }
 
     /// Fetch and RLP-encode L1 block headers from `from + 1` to `to` (inclusive),
-    /// validating the parent-hash chain.
+    /// validating the parent-hash chain and reusing cached overlapping headers.
     ///
     /// Returns headers in ascending block-number order. The first header's
     /// `parent_hash` is validated against the hash of block `from`, ensuring the
@@ -415,21 +438,22 @@ impl BatchSubmitter {
             return Ok(Vec::new());
         }
 
-        let concurrency = self.l1_fetch_concurrency;
-        let range_start = from + 1;
-        let count = (to - from) as usize;
+        let (mut resolved, missing) = {
+            let mut cache = self.ancestry_header_cache.write();
+            let mut resolved = BTreeMap::new();
+            let mut missing = Vec::new();
+            for block_number in from..=to {
+                if let Some(header) = cache.get(&block_number) {
+                    resolved.insert(block_number, header.clone());
+                } else {
+                    missing.push(block_number);
+                }
+            }
+            (resolved, missing)
+        };
+        let cache_hits = (to - from + 1) as usize - missing.len();
 
-        // Fetch the base block's header to seed the parent-hash chain validation.
-        let base_header = self
-            .l1_provider
-            .get_header_by_number(from.into())
-            .await?
-            .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
-        let mut base_buf = Vec::with_capacity(600);
-        base_header.inner.inner.encode(&mut base_buf);
-        let base_hash = alloy_primitives::keccak256(&base_buf);
-
-        let mut fetched = stream::iter(range_start..=to)
+        let mut fetched = stream::iter(missing.iter().copied())
             .map(|block_number| {
                 let provider = &self.l1_provider;
                 async move {
@@ -442,29 +466,86 @@ impl BatchSubmitter {
                     Ok::<_, eyre::Report>((block_number, header.inner.inner))
                 }
             })
-            .buffered(concurrency);
+            .buffered(self.l1_fetch_concurrency);
 
-        let mut headers = Vec::with_capacity(count);
-        let mut prev_hash: Option<B256> = Some(base_hash);
+        let mut new_headers = Vec::with_capacity(missing.len());
 
         while let Some((block_number, header)) = fetched.try_next().await? {
-            if let Some(expected_parent) = prev_hash
-                && header.inner.parent_hash != expected_parent
-            {
-                return Err(eyre::eyre!(
-                    "parent-hash chain broken at block {block_number}: \
-                     expected parent_hash={expected_parent}, got={}",
-                    header.inner.parent_hash
-                ));
-            }
-
             let mut buf = Vec::with_capacity(600);
             header.encode(&mut buf);
             let header_hash = alloy_primitives::keccak256(&buf);
-            prev_hash = Some(header_hash);
-
-            headers.push(Bytes::from(buf));
+            new_headers.push((
+                block_number,
+                CachedAncestryHeader {
+                    parent_hash: header.inner.parent_hash,
+                    hash: header_hash,
+                    encoded: Bytes::from(buf),
+                },
+            ));
         }
+
+        for (block_number, header) in new_headers {
+            if let Some(existing) = resolved.get(&block_number)
+                && existing.hash != header.hash
+            {
+                return Err(eyre::eyre!(
+                    "conflicting L1 header at cached block {block_number}: \
+                     cached={}, fetched={}",
+                    existing.hash,
+                    header.hash
+                ));
+            }
+            resolved.insert(block_number, header);
+        }
+
+        let base_hash = resolved
+            .get(&from)
+            .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?
+            .hash;
+        let mut prev_hash = base_hash;
+        let mut headers = Vec::with_capacity((to - from) as usize);
+
+        for block_number in (from + 1)..=to {
+            let header = resolved
+                .get(&block_number)
+                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+            if header.parent_hash != prev_hash {
+                return Err(eyre::eyre!(
+                    "parent-hash chain broken at block {block_number}: \
+                     expected parent_hash={prev_hash}, got={}",
+                    header.parent_hash
+                ));
+            }
+            prev_hash = header.hash;
+            headers.push(header.encoded.clone());
+        }
+
+        let mut cache = self.ancestry_header_cache.write();
+        for (block_number, header) in resolved {
+            if let Some(existing) = cache.get(&block_number)
+                && existing.hash != header.hash
+            {
+                return Err(eyre::eyre!(
+                    "conflicting L1 header at cached block {block_number}: \
+                     cached={}, fetched={}",
+                    existing.hash,
+                    header.hash
+                ));
+            }
+            if !cache.insert(block_number, header) {
+                return Err(eyre::eyre!(
+                    "failed to cache L1 header for block {block_number}"
+                ));
+            }
+        }
+
+        info!(
+            from,
+            to,
+            cache_hits,
+            fetched = missing.len(),
+            "resolved ancestry headers"
+        );
 
         Ok(headers)
     }
@@ -1079,7 +1160,37 @@ pub(crate) struct ZoneBlockSnapshot {
 mod tests {
     use super::*;
     use crate::abi;
+    use alloy_consensus::Header as ConsensusHeader;
     use alloy_primitives::{B256, address};
+    use alloy_provider::ProviderBuilder;
+    use alloy_rpc_types_eth::Header as RpcHeader;
+    use alloy_transport::mock::Asserter;
+    use tempo_alloy::rpc::TempoHeaderResponse;
+    use tempo_primitives::TempoHeader;
+
+    fn mock_l1_header(number: u64, parent_hash: B256) -> (TempoHeaderResponse, B256) {
+        let header = TempoHeader {
+            inner: ConsensusHeader {
+                number,
+                parent_hash,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let hash = alloy_primitives::keccak256(alloy_rlp::encode(&header));
+        (
+            TempoHeaderResponse {
+                inner: RpcHeader {
+                    hash,
+                    inner: header,
+                    total_difficulty: None,
+                    size: None,
+                },
+                timestamp_millis: 0,
+            },
+            hash,
+        )
+    }
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
@@ -1087,7 +1198,6 @@ mod tests {
             senderTag: B256::repeat_byte(0x11),
             to,
             amount,
-            fee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackNonce: 1,
@@ -1106,6 +1216,39 @@ mod tests {
         assert!(BatchAnchorConfig::new(0, 0).is_err());
         assert!(BatchAnchorConfig::new(10, 10).is_err());
         assert!(BatchAnchorConfig::new(10, 11).is_err());
+    }
+
+    #[tokio::test]
+    async fn ancestry_header_cache_fetches_only_new_suffix() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
+
+        let mut parent_hash = B256::ZERO;
+        let mut headers = Vec::new();
+        for number in 10..=15 {
+            let (header, hash) = mock_l1_header(number, parent_hash);
+            headers.push(header);
+            parent_hash = hash;
+        }
+
+        // The initial range fetches its base plus all ancestry headers.
+        for header in &headers[..5] {
+            asserter.push_success(header);
+        }
+        let first = submitter.fetch_ancestry_headers(10, 14).await.unwrap();
+        assert_eq!(first.len(), 4);
+        assert_eq!(submitter.ancestry_header_cache.read().len(), 4);
+
+        // The overlapping range reuses blocks 11..=14 and fetches only block 15.
+        // If the implementation repeats any cached RPC call, the mock has no
+        // additional response queued and the test fails.
+        asserter.push_success(&headers[5]);
+        let second = submitter.fetch_ancestry_headers(11, 15).await.unwrap();
+        assert_eq!(second.len(), 4);
     }
 
     #[test]

@@ -14,7 +14,7 @@ use tracing::{debug, warn};
 use zone_primitives::policy::AuthRole;
 
 use super::{POLICY_DATA_GAS, ReadOnlyRegistry, ZoneTip403ProxyRegistry};
-use crate::policy::PolicyCheck;
+use crate::{ZonePrecompileError, policy::PolicyCheck};
 
 impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip403ProxyRegistry<P> {
     /// Create a [`DynPrecompile`] that dispatches TIP-403 registry calls
@@ -109,7 +109,7 @@ impl<P: PolicyCheck> TempoPrecompile for ZoneTip403ProxyRegistry<P> {
 impl<P: PolicyCheck> ZoneTip403ProxyRegistry<P> {
     fn read_only_revert(&self) -> PrecompileResult {
         debug!(target: "zone::precompile", "ZoneTip403ProxyRegistry: mutating call reverted");
-        Ok(StorageCtx::default().revert_output(ReadOnlyRegistry {}.abi_encode().into()))
+        StorageCtx.error_result(ZonePrecompileError::from(ReadOnlyRegistry {}))
     }
 
     /// Handle `isAuthorized(policyId, user)` and the directional variants.

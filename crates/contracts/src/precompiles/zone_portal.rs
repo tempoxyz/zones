@@ -19,7 +19,6 @@ crate::sol! {
             bytes32 senderTag;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
@@ -136,6 +135,8 @@ crate::sol! {
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
+        event BouncebackGasUpdated(uint64 bouncebackGas);
+
         event SequencerTransferStarted(
             address indexed currentSequencer,
             address indexed pendingSequencer
@@ -218,6 +219,7 @@ crate::sol! {
 
         function transferSequencer(address newSequencer) external;
         function acceptSequencer() external;
+        function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
@@ -247,6 +249,7 @@ crate::sol! {
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
+        function bouncebackGas() external view returns (uint64);
         function pendingSequencer() external view returns (address);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
@@ -375,7 +378,6 @@ impl Withdrawal {
             senderTag: sender_tag,
             to: event.to,
             amount: event.amount,
-            fee: event.fee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackNonce: event.fallbackNonce,

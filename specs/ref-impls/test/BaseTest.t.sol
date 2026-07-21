@@ -153,7 +153,10 @@ contract BaseTest is Test {
         vm.store(
             ZONE_FACTORY_ADDRESS, bytes32(uint256(5)), bytes32(uint256(uint160(address(messenger))))
         );
-        vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(6)), bytes32(uint256(3)));
+        vm.store(
+            ZONE_FACTORY_ADDRESS, bytes32(uint256(6)), bytes32(uint256(uint160(address(this))))
+        );
+        vm.store(ZONE_FACTORY_ADDRESS, bytes32(uint256(7)), bytes32(uint256(3)));
 
         zoneFactory = ZoneFactory(ZONE_FACTORY_ADDRESS);
     }

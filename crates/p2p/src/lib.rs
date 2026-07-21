@@ -3,7 +3,6 @@
 
 mod identity;
 mod manifest;
-mod messages;
 mod network;
 mod runtime;
 

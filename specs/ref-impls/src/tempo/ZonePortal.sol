@@ -49,10 +49,6 @@ contract ZonePortal is IZonePortal {
     ///      flexibility to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
-    /// @notice Fixed gas value for failed-deposit bounce-back fee calculation
-    /// @dev Priced against Tempo gas because the refund is paid on Tempo.
-    uint64 public constant FIXED_BOUNCEBACK_GAS = 300_000;
-
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
@@ -101,6 +97,10 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Last Tempo block number the zone has synced to
     uint64 public lastSyncedTempoBlockNumber;
+
+    /// @notice Gas amount used to price a failed-deposit bounce-back on Tempo.
+    /// @dev Packed into the unused bytes in slot 6. Defaults to zero.
+    uint64 public bouncebackGas;
 
     /// @notice Historical encryption keys with activation blocks
     /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
@@ -240,6 +240,12 @@ contract ZonePortal is IZonePortal {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
+    }
+
+    /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
+    function setBouncebackGas(uint64 _bouncebackGas) external onlySequencer {
+        bouncebackGas = _bouncebackGas;
+        emit BouncebackGasUpdated(_bouncebackGas);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -504,10 +510,10 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Calculate the reserved fee for a failed-deposit bounce-back
-    /// @dev Fee = ceil(FIXED_BOUNCEBACK_GAS * block.basefee / 1e12)
+    /// @dev Fee = ceil(bouncebackGas * block.basefee / 1e12)
     /// @return fee The bounce-back fee in token units
     function calculateBouncebackFee() public view returns (uint128 fee) {
-        uint256 gasFee = uint256(FIXED_BOUNCEBACK_GAS) * block.basefee;
+        uint256 gasFee = uint256(bouncebackGas) * block.basefee;
         // Round up after scaling so bounce-backs do not underpay.
         fee = uint128((gasFee + TEMPO_BASE_FEE_SCALE - 1) / TEMPO_BASE_FEE_SCALE);
     }
@@ -713,8 +719,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    /// @dev Fee transfer to the sequencer is best-effort.
-    ///      On withdrawal failure, only the amount (not fee) is bounced back.
+    /// @dev On withdrawal failure, only the withdrawal amount is bounced back.
     ///      The token to transfer is read from the withdrawal struct.
     function processWithdrawal(
         Withdrawal calldata withdrawal,
@@ -732,13 +737,6 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
-        }
-
-        // Transfer fee to sequencer.
-        if (withdrawal.fee > 0) {
-            // Fee transfer can fail for e.g. TIP-403 blacklist. The sequencer
-            // forgoes the fee so the withdrawal itself does not stall.
-            _tryTransfer(_token, sequencer, withdrawal.fee);
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
