@@ -15,8 +15,8 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
 use tempo_zone_contracts::{
-    EncryptedDepositPayload, SwapAndDepositRouterEncryptedCallback, ZONE_OUTBOX_ADDRESS,
-    ZoneOutbox, ZonePortal,
+    EncryptedDepositPayload, IZoneOutbox, SwapAndDepositRouterEncryptedCallback,
+    ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use zone_precompiles::ecies::encrypt_deposit;
 
@@ -170,7 +170,7 @@ impl DemoSwapAndDeposit {
             .call()
             .await
             .wrap_err("failed to fetch portal deposit fee")?;
-        let withdrawal_fee = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2)
+        let withdrawal_fee = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2)
             .calculateWithdrawalFee(ROUTER_CALLBACK_GAS_LIMIT)
             .call()
             .await
@@ -357,7 +357,7 @@ impl DemoSwapAndDeposit {
         )
         .await?;
         let l1_from_block = l1.get_block_number().await.unwrap_or(0);
-        let receipt = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_operator)
+        let receipt = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_operator)
             .requestWithdrawal(
                 alpha,
                 router,

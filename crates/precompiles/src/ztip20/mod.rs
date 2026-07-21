@@ -11,7 +11,7 @@
 use alloc::sync::Arc;
 
 use alloy_primitives::Address;
-use alloy_sol_types::{SolCall, SolError};
+use alloy_sol_types::SolCall;
 use tempo_precompiles::{
     dispatch::selector_from_calldata,
     tip20::{IRolesAuth, ITIP20},
@@ -19,7 +19,7 @@ use tempo_precompiles::{
 use tempo_zone_contracts::Unauthorized;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-use crate::execution::{CallCheck, CallRules};
+use crate::execution::{CallCheck, CallRules, ZoneCall};
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
 ///
@@ -72,11 +72,12 @@ impl CallRules for TIP20Rules {
     }
 
     /// Apply zone privacy and bridge-path checks before upstream execution.
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Some(selector) = selector_from_calldata(data) else {
+    fn admit(&self, call: ZoneCall<'_>) -> CallCheck {
+        let Some(selector) = selector_from_calldata(call.data) else {
             return CallCheck::Continue;
         };
-        let args = &data[4..];
+        let args = &call.data[4..];
+        let caller = call.caller;
 
         match selector {
             ITIP20::mintCall::SELECTOR | ITIP20::mintWithMemoCall::SELECTOR => {
@@ -86,18 +87,18 @@ impl CallRules for TIP20Rules {
                 self.check_auth(caller, &[ZONE_OUTBOX_ADDRESS])
             }
             ITIP20::balanceOfCall::SELECTOR => {
-                decode_and_check::<ITIP20::balanceOfCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.account])
+                decode_and_check::<ITIP20::balanceOfCall>(args, |decoded| {
+                    self.check_auth_with_sequencer(caller, &[decoded.account])
                 })
             }
             ITIP20::allowanceCall::SELECTOR => {
-                decode_and_check::<ITIP20::allowanceCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.owner, call.spender])
+                decode_and_check::<ITIP20::allowanceCall>(args, |decoded| {
+                    self.check_auth_with_sequencer(caller, &[decoded.owner, decoded.spender])
                 })
             }
             IRolesAuth::hasRoleCall::SELECTOR => {
-                decode_and_check::<IRolesAuth::hasRoleCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.account])
+                decode_and_check::<IRolesAuth::hasRoleCall>(args, |decoded| {
+                    self.check_auth_with_sequencer(caller, &[decoded.account])
                 })
             }
             _ => CallCheck::Continue,
@@ -110,7 +111,7 @@ impl TIP20Rules {
         if auths.contains(&caller) {
             CallCheck::Continue
         } else {
-            CallCheck::Revert(Unauthorized {}.abi_encode().into())
+            CallCheck::revert(Unauthorized {})
         }
     }
 
@@ -135,7 +136,7 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
-    use alloy_sol_types::{SolCall, SolInterface};
+    use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
@@ -168,17 +169,27 @@ mod tests {
     }
 
     fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
+        let data = call.abi_encode();
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller),
+            rules.admit(ZoneCall {
+                data: &data,
+                caller,
+                is_static: false
+            }),
             CallCheck::Continue
         ));
     }
 
     fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
-        assert!(matches!(
-            rules.admit(&call.abi_encode(), caller),
-            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
-        ));
+        let data = call.abi_encode();
+        let CallCheck::Revert(data) = rules.admit(ZoneCall {
+            data: &data,
+            caller,
+            is_static: false,
+        }) else {
+            panic!("call should be rejected");
+        };
+        assert_eq!(data, Unauthorized {}.abi_encode());
     }
 
     struct PrecompileHarness {

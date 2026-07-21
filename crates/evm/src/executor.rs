@@ -23,7 +23,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::L1StorageReader;
 
-use crate::{L1OverlayDB, ZoneEvm, tx_context};
+use crate::{L1OverlayDB, ZoneEvm};
 
 /// Simplified block executor for zone nodes.
 ///
@@ -112,7 +112,11 @@ where
         // transaction's resolved fee token, so the handler skips FeeAMM.
         self.override_validator_token();
 
-        let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
+        let fee_payer = tx_env.fee_payer().unwrap_or(tx_env.caller());
+        let _tx_context_guard = zone_precompiles::tx_context::set_current_transaction(
+            *recovered.tx().tx_hash(),
+            fee_payer,
+        );
         let result = self
             .inner
             .execute_transaction_without_commit((tx_env, recovered));

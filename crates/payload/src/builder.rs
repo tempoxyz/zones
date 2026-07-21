@@ -591,7 +591,7 @@ where
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
 ///
 /// This must be the **last** transaction in each finalizing zone block. It calls
-/// [`ZoneOutbox.finalizeWithdrawalBatch`](crate::abi::ZoneOutbox) which:
+/// [`IZoneOutbox.finalizeWithdrawalBatch`](crate::abi::IZoneOutbox) which:
 /// - Collects up to `count` pending withdrawals
 /// - Builds the withdrawal hash chain (oldest outermost)
 /// - Increments `withdrawalBatchIndex`
@@ -605,7 +605,7 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     block_number: u64,
     encrypted_senders: Vec<Bytes>,
 ) -> Recovered<TempoTxEnvelope> {
-    let calldata = abi::ZoneOutbox::finalizeWithdrawalBatchCall {
+    let calldata = abi::IZoneOutbox::finalizeWithdrawalBatchCall {
         count,
         blockNumber: block_number,
         encryptedSenders: encrypted_senders,
@@ -649,11 +649,11 @@ where
 fn read_pending_withdrawals_from_outbox<B>(
     builder: &mut B,
     block_number: u64,
-) -> Result<Vec<abi::ZoneOutbox::PendingWithdrawal>, PayloadBuilderError>
+) -> Result<Vec<abi::IZoneOutbox::PendingWithdrawal>, PayloadBuilderError>
 where
     B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
 {
-    let calldata = abi::ZoneOutbox::getPendingWithdrawalsCall {}.abi_encode();
+    let calldata = abi::IZoneOutbox::getPendingWithdrawalsCall {}.abi_encode();
     let output = execute_outbox_view_call(
         builder,
         calldata.into(),
@@ -661,7 +661,7 @@ where
         "getPendingWithdrawals",
     )?;
 
-    abi::ZoneOutbox::getPendingWithdrawalsCall::abi_decode_returns(&output).map_err(|err| {
+    abi::IZoneOutbox::getPendingWithdrawalsCall::abi_decode_returns(&output).map_err(|err| {
         PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
             "failed to decode getPendingWithdrawals return data: {err}"
         )))

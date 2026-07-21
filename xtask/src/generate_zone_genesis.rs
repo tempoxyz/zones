@@ -40,7 +40,9 @@ use tempo_precompiles::{
 };
 use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
-use zone_precompiles::{TempoState as NativeTempoState, ZoneTokenFactory};
+use zone_precompiles::{
+    TempoState as NativeTempoState, ZoneOutbox as NativeZoneOutbox, ZoneTokenFactory,
+};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -148,6 +150,7 @@ impl GenerateZoneGenesis {
         let mut nonce = 0u64;
 
         initialize_tempo_state(&mut evm, &header_rlp)?;
+        initialize_zone_outbox(&mut evm)?;
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
@@ -171,19 +174,6 @@ impl GenerateZoneGenesis {
             &zone_inbox_args,
             ZONE_INBOX_ADDRESS,
             "ZoneInbox",
-            self.chain_id,
-            nonce,
-        )?;
-        nonce += 1;
-
-        let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
-        let zone_outbox_args = (ZONE_CONFIG_ADDRESS,).abi_encode_params();
-        deploy_contract(
-            &mut evm,
-            &zone_outbox_bytecode,
-            &zone_outbox_args,
-            ZONE_OUTBOX_ADDRESS,
-            "ZoneOutbox",
             self.chain_id,
             nonce,
         )?;
@@ -477,6 +467,21 @@ fn initialize_tempo_state(
         || NativeTempoState::new().initialize(header_rlp),
     )?;
     println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
+    Ok(())
+}
+
+/// Initialize the native ZoneOutbox account marker and storage.
+fn initialize_zone_outbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || NativeZoneOutbox::new().initialize(),
+    )?;
+    println!("Initialized native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
     Ok(())
 }
 

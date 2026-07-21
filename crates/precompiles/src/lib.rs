@@ -33,6 +33,8 @@ pub use error::{Result, ZonePrecompileError, ZoneResult};
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
+pub mod outbox;
+pub mod tx_context;
 
 /// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
 pub mod dispatch {
@@ -52,6 +54,7 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
+pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
@@ -61,7 +64,19 @@ pub use ztip20::SequencerExt;
 use alloc::sync::Arc;
 
 use alloy_evm::precompiles::DynPrecompile;
+use alloy_primitives::Address;
 use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
+
+/// Creates the native ZoneOutbox over ordinary zone storage and finalized portal reads supplied
+/// by the EVM database overlay.
+pub fn create_outbox_precompile(portal: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
+    execution::create_precompile(
+        "ZoneOutbox",
+        env,
+        outbox::ZoneOutboxRules::new(portal),
+        |data, caller| ZoneOutbox::new().call(data, caller),
+    )
+}
 
 /// Creates upstream TIP-403 execution with zone read-only rules and adapter-backed L1 reads.
 pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
