@@ -13557,6 +13557,7 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "url",
+ "zeroize",
  "zone-chainspec",
  "zone-evm",
  "zone-l1",
@@ -13665,8 +13666,6 @@ name = "zone-primitives"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
- "alloy-rlp",
- "serde",
 ]
 
 [[package]]
@@ -13727,6 +13726,7 @@ dependencies = [
  "k256",
  "metrics",
  "parking_lot",
+ "proptest",
  "reth-metrics",
  "schnellru",
  "serde_json",

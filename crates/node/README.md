@@ -119,7 +119,7 @@ header chain linking back to the target block.
 3. At batch finalization, withdrawals are hashed into a chain and submitted to
    L1 as part of the batch proof.
 4. The `WithdrawalProcessor` polls the L1 portal queue and calls
-   `processWithdrawal` for each pending withdrawal.
+   `processWithdrawals` for each pending withdrawal.
 
 ## TIP-403 Policy Enforcement
 

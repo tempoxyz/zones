@@ -4,10 +4,10 @@
 //!
 //! - [`WithdrawalStore`] — an in-memory store that holds [`abi::Withdrawal`] structs grouped by
 //!   batch index. The L1 portal queue only stores hashes, so the sequencer must retain the actual
-//!   withdrawal data to provide it when calling `processWithdrawal`.
+//!   withdrawal data to provide it when calling `processWithdrawals`.
 //!
 //! - [`WithdrawalProcessor`] — a background task that polls the ZonePortal withdrawal queue on
-//!   **Tempo L1** and processes withdrawals by calling `processWithdrawal(withdrawal, remainingQueue)`.
+//!   **Tempo L1** and processes withdrawals by calling `processWithdrawals(withdrawals, remainingQueue)`.
 //!
 //! ## Data flow
 //!
@@ -87,7 +87,7 @@ pub struct WithdrawalProcessorConfig {
 /// In-memory store for withdrawal data grouped by batch index.
 ///
 /// The L1 portal queue only stores hash chains. The sequencer must keep the actual
-/// [`abi::Withdrawal`] structs so it can provide them when calling `processWithdrawal`.
+/// [`abi::Withdrawal`] structs so it can provide them when calling `processWithdrawals`.
 ///
 /// Withdrawals are grouped by batch index, where each batch is a `Vec<Withdrawal>` in FIFO order
 /// (oldest first). The batch index corresponds to the portal's withdrawal queue slot index.
@@ -175,7 +175,7 @@ impl Default for WithdrawalStore {
 
 /// Compute the remaining queue hash after removing the first `processed_count` withdrawals.
 ///
-/// This value is passed as `remainingQueue` to `processWithdrawal` on the portal contract.
+/// This value is passed as `remainingQueue` to `processWithdrawals` on the portal contract.
 ///
 /// - If `processed_count >= withdrawals.len()`, returns `B256::ZERO` (no remaining items).
 /// - Otherwise, computes the hash chain over `withdrawals[processed_count..]` via
@@ -219,7 +219,7 @@ const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
     bounded_callback_gas + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
 }
 
-/// Outcome of submitting and confirming one `processWithdrawal` transaction.
+/// Outcome of submitting and confirming one `processWithdrawals` transaction.
 enum SubmitOutcome {
     /// The transaction was included on L1 and succeeded.
     Confirmed,
@@ -481,7 +481,7 @@ impl WithdrawalProcessor {
         }
     }
 
-    /// Submit one `processWithdrawal` transaction and wait for its receipt.
+    /// Submit one `processWithdrawals` transaction and wait for its receipt.
     async fn submit_and_confirm(
         &self,
         slot: u64,
@@ -505,7 +505,7 @@ impl WithdrawalProcessor {
 
         let call = self
             .portal
-            .processWithdrawal(withdrawal.clone(), remaining_queue)
+            .processWithdrawals(vec![withdrawal.clone()], remaining_queue)
             .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY);
 
         // When the withdrawal has a callback (`gasLimit > 0`), we must
@@ -557,7 +557,7 @@ impl WithdrawalProcessor {
                     to = %withdrawal.to,
                     amount = %withdrawal.amount,
                     error = %e,
-                    "processWithdrawal tx failed to send, stopping batch processing"
+                    "processWithdrawals tx failed to send, stopping batch processing"
                 );
                 return SubmitOutcome::Unconfirmed;
             }
@@ -580,7 +580,7 @@ impl WithdrawalProcessor {
                     to = %withdrawal.to,
                     amount = %withdrawal.amount,
                     error = %e,
-                    "processWithdrawal tx not confirmed, stopping batch processing"
+                    "processWithdrawals tx not confirmed, stopping batch processing"
                 );
                 return SubmitOutcome::Unconfirmed;
             }
@@ -596,7 +596,7 @@ impl WithdrawalProcessor {
                 to = %withdrawal.to,
                 amount = %withdrawal.amount,
                 expected_remaining_queue = %remaining_queue,
-                "processWithdrawal tx was included but reverted; keeping batch in store and requesting repair"
+                "processWithdrawals tx was included but reverted; keeping batch in store and requesting repair"
             );
             return SubmitOutcome::Reverted;
         }

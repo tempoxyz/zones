@@ -201,7 +201,7 @@ crate::sol! {
             external
             returns (bytes32 newCurrentDepositQueueHash);
 
-        function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+        function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
         function submitBatch(
             uint64 tempoBlockNumber,

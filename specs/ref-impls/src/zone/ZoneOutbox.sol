@@ -42,7 +42,7 @@ contract ZoneOutbox is IZoneOutbox {
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
-    /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
+    /// @dev Covers processWithdrawals overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
 
     /// @notice Length of a compressed secp256k1 public key

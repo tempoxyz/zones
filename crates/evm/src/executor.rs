@@ -21,6 +21,7 @@ use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
+use zone_precompiles::L1StorageReader;
 
 use crate::{L1OverlayDB, ZoneEvm, tx_context};
 
@@ -28,18 +29,19 @@ use crate::{L1OverlayDB, ZoneEvm, tx_context};
 ///
 /// Wraps [`EthBlockExecutor`] without any subblock validation, gas-section tracking,
 /// or end-of-block metadata system transaction requirements.
-pub struct ZoneBlockExecutor<'a, DB: Database, I> {
-    inner: EthBlockExecutor<'a, ZoneEvm<DB, I>, &'a ZoneChainSpec, TempoReceiptBuilder>,
+pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
+    inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
 }
 
-impl<'a, DB, I> ZoneBlockExecutor<'a, DB, I>
+impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<L1OverlayDB<DB, L1StateProvider>>>,
+    L1: L1StorageReader,
+    I: Inspector<TempoContext<L1OverlayDB<DB, L1>>>,
 {
     /// Create a zone block executor for `evm` and the current block context.
     pub fn new(
-        evm: ZoneEvm<DB, I>,
+        evm: ZoneEvm<DB, I, L1>,
         ctx: TempoBlockExecutionCtx<'a>,
         chain_spec: &'a ZoneChainSpec,
     ) -> Self {
@@ -81,14 +83,15 @@ where
     }
 }
 
-impl<'a, DB, I> BlockExecutor for ZoneBlockExecutor<'a, DB, I>
+impl<'a, DB, I, L1> BlockExecutor for ZoneBlockExecutor<'a, DB, I, L1>
 where
     DB: StateDB,
-    I: Inspector<TempoContext<L1OverlayDB<DB, L1StateProvider>>>,
+    L1: L1StorageReader,
+    I: Inspector<TempoContext<L1OverlayDB<DB, L1>>>,
 {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type Evm = ZoneEvm<DB, I>;
+    type Evm = ZoneEvm<DB, I, L1>;
     type Result = EthTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
