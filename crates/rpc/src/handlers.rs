@@ -864,6 +864,7 @@ mod tests {
                     "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
                     "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
                     "chainId": "0x2a",
+                    "tempoBlockNumber": "0x7",
                 }))
             })
         }
@@ -972,6 +973,7 @@ mod tests {
             format!("{:#x}", Address::repeat_byte(0x22))
         );
         assert_eq!(body["chainId"], "0x2a");
+        assert_eq!(body["tempoBlockNumber"], "0x7");
     }
 
     #[tokio::test]

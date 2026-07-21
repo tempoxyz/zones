@@ -1134,6 +1134,7 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         zone_info["result"]["chainId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.chain_id),
     );
+    assert_eq!(zone_info["result"]["tempoBlockNumber"], "0x0");
 
     Ok(())
 }

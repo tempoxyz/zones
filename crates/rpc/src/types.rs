@@ -181,6 +181,8 @@ pub struct ZoneInfoResponse {
     pub sequencer: Address,
     /// The zone chain ID.
     pub chain_id: U64,
+    /// The latest Tempo block imported into the zone.
+    pub tempo_block_number: U64,
 }
 
 /// Response payload for `zone_getDepositStatus`.

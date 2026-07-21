@@ -901,11 +901,18 @@ where
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
             let sequencer = self.zone_sequencer().await?;
+            let tempo_block_number = self
+                .tempo_state
+                .tempoBlockNumber()
+                .call()
+                .await
+                .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
                 zone_tokens,
                 sequencer,
                 chain_id: U64::from(self.config.chain_id),
+                tempo_block_number: U64::from(tempo_block_number),
             })
         })
     }
