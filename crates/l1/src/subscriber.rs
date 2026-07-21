@@ -4,11 +4,21 @@ use tempo_primitives::is_tip20_prefix;
 
 use std::collections::BTreeMap;
 
+/// Maximum number of authenticated L1 blocks a follower may retain ahead of its imported Tempo
+/// checkpoint (approximately one hour at Tempo's 500ms block time).
+pub const MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
+
 #[derive(Debug, Default)]
 struct L1BlockTrackerState {
-    observed: BTreeMap<u64, B256>,
+    observed: BTreeMap<u64, L1BlockObservation>,
     latest: Option<NumHash>,
     pruned_through: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct L1BlockObservation {
+    hash: B256,
+    portal_events: L1PortalEvents,
 }
 
 /// L1 blocks whose headers and receipts have been independently validated and
@@ -34,9 +44,21 @@ impl Default for L1BlockTracker {
 }
 
 impl L1BlockTracker {
+    /// Initialize the last L1 height already represented by canonical local zone state.
+    pub fn initialize_consumed_through(&self, number: u64) {
+        let mut state = self.state.write();
+        state.pruned_through = Some(state.pruned_through.map_or(number, |old| old.max(number)));
+        drop(state);
+        self.changed.send_replace(());
+    }
+
     /// Return the independently observed hash at `number`, if it is retained.
     pub fn observed_hash(&self, number: u64) -> Option<B256> {
-        self.state.read().observed.get(&number).copied()
+        self.state
+            .read()
+            .observed
+            .get(&number)
+            .map(|observation| observation.hash)
     }
 
     /// Return the highest independently observed L1 anchor.
@@ -44,20 +66,59 @@ impl L1BlockTracker {
         self.state.read().latest
     }
 
+    /// Return whether `number` fits inside the bounded follower lookahead window.
+    pub fn has_capacity_for(&self, number: u64) -> bool {
+        self.state.read().pruned_through.is_none_or(|consumed| {
+            number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+        })
+    }
+
+    /// Wait until canonical follower import advances enough to retain `number`.
+    pub async fn wait_for_capacity(&self, number: u64) -> eyre::Result<()> {
+        let mut changed = self.changed.subscribe();
+        while !self.has_capacity_for(number) {
+            changed
+                .changed()
+                .await
+                .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
+        }
+        Ok(())
+    }
+
+    /// Return the next L1 height the observer needs to retain.
+    pub fn next_observation_number(&self) -> Option<u64> {
+        let state = self.state.read();
+        state
+            .latest
+            .map(|latest| latest.number.saturating_add(1))
+            .or_else(|| {
+                state
+                    .pruned_through
+                    .map(|consumed| consumed.saturating_add(1))
+            })
+    }
+
     /// Wait until the exact L1 block has been validated and applied locally.
     pub async fn wait_for(&self, block: NumHash) -> eyre::Result<()> {
+        self.wait_for_portal_events(block).await.map(|_| ())
+    }
+
+    /// Wait for an exact L1 block and return its receipt-authenticated portal events.
+    pub async fn wait_for_portal_events(&self, block: NumHash) -> eyre::Result<L1PortalEvents> {
         let mut changed = self.changed.subscribe();
         loop {
             {
                 let state = self.state.read();
                 match state.observed.get(&block.number) {
-                    Some(&hash) if hash == block.hash => return Ok(()),
-                    Some(&hash) => {
+                    Some(observation) if observation.hash == block.hash => {
+                        return Ok(observation.portal_events.clone());
+                    }
+                    Some(observation) => {
                         eyre::bail!(
                             "observed different L1 hash at block {}: expected {}, got {}",
                             block.number,
                             block.hash,
-                            hash
+                            observation.hash
                         )
                     }
                     None if state
@@ -91,13 +152,22 @@ impl L1BlockTracker {
 
     /// Record an independently validated and applied L1 anchor.
     pub fn record(&self, block: NumHash) -> eyre::Result<()> {
+        self.record_with_portal_events(block, L1PortalEvents::default())
+    }
+
+    /// Record an L1 anchor together with portal events decoded from its verified receipts.
+    pub fn record_with_portal_events(
+        &self,
+        block: NumHash,
+        portal_events: L1PortalEvents,
+    ) -> eyre::Result<()> {
         let mut state = self.state.write();
-        if let Some(hash) = state.observed.get(&block.number) {
+        if let Some(observation) = state.observed.get(&block.number) {
             eyre::ensure!(
-                *hash == block.hash,
+                observation.hash == block.hash,
                 "conflicting L1 hash at observed height {}: existing {}, new {}",
                 block.number,
-                hash,
+                observation.hash,
                 block.hash
             );
             return Ok(());
@@ -107,6 +177,15 @@ impl L1BlockTracker {
             // leader after it was handed to the deposit queue.
             return Ok(());
         }
+        let consumed = *state
+            .pruned_through
+            .get_or_insert_with(|| block.number.saturating_sub(1));
+        eyre::ensure!(
+            block.number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS),
+            "L1 observation {} exceeds follower lookahead through {}",
+            block.number,
+            consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+        );
         if let Some(latest) = state.latest {
             eyre::ensure!(
                 block.number == latest.number.saturating_add(1),
@@ -114,8 +193,21 @@ impl L1BlockTracker {
                 latest.number,
                 block.number
             );
+        } else {
+            eyre::ensure!(
+                block.number == consumed.saturating_add(1),
+                "non-contiguous first L1 observation: consumed through {}, new {}",
+                consumed,
+                block.number
+            );
         }
-        state.observed.insert(block.number, block.hash);
+        state.observed.insert(
+            block.number,
+            L1BlockObservation {
+                hash: block.hash,
+                portal_events,
+            },
+        );
         state.latest = Some(block);
         drop(state);
         self.changed.send_replace(());
@@ -127,7 +219,14 @@ impl L1BlockTracker {
         let mut state = self.state.write();
         state.observed.retain(|height, _| *height > number);
         state.pruned_through = Some(state.pruned_through.map_or(number, |old| old.max(number)));
+        drop(state);
+        self.changed.send_replace(());
     }
+}
+
+enum LiveStreamOutcome {
+    Ended,
+    Backpressured { next_l1_block: u64 },
 }
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
@@ -435,6 +534,9 @@ impl L1Subscriber {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
         };
+        self.config
+            .block_tracker
+            .initialize_consumed_through(from.saturating_sub(1));
 
         // Skip past blocks already observed during a previous `run()`.
         if let Some(last) = self.config.block_tracker.latest() {
@@ -487,12 +589,15 @@ impl L1Subscriber {
 
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
+        let block_tracker = self.config.block_tracker.clone();
 
         let mut fetched = stream::iter(from..=to)
             .map(move |block_number| {
                 let provider = l1_provider;
                 let subscriber_metrics = subscriber_metrics.clone();
+                let block_tracker = block_tracker.clone();
                 async move {
+                    block_tracker.wait_for_capacity(block_number).await?;
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
                     let header_resp = async {
@@ -552,7 +657,9 @@ impl L1Subscriber {
             );
             self.apply_portal_state_events(block_number, &events);
             let anchor = sealed.num_hash();
-            self.config.block_tracker.record(anchor)?;
+            self.config
+                .block_tracker
+                .record_with_portal_events(anchor, events.clone())?;
             if let Some(deposit_queue) = &self.deposit_queue {
                 deposit_queue.enqueue_sealed(sealed, events);
                 self.subscriber_metrics.blocks_enqueued.increment(1);
@@ -601,14 +708,39 @@ impl L1Subscriber {
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(&self) -> eyre::Result<()> {
-        let provider = self.connect().await?;
+        loop {
+            let provider = self.connect().await?;
 
-        // Backfill to the current tip before subscribing.
-        // Backfilled blocks are historical and considered confirmed.
-        self.sync_to_l1_tip(&provider).await?;
+            // Backfill to the current tip before subscribing.
+            // Backfilled blocks are historical and considered confirmed.
+            self.sync_to_l1_tip(&provider).await?;
 
+            let outcome = self.run_live_stream(&provider).await?;
+            drop(provider);
+            match outcome {
+                LiveStreamOutcome::Ended => return Ok(()),
+                LiveStreamOutcome::Backpressured { next_l1_block } => {
+                    info!(
+                        next_l1_block,
+                        max_lookahead = MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
+                        "Follower L1 observation reached its lookahead limit; reconnecting after zone import catches up"
+                    );
+                    self.config
+                        .block_tracker
+                        .wait_for_capacity(next_l1_block)
+                        .await?;
+                    self.subscriber_metrics.reconnects.increment(1);
+                }
+            }
+        }
+    }
+
+    async fn run_live_stream(
+        &self,
+        provider: &DynProvider<TempoNetwork>,
+    ) -> eyre::Result<LiveStreamOutcome> {
         info!(portal = %self.config.portal_address, "Listening for L1 blocks");
-        let mut stream = self.l1_block_stream(&provider).await?;
+        let mut stream = self.l1_block_stream(provider).await?;
 
         // Confirmation buffer: holds the latest unconfirmed L1 block.
         // A block is only flushed to the deposit queue once the NEXT block
@@ -617,13 +749,21 @@ impl L1Subscriber {
         let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, L1ProcessedEvents)> = None;
 
         loop {
+            if let Some(next_l1_block) = self.config.block_tracker.next_observation_number()
+                && !self.config.block_tracker.has_capacity_for(next_l1_block)
+            {
+                // Returning drops the subscription before waiting, preventing the transport's
+                // notification channel from becoming an unbounded hidden buffer.
+                return Ok(LiveStreamOutcome::Backpressured { next_l1_block });
+            }
             let stream_wait_start = std::time::Instant::now();
             let next = stream.try_next().await?;
             self.subscriber_metrics
                 .stream_try_next_duration_seconds
                 .record(stream_wait_start.elapsed().as_secs_f64());
             let Some((header, receipts)) = next else {
-                break;
+                warn!("L1 block subscription stream ended");
+                return Ok(LiveStreamOutcome::Ended);
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
@@ -636,16 +776,15 @@ impl L1Subscriber {
                     // Confirmed — fill any observer-mode gap, update caches,
                     // publish the exact anchor, and optionally enqueue deposits.
                     let tip_number = tip_header.number();
-                    if let Some(observed) = self.config.block_tracker.latest()
-                        && tip_number > observed.number.saturating_add(1)
+                    if let Some(expected) = self.config.block_tracker.next_observation_number()
+                        && tip_number > expected
                     {
-                        let from = observed.number + 1;
                         warn!(
-                            from,
+                            from = expected,
                             to = tip_number,
                             "Backfilling gap before observed L1 tip"
                         );
-                        self.backfill(&provider, from, tip_number).await?;
+                        self.backfill(provider, expected, tip_number).await?;
                         unconfirmed_tip = Some((sealed, (events, invalidated)));
                         continue;
                     }
@@ -653,7 +792,9 @@ impl L1Subscriber {
                     let tip_parent = tip_header.parent_hash();
                     self.update_l1_state_anchor(tip_number, tip_hash, tip_parent, &tip_invalidated);
                     self.apply_portal_state_events(tip_number, &tip_events);
-                    self.config.block_tracker.record(tip_header.num_hash())?;
+                    self.config
+                        .block_tracker
+                        .record_with_portal_events(tip_header.num_hash(), tip_events.clone())?;
                     if let Some(deposit_queue) = &self.deposit_queue {
                         match deposit_queue.try_enqueue(tip_header, tip_events) {
                             EnqueueOutcome::Accepted => {
@@ -695,9 +836,6 @@ impl L1Subscriber {
             // Buffer the new block as unconfirmed tip.
             unconfirmed_tip = Some((sealed, (events, invalidated)));
         }
-
-        warn!("L1 block subscription stream ended");
-        Ok(())
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.

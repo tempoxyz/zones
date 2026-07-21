@@ -1,7 +1,7 @@
 use super::*;
 use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
 use alloy_consensus::{Header, ReceiptWithBloom};
-use alloy_primitives::{Bloom, FixedBytes, address};
+use alloy_primitives::{Bloom, Bytes, FixedBytes, address};
 use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
@@ -173,6 +173,70 @@ async fn l1_block_tracker_waits_for_exact_observation() {
 }
 
 #[tokio::test]
+async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
+    let tracker = L1BlockTracker::default();
+    let anchor = NumHash::new(10, B256::with_last_byte(0x10));
+    let events = L1PortalEvents::from_deposits(vec![make_deposit(100)]);
+    tracker
+        .record_with_portal_events(anchor, events.clone())
+        .unwrap();
+
+    let observed = tracker.wait_for_portal_events(anchor).await.unwrap();
+    assert_eq!(observed.deposits.len(), 1);
+    assert_eq!(
+        observed.deposits[0].to_abi_queued_deposit(),
+        events.deposits[0].to_abi_queued_deposit()
+    );
+}
+
+#[test]
+fn observed_portal_events_require_complete_advance_tempo_inputs() {
+    let events = L1PortalEvents {
+        deposits: vec![make_deposit(100), make_deposit(200)],
+        enabled_tokens: vec![EnabledToken {
+            token: address!("0x20C0000000000000000000000000000000000001"),
+            name: "Alpha USD".to_owned(),
+            symbol: "aUSD".to_owned(),
+            currency: "USD".to_owned(),
+        }],
+        ..Default::default()
+    };
+    let mut deposits: Vec<_> = events
+        .deposits
+        .iter()
+        .map(L1Deposit::to_abi_queued_deposit)
+        .collect();
+    let enabled_tokens: Vec<_> = events
+        .enabled_tokens
+        .iter()
+        .map(EnabledToken::to_abi)
+        .collect();
+
+    // Rejection is a sequencer decision and does not change the authenticated deposit identity.
+    deposits[0].rejected = true;
+    events
+        .validate_advance_tempo_inputs(&deposits, &enabled_tokens)
+        .unwrap();
+
+    let partial = events
+        .validate_advance_tempo_inputs(&deposits[..1], &enabled_tokens)
+        .unwrap_err();
+    assert!(partial.to_string().contains("deposit count"));
+
+    let mut fabricated = deposits.clone();
+    fabricated[1].depositData = Bytes::from_static(b"fabricated");
+    let fabricated = events
+        .validate_advance_tempo_inputs(&fabricated, &enabled_tokens)
+        .unwrap_err();
+    assert!(fabricated.to_string().contains("deposit 1"));
+
+    let missing_token = events
+        .validate_advance_tempo_inputs(&deposits, &[])
+        .unwrap_err();
+    assert!(missing_token.to_string().contains("token enables"));
+}
+
+#[tokio::test]
 async fn l1_block_tracker_rejects_conflicts_and_missing_heights() {
     let tracker = L1BlockTracker::default();
     let block_10 = NumHash::new(10, B256::with_last_byte(0x10));
@@ -209,6 +273,62 @@ async fn l1_block_tracker_prunes_only_consumed_observations() {
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
+    let tracker = L1BlockTracker::default();
+    let consumed = 100;
+    tracker.initialize_consumed_through(consumed);
+
+    for number in consumed + 1..=consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS {
+        tracker
+            .record(NumHash::new(number, B256::with_last_byte(number as u8)))
+            .unwrap();
+    }
+
+    let blocked_number = consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS + 1;
+    assert!(!tracker.has_capacity_for(blocked_number));
+    assert_eq!(tracker.next_observation_number(), Some(blocked_number));
+    assert!(
+        tracker
+            .record(NumHash::new(
+                blocked_number,
+                B256::with_last_byte(blocked_number as u8),
+            ))
+            .is_err()
+    );
+
+    let waiting = tracker.clone();
+    let waiter = tokio::spawn(async move { waiting.wait_for_capacity(blocked_number).await });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    tracker.prune_through(consumed + 1);
+    waiter.await.unwrap().unwrap();
+    assert!(tracker.has_capacity_for(blocked_number));
+}
+
+#[test]
+fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
+    let tracker = L1BlockTracker::default();
+    tracker.initialize_consumed_through(10);
+
+    let skipped = tracker
+        .record(NumHash::new(12, B256::with_last_byte(12)))
+        .unwrap_err();
+    assert!(
+        skipped
+            .to_string()
+            .contains("non-contiguous first L1 observation")
+    );
+    assert_eq!(tracker.latest(), None);
+    assert_eq!(tracker.next_observation_number(), Some(11));
+
+    tracker
+        .record(NumHash::new(11, B256::with_last_byte(11)))
+        .unwrap();
+    assert_eq!(tracker.latest().unwrap().number, 11);
 }
 
 #[test]

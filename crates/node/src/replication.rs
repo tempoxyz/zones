@@ -15,7 +15,7 @@ use std::{collections::BTreeMap, time::Duration};
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use zone_l1::{L1BlockTracker, TempoStateExt as _};
+use zone_l1::{L1BlockTracker, L1PortalEvents, TempoStateExt as _};
 use zone_p2p::{P2pCommand, P2pEvent, Role};
 use zone_payload::{
     ZonePayloadTypes,
@@ -678,16 +678,20 @@ where
 
     // 3. Require the block to advance the local Tempo checkpoint by exactly
     // one independently observed L1 block.
-    let l1_header = decode_advance_tempo_header(&block)?;
+    let (l1_header, portal_inputs) = decode_advance_tempo(&block)?;
     let local = provider
         .state_by_block_hash(parent.hash())?
         .tempo_num_hash()?;
     validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
     let anchor = l1_header.num_hash();
     loop {
-        match tokio::time::timeout(Duration::from_secs(30), l1_block_tracker.wait_for(anchor)).await
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            l1_block_tracker.wait_for_portal_events(anchor),
+        )
+        .await
         {
-            Ok(observed) => break observed?,
+            Ok(observed) => break portal_inputs.validate(&observed?)?,
             Err(_) => warn!(
                 target: "zone::p2p",
                 block_number,
@@ -721,6 +725,17 @@ where
     Ok(())
 }
 
+struct AdvanceTempoPortalInputs {
+    deposits: Vec<zone_payload::abi::QueuedDeposit>,
+    enabled_tokens: Vec<zone_payload::abi::EnabledToken>,
+}
+
+impl AdvanceTempoPortalInputs {
+    fn validate(&self, observed: &L1PortalEvents) -> eyre::Result<()> {
+        observed.validate_advance_tempo_inputs(&self.deposits, &self.enabled_tokens)
+    }
+}
+
 fn validate_l1_checkpoint_transition(
     l1_header: &SealedHeader<TempoHeader>,
     local_number: u64,
@@ -747,9 +762,16 @@ fn validate_l1_checkpoint_transition(
 }
 
 /// Decode the L1 header embedded in the first `ZoneInbox.advanceTempo` system transaction.
+#[cfg(test)]
 fn decode_advance_tempo_header(
     block: &SealedBlock<Block>,
 ) -> eyre::Result<SealedHeader<TempoHeader>> {
+    decode_advance_tempo(block).map(|(header, _)| header)
+}
+
+fn decode_advance_tempo(
+    block: &SealedBlock<Block>,
+) -> eyre::Result<(SealedHeader<TempoHeader>, AdvanceTempoPortalInputs)> {
     // Do some basic checks
 
     // 1. `advanceTempo` is the first tx
@@ -780,7 +802,13 @@ fn decode_advance_tempo_header(
             header_rlp.len()
         )
     }
-    Ok(SealedHeader::seal_slow(header))
+    Ok((
+        SealedHeader::seal_slow(header),
+        AdvanceTempoPortalInputs {
+            deposits: call.deposits,
+            enabled_tokens: call.enabledTokens,
+        },
+    ))
 }
 
 #[cfg(test)]
