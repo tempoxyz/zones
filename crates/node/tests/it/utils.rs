@@ -3803,20 +3803,6 @@ impl PrivateRpcTestCtx {
         eyre::ensure!(receipt.status(), "revokeKey failed");
         Ok(())
     }
-
-    /// Query `zone_getDepositStatus` via the private RPC as a specific user.
-    pub(crate) async fn get_deposit_status_as_user(
-        &self,
-        tempo_block_number: u64,
-        signer: &alloy_signer_local::PrivateKeySigner,
-    ) -> eyre::Result<serde_json::Value> {
-        self.call_as_user(
-            "zone_getDepositStatus",
-            serde_json::json!([format!("0x{tempo_block_number:x}")]),
-            signer,
-        )
-        .await
-    }
 }
 
 async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {
@@ -4056,7 +4042,10 @@ impl L1Fixture {
         // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
         seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
-        cache.update_anchor(num_blocks);
+        while cache.anchor() < num_blocks {
+            let next_anchor = cache.anchor() + 1;
+            cache.invalidate_and_set_anchor(next_anchor, []);
+        }
         drop(cache);
         self.caches.lock().unwrap().push(cache_handle.clone());
     }
@@ -4110,8 +4099,9 @@ impl L1Fixture {
     fn extend_cache_coverage(&self, block_number: u64) {
         for cache in self.caches.lock().unwrap().iter() {
             let mut cache = cache.write();
-            if block_number > cache.anchor() {
-                cache.update_anchor(block_number);
+            while cache.anchor() < block_number {
+                let next_anchor = cache.anchor() + 1;
+                cache.invalidate_and_set_anchor(next_anchor, []);
             }
         }
     }
@@ -4140,12 +4130,6 @@ impl L1Fixture {
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
         self.extend_cache_coverage(number);
-
-        // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
-        // coverage the subscriber would publish before the engine consumes this block.
-        for cache in self.caches.lock().unwrap().iter() {
-            cache.write().update_anchor(number);
-        }
 
         header
     }

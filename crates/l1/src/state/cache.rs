@@ -121,16 +121,28 @@ impl L1StateCacheInner {
             .get(&(address, slot))?
             .range(..=block_number)
             .next_back()?;
-        let invalidated = self
+
+        // On exact match, just return the value
+        if cached_block == block_number {
+            return Some(value);
+        }
+
+        // If we didn't yet process the requested block, we can't use the cached value
+        if block_number > *self.coverage.end() {
+            return None;
+        }
+
+        // If there was an invalidation between cached and requested block, we can't use the cached value
+        if self
             .invalidations
             .get(&address)
             .and_then(|blocks| blocks.range(..=block_number).next_back())
-            .is_some_and(|&invalidated_at| invalidated_at > cached_block);
+            .is_some_and(|&invalidated_at| invalidated_at > cached_block)
+        {
+            return None;
+        }
 
-        let is_exact = cached_block == block_number;
-        let can_inherit = block_number <= *self.coverage.end() && !invalidated;
-        let is_cache_valid = cached_block >= *self.coverage.start() && (is_exact || can_inherit);
-        is_cache_valid.then_some(value)
+        Some(value)
     }
 
     /// Sets a storage slot value in the forward cache at the given block number.
@@ -156,44 +168,53 @@ impl L1StateCacheInner {
         debug_assert!(inserted, "trimmed slot history must fit cache capacity");
     }
 
-    /// Prevents values populated before the current contiguous receipt-coverage baseline from
-    /// entering the forward cache. Initialized at startup and rebased after a coverage reset.
-    pub fn initialize_floor(&mut self, block_number: u64) {
-        let floor = (*self.coverage.start()).max(block_number);
-        self.coverage = floor..=*self.coverage.end();
+    /// Clears cached state and establishes a new contiguous receipt-coverage baseline.
+    pub fn reset(&mut self, floor: u64) {
+        self.slots.clear();
+        self.invalidations.clear();
+        self.invalidation_count = 0;
+        self.coverage = floor..=floor;
     }
 
-    /// Returns the non-advancing cache floor.
-    pub fn block_floor(&self) -> u64 {
-        *self.coverage.start()
-    }
-
-    /// Invalidates inherited values for `address` starting at `block_number`.
-    pub fn invalidate(&mut self, address: Address, block_number: u64) {
-        let inserted = self
-            .invalidations
-            .entry(address)
-            .or_default()
-            .insert(block_number);
-        self.invalidation_count += usize::from(inserted);
-
-        if self.invalidation_count > self.max_invalidations {
+    /// Records mutation barriers and publishes receipt coverage for one finalized block.
+    ///
+    /// Coverage only advances one block at a time. A duplicate, skipped, or out-of-order block
+    /// invalidates the cache's continuity assumptions, so cached state is cleared and `anchor`
+    /// becomes the new coverage floor.
+    pub fn invalidate_and_set_anchor(
+        &mut self,
+        anchor: u64,
+        invalidated_addresses: impl IntoIterator<Item = Address>,
+    ) {
+        if self.coverage.end().checked_add(1) != Some(anchor) {
             warn!(
-                block_number,
-                invalidation_capacity = self.max_invalidations,
-                "L1 state invalidation capacity reached; resetting cache coverage"
+                anchor,
+                previous_anchor = *self.coverage.end(),
+                "Non-contiguous L1 state cache update; resetting cache coverage"
             );
-            // The subscriber publishes this block's coverage after recording all of its barriers.
-            // Clearing here is safe because values below this block become inadmissible.
-            self.slots.clear();
-            self.invalidations.clear();
-            self.invalidation_count = 0;
-            self.initialize_floor(block_number);
+            self.reset(anchor);
+            return;
         }
-    }
 
-    /// Updates the latest contiguous block whose receipts have been processed.
-    pub fn update_anchor(&mut self, anchor: u64) {
+        for address in invalidated_addresses {
+            let inserted = self
+                .invalidations
+                .entry(address)
+                .or_default()
+                .insert(anchor);
+            self.invalidation_count += usize::from(inserted);
+
+            if self.invalidation_count > self.max_invalidations {
+                warn!(
+                    anchor,
+                    invalidation_capacity = self.max_invalidations,
+                    "L1 state invalidation capacity reached; resetting cache coverage"
+                );
+                self.reset(anchor);
+                return;
+            }
+        }
+
         self.coverage = *self.coverage.start()..=anchor;
     }
 
@@ -286,7 +307,9 @@ mod tests {
     const PORTAL: Address = address!("0x0000000000000000000000000000000000004242");
 
     fn cover_through(cache: &mut L1StateCacheInner, block_number: u64) {
-        cache.update_anchor(block_number);
+        while cache.anchor() < block_number {
+            cache.invalidate_and_set_anchor(cache.anchor() + 1, []);
+        }
     }
 
     #[test]
@@ -360,7 +383,8 @@ mod tests {
         let old = B256::with_last_byte(0x0a);
         let new = B256::with_last_byte(0x0b);
         cache.set(PORTAL, slot, 10, old);
-        cache.invalidate(PORTAL, 11);
+        cover_through(&mut cache, 10);
+        cache.invalidate_and_set_anchor(11, [PORTAL]);
         cover_through(&mut cache, 12);
 
         assert_eq!(cache.get(PORTAL, slot, 11), None);
@@ -375,7 +399,7 @@ mod tests {
     fn floor_rejects_historical_cache_admission() {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
-        cache.initialize_floor(10);
+        cache.reset(10);
         cache.set(PORTAL, slot, 9, B256::with_last_byte(9));
         cover_through(&mut cache, 11);
 
@@ -394,10 +418,24 @@ mod tests {
     }
 
     #[test]
-    fn update_anchor() {
+    fn contiguous_update_advances_anchor() {
         let mut cache = L1StateCacheInner::new();
-        cache.update_anchor(42);
-        assert_eq!(cache.anchor(), 42);
+        cache.invalidate_and_set_anchor(1, []);
+        assert_eq!(cache.anchor(), 1);
+    }
+
+    #[test]
+    fn non_contiguous_update_resets_cache_at_new_floor() {
+        let mut cache = L1StateCacheInner::new();
+        let slot = B256::with_last_byte(1);
+        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
+
+        cache.invalidate_and_set_anchor(10, [PORTAL]);
+
+        assert_eq!(cache.anchor(), 10);
+        assert_eq!(*cache.coverage.start(), 10);
+        assert!(cache.invalidations.is_empty());
+        assert_eq!(cache.get(PORTAL, slot, 10), None);
     }
 
     #[test]
@@ -502,14 +540,12 @@ mod tests {
         let mut cache = L1StateCacheInner::with_limits(10, 1);
         let slot = B256::with_last_byte(1);
 
-        cache.initialize_floor(10);
+        cache.reset(10);
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
-        cache.invalidate(PORTAL, 11);
-        cover_through(&mut cache, 11);
-        cache.invalidate(PORTAL, 12);
-        cover_through(&mut cache, 12);
+        cache.invalidate_and_set_anchor(11, [PORTAL]);
+        cache.invalidate_and_set_anchor(12, [PORTAL]);
 
-        assert_eq!(cache.block_floor(), 12);
+        assert_eq!(*cache.coverage.start(), 12);
         assert_eq!(cache.invalidation_count, 0);
         assert!(cache.invalidations.is_empty());
         assert_eq!(cache.get(PORTAL, slot, 10), None);

@@ -491,12 +491,10 @@ impl L1Subscriber {
         number: u64,
         invalidated_accounts: &HashSet<Address>,
     ) {
-        let mut guard = self.config.l1_state_cache.write();
-        for &address in invalidated_accounts {
-            guard.invalidate(address, number);
-        }
-        // Publish receipt coverage only after every mutation barrier from this block is visible.
-        guard.update_anchor(number);
+        self.config
+            .l1_state_cache
+            .write()
+            .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
 }
 

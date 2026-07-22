@@ -445,8 +445,8 @@ where
         self.l1_config
             .l1_state_cache
             .write()
-            .initialize_floor(tempo_block_number);
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
+            .reset(tempo_block_number);
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and reset cache");
 
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
