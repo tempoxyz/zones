@@ -151,8 +151,7 @@ impl ZoneOutbox {
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
         }
-        let mut zone_token = TIP20Token::from_address(call.token)?;
-        if !zone_token.is_initialized()? {
+        if !TIP20Token::from_address(call.token)?.is_initialized()? {
             return Err(TIP20Error::uninitialized().into());
         }
         self.enforce_withdrawal_block_cap()?;
