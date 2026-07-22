@@ -99,13 +99,8 @@ where
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         let outbox_env = env.clone();
         let outbox_l1 = l1.clone();
-        let outbox_portal = self.portal_address;
         precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, move |_| {
-            Some(create_outbox_precompile(
-                outbox_portal,
-                outbox_l1.clone(),
-                &outbox_env,
-            ))
+            Some(create_outbox_precompile(outbox_l1.clone(), &outbox_env))
         });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
             Some(ChaumPedersenVerify::create(&env))

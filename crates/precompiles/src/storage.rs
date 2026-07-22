@@ -74,6 +74,11 @@ impl<P> L1State<P> {
         self.anchor.get()
     }
 
+    /// Returns the ZonePortal configured for this execution-local L1 state.
+    pub(crate) const fn portal(&self) -> Address {
+        self.portal_address
+    }
+
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
         match self.get_anchor() {
             None => {
