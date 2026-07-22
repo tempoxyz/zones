@@ -112,9 +112,8 @@ where
         // transaction's resolved fee token, so the handler skips FeeAMM.
         self.override_validator_token();
 
-        let fee_payer = tx_env.fee_payer().unwrap_or(tx_env.caller());
         let _tx_context_guard =
-            tx_context::set_current_transaction(*recovered.tx().tx_hash(), fee_payer);
+            tx_context::set_current_transaction(*recovered.tx().tx_hash(), tx_env.fee_payer().unwrap_or(tx_env.caller()));
         let result = self
             .inner
             .execute_transaction_without_commit((tx_env, recovered));
