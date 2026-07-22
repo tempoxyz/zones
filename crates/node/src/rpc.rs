@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use alloy_consensus::BlockHeader;
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -463,7 +464,13 @@ where
     }
 
     fn coinbase(&self) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&Address::ZERO) })
+        Box::pin(async move {
+            let header = EthBlocks::rpc_block_header(&self.eth.api, BlockId::latest())
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| JsonRpcError::internal("latest block not found"))?;
+            to_raw(&header.beneficiary())
+        })
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
