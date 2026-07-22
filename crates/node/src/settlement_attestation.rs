@@ -274,9 +274,11 @@ pub(crate) async fn collect_leader_settlements<P>(
         + Sync
         + 'static,
 {
-    // Reconstruct the next unsubmitted boundary after a restart. Portal-tip validation inside
-    // the builder ensures only the first still-current batch is proposed.
-    let head = match provider.best_block_number() {
+    // Subscribe before reading the persisted head, then reconcile through that head. Reth's
+    // persisted-block stream is latest-value based, so notifications are wake-ups rather than a
+    // lossless sequence of every persisted block.
+    let mut persisted = provider.persisted_block_stream();
+    let head = match provider.last_block_number() {
         Ok(head) => head,
         Err(err) => {
             tracing::error!(target: "zone::p2p", %err, "Failed reading head for settlement recovery");
@@ -298,18 +300,37 @@ pub(crate) async fn collect_leader_settlements<P>(
         }
     }
 
-    let mut persisted = provider.persisted_block_stream();
+    let mut last_scanned = head;
     let mut retry = tokio::time::interval(Duration::from_secs(5));
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
             tip = persisted.next() => {
                 let Some(tip) = tip else { return };
-                match propose_settlement(&provider, tip.number, &commands, &context).await {
-                    Ok(true) => pending_boundary = Some(tip.number),
-                    Ok(false) => {}
-                    Err(err) => tracing::warn!(target: "zone::p2p", %err, height = tip.number, "Failed proposing settlement boundary"),
+                if tip.number < last_scanned {
+                    tracing::error!(target: "zone::p2p", persisted = tip.number, last_scanned, "Persisted zone head moved backwards");
+                    return;
                 }
+
+                if pending_boundary.is_none() {
+                    for candidate in last_scanned.saturating_add(1)..=tip.number {
+                        match propose_settlement(&provider, candidate, &commands, &context).await {
+                            Ok(true) => {
+                                pending_boundary = Some(candidate);
+                                break;
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                // Retain the candidate so the timer retries it even if no further
+                                // persisted-block notification arrives.
+                                pending_boundary = Some(candidate);
+                                tracing::warn!(target: "zone::p2p", %err, height = candidate, "Failed proposing settlement boundary");
+                                break;
+                            }
+                        }
+                    }
+                }
+                last_scanned = tip.number;
             }
             _ = retry.tick(), if pending_boundary.is_some() => {
                 let number = pending_boundary.expect("guarded by is_some");
@@ -322,7 +343,7 @@ pub(crate) async fn collect_leader_settlements<P>(
                         // A successful submitBatch makes the previously pending proposal stale.
                         // Walk the already-persisted boundaries after it so the next batch can be
                         // proposed even when the live tip is now far ahead of the portal tip.
-                        let head = match provider.best_block_number() {
+                        let head = match provider.last_block_number() {
                             Ok(head) => head,
                             Err(err) => {
                                 debug!(target: "zone::p2p", %err, "Failed reading head while advancing settlement proposal");
