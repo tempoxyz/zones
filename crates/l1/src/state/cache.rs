@@ -169,7 +169,7 @@ impl L1StateCacheInner {
     }
 
     /// Clears cached state and establishes a new contiguous receipt-coverage baseline.
-    pub fn reset(&mut self, floor: u64) {
+    fn reset(&mut self, floor: u64) {
         self.slots.clear();
         self.invalidations.clear();
         self.invalidation_count = 0;

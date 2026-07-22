@@ -424,7 +424,11 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     let stable_account = address!("0x0000000000000000000000000000000000000ABC");
     let stable_slot = B256::with_last_byte(3);
     let stable_value = B256::with_last_byte(4);
-    subscriber.config.l1_state_cache.write().reset(9);
+    subscriber
+        .config
+        .l1_state_cache
+        .write()
+        .invalidate_and_set_anchor(9, []);
     subscriber
         .config
         .l1_state_cache
