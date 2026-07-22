@@ -367,7 +367,7 @@ impl L1Subscriber {
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), &invalidated);
+            self.update_l1_state_anchor(block_number, &invalidated);
             self.deposit_queue.enqueue_sealed(sealed, events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
@@ -489,7 +489,6 @@ impl L1Subscriber {
     pub(crate) fn update_l1_state_anchor(
         &self,
         number: u64,
-        hash: B256,
         invalidated_accounts: &HashSet<Address>,
     ) {
         let mut guard = self.config.l1_state_cache.write();
@@ -497,7 +496,7 @@ impl L1Subscriber {
             guard.invalidate(address, number);
         }
         // Publish receipt coverage only after every mutation barrier from this block is visible.
-        guard.update_anchor(NumHash::new(number, hash));
+        guard.update_anchor(number);
     }
 }
 

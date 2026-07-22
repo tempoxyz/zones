@@ -174,7 +174,7 @@ impl L1StateProvider {
     /// docs).
     pub fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         {
-            let cache = self.cache.read();
+            let mut cache = self.cache.write();
             if let Some(value) = cache.get(address, slot, block_number) {
                 debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
@@ -229,7 +229,7 @@ impl L1StateProvider {
         block_number: u64,
     ) -> Result<B256> {
         {
-            let cache = self.cache.read();
+            let mut cache = self.cache.write();
             if let Some(value) = cache.get(address, slot, block_number) {
                 debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);

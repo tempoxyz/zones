@@ -1,6 +1,5 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
-use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -347,7 +346,7 @@ pub(crate) fn seed_raw_tip403_policy(
     let registry = TIP403Registry::new();
     let counter_slot = registry.policy_id_counter.slot();
     let existing_next_policy_id = cache
-        .read()
+        .write()
         .get(TIP403_REGISTRY_ADDRESS, counter_slot.into(), block_number)
         .and_then(|value| U256::from_be_bytes(value.0).try_into().ok())
         .unwrap_or(2u64);
@@ -3804,6 +3803,20 @@ impl PrivateRpcTestCtx {
         eyre::ensure!(receipt.status(), "revokeKey failed");
         Ok(())
     }
+
+    /// Query `zone_getDepositStatus` via the private RPC as a specific user.
+    pub(crate) async fn get_deposit_status_as_user(
+        &self,
+        tempo_block_number: u64,
+        signer: &alloy_signer_local::PrivateKeySigner,
+    ) -> eyre::Result<serde_json::Value> {
+        self.call_as_user(
+            "zone_getDepositStatus",
+            serde_json::json!([format!("0x{tempo_block_number:x}")]),
+            signer,
+        )
+        .await
+    }
 }
 
 async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {
@@ -4043,10 +4056,7 @@ impl L1Fixture {
         // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
         seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
-        cache.update_anchor(NumHash {
-            number: num_blocks,
-            hash: B256::ZERO,
-        });
+        cache.update_anchor(num_blocks);
         drop(cache);
         self.caches.lock().unwrap().push(cache_handle.clone());
     }
@@ -4092,6 +4102,20 @@ impl L1Fixture {
         }
     }
 
+    /// Extend the fixture caches' contiguous receipt coverage through a generated block.
+    ///
+    /// `seed_l1_cache` may seed only the blocks a test normally needs. Tests that subsequently
+    /// cross that horizon still need unchanged slots to inherit their last seeded value rather
+    /// than falling back to the deliberately unavailable dummy L1 RPC.
+    fn extend_cache_coverage(&self, block_number: u64) {
+        for cache in self.caches.lock().unwrap().iter() {
+            let mut cache = cache.write();
+            if block_number > cache.anchor() {
+                cache.update_anchor(block_number);
+            }
+        }
+    }
+
     /// Build a [`TempoHeader`] for the next L1 block.
     fn next_header(&mut self) -> TempoHeader {
         let number = self.next_block_number;
@@ -4115,13 +4139,12 @@ impl L1Fixture {
         self.last_hash = keccak256(&rlp_buf);
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
+        self.extend_cache_coverage(number);
 
         // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
         // coverage the subscriber would publish before the engine consumes this block.
         for cache in self.caches.lock().unwrap().iter() {
-            cache
-                .write()
-                .update_anchor(NumHash::new(number, self.last_hash));
+            cache.write().update_anchor(number);
         }
 
         header

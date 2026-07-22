@@ -45,6 +45,7 @@ futures.workspace = true
 k256.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
+schnellru.workspace = true
 serde = { workspace = true, features = ["derive"] }
 tokio.workspace = true
 tracing.workspace = true
