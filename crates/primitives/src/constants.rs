@@ -59,11 +59,7 @@ pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000
 pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
 /// ZonePortal storage slot 6: `_tokenConfigs` mapping.
-pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 6;
-    B256::new(bytes)
-};
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
