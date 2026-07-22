@@ -3958,12 +3958,7 @@ pub(crate) struct L1Fixture {
     next_timestamp: u64,
     last_hash: B256,
     /// Raw L1 caches seeded by this fixture, updated with state implied by injected deposits.
-    caches: Mutex<Vec<FixtureL1Cache>>,
-}
-
-struct FixtureL1Cache {
-    handle: L1StateCache,
-    coverage_end: u64,
+    caches: Mutex<Vec<L1StateCache>>,
 }
 
 impl L1Fixture {
@@ -4047,14 +4042,8 @@ impl L1Fixture {
         // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
         seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
-        for block_number in 1..=num_blocks {
-            cache.invalidate_and_set_anchor(block_number, []);
-        }
         drop(cache);
-        self.caches.lock().unwrap().push(FixtureL1Cache {
-            handle: cache_handle.clone(),
-            coverage_end: num_blocks,
-        });
+        self.caches.lock().unwrap().push(cache_handle.clone());
     }
 
     /// Seed the absence of an address-level TIP-403 receive policy at the current Zone anchor.
@@ -4067,7 +4056,7 @@ impl L1Fixture {
         // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
         let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
         for cache in self.caches.lock().unwrap().iter() {
-            cache.handle.write().set(
+            cache.write().set(
                 TIP403_REGISTRY_ADDRESS,
                 B256::from(receive_policy_slot.to_be_bytes()),
                 block_number,
@@ -4086,7 +4075,7 @@ impl L1Fixture {
 
     fn seed_enabled_token_policy_state(&self, block_number: u64, tokens: &[EnabledToken]) {
         for cache in self.caches.lock().unwrap().iter() {
-            let mut cache = cache.handle.write();
+            let mut cache = cache.write();
             for token in tokens {
                 seed_raw_tip403_token_policy(
                     &mut cache,
@@ -4094,21 +4083,6 @@ impl L1Fixture {
                     token.token,
                     ALLOW_ALL_POLICY_ID,
                 );
-            }
-        }
-    }
-
-    /// Extend the fixture caches' contiguous receipt coverage through a generated block.
-    ///
-    /// `seed_l1_cache` may seed only the blocks a test normally needs. Tests that subsequently
-    /// cross that horizon still need unchanged slots to inherit their last seeded value rather
-    /// than falling back to the deliberately unavailable dummy L1 RPC.
-    fn extend_cache_coverage(&self, block_number: u64) {
-        for cache in self.caches.lock().unwrap().iter_mut() {
-            let mut handle = cache.handle.write();
-            while cache.coverage_end < block_number {
-                cache.coverage_end += 1;
-                handle.invalidate_and_set_anchor(cache.coverage_end, []);
             }
         }
     }
@@ -4136,7 +4110,12 @@ impl L1Fixture {
         self.last_hash = keccak256(&rlp_buf);
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
-        self.extend_cache_coverage(number);
+
+        // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
+        // coverage the subscriber would publish before the engine consumes this block.
+        for cache in self.caches.lock().unwrap().iter() {
+            cache.write().invalidate_and_set_anchor(number, []);
+        }
 
         header
     }
