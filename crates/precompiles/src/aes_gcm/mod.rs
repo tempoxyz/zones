@@ -67,36 +67,26 @@ impl AesGcmDecrypt {
         StorageCtx::default().deduct_gas(gas)
     }
 
-    /// Decrypt using the shared AES-GCM implementation.
-    pub(crate) fn decrypt(
+    /// Decrypt AES-256-GCM ciphertext with tag verification.
+    ///
+    /// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
+    /// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
+    pub fn decrypt(
         key: &[u8; 32],
         nonce: &[u8; 12],
         ciphertext: &[u8],
         aad: &[u8],
         tag: &[u8; 16],
     ) -> (Vec<u8>, bool) {
-        decrypt_aes_gcm(key, nonce, ciphertext, aad, tag)
-    }
-}
+        let cipher = Aes256Gcm::new(key.into());
+        let gcm_nonce = Nonce::from_slice(nonce);
+        let mut plaintext = ciphertext.to_vec();
 
-/// Decrypt AES-256-GCM ciphertext with tag verification.
-///
-/// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
-/// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
-pub fn decrypt_aes_gcm(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    ciphertext: &[u8],
-    aad: &[u8],
-    tag: &[u8; 16],
-) -> (Vec<u8>, bool) {
-    let cipher = Aes256Gcm::new(key.into());
-    let gcm_nonce = Nonce::from_slice(nonce);
-    let mut plaintext = ciphertext.to_vec();
-
-    match cipher.decrypt_in_place_detached(gcm_nonce, aad, &mut plaintext, Tag::from_slice(tag)) {
-        Ok(()) => (plaintext, true),
-        Err(_) => (Vec::new(), false),
+        match cipher.decrypt_in_place_detached(gcm_nonce, aad, &mut plaintext, Tag::from_slice(tag))
+        {
+            Ok(()) => (plaintext, true),
+            Err(_) => (Vec::new(), false),
+        }
     }
 }
 
