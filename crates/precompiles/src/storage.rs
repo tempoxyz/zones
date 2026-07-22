@@ -4,7 +4,7 @@
 use alloc::{rc::Rc, string::String};
 use core::{cell::Cell, fmt};
 
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, keccak256};
 use alloy_sol_types::SolValue;
 use revm::{context::result::AnyError, precompile::PrecompileError};
 use thiserror::Error;
