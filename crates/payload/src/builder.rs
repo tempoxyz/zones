@@ -257,7 +257,10 @@ where
         let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
-        execute_required_system_transaction(&mut builder, build_advance_tempo_tx(prepared))
+        builder
+            .execute_transaction(build_advance_tempo_tx(prepared))
+            .map(|_| ())
+            .map_err(PayloadBuilderError::evm)
             .map_err(|err| {
                 error!(
                     ?err,
@@ -579,13 +582,17 @@ where
         .collect::<Result<Vec<_>, _>>()?;
     let count = U256::from(pending_withdrawals.len());
     let finalize_tx = build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
-    execute_required_system_transaction(builder, finalize_tx).map_err(|err| {
-        error!(
-            ?err,
-            block_number, "finalizeWithdrawalBatch system tx failed"
-        );
-        err
-    })
+    builder
+        .execute_transaction(finalize_tx)
+        .map(|_| ())
+        .map_err(PayloadBuilderError::evm)
+        .map_err(|err| {
+            error!(
+                ?err,
+                block_number, "finalizeWithdrawalBatch system tx failed"
+            );
+            err
+        })
 }
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
@@ -626,23 +633,6 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
         TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
         TEMPO_SYSTEM_TX_SENDER,
     )
-}
-
-/// Execute a required system transaction and fail the payload if the executor rejects it.
-///
-/// Tempo's EVM reports system-call reverts as transaction errors, so successful execution does
-/// not need a second result-status check.
-fn execute_required_system_transaction<B>(
-    builder: &mut B,
-    tx: Recovered<TempoTxEnvelope>,
-) -> Result<(), PayloadBuilderError>
-where
-    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
-{
-    builder
-        .execute_transaction(tx)
-        .map(|_| ())
-        .map_err(PayloadBuilderError::evm)
 }
 
 /// Read all pending withdrawals in the ZoneOutbox
