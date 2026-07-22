@@ -28,10 +28,12 @@ use std::{collections::BTreeMap, fmt};
 use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
 use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
-use alloy_sol_types::{SolCall, SolEvent};
+use alloy_signer::SignerSync;
+use alloy_signer_local::PrivateKeySigner;
+use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain, sol};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
@@ -128,6 +130,8 @@ pub(crate) const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 /// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
 #[derive(Debug, Clone)]
 pub struct BatchData {
+    /// Zone L2 height committed by this batch.
+    pub zone_height: u64,
     /// Tempo L1 block number for EIP-2935 verification.
     pub tempo_block_number: u64,
     /// Previous zone block hash (must match portal's current `blockHash`).
@@ -144,6 +148,32 @@ pub struct BatchData {
     pub next_deposit_number: u64,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
+}
+
+struct SettlementAttestationInput<'a> {
+    batch: &'a BatchData,
+    anchor_block_number: u64,
+    anchor_block_hash: B256,
+    block_transition: &'a BlockTransition,
+    deposit_transition: &'a DepositQueueTransition,
+    verifier_config: &'a Bytes,
+}
+
+sol! {
+    struct SettlementAttestation {
+        uint32 zoneId;
+        uint64 sequencerSetVersion;
+        uint256 zoneHeight;
+        uint256 withdrawalBatchIndex;
+        address verifier;
+        uint64 tempoBlockNumber;
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
+        bytes32 blockTransitionHash;
+        bytes32 depositQueueTransitionHash;
+        bytes32 withdrawalQueueHash;
+        bytes32 verifierConfigHash;
+    }
 }
 
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
@@ -171,9 +201,8 @@ pub struct BatchSubmitter {
     /// ZonePortal contract instance for calling `submitBatch` and reading
     /// on-chain state such as `blockHash()`.
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
-    /// The portal's `genesisTempoBlockNumber` — batches with a
-    /// `tempo_block_number` below this value will be rejected on-chain.
-    genesis_tempo_block_number: u64,
+    /// Local sequencer key used to produce a 1-of-1 TIP-1091 settlement certificate.
+    signer: Option<PrivateKeySigner>,
     /// Concurrency for pipelined L1 header fetching in ancestry mode.
     l1_fetch_concurrency: usize,
     /// EIP-2935 history and safety-margin limits used for anchor decisions.
@@ -272,27 +301,46 @@ fn resolve_ancestry_headers(
 }
 
 impl BatchSubmitter {
-    /// Create a new batch submitter from a shared L1 provider.
+    /// Create a batch submitter without a certificate signer.
     ///
-    /// The provider must already include the sequencer wallet for signing.
-    pub fn new(
-        portal_address: Address,
-        l1_provider: DynProvider<TempoNetwork>,
-        genesis_tempo_block_number: u64,
-    ) -> Self {
-        Self::with_anchor_config(
-            portal_address,
-            l1_provider,
-            genesis_tempo_block_number,
-            BatchAnchorConfig::default(),
-        )
+    /// This is useful for read-only operations and tests. Batch submission returns an error.
+    pub fn new(portal_address: Address, l1_provider: DynProvider<TempoNetwork>) -> Self {
+        Self::with_anchor_config(portal_address, l1_provider, BatchAnchorConfig::default())
     }
 
     /// Create a new batch submitter with custom EIP-2935 anchor limits.
     pub fn with_anchor_config(
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
-        genesis_tempo_block_number: u64,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
+        Self::with_optional_signer_and_anchor_config(
+            portal_address,
+            l1_provider,
+            None,
+            anchor_config,
+        )
+    }
+
+    /// Create a batch submitter that signs TIP-1091 settlement certificates locally.
+    pub fn with_signer_and_anchor_config(
+        portal_address: Address,
+        l1_provider: DynProvider<TempoNetwork>,
+        signer: PrivateKeySigner,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
+        Self::with_optional_signer_and_anchor_config(
+            portal_address,
+            l1_provider,
+            Some(signer),
+            anchor_config,
+        )
+    }
+
+    pub(crate) fn with_optional_signer_and_anchor_config(
+        portal_address: Address,
+        l1_provider: DynProvider<TempoNetwork>,
+        signer: Option<PrivateKeySigner>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
@@ -300,7 +348,7 @@ impl BatchSubmitter {
             portal_address,
             l1_provider,
             portal,
-            genesis_tempo_block_number,
+            signer,
             l1_fetch_concurrency: 16,
             anchor_config,
             ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
@@ -332,14 +380,6 @@ impl BatchSubmitter {
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
     ))]
     pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
-        if batch.tempo_block_number < self.genesis_tempo_block_number {
-            return Err(eyre::eyre!(
-                "tempo_block_number ({}) is below genesis ({})",
-                batch.tempo_block_number,
-                self.genesis_tempo_block_number
-            ));
-        }
-
         if !batch.withdrawal_queue_hash.is_zero() {
             self.check_withdrawal_queue_capacity().await?;
         }
@@ -359,6 +399,32 @@ impl BatchSubmitter {
         let (anchor_mode, current_l1_block) =
             self.resolve_anchor_mode(batch.tempo_block_number).await?;
         let recent_tempo_block_number = anchor_mode.recent_block_number();
+        let anchor_block_number = anchor_mode.anchor_block_number(batch.tempo_block_number);
+        let anchor_block_hash = self
+            .l1_provider
+            .get_block_by_number(anchor_block_number.into())
+            .await?
+            .ok_or_else(|| eyre::eyre!("L1 anchor block {anchor_block_number} not found"))?
+            .header
+            .hash;
+
+        let signer = self.signer.as_ref().ok_or_else(|| {
+            eyre::eyre!("TIP-1091 batch submission requires the local sequencer signer")
+        })?;
+        let verifier_config = Bytes::new();
+        let signature = self
+            .sign_settlement_attestation(
+                signer,
+                SettlementAttestationInput {
+                    batch,
+                    anchor_block_number,
+                    anchor_block_hash,
+                    block_transition: &block_transition,
+                    deposit_transition: &deposit_transition,
+                    verifier_config: &verifier_config,
+                },
+            )
+            .await?;
 
         info!(
             anchor_mode = %anchor_mode,
@@ -377,9 +443,10 @@ impl BatchSubmitter {
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
-                // verifierConfig and proof stay empty until real proof generation is wired in.
+                verifier_config,
                 Bytes::new(),
-                Bytes::new(),
+                U256::from(batch.zone_height),
+                vec![signature],
             )
             .nonce_key(SUBMIT_BATCH_NONCE_KEY)
             .send()
@@ -428,6 +495,70 @@ impl BatchSubmitter {
         );
 
         Ok(event)
+    }
+
+    async fn sign_settlement_attestation(
+        &self,
+        signer: &PrivateKeySigner,
+        attestation: SettlementAttestationInput<'_>,
+    ) -> Result<Bytes> {
+        let SettlementAttestationInput {
+            batch,
+            anchor_block_number,
+            anchor_block_hash,
+            block_transition,
+            deposit_transition,
+            verifier_config,
+        } = attestation;
+        let zone_id = self.portal.zoneId().call().await?;
+        let sequencer_set_version = self.portal.sequencerSetVersion().call().await?;
+        let sequencer_threshold = self.portal.sequencerThreshold().call().await?;
+        eyre::ensure!(
+            sequencer_threshold == 1,
+            "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {sequencer_threshold}"
+        );
+        eyre::ensure!(
+            self.portal.isSequencer(signer.address()).call().await?,
+            "local sequencer signer {} is not active in the portal sequencer set",
+            signer.address()
+        );
+        let withdrawal_batch_index = self
+            .portal
+            .withdrawalBatchIndex()
+            .call()
+            .await?
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("portal withdrawal batch index overflow"))?;
+        let verifier = self.portal.verifier().call().await?;
+        let chain_id = self.l1_provider.get_chain_id().await?;
+
+        let domain = eip712_domain! {
+            name: "ZonePortal",
+            version: "1",
+            chain_id: chain_id,
+            verifying_contract: self.portal_address,
+        };
+        let message = SettlementAttestation {
+            zoneId: zone_id,
+            sequencerSetVersion: sequencer_set_version,
+            zoneHeight: U256::from(batch.zone_height),
+            withdrawalBatchIndex: U256::from(withdrawal_batch_index),
+            verifier,
+            tempoBlockNumber: batch.tempo_block_number,
+            anchorBlockNumber: anchor_block_number,
+            anchorBlockHash: anchor_block_hash,
+            blockTransitionHash: keccak256(block_transition.abi_encode()),
+            depositQueueTransitionHash: keccak256(deposit_transition.abi_encode()),
+            withdrawalQueueHash: batch.withdrawal_queue_hash,
+            verifierConfigHash: keccak256(verifier_config),
+        };
+        let digest = message.eip712_signing_hash(&domain);
+        let signature = signer.sign_hash_sync(&digest)?;
+        let mut encoded = Vec::with_capacity(65);
+        encoded.extend_from_slice(&signature.r().to_be_bytes::<32>());
+        encoded.extend_from_slice(&signature.s().to_be_bytes::<32>());
+        encoded.push(signature.v() as u8 + 27);
+        Ok(encoded.into())
     }
 
     /// Decode the `BatchSubmitted` event from a confirmed `submitBatch` receipt's logs.
@@ -593,11 +724,6 @@ impl BatchSubmitter {
         );
 
         Ok(headers)
-    }
-
-    /// Read the portal's `genesisTempoBlockNumber` from L1.
-    pub async fn read_genesis_tempo_block_number(&self) -> Result<u64> {
-        Ok(self.portal.genesisTempoBlockNumber().call().await?)
     }
 
     /// Read the current `blockHash` from the ZonePortal on L1.
@@ -794,8 +920,8 @@ impl BatchSubmitter {
         let mut found = BTreeMap::new();
         let mut hi = self.l1_provider.get_block_number().await?;
 
-        while hi >= self.genesis_tempo_block_number && found.len() < needed {
-            let lo = backward_log_query_start(hi, self.genesis_tempo_block_number);
+        while found.len() < needed {
+            let lo = backward_log_query_start(hi, 0);
 
             let events = self
                 .portal
@@ -815,7 +941,7 @@ impl BatchSubmitter {
                 }
             }
 
-            if lo == self.genesis_tempo_block_number {
+            if lo == 0 {
                 break;
             }
             hi = lo - 1;
@@ -1186,6 +1312,13 @@ impl AnchorMode {
             Self::Ancestry { anchor_block, .. } => *anchor_block,
         }
     }
+
+    const fn anchor_block_number(&self, tempo_block_number: u64) -> u64 {
+        match self {
+            Self::Direct => tempo_block_number,
+            Self::Ancestry { anchor_block, .. } => *anchor_block,
+        }
+    }
 }
 
 impl fmt::Display for AnchorMode {
@@ -1442,7 +1575,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
         *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
@@ -1489,7 +1622,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
         *submitter.ancestry_header_cache.write() = LruMap::new(ByLength::new(4));
 
         let mut parent_hash = B256::ZERO;
@@ -1528,7 +1661,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
 
         asserter.push_success(&100_u64);
         let (mode, current_l1_block) = submitter.resolve_anchor_mode(99).await.unwrap();
@@ -1544,7 +1677,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(Address::ZERO, provider, 0);
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
 
         let cached_header = CachedAncestryHeader {
             parent_hash: B256::ZERO,
@@ -1664,7 +1797,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
             .connect_mocked_client(Asserter::new())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider, 0);
+        let submitter = BatchSubmitter::new(portal_address, provider);
 
         let event = abi::ZonePortal::BatchSubmitted {
             withdrawalBatchIndex: 7,
@@ -1709,7 +1842,7 @@ mod tests {
         let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
             .connect_mocked_client(asserter.clone())
             .erased();
-        let submitter = BatchSubmitter::new(portal_address, provider, 0);
+        let submitter = BatchSubmitter::new(portal_address, provider);
 
         asserter.push_success(&10_000_u64);
         let logs: Vec<_> = [99_u64, 100, 101]

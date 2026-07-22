@@ -100,6 +100,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         info!(target: "reth::cli", "Launching Tempo Zone node");
 
         validate_l1_rpc_url(&args.l1_rpc_url)?;
+        validate_portal_address(args.portal_address)?;
 
         let p2p_config = args
             .sequencer_manifest
@@ -435,13 +436,24 @@ fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
     Ok(())
 }
 
+fn validate_portal_address(portal_address: Address) -> eyre::Result<()> {
+    eyre::ensure!(
+        !portal_address.is_zero(),
+        "--l1.portal-address must be nonzero"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::{io::Write as _, process::Command, thread, time::Duration};
 
     use clap::Parser as _;
 
-    use super::{ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url};
+    use super::{
+        ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url,
+        validate_portal_address,
+    };
     use zone_p2p::Role;
 
     #[derive(Debug, clap::Parser)]
@@ -462,6 +474,12 @@ mod tests {
     fn dev_is_parsed_by_the_top_level_cli() {
         let parsed = ZoneCli::try_parse_from(["tempo-zone", "dev"]).unwrap();
         assert!(matches!(parsed, ZoneCli::Dev(_)));
+    }
+
+    #[test]
+    fn portal_address_must_be_nonzero() {
+        assert!(validate_portal_address(alloy_primitives::Address::ZERO).is_err());
+        assert!(validate_portal_address(alloy_primitives::Address::repeat_byte(0x11)).is_ok());
     }
 
     #[test]

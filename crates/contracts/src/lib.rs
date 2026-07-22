@@ -7,7 +7,8 @@
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes `LastBatch` state for proof generation.
 //! - **ZoneInbox**, **TempoState**, **ZoneTxContext** — Zone L2 predeploys.
-//! - **ZoneFactory**, **SwapAndDepositRouter** — deployed on Tempo L1.
+//! - **ZoneFactory** — native TIP-1091 precompile on Tempo L1.
+//! - **SwapAndDepositRouter** — deployed on Tempo L1.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]

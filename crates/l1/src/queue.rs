@@ -173,7 +173,9 @@ impl PendingDeposits {
     pub(crate) fn enqueue(&mut self, header: TempoHeader, events: L1PortalEvents) {
         match self.try_enqueue(SealedHeader::seal_slow(header), events) {
             EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-            other => panic!("enqueue expected Accepted or Duplicate, got {other:?}"),
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                panic!("enqueue found a non-contiguous finalized range {from}..={to}")
+            }
         }
     }
 
@@ -344,22 +346,6 @@ impl DepositQueue {
         }
     }
 
-    /// Try to enqueue an L1 block. Returns the outcome — callers handle
-    /// `NeedBackfill` by fetching missing blocks and retrying.
-    pub(crate) fn try_enqueue(
-        &self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-    ) -> EnqueueOutcome {
-        let mut queue = self.inner.lock();
-        let outcome = queue.try_enqueue(header, events);
-        if matches!(outcome, EnqueueOutcome::Accepted) {
-            drop(queue);
-            self.notify.notify_one();
-        }
-        outcome
-    }
-
     /// Enqueue an L1 block with its deposits and notify waiters.
     pub fn enqueue(&self, header: TempoHeader, events: L1PortalEvents) {
         self.inner.lock().enqueue(header, events);
@@ -372,7 +358,9 @@ impl DepositQueue {
         let mut queue = self.inner.lock();
         match queue.try_enqueue(header, events) {
             EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-            other => panic!("enqueue_sealed expected Accepted or Duplicate, got {other:?}"),
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                panic!("enqueue_sealed found a non-contiguous finalized range {from}..={to}")
+            }
         }
         drop(queue);
         self.notify.notify_one();

@@ -154,7 +154,7 @@ impl ZoneEngine {
         let res = self.to_engine.fork_choice_updated(state, None).await?;
 
         if !res.is_valid() {
-            eyre::bail!("Invalid fork choice update {state:?}: {res:?}")
+            eyre::bail!("Invalid fork choice update {state:?}: {res:?}");
         }
 
         Ok(())
@@ -166,7 +166,7 @@ impl ZoneEngine {
     /// them, with no timer delays between blocks.
     ///
     /// Reorg safety is handled upstream by the L1 subscriber, which only
-    /// enqueues blocks once they are confirmed by a successor.
+    /// enqueues blocks exposed by L1's `finalized` tag.
     async fn advance_all_available(&mut self) {
         while let Some(l1_block) = self.deposit_queue.peek() {
             if let Err(e) = self.advance(l1_block).await {
@@ -231,7 +231,7 @@ impl ZoneEngine {
             .await?;
 
         if res.is_invalid() {
-            eyre::bail!("Invalid payload status")
+            eyre::bail!("Invalid payload status");
         }
 
         let payload_id = res.payload_id.ok_or_eyre("No payload id")?;
@@ -241,7 +241,7 @@ impl ZoneEngine {
             .resolve_kind(payload_id, PayloadKind::WaitForPending)
             .await
         else {
-            eyre::bail!("No payload")
+            eyre::bail!("No payload");
         };
 
         let header = payload.block().sealed_header().clone();
@@ -250,7 +250,7 @@ impl ZoneEngine {
         let res = self.to_engine.new_payload(payload).await?;
 
         if !res.is_valid() {
-            eyre::bail!("Invalid payload for block {block_number}")
+            eyre::bail!("Invalid payload for block {block_number}");
         }
 
         // newPayload succeeded — confirm the L1 block in the queue so it is

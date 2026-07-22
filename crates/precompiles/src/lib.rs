@@ -56,7 +56,7 @@ pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
-pub use ztip20::SequencerExt;
+pub use ztip20::SequencerSetExt;
 
 use alloc::sync::Arc;
 
@@ -77,12 +77,12 @@ pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
 pub fn create_tip20_precompile(
     address: alloy_primitives::Address,
     env: &ZonePrecompileEnv,
-    sequencer: Arc<dyn SequencerExt>,
+    sequencers: Arc<dyn SequencerSetExt>,
 ) -> DynPrecompile {
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules::new(sequencer),
+        ztip20::TIP20Rules::new(sequencers),
         move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
     )
 }

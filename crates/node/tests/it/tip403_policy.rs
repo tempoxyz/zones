@@ -16,8 +16,8 @@ use tempo_contracts::precompiles::{
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, TIP403_REGISTRY_ADDRESS};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip20_policy_id,
-    seed_raw_tip403_policy, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
+    seed_raw_tip403_token_policy, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
@@ -119,7 +119,7 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     let anchor = zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
 
     const BLACKLIST_POLICY_ID: u64 = 42;
-    seed_raw_tip20_policy_id(
+    seed_raw_tip403_token_policy(
         &mut zone.l1_state_cache().write(),
         anchor,
         PATH_USD_ADDRESS,

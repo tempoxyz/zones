@@ -5,6 +5,7 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
+    ZONE_FACTORY_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -13,7 +14,7 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 /// @notice Shared withdrawal callback sender for all zones created by one ZoneFactory.
 contract ZoneMessenger is IZoneMessenger {
 
-    IZoneFactory public immutable zoneFactory;
+    IZoneFactory public constant zoneFactory = IZoneFactory(ZONE_FACTORY_ADDRESS);
 
     uint256 internal _relayReentrancyStatus;
 
@@ -21,10 +22,6 @@ contract ZoneMessenger is IZoneMessenger {
     error TransferFailed();
     error CallbackRejected();
     error ReentrantRelay();
-
-    constructor(address _zoneFactory) {
-        zoneFactory = IZoneFactory(_zoneFactory);
-    }
 
     modifier nonReentrantRelay() {
         if (_relayReentrancyStatus != 0) revert ReentrantRelay();

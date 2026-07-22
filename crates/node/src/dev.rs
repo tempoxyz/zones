@@ -23,7 +23,7 @@ use zone_sequencer::register_encryption_key;
 pub struct ProvisionConfig {
     /// Tempo L1 RPC URL (http(s) or ws(s)).
     pub l1_rpc_url: String,
-    /// Dev key: L1 fee payer, portal admin, and zone sequencer.
+    /// Dev key: factory owner, L1 fee payer, portal admin, and zone sequencer.
     pub dev_key: PrivateKeySigner,
     /// Optional factory override, which must equal TIP-1091's protocol address.
     pub factory: Option<Address>,
@@ -82,11 +82,16 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             "ZoneFactory must use TIP-1091 address {ZONE_FACTORY_ADDRESS}, got {address}"
         );
     }
-    let factory_address = deploy_zone_factory(&l1_rpc_url, wallet).await?;
+    let factory_address = native_zone_factory(&l1_rpc_url, wallet).await?;
 
     let factory = ZoneFactory::new(factory_address, &provider);
-    let verifier = factory.verifier().call().await?;
-
+    let factory_owner = factory.owner().call().await?;
+    eyre::ensure!(
+        factory_owner == dev_address,
+        "ZoneFactory owner is {factory_owner}, but the configured dev key resolves to \
+         {dev_address}; use the standard Tempo dev key or transfer factory ownership before \
+         provisioning"
+    );
     // Anchor before createZone so the L1 subscriber replays the creation block,
     // including the initial TokenEnabled event emitted by the portal constructor.
     let anchor_block_number = provider.get_block_number().await?;
@@ -96,19 +101,13 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("anchor header {anchor_block_number} not found"))?
         .inner
         .inner;
-    let anchor_block_hash = anchor_header.hash_slow();
 
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
             admin: dev_address,
-            sequencer: dev_address,
-            verifier,
-            zoneParams: ZoneFactory::ZoneParams {
-                genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: anchor_block_hash,
-                genesisTempoBlockNumber: anchor_block_number,
-            },
+            sequencers: vec![dev_address],
+            threshold: 1,
             rpcUrl: rpc_url,
         })
         .send()
@@ -200,7 +199,7 @@ async fn fund_dev_account<P: Provider<TempoNetwork>>(
 }
 
 /// Returns TIP-1091's fixed `ZoneFactory` address after verifying it is installed on L1.
-pub async fn deploy_zone_factory(
+pub async fn native_zone_factory(
     l1_rpc_url: &str,
     wallet: EthereumWallet,
 ) -> eyre::Result<Address> {

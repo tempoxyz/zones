@@ -19,6 +19,7 @@ import {
     IZoneOutbox,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
@@ -71,7 +72,9 @@ contract ZoneInboxTest is Test {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         config = new ZoneConfig(mockPortal, address(tempoState));
         tempoState.setMockStorageValue(
-            mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+            mockPortal,
+            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            bytes32(uint256(1))
         );
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         vm.etch(ZONE_OUTBOX, hex"00");
@@ -113,6 +116,13 @@ contract ZoneInboxTest is Test {
         Deposit[] memory deposits = new Deposit[](0);
 
         vm.prank(sequencer);
+        _advanceTempo(deposits);
+
+        // Any additional active member has the same authority.
+        tempoState.setMockStorageValue(
+            mockPortal, keccak256(abi.encode(alice, PORTAL_IS_SEQUENCER_SLOT)), bytes32(uint256(1))
+        );
+        vm.prank(alice);
         _advanceTempo(deposits);
 
         // State should remain at bytes32(0)

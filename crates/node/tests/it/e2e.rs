@@ -827,7 +827,12 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
         "withdrawalBatchIndex should not advance on deferred block"
     );
     assert!(
-        outbox.pendingWithdrawalsCount().call().await? > U256::ZERO,
+        outbox
+            .pendingWithdrawalsCount()
+            .from(Address::ZERO)
+            .call()
+            .await?
+            > U256::ZERO,
         "withdrawal should remain pending after deferred block"
     );
 
@@ -853,7 +858,11 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
     .await?;
 
     assert_eq!(
-        outbox.pendingWithdrawalsCount().call().await?,
+        outbox
+            .pendingWithdrawalsCount()
+            .from(Address::ZERO)
+            .call()
+            .await?,
         U256::ZERO,
         "finalize block should sweep pending withdrawals"
     );
@@ -1206,7 +1215,11 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
 
     approve_outbox(&mut fixture, &zone, &provider).await?;
 
-    let pending_before = outbox.pendingWithdrawalsCount().call().await?;
+    let pending_before = outbox
+        .pendingWithdrawalsCount()
+        .from(Address::ZERO)
+        .call()
+        .await?;
     let max_callback_gas = outbox.MAX_WITHDRAWAL_GAS_LIMIT().call().await?;
 
     let withdrawal_pending = outbox
@@ -1232,7 +1245,11 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
         "over-cap withdrawal request should revert on L2"
     );
 
-    let pending_after = outbox.pendingWithdrawalsCount().call().await?;
+    let pending_after = outbox
+        .pendingWithdrawalsCount()
+        .from(Address::ZERO)
+        .call()
+        .await?;
     assert_eq!(
         pending_after, pending_before,
         "reverted withdrawal must not enter the pending queue"
