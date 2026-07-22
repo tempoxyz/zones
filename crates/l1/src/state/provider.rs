@@ -176,7 +176,6 @@ impl L1StateProvider {
         {
             let mut cache = self.cache.write();
             if let Some(value) = cache.get(address, slot, block_number) {
-                debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
             }
         }
@@ -231,7 +230,6 @@ impl L1StateProvider {
         {
             let mut cache = self.cache.write();
             if let Some(value) = cache.get(address, slot, block_number) {
-                debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
             }
         }
