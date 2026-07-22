@@ -208,11 +208,6 @@ impl L1StateCacheInner {
 
         self.coverage = *self.coverage.start()..=anchor;
     }
-
-    /// Returns the end of contiguous receipt coverage.
-    pub fn anchor(&self) -> u64 {
-        *self.coverage.end()
-    }
 }
 
 /// [`schnellru`] limiter which measures capacity by the number of versions in all slot histories.
@@ -298,8 +293,8 @@ mod tests {
     const PORTAL: Address = address!("0x0000000000000000000000000000000000004242");
 
     fn cover_through(cache: &mut L1StateCacheInner, block_number: u64) {
-        while cache.anchor() < block_number {
-            cache.invalidate_and_set_anchor(cache.anchor() + 1, []);
+        while *cache.coverage.end() < block_number {
+            cache.invalidate_and_set_anchor(*cache.coverage.end() + 1, []);
         }
     }
 
@@ -403,16 +398,16 @@ mod tests {
     }
 
     #[test]
-    fn anchor_defaults_to_zero() {
+    fn coverage_defaults_to_zero() {
         let cache = L1StateCacheInner::new();
-        assert_eq!(cache.anchor(), 0);
+        assert_eq!(*cache.coverage.end(), 0);
     }
 
     #[test]
-    fn contiguous_update_advances_anchor() {
+    fn contiguous_update_advances_coverage() {
         let mut cache = L1StateCacheInner::new();
         cache.invalidate_and_set_anchor(1, []);
-        assert_eq!(cache.anchor(), 1);
+        assert_eq!(*cache.coverage.end(), 1);
     }
 
     #[test]
@@ -423,7 +418,7 @@ mod tests {
 
         cache.invalidate_and_set_anchor(10, [PORTAL]);
 
-        assert_eq!(cache.anchor(), 10);
+        assert_eq!(*cache.coverage.end(), 10);
         assert_eq!(*cache.coverage.start(), 10);
         assert!(cache.invalidations.is_empty());
         assert_eq!(cache.get(PORTAL, slot, 10), None);
