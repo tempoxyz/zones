@@ -129,21 +129,21 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
         let mut transactions = block.body().transactions.iter();
 
         let Some(first) = transactions.next() else {
-            return Err(invalid_payload(
+            return Err(NewPayloadError::other(reth_errors::RethError::msg(
                 "zone block is missing its required advanceTempo transaction",
-            ));
+            )));
         };
 
         if !is_advance_tempo(first) {
-            return Err(invalid_payload(
+            return Err(NewPayloadError::other(reth_errors::RethError::msg(
                 "advanceTempo must be the first transaction in every zone block",
-            ));
+            )));
         }
 
         if transactions.any(is_advance_tempo) {
-            return Err(invalid_payload(
+            return Err(NewPayloadError::other(reth_errors::RethError::msg(
                 "advanceTempo must appear exactly once in every zone block",
-            ));
+            )));
         }
 
         Ok(block)
@@ -165,8 +165,4 @@ fn is_advance_tempo(tx: &TempoTxEnvelope) -> bool {
     tx.is_system_tx()
         && tx.kind() == TxKind::Call(ZONE_INBOX_ADDRESS)
         && tx.input().get(..4) == Some(ZoneInbox::advanceTempoCall::SELECTOR.as_slice())
-}
-
-fn invalid_payload(message: &'static str) -> NewPayloadError {
-    NewPayloadError::other(reth_errors::RethError::msg(message))
 }
