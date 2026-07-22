@@ -335,15 +335,15 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='bf1b954aaf181edae392fe691515683d18768b3b'
+export TXGEN_REV='1d0640b415eff89c322c366b41f9e7463d584731'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
 
-That commit is currently reachable through the public
-`tempoxyz/txgen:dan/zones-716-txgen` branch. The branch must remain reachable for
-fresh `cargo install --rev` operations until the required txgen changes merge;
-afterward this workflow should be repinned to their reachable merge commit.
+That commit is the current head of public txgen PR #155 and is reachable through
+`tempoxyz/txgen:dan/per-sender-http-auth`. The branch must remain reachable for
+fresh `cargo install --rev` operations until the PR merges; afterward this
+workflow should be repinned to its reachable merge commit.
 
 The paired-manifest and safe-root checks are standalone and do not start nodes
 or build contracts:
@@ -669,7 +669,7 @@ job:
    putting the phrase in workflow arguments or artifacts;
 2. restores private writable copies of the two isolated Schelk virgin volumes;
 3. checks out the exact Tempo revision and txgen commit
-   `bf1b954aaf181edae392fe691515683d18768b3b`, then builds Tempo and Zone
+   `1d0640b415eff89c322c366b41f9e7463d584731`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
@@ -800,6 +800,6 @@ huge-page settings, or `unattended-upgrades` service state. The dedicated runner
 therefore remains benchmark-tuned after this workflow, just as it does after
 Tempo's e2e benchmark.
 
-Finally, the pinned txgen commit is on an unmerged branch. The branch must remain
-reachable until those changes merge and this workflow is repinned to a
-reachable merge commit.
+Finally, the pinned txgen commit is the head of unmerged txgen PR #155. Its
+branch must remain reachable until the PR merges and this workflow is repinned
+to the merge commit.
