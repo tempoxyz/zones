@@ -3,17 +3,22 @@ pragma solidity ^0.8.26;
 
 import { Math } from "../libraries/Math.sol";
 
-import { IEarnShareToken } from "../interfaces/IEarnShareToken.sol";
 import { IERC20Like } from "../interfaces/IERC20Like.sol";
+import { IEarnShareToken } from "../interfaces/IEarnShareToken.sol";
 import { IRedeemReceiver } from "../interfaces/IRedeemReceiver.sol";
+import { IVaultAdapter } from "../interfaces/IVaultAdapter.sol";
+import { ControlInit, EngineMigrationMode } from "../interfaces/IVaultControls.sol";
 import { IVaultEngine } from "../interfaces/IVaultEngine.sol";
 import { IVaultEngineAsync } from "../interfaces/IVaultEngineAsync.sol";
 import { IVaultEngineExactWithdraw } from "../interfaces/IVaultEngineExactWithdraw.sol";
 import { IVaultEngineShares } from "../interfaces/IVaultEngineShares.sol";
 import { IVaultEngineSync } from "../interfaces/IVaultEngineSync.sol";
-import { IVaultAdapter } from "../interfaces/IVaultAdapter.sol";
-import { ControlInit, EngineMigrationMode } from "../interfaces/IVaultControls.sol";
-import { FeeConfig, FeeInit, FeePreview, MAX_FIXED_FEE_RECIPIENTS } from "../interfaces/IVaultFees.sol";
+import {
+    FeeConfig,
+    FeeInit,
+    FeePreview,
+    MAX_FIXED_FEE_RECIPIENTS
+} from "../interfaces/IVaultFees.sol";
 import { FeeMath } from "./FeeMath.sol";
 import { ERC165Checker } from "@openzeppelin/contracts/utils/introspection/ERC165Checker.sol";
 
@@ -32,6 +37,7 @@ import { ERC165Checker } from "@openzeppelin/contracts/utils/introspection/ERC16
 ///      implementation. All economic state, roles, caps, engine custody, and fee ledgers are isolated
 ///      per proxy. The implementation is locked against direct initialization.
 contract VaultAdapter is IVaultAdapter {
+
     uint256 internal constant MAX_FIXED_FEE_CAP = 0.25e18;
     uint256 internal constant MAX_EXCESS_FEE_CAP = 1e18;
     uint256 internal constant MAX_ANNUAL_TARGET_RATE = 1e18;
@@ -98,13 +104,24 @@ contract VaultAdapter is IVaultAdapter {
     bool private initialized;
 
     event Contributed(
-        address indexed caller, uint256 assets, uint256 venueShares, uint256 anchorEngineShares, uint256 anchorSupply
+        address indexed caller,
+        uint256 assets,
+        uint256 venueShares,
+        uint256 anchorEngineShares,
+        uint256 anchorSupply
     );
     event RedeemRequested(
-        bytes32 indexed requestId, address indexed requester, address indexed receiver, uint256 shares
+        bytes32 indexed requestId,
+        address indexed requester,
+        address indexed receiver,
+        uint256 shares
     );
     event RedeemFinalized(
-        bytes32 indexed requestId, address indexed receiver, uint256 shares, address asset, uint256 amount
+        bytes32 indexed requestId,
+        address indexed receiver,
+        uint256 shares,
+        address asset,
+        uint256 amount
     );
     event RedeemCancelled(bytes32 indexed requestId, address indexed receiver, uint256 shares);
     event FeesAccrued(
@@ -116,12 +133,18 @@ contract VaultAdapter is IVaultAdapter {
         uint256 highWaterMark,
         uint256 targetValuePerShare
     );
-    event FeeSharesAllocated(uint64 indexed configId, address indexed recipient, uint256 feeAssets, uint256 feeShares);
+    event FeeSharesAllocated(
+        uint64 indexed configId, address indexed recipient, uint256 feeAssets, uint256 feeShares
+    );
     event FeeSharesClaimed(address indexed recipient, address indexed to, uint256 shares);
-    event FeeConfigurationSet(uint64 indexed configId, bytes32 indexed configHash, bool reactivated);
+    event FeeConfigurationSet(
+        uint64 indexed configId, bytes32 indexed configHash, bool reactivated
+    );
     event FeeDustWaived(uint64 indexed configId, uint8 indexed slot, uint256 remainder);
     event FeesDisabled(address indexed guardian);
-    event FeeBaselinesInitialized(uint256 highWaterMark, uint256 targetBase, uint40 targetStartedAt);
+    event FeeBaselinesInitialized(
+        uint256 highWaterMark, uint256 targetBase, uint40 targetStartedAt
+    );
     /// @notice Emitted when {migrateEngine} atomically re-homes custody and re-anchors accounting.
     ///         `shareSupply` is unchanged across the swap; `oldShares`/`newShares` are the venue-share
     ///         counts before/after (they differ at the new engine's rate).
@@ -185,10 +208,14 @@ contract VaultAdapter is IVaultAdapter {
         address operator_,
         ControlInit memory controlInit_,
         FeeInit memory feeInit_
-    ) external {
+    )
+        external
+    {
         if (initialized) revert AlreadyInitialized();
         initialized = true;
-        if (engine_ == address(0) || shareToken_ == address(0) || operator_ == address(0)) revert ZeroAddress();
+        if (engine_ == address(0) || shareToken_ == address(0) || operator_ == address(0)) {
+            revert ZeroAddress();
+        }
         _requireCapability(engine_, type(IVaultEngine).interfaceId);
 
         address asset_ = IVaultEngine(engine_).asset();
@@ -249,7 +276,12 @@ contract VaultAdapter is IVaultAdapter {
         return _feesActive();
     }
 
-    function accrueFees() external override nonReentrant returns (uint256 feeAssets, uint256 feeShares) {
+    function accrueFees()
+        external
+        override
+        nonReentrant
+        returns (uint256 feeAssets, uint256 feeShares)
+    {
         FeePreview memory result = _accrueFees();
         return (result.totalFeeAssets, result.totalFeeShares);
     }
@@ -274,7 +306,12 @@ contract VaultAdapter is IVaultAdapter {
         );
     }
 
-    function setFeeConfig(FeeConfig calldata config) external override nonReentrant returns (uint64 configId) {
+    function setFeeConfig(FeeConfig calldata config)
+        external
+        override
+        nonReentrant
+        returns (uint64 configId)
+    {
         if (msg.sender != feeAdministrator) revert NotFeeAdministrator();
         if (fixedFeeCap == 0 && excessFeeCap == 0) revert FeesPermanentlyDisabled();
         _validateFeeConfig(config);
@@ -303,7 +340,9 @@ contract VaultAdapter is IVaultAdapter {
                     targetStartedAt = uint40(block.timestamp);
                 } else {
                     uint256 supply = IEarnShareToken(shareToken).totalSupply();
-                    targetBase = supply == 0 ? 0 : Math.mulDiv(IVaultEngine(engine).totalAssets(), shareScale, supply);
+                    targetBase = supply == 0
+                        ? 0
+                        : Math.mulDiv(IVaultEngine(engine).totalAssets(), shareScale, supply);
                     targetStartedAt = uint40(block.timestamp);
                 }
             } else {
@@ -361,7 +400,11 @@ contract VaultAdapter is IVaultAdapter {
     ///         measured venue-share delta is converted at the active anchor. `minShares` protects
     ///         the caller from quote drift, and the adapter rejects conversion floor loss above one
     ///         basis point even when the caller obtained a quote after the anchor was distorted.
-    function deposit(uint256 assets, address receiver, uint256 minShares)
+    function deposit(
+        uint256 assets,
+        address receiver,
+        uint256 minShares
+    )
         external
         override
         nonReentrant
@@ -399,7 +442,11 @@ contract VaultAdapter is IVaultAdapter {
     ///      crystallized before the new backing enters, and the proportional EarnToken mint prevents
     ///      the incoming principal from being treated as positive value accrual. The same one-basis-point
     ///      conversion-loss ceiling as {deposit} applies independently of `minEarnShares`.
-    function depositShares(uint256 venueShares, address receiver, uint256 minEarnShares)
+    function depositShares(
+        uint256 venueShares,
+        address receiver,
+        uint256 minEarnShares
+    )
         external
         override
         nonReentrant
@@ -415,9 +462,12 @@ contract VaultAdapter is IVaultAdapter {
 
         _requireCapability(engine, type(IVaultEngineShares).interfaceId);
         uint256 engineSharesBefore = IVaultEngine(engine).totalShares();
-        uint256 reportedVenueShares = IVaultEngineShares(engine).depositShares(venueShares, msg.sender);
+        uint256 reportedVenueShares =
+            IVaultEngineShares(engine).depositShares(venueShares, msg.sender);
         uint256 receivedVenueShares = IVaultEngine(engine).totalShares() - engineSharesBefore;
-        if (receivedVenueShares == 0 || reportedVenueShares != receivedVenueShares) revert InsufficientOutput();
+        if (receivedVenueShares == 0 || reportedVenueShares != receivedVenueShares) {
+            revert InsufficientOutput();
+        }
 
         earnShares = _sharesToTokens(receivedVenueShares);
         if (earnShares == 0) revert InsufficientOutput();
@@ -427,7 +477,9 @@ contract VaultAdapter is IVaultAdapter {
         IEarnShareToken(shareToken).mint(receiver, earnShares);
         _reanchorAtRest();
         if (supplyBefore == 0 && _feesActive()) _initializeFeeBaselines();
-        emit VenueSharesDeposited(msg.sender, receiver, venueShares, receivedVenueShares, earnShares);
+        emit VenueSharesDeposited(
+            msg.sender, receiver, venueShares, receivedVenueShares, earnShares
+        );
     }
 
     /// @notice Adds backing for current EarnToken holders without minting new EarnToken.
@@ -435,7 +487,12 @@ contract VaultAdapter is IVaultAdapter {
     ///      then the conversion anchor is restated against the unchanged EarnToken
     ///      supply. With open async exits, only the active pool participates because queued claims
     ///      have already burned their EarnToken and left active NAV.
-    function contribute(uint256 assets) external override nonReentrant returns (uint256 venueShares) {
+    function contribute(uint256 assets)
+        external
+        override
+        nonReentrant
+        returns (uint256 venueShares)
+    {
         if (depositsPaused) revert DepositsPaused();
         if (assets == 0) revert ZeroAmount();
 
@@ -460,7 +517,11 @@ contract VaultAdapter is IVaultAdapter {
 
     /// @notice Burns `shares` share tokens pulled from the caller and redeems the RATE-converted venue
     ///         shares from the engine. Proceeds go directly to `receiver`.
-    function redeem(uint256 shares, address receiver, uint256 minAssets)
+    function redeem(
+        uint256 shares,
+        address receiver,
+        uint256 minAssets
+    )
         external
         override
         nonReentrant
@@ -492,7 +553,11 @@ contract VaultAdapter is IVaultAdapter {
     ///         units) would be burned.
     /// @dev Used when public requests are denominated in assets rather than shares. The caller keeps
     ///      any unused share tokens.
-    function withdrawExact(uint256 assets, address receiver, uint256 maxShares)
+    function withdrawExact(
+        uint256 assets,
+        address receiver,
+        uint256 maxShares
+    )
         external
         override
         nonReentrant
@@ -531,7 +596,11 @@ contract VaultAdapter is IVaultAdapter {
     ///         version, requester, and stored receiver.
     /// @dev The queued backing and burned EarnToken leave active accounting atomically. If the engine
     ///      request fails, the entire transaction—including the burn—reverts.
-    function requestRedeemAsync(uint256 shares, bytes calldata engineData, address receiver)
+    function requestRedeemAsync(
+        uint256 shares,
+        bytes calldata engineData,
+        address receiver
+    )
         external
         override
         nonReentrant
@@ -560,7 +629,14 @@ contract VaultAdapter is IVaultAdapter {
 
     /// @notice ENGINE-ONLY. Forwards a solved queued payout to the stored receiver and closes the
     ///         pending claim. No EarnToken is burned here because it was burned at request time.
-    function finalizeRedeem(bytes32 requestId, address asset_, uint256 amount) external nonReentrant {
+    function finalizeRedeem(
+        bytes32 requestId,
+        address asset_,
+        uint256 amount
+    )
+        external
+        nonReentrant
+    {
         if (msg.sender != engine) revert NotEngine();
         PendingRedeem storage p = _pending[requestId];
         if (!p.open) revert RequestNotOpen(requestId);
@@ -590,15 +666,19 @@ contract VaultAdapter is IVaultAdapter {
     function cancelRedeemAsync(bytes32 requestId) external override nonReentrant {
         PendingRedeem storage p = _pending[requestId];
         if (!p.open) revert RequestNotOpen(requestId);
-        if (msg.sender != p.requester && msg.sender != asyncJanitor) revert NotRequesterOrJanitor();
+        if (msg.sender != p.requester && msg.sender != asyncJanitor) {
+            revert NotRequesterOrJanitor();
+        }
 
         address receiver = p.receiver;
         uint256 burnedEarnToken = p.burnedEarnToken;
 
         _accrueFees();
-        bool chargePending = !emergencyFeesDisabled && p.feeConfigId != 0 && _configHasFees(_feeConfigs[p.feeConfigId]);
+        bool chargePending = !emergencyFeesDisabled && p.feeConfigId != 0
+            && _configHasFees(_feeConfigs[p.feeConfigId]);
         uint256 activeSupply = IEarnShareToken(shareToken).totalSupply();
-        uint256 activeAssets = activeSupply == 0 || !chargePending ? 0 : IVaultEngine(engine).totalAssets();
+        uint256 activeAssets =
+            activeSupply == 0 || !chargePending ? 0 : IVaultEngine(engine).totalAssets();
         uint256 heldBefore = IVaultEngine(engine).totalShares();
 
         IVaultEngineAsync(engine).cancelRedeem(requestId);
@@ -613,12 +693,14 @@ contract VaultAdapter is IVaultAdapter {
         uint256 receiverShares;
         uint256 totalReentryShares;
         if (emergencyFeesDisabled || !chargePending) {
-            totalReentryShares = activeSupply == 0 ? burnedEarnToken : _sharesToTokens(returnedVenueShares);
+            totalReentryShares =
+                activeSupply == 0 ? burnedEarnToken : _sharesToTokens(returnedVenueShares);
             receiverShares = totalReentryShares;
         } else {
             uint256 returnedValue = IVaultEngine(engine).valueOf(returnedVenueShares);
             if (returnedValue == 0) revert InsufficientOutput();
-            (FeePreview memory pendingFees, uint256[5] memory nextRemainders) = _previewPendingFees(p, returnedValue);
+            (FeePreview memory pendingFees, uint256[5] memory nextRemainders) =
+                _previewPendingFees(p, returnedValue);
             _storeRemainders(p.feeConfigId, nextRemainders);
 
             if (activeSupply == 0) {
@@ -629,8 +711,9 @@ contract VaultAdapter is IVaultAdapter {
             }
             if (totalReentryShares == 0) revert InsufficientOutput();
 
-            uint256 feeShares =
-                returnedValue == 0 ? 0 : Math.mulDiv(totalReentryShares, pendingFees.totalFeeAssets, returnedValue);
+            uint256 feeShares = returnedValue == 0
+                ? 0
+                : Math.mulDiv(totalReentryShares, pendingFees.totalFeeAssets, returnedValue);
             if (feeShares > totalReentryShares) feeShares = totalReentryShares;
             _mintAndCreditFeeShares(p.feeConfigId, pendingFees, feeShares);
             receiverShares = totalReentryShares - feeShares;
@@ -645,7 +728,9 @@ contract VaultAdapter is IVaultAdapter {
 
         if (receiver.code.length != 0) {
             // forge-lint: disable-next-line(unused-return)
-            try IRedeemReceiver(receiver).onRedeemCancelled(requestId, shareToken, receiverShares) { } catch { }
+            try IRedeemReceiver(receiver)
+                .onRedeemCancelled(requestId, shareToken, receiverShares) { }
+                catch { }
         }
 
         _waiveClosedHistoricalRemainders(p.feeConfigId);
@@ -671,13 +756,19 @@ contract VaultAdapter is IVaultAdapter {
     /// @param newEngine Initialized replacement engine using this adapter and the same base asset.
     /// @param minNewShares Minimum replacement-engine shares accepted for a nonempty migration.
     /// @param minAssetsRetained Minimum base-asset value those replacement shares must represent.
-    function migrateEngine(address newEngine, uint256 minNewShares, uint256 minAssetsRetained)
+    function migrateEngine(
+        address newEngine,
+        uint256 minNewShares,
+        uint256 minAssetsRetained
+    )
         external
         override
         nonReentrant
         returns (uint256 newShares)
     {
-        if (engineMigrationMode != EngineMigrationMode.OperatorEnabled) revert OperatorMigrationDisabled();
+        if (engineMigrationMode != EngineMigrationMode.OperatorEnabled) {
+            revert OperatorMigrationDisabled();
+        }
         if (msg.sender != operator) revert NotOperator();
         if (newEngine == address(0)) revert ZeroAddress();
         address oldEngine = engine;
@@ -726,7 +817,14 @@ contract VaultAdapter is IVaultAdapter {
         }
 
         emit EngineMigrated(
-            oldEngine, newEngine, oldShares, assetsMoved, newShares, supply, anchorEngineShares, anchorSupply
+            oldEngine,
+            newEngine,
+            oldShares,
+            assetsMoved,
+            newShares,
+            supply,
+            anchorEngineShares,
+            anchorSupply
         );
     }
 
@@ -810,7 +908,11 @@ contract VaultAdapter is IVaultAdapter {
     /// @dev Projects the conversion anchor that `_accrueFees` and `_reanchorAtRest` would leave in
     ///      this block. If pending fee shares are too small to disturb the current total-supply
     ///      conversion, `_reanchorAtRest` keeps the stored anchor and so does this view.
-    function _previewConversionAnchor() internal view returns (uint256 engineShareAnchor, uint256 supplyAnchor) {
+    function _previewConversionAnchor()
+        internal
+        view
+        returns (uint256 engineShareAnchor, uint256 supplyAnchor)
+    {
         engineShareAnchor = anchorEngineShares;
         supplyAnchor = anchorSupply;
 
@@ -876,7 +978,9 @@ contract VaultAdapter is IVaultAdapter {
             _reanchorAtRest();
         }
 
-        if (result.preFeeValuePerShare > highWaterMark) highWaterMark = result.postFeeValuePerShare;
+        if (result.preFeeValuePerShare > highWaterMark) {
+            highWaterMark = result.postFeeValuePerShare;
+        }
 
         FeeConfig memory config = _feeConfigs[currentFeeConfigId];
         if (config.excess.enabled && result.postFeeValuePerShare > result.targetValuePerShare) {
@@ -895,16 +999,21 @@ contract VaultAdapter is IVaultAdapter {
         );
     }
 
-    function _previewPendingFees(PendingRedeem storage pending, uint256 returnedValue)
+    function _previewPendingFees(
+        PendingRedeem storage pending,
+        uint256 returnedValue
+    )
         internal
         view
         returns (FeePreview memory result, uint256[5] memory nextRemainders)
     {
         FeeConfig memory config = _feeConfigs[pending.feeConfigId];
-        uint256 pendingHighWater =
-            pending.burnedEarnToken == 0 ? 0 : Math.mulDiv(pending.highWaterValue, shareScale, pending.burnedEarnToken);
-        uint256 pendingTarget =
-            pending.burnedEarnToken == 0 ? 0 : Math.mulDiv(pending.targetValue, shareScale, pending.burnedEarnToken);
+        uint256 pendingHighWater = pending.burnedEarnToken == 0
+            ? 0
+            : Math.mulDiv(pending.highWaterValue, shareScale, pending.burnedEarnToken);
+        uint256 pendingTarget = pending.burnedEarnToken == 0
+            ? 0
+            : Math.mulDiv(pending.targetValue, shareScale, pending.burnedEarnToken);
         (result, nextRemainders) = FeeMath.preview(
             FeeMath.Input({
                 activeAssets: returnedValue,
@@ -926,7 +1035,9 @@ contract VaultAdapter is IVaultAdapter {
         address receiver,
         uint256 shares,
         uint256 venueShares
-    ) internal {
+    )
+        internal
+    {
         PendingRedeem storage pending = _pending[requestId];
         if (pending.open) revert DuplicateRequest(requestId);
         pending.receiver = receiver;
@@ -941,8 +1052,9 @@ contract VaultAdapter is IVaultAdapter {
             pending.highWaterValue = Math.mulDiv(highWaterMark, shares, shareScale);
             FeeConfig memory config = _feeConfigs[currentFeeConfigId];
             if (config.excess.enabled) {
-                uint256 currentTarget =
-                    FeeMath.targetAt(targetBase, config.excess.annualTargetRate, targetStartedAt, block.timestamp);
+                uint256 currentTarget = FeeMath.targetAt(
+                    targetBase, config.excess.annualTargetRate, targetStartedAt, block.timestamp
+                );
                 pending.targetValue = Math.mulDiv(currentTarget, shares, shareScale);
             }
             pending.feeConfigId = currentFeeConfigId;
@@ -950,7 +1062,13 @@ contract VaultAdapter is IVaultAdapter {
         }
     }
 
-    function _mintAndCreditFeeShares(uint64 configId, FeePreview memory fees, uint256 feeShares) internal {
+    function _mintAndCreditFeeShares(
+        uint64 configId,
+        FeePreview memory fees,
+        uint256 feeShares
+    )
+        internal
+    {
         if (feeShares == 0 || fees.totalFeeAssets == 0) return;
         IEarnShareToken(shareToken).mint(address(this), feeShares);
 
@@ -968,7 +1086,9 @@ contract VaultAdapter is IVaultAdapter {
                 assigned += shares;
             }
             if (shares != 0) {
-                _creditFeeShares(configId, fees.allocations[i].account, fees.allocations[i].feeAssets, shares);
+                _creditFeeShares(
+                    configId, fees.allocations[i].account, fees.allocations[i].feeAssets, shares
+                );
             }
         }
     }
@@ -977,29 +1097,49 @@ contract VaultAdapter is IVaultAdapter {
         for (uint256 i = 0; i < fees.allocationCount; i++) {
             uint256 shares = fees.allocations[i].feeShares;
             if (shares != 0) {
-                _creditFeeShares(configId, fees.allocations[i].account, fees.allocations[i].feeAssets, shares);
+                _creditFeeShares(
+                    configId, fees.allocations[i].account, fees.allocations[i].feeAssets, shares
+                );
             }
         }
     }
 
-    function _creditFeeShares(uint64 configId, address account, uint256 feeAssets, uint256 shares) internal {
+    function _creditFeeShares(
+        uint64 configId,
+        address account,
+        uint256 feeAssets,
+        uint256 shares
+    )
+        internal
+    {
         claimableFeeShares[account] += shares;
         totalClaimableFeeShares += shares;
         emit FeeSharesAllocated(configId, account, feeAssets, shares);
     }
 
-    function _restoreReopenedBaselines(PendingRedeem storage pending, uint256 normalization) internal {
+    function _restoreReopenedBaselines(
+        PendingRedeem storage pending,
+        uint256 normalization
+    )
+        internal
+    {
         if (normalization == 0) return;
-        uint256 currentValue = Math.mulDiv(IVaultEngine(engine).totalAssets(), shareScale, normalization);
-        uint256 pendingHighWater = Math.mulDiv(pending.highWaterValue, shareScale, pending.burnedEarnToken);
+        uint256 currentValue =
+            Math.mulDiv(IVaultEngine(engine).totalAssets(), shareScale, normalization);
+        uint256 pendingHighWater =
+            Math.mulDiv(pending.highWaterValue, shareScale, pending.burnedEarnToken);
         highWaterMark = currentValue > pendingHighWater ? currentValue : pendingHighWater;
 
         FeeConfig memory pendingConfig = _feeConfigs[pending.feeConfigId];
         FeeConfig memory activeConfig = _feeConfigs[currentFeeConfigId];
         if (activeConfig.excess.enabled) {
-            uint256 pendingTarget = Math.mulDiv(pending.targetValue, shareScale, pending.burnedEarnToken);
+            uint256 pendingTarget =
+                Math.mulDiv(pending.targetValue, shareScale, pending.burnedEarnToken);
             uint256 grownTarget = FeeMath.targetAt(
-                pendingTarget, pendingConfig.excess.annualTargetRate, pending.requestedAt, block.timestamp
+                pendingTarget,
+                pendingConfig.excess.annualTargetRate,
+                pending.requestedAt,
+                block.timestamp
             );
             targetBase = currentValue > grownTarget ? currentValue : grownTarget;
             targetStartedAt = uint40(block.timestamp);
@@ -1040,7 +1180,9 @@ contract VaultAdapter is IVaultAdapter {
         for (uint256 i = 0; i < config.fixedFeeCount; i++) {
             address account = config.fixedFees[i].account;
             uint256 rate = config.fixedFees[i].rate;
-            if (account == address(0) || account == address(this) || rate == 0) revert InvalidFeeConfiguration();
+            if (account == address(0) || account == address(this) || rate == 0) {
+                revert InvalidFeeConfiguration();
+            }
             for (uint256 j = 0; j < i; j++) {
                 if (config.fixedFees[j].account == account) revert InvalidFeeConfiguration();
             }
@@ -1056,7 +1198,8 @@ contract VaultAdapter is IVaultAdapter {
         if (config.excess.enabled) {
             if (
                 config.excess.account == address(0) || config.excess.account == address(this)
-                    || config.excess.excessFeeRate == 0 || config.excess.excessFeeRate > excessFeeCap
+                    || config.excess.excessFeeRate == 0
+                    || config.excess.excessFeeRate > excessFeeCap
                     || config.excess.annualTargetRate > MAX_ANNUAL_TARGET_RATE
             ) revert InvalidFeeConfiguration();
         } else if (
@@ -1098,7 +1241,10 @@ contract VaultAdapter is IVaultAdapter {
     }
 
     function _waiveClosedHistoricalRemainders(uint64 configId) internal {
-        if (configId == 0 || configId == currentFeeConfigId || _pendingRedeemsByFeeConfig[configId] != 0) return;
+        if (
+            configId == 0 || configId == currentFeeConfigId
+                || _pendingRedeemsByFeeConfig[configId] != 0
+        ) return;
         _waiveRemainders(configId);
     }
 
@@ -1118,7 +1264,9 @@ contract VaultAdapter is IVaultAdapter {
     }
 
     function _safeApprove(address token, address spender, uint256 value) internal {
-        _callOptionalReturn(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, value));
+        _callOptionalReturn(
+            token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, value)
+        );
     }
 
     function _safeTransfer(address token, address to, uint256 value) internal {
@@ -1126,7 +1274,9 @@ contract VaultAdapter is IVaultAdapter {
     }
 
     function _safeTransferFrom(address token, address from, address to, uint256 value) internal {
-        _callOptionalReturn(token, abi.encodeWithSelector(IERC20Like.transferFrom.selector, from, to, value));
+        _callOptionalReturn(
+            token, abi.encodeWithSelector(IERC20Like.transferFrom.selector, from, to, value)
+        );
     }
 
     function _callOptionalReturn(address token, bytes memory data) internal {
@@ -1147,4 +1297,5 @@ contract VaultAdapter is IVaultAdapter {
             }
         }
     }
+
 }

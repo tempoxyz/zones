@@ -7,7 +7,14 @@ pragma solidity ^0.8.26;
 ///      `requestData` is interpreted by the concrete engine; stable adapter accounting does not
 ///      encode venue-specific queue terms.
 interface IVaultEngineAsync {
-    function requestRedeem(uint256 shares, bytes calldata requestData) external returns (bytes32 requestId);
+
+    function requestRedeem(
+        uint256 shares,
+        bytes calldata requestData
+    )
+        external
+        returns (bytes32 requestId);
 
     function cancelRedeem(bytes32 requestId) external returns (uint256 shares);
+
 }

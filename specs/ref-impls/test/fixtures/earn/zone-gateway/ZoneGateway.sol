@@ -11,6 +11,7 @@ import { ZoneGatewayBase } from "./ZoneGatewayBase.sol";
 ///      If the vault operation, swap, or encrypted return fails, the callback reverts and the
 ///      Zone protocol handles the original withdrawal through its private bounce-back path.
 contract ZoneGateway is ZoneGatewayBase, IZoneWithdrawalReceiver {
+
     enum Flow {
         Deposit,
         Redeem
@@ -51,7 +52,9 @@ contract ZoneGateway is ZoneGatewayBase, IZoneWithdrawalReceiver {
         address zonePortal_,
         address zoneMessenger_,
         address owner_
-    ) ZoneGatewayBase(vaultAdapter_, defaultSwapper_, zonePortal_, zoneMessenger_, owner_) { }
+    )
+        ZoneGatewayBase(vaultAdapter_, defaultSwapper_, zonePortal_, zoneMessenger_, owner_)
+    { }
 
     /// @notice Returns true only for the two flows that satisfy the closed-loop Zone invariant.
     function supportsFlow(uint8 flow) public pure virtual returns (bool) {
@@ -66,7 +69,12 @@ contract ZoneGateway is ZoneGatewayBase, IZoneWithdrawalReceiver {
         address token,
         uint128 amount,
         bytes calldata callbackData
-    ) public virtual nonReentrant returns (bytes4) {
+    )
+        public
+        virtual
+        nonReentrant
+        returns (bytes4)
+    {
         _validateWithdrawal(sourceZoneId, sourcePortal, amount);
 
         uint256 rawFlow = _decodeRawFlow(callbackData);
@@ -82,13 +90,29 @@ contract ZoneGateway is ZoneGatewayBase, IZoneWithdrawalReceiver {
     /// @notice Recovers tokens accidentally sent outside a callback.
     /// @dev Synchronous callbacks never retain a legitimate balance: every success returns the
     ///      complete output to the Zone and every failure reverts atomically.
-    function rescueToken(address token, address receiver, uint256 amount) public virtual onlyOwner nonReentrant {
+    function rescueToken(
+        address token,
+        address receiver,
+        uint256 amount
+    )
+        public
+        virtual
+        onlyOwner
+        nonReentrant
+    {
         if (token == address(0) || receiver == address(0)) revert ZeroAddress();
         _safeTransfer(token, receiver, amount);
         emit TokenRescued(token, receiver, amount);
     }
 
-    function _dispatchSyncWithdrawal(Flow flow, address token, uint128 amount, CallbackData memory data) internal {
+    function _dispatchSyncWithdrawal(
+        Flow flow,
+        address token,
+        uint128 amount,
+        CallbackData memory data
+    )
+        internal
+    {
         if (flow == Flow.Deposit) {
             _handleDeposit(token, amount, data);
         } else if (flow == Flow.Redeem) {
@@ -105,13 +129,15 @@ contract ZoneGateway is ZoneGatewayBase, IZoneWithdrawalReceiver {
         if (token == vaultAsset) {
             vaultAssets_ = amount;
         } else {
-            vaultAssets_ = _swap(_depositSwapper(token), token, vaultAsset, amount, data.minVaultAssets);
+            vaultAssets_ =
+                _swap(_depositSwapper(token), token, vaultAsset, amount, data.minVaultAssets);
         }
         if (vaultAssets_ == 0 || vaultAssets_ < data.minVaultAssets) revert InsufficientOutput();
 
         _safeApprove(vaultAsset, vaultAdapter, 0);
         _safeApprove(vaultAsset, vaultAdapter, vaultAssets_);
-        uint256 shares = IVaultAdapter(vaultAdapter).deposit(vaultAssets_, address(this), data.minVaultShares);
+        uint256 shares =
+            IVaultAdapter(vaultAdapter).deposit(vaultAssets_, address(this), data.minVaultShares);
         if (shares == 0 || shares < data.minVaultShares) revert InsufficientOutput();
 
         bytes32 zoneDepositHash = _returnToZone(shareToken, _toUint128(shares), data);
@@ -120,30 +146,47 @@ contract ZoneGateway is ZoneGatewayBase, IZoneWithdrawalReceiver {
 
     function _handleRedeem(address token, uint128 amount, CallbackData memory data) internal {
         if (token != shareToken) revert WrongShareToken();
-        if (data.outputToken == address(0) || data.outputToken == shareToken) revert WrongOutputToken();
+        if (data.outputToken == address(0) || data.outputToken == shareToken) {
+            revert WrongOutputToken();
+        }
 
         _safeApprove(shareToken, vaultAdapter, 0);
         _safeApprove(shareToken, vaultAdapter, amount);
-        uint256 vaultAssets_ = IVaultAdapter(vaultAdapter).redeem(amount, address(this), data.minVaultAssets);
+        uint256 vaultAssets_ =
+            IVaultAdapter(vaultAdapter).redeem(amount, address(this), data.minVaultAssets);
         if (vaultAssets_ == 0 || vaultAssets_ < data.minVaultAssets) revert InsufficientOutput();
 
         uint256 outputAmount = vaultAssets_;
         if (data.outputToken != vaultAsset) {
             outputAmount = _swap(
-                _redeemSwapper(data.outputToken), vaultAsset, data.outputToken, vaultAssets_, data.minOutputAmount
+                _redeemSwapper(data.outputToken),
+                vaultAsset,
+                data.outputToken,
+                vaultAssets_,
+                data.minOutputAmount
             );
         }
         if (outputAmount == 0 || outputAmount < data.minOutputAmount) revert InsufficientOutput();
 
         bytes32 zoneDepositHash = _returnToZone(data.outputToken, _toUint128(outputAmount), data);
-        emit EarnRedeem(data.actionId, data.outputToken, amount, vaultAssets_, outputAmount, zoneDepositHash);
+        emit EarnRedeem(
+            data.actionId, data.outputToken, amount, vaultAssets_, outputAmount, zoneDepositHash
+        );
     }
 
-    function _returnToZone(address token, uint128 amount, CallbackData memory data) internal returns (bytes32 hash) {
+    function _returnToZone(
+        address token,
+        uint128 amount,
+        CallbackData memory data
+    )
+        internal
+        returns (bytes32 hash)
+    {
         _safeApprove(token, zonePortal, 0);
         _safeApprove(token, zonePortal, amount);
         hash = IZonePortal(zonePortal)
             .depositEncrypted(token, amount, data.keyIndex, data.encrypted, data.refundRecipient);
         _safeApprove(token, zonePortal, 0);
     }
+
 }

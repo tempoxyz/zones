@@ -3,7 +3,7 @@
 
 pragma solidity ^0.8.20;
 
-import {IERC165} from "./IERC165.sol";
+import { IERC165 } from "./IERC165.sol";
 
 /**
  * @dev Library used to query support of an interface declared via {IERC165}.
@@ -13,6 +13,7 @@ import {IERC165} from "./IERC165.sol";
  * what to do in these cases.
  */
 library ERC165Checker {
+
     // As per the ERC-165 spec, no interface should ever match 0xffffffff
     bytes4 private constant INTERFACE_ID_INVALID = 0xffffffff;
 
@@ -22,9 +23,8 @@ library ERC165Checker {
     function supportsERC165(address account) internal view returns (bool) {
         // Any contract that implements ERC-165 must explicitly indicate support of
         // InterfaceId_ERC165 and explicitly indicate non-support of InterfaceId_Invalid
-        return
-            supportsERC165InterfaceUnchecked(account, type(IERC165).interfaceId) &&
-            !supportsERC165InterfaceUnchecked(account, INTERFACE_ID_INVALID);
+        return supportsERC165InterfaceUnchecked(account, type(IERC165).interfaceId)
+            && !supportsERC165InterfaceUnchecked(account, INTERFACE_ID_INVALID);
     }
 
     /**
@@ -49,7 +49,11 @@ library ERC165Checker {
     function getSupportedInterfaces(
         address account,
         bytes4[] memory interfaceIds
-    ) internal view returns (bool[] memory) {
+    )
+        internal
+        view
+        returns (bool[] memory)
+    {
         // an array of booleans corresponding to interfaceIds and whether they're supported or not
         bool[] memory interfaceIdsSupported = new bool[](interfaceIds.length);
 
@@ -57,7 +61,8 @@ library ERC165Checker {
         if (supportsERC165(account)) {
             // query support of each interface in interfaceIds
             for (uint256 i = 0; i < interfaceIds.length; i++) {
-                interfaceIdsSupported[i] = supportsERC165InterfaceUnchecked(account, interfaceIds[i]);
+                interfaceIdsSupported[i] =
+                    supportsERC165InterfaceUnchecked(account, interfaceIds[i]);
             }
         }
 
@@ -73,7 +78,14 @@ library ERC165Checker {
      *
      * See {IERC165-supportsInterface}.
      */
-    function supportsAllInterfaces(address account, bytes4[] memory interfaceIds) internal view returns (bool) {
+    function supportsAllInterfaces(
+        address account,
+        bytes4[] memory interfaceIds
+    )
+        internal
+        view
+        returns (bool)
+    {
         // query support of ERC-165 itself
         if (!supportsERC165(account)) {
             return false;
@@ -105,7 +117,14 @@ library ERC165Checker {
      *
      * Interface identification is specified in ERC-165.
      */
-    function supportsERC165InterfaceUnchecked(address account, bytes4 interfaceId) internal view returns (bool) {
+    function supportsERC165InterfaceUnchecked(
+        address account,
+        bytes4 interfaceId
+    )
+        internal
+        view
+        returns (bool)
+    {
         // prepare call
         bytes memory encodedParams = abi.encodeCall(IERC165.supportsInterface, (interfaceId));
 
@@ -114,11 +133,19 @@ library ERC165Checker {
         uint256 returnSize;
         uint256 returnValue;
         assembly ("memory-safe") {
-            success := staticcall(30000, account, add(encodedParams, 0x20), mload(encodedParams), 0x00, 0x20)
+            success := staticcall(
+                30000,
+                account,
+                add(encodedParams, 0x20),
+                mload(encodedParams),
+                0x00,
+                0x20
+            )
             returnSize := returndatasize()
             returnValue := mload(0x00)
         }
 
         return success && returnSize >= 0x20 && returnValue > 0;
     }
+
 }

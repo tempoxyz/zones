@@ -13,6 +13,7 @@ import { IERC165 } from "@openzeppelin/contracts/utils/introspection/IERC165.sol
 /// @dev Minimal ERC-4626 surface of the wrapped venue vault (Morpho vault, {Simple4626Vault} demo,
 ///      or any conformant 4626). Only the methods the engine drives are declared.
 interface IERC4626Vault {
+
     function asset() external view returns (address);
     function decimals() external view returns (uint8);
     function name() external view returns (string memory);
@@ -21,8 +22,21 @@ interface IERC4626Vault {
     function previewWithdraw(uint256 assets) external view returns (uint256 shares);
     function previewRedeem(uint256 shares) external view returns (uint256 assets);
     function deposit(uint256 assets, address receiver) external returns (uint256 shares);
-    function redeem(uint256 shares, address receiver, address owner) external returns (uint256 assets);
-    function withdraw(uint256 assets, address receiver, address owner) external returns (uint256 shares);
+    function redeem(
+        uint256 shares,
+        address receiver,
+        address owner
+    )
+        external
+        returns (uint256 assets);
+    function withdraw(
+        uint256 assets,
+        address receiver,
+        address owner
+    )
+        external
+        returns (uint256 shares);
+
 }
 
 /// @title ERC4626Engine
@@ -40,7 +54,14 @@ interface IERC4626Vault {
 ///      the venue, so proceeds never rest here). `asset` is derived from the wrapped vault;
 ///      `name`/`symbol` use immutable constructor overrides when supplied and otherwise derive from
 ///      the vault.
-contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithdraw, IVaultEngineShares, Ownable2Step {
+contract ERC4626Engine is
+    IVaultEngine,
+    IVaultEngineSync,
+    IVaultEngineExactWithdraw,
+    IVaultEngineShares,
+    Ownable2Step
+{
+
     /// @notice The wrapped ERC-4626 venue vault. The engine holds this vault's shares.
     IERC4626Vault public immutable vault;
     address public immutable baseAsset;
@@ -55,7 +76,9 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
 
     event CoreInitialized(address indexed core);
     event Deposited(address indexed receiver, uint256 assets, uint256 shares);
-    event VenueSharesDeposited(address indexed from, uint256 requestedShares, uint256 receivedShares);
+    event VenueSharesDeposited(
+        address indexed from, uint256 requestedShares, uint256 receivedShares
+    );
     event Redeemed(address indexed receiver, uint256 shares, uint256 assets);
     event WithdrewExact(address indexed receiver, uint256 assets, uint256 sharesBurned);
 
@@ -86,7 +109,12 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
     ///        supply metadata. An empty value derives the name from `vault_`.
     /// @param symbolOverride_ Optional immutable engine symbol. An empty value derives it from
     ///        `vault_`. The effective name and symbol must both be nonempty.
-    constructor(IERC4626Vault vault_, address owner_, string memory nameOverride_, string memory symbolOverride_)
+    constructor(
+        IERC4626Vault vault_,
+        address owner_,
+        string memory nameOverride_,
+        string memory symbolOverride_
+    )
         Ownable(owner_ == address(0) ? msg.sender : owner_)
     {
         if (address(vault_) == address(0)) revert ZeroAddress();
@@ -149,7 +177,10 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
     ///         engine custody. This lets an existing vault shareholder enter Earn without first
     ///         redeeming to the base asset. The adapter independently converts the measured share
     ///         delta into EarnToken at its current anchor.
-    function depositShares(uint256 shares, address from)
+    function depositShares(
+        uint256 shares,
+        address from
+    )
         external
         onlyCore
         nonReentrant
@@ -164,7 +195,11 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
     }
 
     /// @notice Redeem `shares` of the engine's held 4626 shares straight to `receiver`.
-    function redeem(uint256 shares, address receiver, uint256 minAssets)
+    function redeem(
+        uint256 shares,
+        address receiver,
+        uint256 minAssets
+    )
         external
         onlyCore
         nonReentrant
@@ -178,7 +213,15 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
 
     /// @notice EXACT-asset exit: withdraw exactly `assets` from the 4626 straight to `receiver`,
     ///         returning the 4626 shares the venue burned.
-    function withdraw(uint256 assets, address receiver) external onlyCore nonReentrant returns (uint256 shares) {
+    function withdraw(
+        uint256 assets,
+        address receiver
+    )
+        external
+        onlyCore
+        nonReentrant
+        returns (uint256 shares)
+    {
         if (receiver == address(0)) revert ZeroAddress();
         shares = vault.withdraw(assets, receiver, address(this));
         emit WithdrewExact(receiver, assets, shares);
@@ -201,7 +244,8 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
     }
 
     function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
-        return interfaceId == type(IERC165).interfaceId || interfaceId == type(IVaultEngine).interfaceId
+        return interfaceId == type(IERC165).interfaceId
+            || interfaceId == type(IVaultEngine).interfaceId
             || interfaceId == type(IVaultEngineSync).interfaceId
             || interfaceId == type(IVaultEngineExactWithdraw).interfaceId
             || interfaceId == type(IVaultEngineShares).interfaceId;
@@ -222,4 +266,5 @@ contract ERC4626Engine is IVaultEngine, IVaultEngineSync, IVaultEngineExactWithd
             if (!IERC20Like(token).approve(spender, amount)) revert TransferFailed();
         }
     }
+
 }

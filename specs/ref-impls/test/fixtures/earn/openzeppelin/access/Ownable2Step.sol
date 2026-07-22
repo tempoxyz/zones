@@ -3,7 +3,7 @@
 
 pragma solidity ^0.8.20;
 
-import {Ownable} from "./Ownable.sol";
+import { Ownable } from "./Ownable.sol";
 
 /**
  * @dev Contract module which provides access control mechanism, where
@@ -23,6 +23,7 @@ import {Ownable} from "./Ownable.sol";
  * from parent (Ownable).
  */
 abstract contract Ownable2Step is Ownable {
+
     address private _pendingOwner;
 
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
@@ -64,4 +65,5 @@ abstract contract Ownable2Step is Ownable {
         }
         _transferOwnership(sender);
     }
+
 }

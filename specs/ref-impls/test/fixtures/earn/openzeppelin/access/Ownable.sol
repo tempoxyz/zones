@@ -3,7 +3,7 @@
 
 pragma solidity ^0.8.20;
 
-import {Context} from "../utils/Context.sol";
+import { Context } from "../utils/Context.sol";
 
 /**
  * @dev Contract module which provides a basic access control mechanism, where
@@ -18,6 +18,7 @@ import {Context} from "../utils/Context.sol";
  * the owner.
  */
 abstract contract Ownable is Context {
+
     address private _owner;
 
     /**
@@ -97,4 +98,5 @@ abstract contract Ownable is Context {
         _owner = newOwner;
         emit OwnershipTransferred(oldOwner, newOwner);
     }
+
 }

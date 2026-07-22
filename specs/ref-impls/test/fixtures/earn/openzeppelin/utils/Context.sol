@@ -14,6 +14,7 @@ pragma solidity ^0.8.20;
  * This contract is only required for intermediate, library-like contracts.
  */
 abstract contract Context {
+
     function _msgSender() internal view virtual returns (address) {
         return msg.sender;
     }
@@ -25,4 +26,5 @@ abstract contract Context {
     function _contextSuffixLength() internal view virtual returns (uint256) {
         return 0;
     }
+
 }

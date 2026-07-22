@@ -8,6 +8,7 @@ import { IERC165 } from "@openzeppelin/contracts/utils/introspection/IERC165.sol
 ///      venue shares for exactly one `VaultAdapter`. Exit and in-kind entry behaviors are separate
 ///      ERC-165 capabilities so future RWA engines expose only the operations they actually support.
 interface IVaultEngine is IERC165 {
+
     function asset() external view returns (address);
     function deposit(uint256 assets) external returns (uint256 shares);
     function name() external view returns (string memory);
@@ -15,4 +16,5 @@ interface IVaultEngine is IERC165 {
     function totalShares() external view returns (uint256 shares);
     function totalAssets() external view returns (uint256 assets);
     function valueOf(uint256 shares) external view returns (uint256 assets);
+
 }

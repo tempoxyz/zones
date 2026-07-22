@@ -11,6 +11,7 @@ import { Ownable2Step } from "@openzeppelin/contracts/access/Ownable2Step.sol";
 /// @notice Shared Zone authentication, routing, ownership, and token plumbing.
 /// @dev Capability-specific gateways define callback flows and custody rules on top of this base.
 abstract contract ZoneGatewayBase is Ownable2Step {
+
     address public immutable vaultAdapter;
     address public immutable vaultAsset;
     address public immutable shareToken;
@@ -49,10 +50,12 @@ abstract contract ZoneGatewayBase is Ownable2Step {
         address zonePortal_,
         address zoneMessenger_,
         address owner_
-    ) Ownable(owner_) {
+    )
+        Ownable(owner_)
+    {
         if (
-            vaultAdapter_ == address(0) || defaultSwapper_ == address(0) || zonePortal_ == address(0)
-                || zoneMessenger_ == address(0) || owner_ == address(0)
+            vaultAdapter_ == address(0) || defaultSwapper_ == address(0)
+                || zonePortal_ == address(0) || zoneMessenger_ == address(0) || owner_ == address(0)
         ) {
             revert ZeroAddress();
         }
@@ -101,13 +104,26 @@ abstract contract ZoneGatewayBase is Ownable2Step {
         emit RedeemRouteUpdated(outputToken, swapper);
     }
 
-    function _validateWithdrawal(uint32 sourceZoneId, address sourcePortal, uint128 amount) internal view {
+    function _validateWithdrawal(
+        uint32 sourceZoneId,
+        address sourcePortal,
+        uint128 amount
+    )
+        internal
+        view
+    {
         if (sourcePortal != zonePortal || sourceZoneId != zoneId) revert InvalidSourcePortal();
         if (msg.sender != zoneMessenger) revert NotZoneMessenger();
         if (amount == 0) revert ZeroAmount();
     }
 
-    function _swap(address swapper, address tokenIn, address tokenOut, uint256 amountIn, uint256 minAmountOut)
+    function _swap(
+        address swapper,
+        address tokenIn,
+        address tokenOut,
+        uint256 amountIn,
+        uint256 minAmountOut
+    )
         internal
         returns (uint256 amountOut)
     {
@@ -137,7 +153,9 @@ abstract contract ZoneGatewayBase is Ownable2Step {
         if (callbackData.length < 32) revert BadFlow();
 
         uint256 tupleOffset = abi.decode(callbackData, (uint256));
-        if (tupleOffset > callbackData.length || callbackData.length - tupleOffset < 32) revert BadFlow();
+        if (tupleOffset > callbackData.length || callbackData.length - tupleOffset < 32) {
+            revert BadFlow();
+        }
 
         assembly {
             rawFlow := calldataload(add(callbackData.offset, tupleOffset))
@@ -163,4 +181,5 @@ abstract contract ZoneGatewayBase is Ownable2Step {
         if (!ok) revert TokenCallFailed();
         if (returnData.length != 0 && !abi.decode(returnData, (bool))) revert TokenCallFalse();
     }
+
 }
