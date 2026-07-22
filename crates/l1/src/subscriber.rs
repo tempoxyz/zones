@@ -276,7 +276,7 @@ impl L1Subscriber {
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 
-        eyre::bail!("L1 head notification stream ended")
+        Err(eyre::eyre!("L1 head notification stream ended"))
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.

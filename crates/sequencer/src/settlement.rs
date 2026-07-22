@@ -34,7 +34,7 @@ use alloy_rlp::Encodable;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain, sol};
-use eyre::Result;
+use eyre::{OptionExt as _, Result};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use schnellru::{ByLength, LruMap};
@@ -404,13 +404,14 @@ impl BatchSubmitter {
             .l1_provider
             .get_block_by_number(anchor_block_number.into())
             .await?
-            .ok_or_else(|| eyre::eyre!("L1 anchor block {anchor_block_number} not found"))?
+            .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
             .header
             .hash;
 
-        let signer = self.signer.as_ref().ok_or_else(|| {
-            eyre::eyre!("TIP-1091 batch submission requires the local sequencer signer")
-        })?;
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
         let verifier_config = Bytes::new();
         let signature = self
             .sign_settlement_attestation(
