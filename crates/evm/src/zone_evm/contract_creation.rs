@@ -437,4 +437,14 @@ mod tests {
 
         assert!(validate_transaction(&tx, &[]).is_err());
     }
+
+    #[test]
+    fn system_operations_require_system_transactions() {
+        let mut tx = call_tx(Address::repeat_byte(0x11), ZONE_INBOX_ADDRESS);
+        tx.inner.data = ZoneInbox::advanceTempoCall::SELECTOR.to_vec().into();
+
+        assert!(validate_transaction(&tx, &[]).is_err());
+        tx.is_system_tx = true;
+        assert!(validate_transaction(&tx, &[]).is_ok());
+    }
 }
