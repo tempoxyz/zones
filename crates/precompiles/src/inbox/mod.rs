@@ -116,15 +116,12 @@ impl ZoneInbox {
         )
     }
 
-    fn advance_tempo<P>(
+    fn advance_tempo<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
         caller: Address,
         call: ZoneInboxAbi::advanceTempoCall,
-    ) -> ZoneResult<()>
-    where
-        P: L1StorageReader,
-    {
+    ) -> ZoneResult<()> {
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
         let deposits = decode_deposits(call.deposits)?;
@@ -146,9 +143,11 @@ impl ZoneInbox {
             }
         }
 
+        // Step 1: Advance Tempo state (validates chain continuity internally)
         tempo_state.finalize_checkpoint(l1, call.header)?;
         self.enable_tokens(call.enabledTokens)?;
 
+        // Step 2: Process deposits and build hash chain
         let tempo_block_number = tempo_state.tempo_block_number()?;
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
         let mut current_hash = self.processed_deposit_queue_hash.read()?;
@@ -184,21 +183,26 @@ impl ZoneInbox {
             return Err(ZoneInboxError::extra_decryption_data().into());
         }
 
-        let tempo_current_hash = l1.read_l1_storage(
+        // Step 3: Bind the canonical Tempo queue head into the execution witness.
+        //
+        // `current_hash` may be an ancestor of this value when the sequencer processes only a
+        // bounded prefix of pending deposits. The batch proof validates that hashing the
+        // unprocessed suffix from `current_hash` reaches `tempo_current_hash`; requiring equality
+        // here would incorrectly forbid partial processing.
+        let _tempo_current_hash = l1.read_l1_storage(
             portal,
             PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
             tempo_block_number,
         )?;
-        if current_hash != tempo_current_hash {
-            return Err(ZoneInboxError::invalid_deposit_queue_hash().into());
-        }
 
+        // Step 4: Update state
         self.processed_deposit_queue_hash.write(current_hash)?;
         let previous_number = self.processed_deposit_number.read()?;
         let processed_number = previous_number
             .checked_add(deposit_count)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.processed_deposit_number.write(processed_number)?;
+
         self.emit_event(ZoneInboxEvent::tempo_advanced(
             tempo_block_hash,
             tempo_block_number,
@@ -256,7 +260,7 @@ impl ZoneInbox {
         current_hash: B256,
         deposit: EncryptedDeposit,
         decryption: DecryptionData,
-        key: EncryptionKey,
+        key: (B256, u8),
     ) -> ZoneResult<()> {
         let Some((to, memo)) = recover_encrypted_payload(portal, &deposit, &decryption, key)?
         else {
@@ -265,10 +269,10 @@ impl ZoneInbox {
 
         if self.try_mint(deposit.token, to, deposit.amount)? {
             self.emit_event(deposit.processed_event(current_hash, to, memo))?;
-            Ok(())
         } else {
-            self.fail_encrypted_deposit(outbox, current_hash, deposit)
+            self.fail_encrypted_deposit(outbox, current_hash, deposit)?;
         }
+        Ok(())
     }
 
     fn fail_encrypted_deposit(
@@ -392,17 +396,11 @@ fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueued
     deposits.into_iter().map(TryInto::try_into).collect()
 }
 
-#[derive(Clone, Copy)]
-struct EncryptionKey {
-    x: B256,
-    y_parity: u8,
-}
-
 fn recover_encrypted_payload(
     portal: Address,
     deposit: &EncryptedDeposit,
     decryption: &DecryptionData,
-    key: EncryptionKey,
+    (key_x, key_y_parity): (B256, u8),
 ) -> ZoneResult<Option<(Address, B256)>> {
     ChaumPedersenVerify::charge_gas()?;
     if !ChaumPedersenVerify::verify(
@@ -410,8 +408,8 @@ fn recover_encrypted_payload(
         deposit.encrypted.ephemeralPubkeyYParity,
         &decryption.sharedSecret.0,
         decryption.sharedSecretYParity,
-        &key.x.0,
-        key.y_parity,
+        &key_x.0,
+        key_y_parity,
         &decryption.cpProof.s.0,
         &decryption.cpProof.c.0,
     ) {
@@ -447,7 +445,7 @@ fn read_encryption_key<P: L1StorageReader>(
     portal: Address,
     tempo_block_number: u64,
     key_index: U256,
-) -> ZoneResult<EncryptionKey> {
+) -> ZoneResult<(B256, u8)> {
     let read_l1_portal_slot =
         |slot: U256| l1.read_l1_storage(portal, slot.into(), tempo_block_number);
 
@@ -466,8 +464,5 @@ fn read_encryption_key<P: L1StorageReader>(
             .checked_add(U256::ONE)
             .ok_or_else(TempoPrecompileError::under_overflow)?,
     )?;
-    Ok(EncryptionKey {
-        x,
-        y_parity: meta.as_slice()[31],
-    })
+    Ok((x, meta.as_slice()[31]))
 }

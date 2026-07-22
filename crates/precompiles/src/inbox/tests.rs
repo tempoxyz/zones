@@ -322,27 +322,49 @@ fn child_anchor_storage_failure_is_fatal_and_rolls_back_checkpoint() -> eyre::Re
 }
 
 #[test]
-fn queue_head_mismatch_reverts_and_rolls_back_checkpoint() -> eyre::Result<()> {
+fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
-    harness.set_queue_hash(B256::repeat_byte(0x44));
+    let first = Deposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        to: BOB,
+        amount: 100,
+        bouncebackRecipient: ALICE,
+        memo: B256::repeat_byte(0x11),
+    };
+    let second = Deposit {
+        amount: 200,
+        memo: B256::repeat_byte(0x22),
+        ..first.clone()
+    };
+    let first_hash =
+        keccak256((DepositType::Regular, first.clone(), B256::ZERO).abi_encode_params());
+    let tempo_head = keccak256((DepositType::Regular, second, first_hash).abi_encode_params());
+    harness.set_queue_hash(tempo_head);
 
-    let output = harness.call_atomic(
+    let output = harness.call(
         SEQUENCER,
-        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: first.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
     )?;
-    assert!(output.is_revert());
-    assert_eq!(
-        output.bytes,
-        ZoneInboxAbi::InvalidDepositQueueHash {}.abi_encode()
-    );
+    assert!(output.is_success());
 
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(100));
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-        assert_eq!(TempoState::new().tempo_block_number()?, 0);
+        assert_eq!(TempoState::new().tempo_block_number()?, 1);
         assert_eq!(
             ZoneInbox::new().processed_deposit_queue_hash.read()?,
-            B256::ZERO
+            first_hash
         );
+        assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 1);
         Ok(())
     })?;
     Ok(())
