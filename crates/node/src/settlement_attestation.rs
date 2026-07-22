@@ -205,8 +205,8 @@ where
     }))
 }
 
-/// Verify that the proposed anchor is the same finalized Tempo chain observed by this node
-/// before signing the attestation.
+/// Verify that the proposed Tempo and anchor endpoints are canonical and that the anchor remains
+/// available through EIP-2935. The prover verifies the full ancestry between those endpoints.
 async fn validate_settlement_anchor(
     context: &AttestationContext,
     tempo_block_number: u64,
@@ -217,6 +217,17 @@ async fn validate_settlement_anchor(
     eyre::ensure!(
         anchor_block_number >= tempo_block_number,
         "proposed L1 anchor predates the zone batch's Tempo block"
+    );
+
+    let current_l1_block = context.l1_provider.get_block_number().await?;
+    eyre::ensure!(
+        anchor_block_number < current_l1_block,
+        "proposed L1 anchor is not yet available through EIP-2935"
+    );
+    eyre::ensure!(
+        current_l1_block.saturating_sub(anchor_block_number)
+            < context.anchor_config.history_window(),
+        "proposed L1 anchor fell outside the EIP-2935 history window"
     );
 
     let anchor_header = context
@@ -241,26 +252,6 @@ async fn validate_settlement_anchor(
     eyre::ensure!(
         tempo_header.hash_slow() == tempo_block_hash,
         "zone batch's Tempo block hash does not match finalized L1"
-    );
-
-    let mut parent_hash = tempo_block_hash;
-    for block_number in (tempo_block_number + 1)..=anchor_block_number {
-        let header = context
-            .l1_provider
-            .get_header_by_number(block_number.into())
-            .await?
-            .ok_or_else(|| eyre::eyre!("missing L1 ancestry header {block_number}"))?
-            .inner
-            .inner;
-        eyre::ensure!(
-            header.inner.parent_hash == parent_hash,
-            "L1 ancestry is broken at block {block_number}"
-        );
-        parent_hash = header.hash_slow();
-    }
-    eyre::ensure!(
-        parent_hash == anchor_block_hash,
-        "proposed L1 anchor is not descended from the zone batch's Tempo block"
     );
     Ok(())
 }

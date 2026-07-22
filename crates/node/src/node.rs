@@ -490,13 +490,18 @@ where
                 .as_ref()
                 .map(|config| config.batch_anchor_config)
                 .unwrap_or_default();
-            Self::launch_p2p(
-                config,
-                network_id,
+            let attestation = AttestationContext::new(
                 attestation_domain,
+                config.block_attestation_signer(),
+                config.block_attestation_addresses(),
                 attestation_store.clone(),
                 l1_provider.clone(),
                 anchor_config,
+            );
+            Self::launch_p2p(
+                config,
+                network_id,
+                attestation,
                 &task_executor,
                 ctx.node.provider().clone(),
                 ctx.beacon_engine_handle.clone(),
@@ -554,23 +559,12 @@ where
     fn launch_p2p(
         config: P2pConfig,
         network_id: P2pNetworkId,
-        attestation_domain: AttestationDomain,
-        attestation_store: Option<AttestationStore>,
-        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
-        anchor_config: BatchAnchorConfig,
+        attestation: AttestationContext,
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
         engine: ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
         let role = config.role();
-        let attestation = AttestationContext::new(
-            attestation_domain,
-            config.block_attestation_signer(),
-            config.block_attestation_addresses(),
-            attestation_store,
-            l1_provider,
-            anchor_config,
-        );
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,

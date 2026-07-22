@@ -448,6 +448,10 @@ async fn run_leader_backfill_server<P>(
                     P2pEvent::SettlementSignatureReceived { follower, signature } => {
                         let result = async {
                             let signed = SignedSettlementAttestation::decode(&signature)?;
+                            let signer = signed.recover_signer(attestation.domain)?;
+                            let expected_signer = attestation.addresses.get(&follower).copied()
+                                .ok_or_else(|| eyre::eyre!("unknown follower identity"))?;
+                            eyre::ensure!(signer == expected_signer, "settlement signer does not match authenticated peer");
                             let height: u64 = signed.attestation.zoneHeight.try_into()
                                 .map_err(|_| eyre::eyre!("settlement height does not fit in u64"))?;
                             let expected = build_settlement_attestation(
@@ -457,10 +461,6 @@ async fn run_leader_backfill_server<P>(
                                 Some((signed.attestation.anchorBlockNumber, signed.attestation.anchorBlockHash)),
                             ).await?.ok_or_else(|| eyre::eyre!("signed block is not a batch boundary"))?;
                             eyre::ensure!(signed.attestation == expected, "settlement signature does not match leader state");
-                            let signer = signed.recover_signer(attestation.domain)?;
-                            let expected_signer = attestation.addresses.get(&follower).copied()
-                                .ok_or_else(|| eyre::eyre!("unknown follower identity"))?;
-                            eyre::ensure!(signer == expected_signer, "settlement signer does not match authenticated peer");
                             let (_, signatures) = attestation.store.as_ref()
                                 .expect("leader must have an attestation store")
                                 .insert_settlement(attestation.domain, signer, signed);

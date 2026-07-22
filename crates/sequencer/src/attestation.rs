@@ -100,9 +100,11 @@ impl SignedSettlementAttestation {
     pub fn recover_signer(&self, domain: AttestationDomain) -> eyre::Result<Address> {
         let signature = Signature::try_from(self.signature.as_ref())
             .map_err(|err| eyre::eyre!("invalid settlement signature: {err}"))?;
-        signature
-            .recover_address_from_prehash(&domain.settlement_digest(&self.attestation))
-            .map_err(|err| eyre::eyre!("failed recovering settlement signer: {err}"))
+        alloy_consensus::crypto::secp256k1::recover_signer(
+            &signature,
+            domain.settlement_digest(&self.attestation),
+        )
+        .map_err(|err| eyre::eyre!("failed recovering settlement signer: {err}"))
     }
 }
 
@@ -216,7 +218,7 @@ impl AttestationStore {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, B256, U256, keccak256};
+    use alloy_primitives::{Address, B256, U256, keccak256, uint};
     use alloy_signer_local::PrivateKeySigner;
     use alloy_sol_types::{SolStruct as _, SolValue as _};
 
@@ -301,6 +303,39 @@ mod tests {
             store.insert_settlement(domain, signer.address(), signed),
             (true, 1)
         );
+    }
+
+    #[test]
+    fn rejects_high_s_settlement_signature() {
+        const SECP256K1_ORDER: U256 =
+            uint!(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141_U256);
+
+        let signer = PrivateKeySigner::random();
+        let domain = domain();
+        let attestation = SettlementAttestation {
+            zoneId: 7,
+            sequencerSetVersion: 3,
+            zoneHeight: U256::from(10),
+            withdrawalBatchIndex: U256::from(1),
+            verifier: Address::repeat_byte(2),
+            tempoBlockNumber: 100,
+            anchorBlockNumber: 100,
+            anchorBlockHash: B256::repeat_byte(3),
+            blockTransitionHash: B256::repeat_byte(4),
+            depositQueueTransitionHash: B256::repeat_byte(5),
+            withdrawalQueueHash: B256::repeat_byte(6),
+            verifierConfigHash: B256::repeat_byte(7),
+        };
+        let mut signed = SignedSettlementAttestation::sign(attestation, domain, &signer).unwrap();
+        let signature = Signature::try_from(signed.signature.as_ref()).unwrap();
+        let high_s_signature = Signature::new(
+            signature.r(),
+            SECP256K1_ORDER - signature.s(),
+            !signature.v(),
+        );
+        signed.signature = Bytes::copy_from_slice(&high_s_signature.as_bytes());
+
+        assert!(signed.recover_signer(domain).is_err());
     }
 
     #[tokio::test]
