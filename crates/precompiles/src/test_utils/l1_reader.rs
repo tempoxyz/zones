@@ -21,7 +21,6 @@ pub struct MockL1Reader {
     registry_storage: Shared<HashMapStorageProvider>,
     storage_requests: Shared<Vec<L1Slot>>,
     fallback: B256,
-    policy_id: u64,
     fail_storage: bool,
 }
 
@@ -32,7 +31,6 @@ impl Default for MockL1Reader {
             registry_storage: Arc::new(Mutex::new(HashMapStorageProvider::new(1))),
             storage_requests: Default::default(),
             fallback: B256::ZERO,
-            policy_id: 0,
             fail_storage: false,
         }
     }
@@ -41,24 +39,6 @@ impl Default for MockL1Reader {
 impl MockL1Reader {
     pub fn insert(&self, address: Address, slot: U256, anchor: u64, value: U256) {
         self.set_u256(address, slot, anchor, value);
-    }
-
-    pub fn allow_all() -> Self {
-        Self::with_policy_id(1)
-    }
-
-    pub fn failing() -> Self {
-        Self {
-            fail_storage: true,
-            ..Self::allow_all()
-        }
-    }
-
-    pub fn with_policy_id(policy_id: u64) -> Self {
-        Self {
-            policy_id,
-            ..Default::default()
-        }
     }
 
     pub fn returning(value: B256) -> Self {
@@ -106,18 +86,6 @@ impl MockL1Reader {
             U256::ONE,
         );
     }
-
-    pub fn seed_transfer_policy_id(&self, token: Address, block_number: u64) {
-        let packed = U256::from(self.policy_id)
-            << (tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8);
-        self.set_u256(
-            token,
-            tempo_precompiles::tip20::tip20_slots::TRANSFER_POLICY_ID,
-            block_number,
-            packed,
-        );
-    }
-
     pub fn seed_simple_policy(
         &self,
         policy_id: u64,

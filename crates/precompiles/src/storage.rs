@@ -7,8 +7,6 @@ use core::{cell::Cell, fmt};
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::SolValue;
 use revm::{context::result::AnyError, precompile::PrecompileError};
-use tempo_precompiles::tip20::tip20_slots;
-use tempo_primitives::TempoAddressExt;
 use thiserror::Error;
 use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
 
@@ -181,19 +179,6 @@ impl From<L1StateError> for PrecompileError {
     fn from(error: L1StateError) -> Self {
         Self::FatalAny(AnyError::new(error))
     }
-}
-
-/// Returns whether this is the packed TIP-20 transfer-policy slot.
-pub fn is_tip20_policy_id_slot(address: Address, key: U256) -> bool {
-    address.is_tip20() && key == tip20_slots::TRANSFER_POLICY_ID
-}
-
-/// Replaces the L1-owned transfer-policy field while preserving Zone-local packed fields.
-pub fn merge_transfer_policy_id(local_slot: U256, l1_slot: U256) -> U256 {
-    let offset_bits = tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
-    let field_bits = core::mem::size_of::<u64>() * 8;
-    let field_mask = ((U256::ONE << field_bits) - U256::ONE) << offset_bits;
-    (local_slot & !field_mask) | (l1_slot & field_mask)
 }
 
 #[cfg(test)]

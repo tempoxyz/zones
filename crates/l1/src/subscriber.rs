@@ -1,6 +1,5 @@
 use super::*;
 use std::collections::HashSet;
-use tempo_primitives::is_tip20_prefix;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -406,7 +405,7 @@ impl L1Subscriber {
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> L1ProcessedEvents {
-        use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
+        use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
@@ -421,10 +420,7 @@ impl L1Subscriber {
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
-                } else if address == TIP403_REGISTRY_ADDRESS
-                    || (is_tip20_prefix(address)
-                        && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH))
-                {
+                } else if address == TIP403_REGISTRY_ADDRESS {
                     invalidated.insert(address);
                 }
             }

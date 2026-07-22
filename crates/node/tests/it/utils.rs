@@ -47,7 +47,6 @@ use tempo_precompiles::{
     storage::{
         Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
     },
-    tip20::tip20_slots,
     tip403_registry::{
         ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
         TIP403Registry, tip403_registry_slots,
@@ -266,22 +265,6 @@ pub(crate) fn seed_raw_tip403_token_policy(
     cache.set(
         TIP403_REGISTRY_ADDRESS,
         slot,
-        block_number,
-        B256::from(packed.to_be_bytes()),
-    );
-}
-
-/// Seed the token-local transfer-policy field used by Tempo's TIP-1092 compatibility fallback.
-fn seed_raw_legacy_tip20_policy(
-    cache: &mut zone_l1::state::L1StateCacheInner,
-    block_number: u64,
-    token: Address,
-    policy_id: u64,
-) {
-    let packed = U256::from(policy_id) << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8);
-    cache.set(
-        token,
-        B256::from(tip20_slots::TRANSFER_POLICY_ID.to_be_bytes()),
         block_number,
         B256::from(packed.to_be_bytes()),
     );
@@ -3644,15 +3627,6 @@ impl L1Fixture {
             let mut cache = cache.write();
             for token in tokens {
                 seed_raw_tip403_token_policy(
-                    &mut cache,
-                    block_number,
-                    token.token,
-                    ALLOW_ALL_POLICY_ID,
-                );
-                // Synthetic enable-token events do not include the accompanying L1 state
-                // transition. Model both the TIP-1092 registry binding and its supported
-                // token-local fallback so same-block deposits remain self-contained.
-                seed_raw_legacy_tip20_policy(
                     &mut cache,
                     block_number,
                     token.token,
