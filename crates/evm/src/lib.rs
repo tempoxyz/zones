@@ -101,23 +101,13 @@ where
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         let inbox_env = env.clone();
         let inbox_l1 = l1.clone();
-        let inbox_portal = self.portal_address;
         precompiles.apply_precompile(&ZONE_INBOX_ADDRESS, move |_| {
-            Some(ZoneInbox::create(
-                inbox_portal,
-                inbox_l1.clone(),
-                &inbox_env,
-            ))
+            Some(ZoneInbox::create(inbox_l1.clone(), &inbox_env))
         });
         let outbox_env = env.clone();
         let outbox_l1 = l1.clone();
-        let outbox_portal = self.portal_address;
         precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, move |_| {
-            Some(create_outbox_precompile(
-                outbox_portal,
-                outbox_l1.clone(),
-                &outbox_env,
-            ))
+            Some(create_outbox_precompile(outbox_l1.clone(), &outbox_env))
         });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
             Some(ChaumPedersenVerify::create(&env))
@@ -519,7 +509,7 @@ mod tests {
         let portal = Address::repeat_byte(0x42);
         let sequencer = Address::repeat_byte(0xa1);
         let token = address!("0x20C00000000000000000000000000000000000AA");
-        let reader = MockL1Reader::with_policy_id(1);
+        let reader = MockL1Reader::default();
 
         let membership_slot = sequencer.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
         reader.set_u256(portal, membership_slot, PARENT, U256::ZERO);
@@ -536,7 +526,6 @@ mod tests {
         let child_policy = U256::from(0xbbbb);
         reader.set_u256(TIP403_REGISTRY_ADDRESS, policy_slot, PARENT, parent_policy);
         reader.set_u256(TIP403_REGISTRY_ADDRESS, policy_slot, CHILD, child_policy);
-        reader.seed_transfer_policy_id(token, CHILD);
 
         let genesis = TempoHeader::default();
         let mut genesis_rlp = Vec::new();

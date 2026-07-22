@@ -70,14 +70,11 @@ use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP
 
 /// Creates the native ZoneOutbox over ordinary Zone storage and direct finalized portal reads.
 #[cfg(feature = "std")]
-pub fn create_outbox_precompile<P>(
-    portal_address: Address,
-    l1: L1State<P>,
-    env: &ZonePrecompileEnv,
-) -> DynPrecompile
+pub fn create_outbox_precompile<P>(l1: L1State<P>, env: &ZonePrecompileEnv) -> DynPrecompile
 where
     P: L1StorageReader,
 {
+    let portal_address = l1.portal_address();
     execution::create_precompile(
         "ZoneOutbox",
         env,

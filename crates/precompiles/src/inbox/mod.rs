@@ -64,14 +64,11 @@ impl ZoneInbox {
     }
 
     /// Create the direct-call-only native Inbox precompile.
-    pub fn create<P>(
-        portal_address: Address,
-        l1: L1State<P>,
-        env: &crate::ZonePrecompileEnv,
-    ) -> DynPrecompile
+    pub fn create<P>(l1: L1State<P>, env: &crate::ZonePrecompileEnv) -> DynPrecompile
     where
         P: L1StorageReader,
     {
+        let portal_address = l1.portal_address();
         crate::execution::create_precompile(
             "ZoneInbox",
             env,

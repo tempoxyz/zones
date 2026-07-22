@@ -66,8 +66,8 @@ impl Harness {
         l1.seed_active_sequencer(PORTAL, 1, SEQUENCER);
         let l1_state = L1State::new(l1.clone(), PORTAL);
         let env = test_env(&ctx);
-        let precompile = ZoneInbox::create(PORTAL, l1_state.clone(), &env);
-        let outbox_precompile = crate::create_outbox_precompile(PORTAL, l1_state.clone(), &env);
+        let precompile = ZoneInbox::create(l1_state.clone(), &env);
+        let outbox_precompile = crate::create_outbox_precompile(l1_state.clone(), &env);
         Ok(Self {
             ctx,
             l1,
