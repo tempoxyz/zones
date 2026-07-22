@@ -7,8 +7,9 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-direct-lifecycle
+        default: neobank-third-party-recipient
         options:
+          - neobank-third-party-recipient
           - neobank-direct-lifecycle
           - neobank-swapped-lifecycle
           - neobank-full-journey
@@ -18,7 +19,7 @@ on:
         description: Number of benchmark accounts.
         type: string
         required: true
-        default: "100"
+        default: "200"
       count:
         description: Number of measured transactions, or complete journeys for a scenario.
         type: string
@@ -91,7 +92,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: direct-lifecycle
+  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: third-party-recipient
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -155,7 +156,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
-          INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
+          INPUT_ACCOUNTS: ${{ inputs.accounts || '200' }}
           INPUT_COUNT: ${{ inputs.count || '1000' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
@@ -179,21 +180,30 @@ jobs:
             requested_phase="neobank-$ZONES_BENCH_DEFAULT_NEOBANK_PRESET"
           fi
           case "$requested_phase" in
+            neobank-third-party-recipient)
+              phase=neobank-e2e
+              neobank_preset=third-party-recipient
+              leases_per_journey=2
+              ;;
             neobank-direct-lifecycle)
               phase=neobank-e2e
               neobank_preset=direct-lifecycle
+              leases_per_journey=1
               ;;
             neobank-full-journey)
               phase=neobank-e2e
               neobank_preset=full-journey
+              leases_per_journey=1
               ;;
             neobank-swapped-lifecycle)
               phase=neobank-e2e
               neobank_preset=swapped-lifecycle
+              leases_per_journey=1
               ;;
             roundtrip|deposit)
               phase="$requested_phase"
               neobank_preset=none
+              leases_per_journey=1
               ;;
             *) echo "::error::unsupported benchmark phase: $requested_phase"; exit 1 ;;
           esac
@@ -228,9 +238,10 @@ jobs:
               exit 1
             fi
           done
+          required_accounts=$((10#$INPUT_MAX_CONCURRENT * leases_per_journey))
           if { [ "$phase" = roundtrip ] || [ "$phase" = neobank-e2e ]; } \
-            && (( 10#$INPUT_MAX_CONCURRENT > 10#$INPUT_ACCOUNTS )); then
-            echo "::error::max-concurrent cannot exceed accounts for scenario leases"
+            && (( required_accounts > 10#$INPUT_ACCOUNTS )); then
+            echo "::error::$requested_phase requires at least $required_accounts accounts for max-concurrent=$INPUT_MAX_CONCURRENT"
             exit 1
           fi
           case "$INPUT_STATE_BLOAT_GIB" in 0|1|10|100) ;; *) exit 1 ;; esac

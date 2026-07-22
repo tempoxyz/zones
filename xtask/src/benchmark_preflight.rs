@@ -2146,6 +2146,7 @@ mod tests {
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
             "../neobank/direct-lifecycle-scenario.yml",
+            "../neobank/third-party-recipient-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2230,6 +2231,103 @@ mod tests {
             direct_steps[2]["with"]["amount"]["var"],
             "earn_deposit.callback.args.shares"
         );
+
+        let third_party: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("third-party-recipient-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let third_party_bindings = &third_party["scenario"]["bindings"];
+        for account in ["account_a", "account_b"] {
+            assert_eq!(third_party_bindings[account]["account"]["pool"], "users");
+            assert_eq!(third_party_bindings[account]["account"]["select"], "lease");
+        }
+        assert_eq!(
+            third_party_bindings
+                .as_mapping()
+                .unwrap()
+                .values()
+                .filter(|binding| binding["account"]["select"] == "lease")
+                .count(),
+            2
+        );
+
+        let third_party_steps = third_party["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(third_party_steps.len(), 4);
+        for step in third_party_steps {
+            assert_eq!(
+                step["with"]["fee_token"],
+                "0x2000000000000000000000000000000000000002"
+            );
+        }
+        assert_eq!(third_party_steps[0]["as"], "account_a_entry");
+        assert_eq!(third_party_steps[0]["use"], "encrypted-zone-entry");
+        assert_eq!(
+            third_party_steps[0]["with"]["sender"]["var"],
+            "account_a.ref"
+        );
+        assert_eq!(
+            third_party_steps[0]["with"]["recipient"]["var"],
+            "account_a.address"
+        );
+        assert_eq!(
+            third_party_steps[0]["with"]["token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        assert_eq!(third_party_steps[1]["as"], "account_b_fee_entry");
+        assert_eq!(third_party_steps[1]["use"], "encrypted-zone-entry");
+        assert_eq!(
+            third_party_steps[1]["with"]["sender"]["var"],
+            "account_b.ref"
+        );
+        assert_eq!(
+            third_party_steps[1]["with"]["recipient"]["var"],
+            "account_b.address"
+        );
+
+        let third_party_deposit = &third_party_steps[2];
+        assert_eq!(third_party_deposit["as"], "earn_deposit");
+        assert_eq!(third_party_deposit["use"], "earn-deposit-and-return");
+        assert_eq!(
+            third_party_deposit["with"]["sender"]["var"],
+            "account_a.ref"
+        );
+        assert_eq!(
+            third_party_deposit["with"]["recipient"]["var"],
+            "account_b.address"
+        );
+        assert_eq!(
+            third_party_deposit["with"]["input_token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        for field in ["fallback_recipient", "refund_recipient"] {
+            assert_eq!(
+                third_party_deposit["with"][field]["var"],
+                "account_a.address"
+            );
+        }
+
+        let third_party_redeem = &third_party_steps[3];
+        assert_eq!(third_party_redeem["as"], "earn_redeem");
+        assert_eq!(third_party_redeem["use"], "earn-redeem-and-return");
+        assert_eq!(third_party_redeem["with"]["sender"]["var"], "account_b.ref");
+        assert_eq!(
+            third_party_redeem["with"]["recipient"]["var"],
+            "account_a.address"
+        );
+        assert_eq!(
+            third_party_redeem["with"]["output_token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        assert_eq!(
+            third_party_redeem["with"]["amount"]["var"],
+            "earn_deposit.callback.args.shares"
+        );
+        for field in ["fallback_recipient", "refund_recipient"] {
+            assert_eq!(
+                third_party_redeem["with"][field]["var"],
+                "account_b.address"
+            );
+        }
 
         let fragments: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("scenario-fragments.yml")).unwrap(),
@@ -2673,6 +2771,7 @@ mod tests {
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
             "../neobank/direct-lifecycle-scenario.yml",
+            "../neobank/third-party-recipient-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2701,6 +2800,7 @@ mod tests {
             ("private-flow-scenario.yml", 22),
             ("swapped-lifecycle-scenario.yml", 23),
             ("direct-lifecycle-scenario.yml", 23),
+            ("third-party-recipient-scenario.yml", 28),
         ] {
             let rendered_path = output.join(format!("{scenario}.rendered.yml"));
             let validation = Command::new(txgen)

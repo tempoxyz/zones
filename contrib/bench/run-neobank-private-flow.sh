@@ -41,7 +41,7 @@ for name in L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
 do need "$name"; done
 
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
-ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
+ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-200}"
 ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
 ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-1000}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-20}"
@@ -60,22 +60,31 @@ ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
-ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-direct-lifecycle}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-third-party-recipient}"
 case "$ZONES_BENCH_NEOBANK_PRESET" in
     direct-lifecycle)
         scenario_file=direct-lifecycle-scenario.yml
         base_token_label=pathusd
         expected_base_token="$ZONES_BENCH_PATHUSD"
+        leases_per_journey=1
+        ;;
+    third-party-recipient)
+        scenario_file=third-party-recipient-scenario.yml
+        base_token_label=pathusd
+        expected_base_token="$ZONES_BENCH_PATHUSD"
+        leases_per_journey=2
         ;;
     full-journey)
         scenario_file=private-flow-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
+        leases_per_journey=1
         ;;
     swapped-lifecycle)
         scenario_file=swapped-lifecycle-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
+        leases_per_journey=1
         ;;
     *) die "unsupported neobank preset: $ZONES_BENCH_NEOBANK_PRESET" ;;
 esac
@@ -87,8 +96,11 @@ for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER
     ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_SEED
 do uint "$name"; done
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
-(( 10#$ZONES_BENCH_MAX_CONCURRENT <= 10#$ZONES_BENCH_ACCOUNTS )) || die "max-concurrent cannot exceed accounts"
-journeys_per_account=$(((10#$ZONES_BENCH_COUNT + 10#$ZONES_BENCH_ACCOUNTS - 1) / 10#$ZONES_BENCH_ACCOUNTS))
+required_accounts=$((10#$ZONES_BENCH_MAX_CONCURRENT * leases_per_journey))
+(( required_accounts <= 10#$ZONES_BENCH_ACCOUNTS )) ||
+    die "$ZONES_BENCH_NEOBANK_PRESET requires at least $required_accounts accounts for max-concurrent=$ZONES_BENCH_MAX_CONCURRENT"
+account_journeys=$((10#$ZONES_BENCH_COUNT * leases_per_journey))
+journeys_per_account=$(((account_journeys + 10#$ZONES_BENCH_ACCOUNTS - 1) / 10#$ZONES_BENCH_ACCOUNTS))
 
 stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }

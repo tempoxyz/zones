@@ -26,10 +26,10 @@ Provision the existing two-validator L1 plus authenticated private Zone RPC.
 The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile creates
 EarnToken through the native TIP-20 factory and selects the initial Zone token
 for the requested preset: DLUSD for the full and swapped lifecycle flows, or
-pathUSD for the direct lifecycle flow. It deploys the copied Earn proxy stack
-outside the measured interval and enables EarnToken on the portal. The stable
-asset not selected by the preset remains L1-only. The profile does not replace
-these assets with ordinary ERC-20 test contracts.
+pathUSD for the direct and third-party-recipient lifecycle flows. It deploys
+the copied Earn proxy stack outside the measured interval and enables EarnToken
+on the portal. The stable asset not selected by the preset remains L1-only. The
+profile does not replace these assets with ordinary ERC-20 test contracts.
 
 The profile has zero user bridge and withdrawal protocol fees. It retains a
 separate generic profile with nonzero bootstrap fees. The token authorization
@@ -54,8 +54,13 @@ journey. `swapped-lifecycle-scenario.yml` isolates the encrypted DLUSD entry,
 swapped Earn deposit, and swapped Earn redemption path used by the lifecycle
 load test. `direct-lifecycle-scenario.yml` instead measures an encrypted pathUSD
 entry, a pathUSD vault deposit without a DEX swap, and redemption of the exact
-EarnToken shares emitted by that deposit back to pathUSD. All three compose
-shared, receipt-correlated boundaries from `scenario-fragments.yml`.
+EarnToken shares emitted by that deposit back to pathUSD.
+`third-party-recipient-scenario.yml` measures the same direct path across two
+users: account A enters with pathUSD and sends the encrypted EarnToken return
+to account B; B redeems the exact emitted shares and sends the encrypted
+pathUSD return to A. It also measures a separate encrypted pathUSD entry for B
+as the Zone fee buffer before B submits the redemption. All four scenarios
+compose shared, receipt-correlated boundaries from `scenario-fragments.yml`.
 `l1-onramp.yml` and `zone-flow.yml` contain the underlying transaction templates
 and remain separate from the generic roundtrip assets.
 
@@ -93,9 +98,10 @@ contrib/bench/run-neobank-private-flow.sh
 ```
 
 Set `ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle` before provisioning for the
-swapped stablecoin lifecycle, or `full-journey` for the five-boundary journey.
-The selected preset is recorded in the workflow summary and run metadata while
-the rendered scenario remains at the stable results-renderer path.
+swapped stablecoin lifecycle, `third-party-recipient` for the two-user direct
+lifecycle, or `full-journey` for the five-boundary journey. The selected preset
+is recorded in the workflow summary and run metadata while the rendered
+scenario remains at the stable results-renderer path.
 
 To provision and run the direct path independently, use the same preset for
 both commands so provisioning selects pathUSD as the enabled Zone stable asset:
@@ -109,6 +115,27 @@ contrib/bench/provision-topology.sh up
 source "$ZONES_BENCH_ENV_FILE"
 contrib/bench/run-neobank-private-flow.sh
 ```
+
+To run the third-party-recipient path independently, provision its pathUSD plus
+EarnToken topology and keep the same preset selected for the scenario runner:
+
+```bash
+forge build --root specs/ref-impls
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/third-party-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=third-party-recipient
+export ZONES_BENCH_ACCOUNTS=200
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
+contrib/bench/run-neobank-private-flow.sh
+```
+
+Each third-party journey leases two distinct accounts for its full lifetime so
+the EarnToken return and redemption cannot be conflated with a self-transfer.
+A maximum concurrency of 100 therefore requires at least 200 benchmark
+accounts. Both users' pathUSD entries, the A-to-B encrypted EarnToken return,
+and the B-to-A encrypted pathUSD return are inside the measured boundary;
+fixture deployment, approvals, and funding remain setup traffic.
 
 That runner should provision the existing topology, deploy and configure the
 fixtures outside measurement, create the private-RPC authorization map in a
