@@ -85,6 +85,7 @@ if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark
 mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_RENDERED_SCENARIO")"
 secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-neobank-auth.XXXXXX")"
 chmod 700 "$secret_dir"
+export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 auth_pid=""
 cleanup() {
     local status=$?
@@ -224,8 +225,6 @@ fi
 [[ -s "$ZONES_BENCH_RENDERED_SCENARIO" ]] ||
     die "txgen did not render the composed private-flow scenario"
 stage_end render_scenario
-
-export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"
 
 # The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
 stage_start auth_token_map
