@@ -671,7 +671,6 @@ fn malformed_legacy_withdrawal_reverts_with_empty_data() -> eyre::Result<()> {
 #[test]
 fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
-    harness.set_token_enabled(false)?;
     let token = harness.token;
     assert_revert(
         harness.call_static(

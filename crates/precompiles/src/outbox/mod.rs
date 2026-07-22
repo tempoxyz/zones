@@ -11,7 +11,7 @@ use revm::interpreter::instructions::utility::IntoAddress;
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, StorageCtx},
+    storage::{ContractStorage, Handler, Mapping, StorageCtx},
     tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
@@ -151,8 +151,9 @@ impl ZoneOutbox {
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
         }
-        if !TIP20Token::from_address(call.token)?.is_initialized()? {
-            return Err(TIP20Error::uninitialized().into());
+        let mut zone_token = TIP20Token::from_address(call.token)?;
+        if !zone_token.is_initialized()? {
+            return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
         }
         self.enforce_withdrawal_block_cap()?;
 
