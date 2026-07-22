@@ -172,7 +172,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .wrap_err("failed to connect private RPC zone provider")?
             .erased();
         let tempo_state =
-            tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
+            tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider);
         let rpc = Self {
             eth,
             config,
