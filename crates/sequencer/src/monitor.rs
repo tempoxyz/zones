@@ -37,6 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, NO_QUEUE_INDEX, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
+    attestation::AttestationStore,
     rpc::rpc_connection_config,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_finalized_batch,
@@ -84,6 +85,8 @@ pub struct ZoneMonitorConfig {
     pub portal_address: Address,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
+    /// Shared P2P attestations, required after a settlement signer set is activated.
+    pub attestation_store: Option<AttestationStore>,
 }
 
 /// Monitors the Zone L2 chain for new finalized batch boundaries and submits
@@ -189,12 +192,13 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
+        let mut batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
             config.portal_address,
             l1_provider,
             signer,
             config.batch_anchor_config,
         );
+        batch_submitter.set_attestation_store(config.attestation_store.clone());
 
         let prev_zone_block_hash = batch_submitter
             .read_portal_block_hash()
@@ -998,6 +1002,7 @@ mod tests {
             batch_interval_blocks: 1,
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
+            attestation_store: None,
         };
         let zone_provider = mock_provider(zone);
         let l1_provider = mock_provider(l1);
@@ -1036,6 +1041,7 @@ mod tests {
             batch_interval_blocks: 1,
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
+            attestation_store: None,
         };
 
         l1.push_failure_msg("boom");
