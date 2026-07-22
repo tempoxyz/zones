@@ -77,6 +77,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     // bytes, then independently validated by the leader pool for the next L1-derived build.
     let (follower_wallet, sender) = local_dev_zone_account(&follower)?;
     let transfer_recipient = address!("0x0000000000000000000000000000000000009abc");
+    fixture.seed_no_receive_policy(transfer_recipient)?;
     let sender_deposit = fixture.make_deposit(PATH_USD_ADDRESS, sender, sender, amount);
     fixture.inject_deposits(leader.deposit_queue(), vec![sender_deposit]);
     leader
