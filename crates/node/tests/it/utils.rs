@@ -3369,20 +3369,6 @@ impl PrivateRpcTestCtx {
         eyre::ensure!(receipt.status(), "revokeKey failed");
         Ok(())
     }
-
-    /// Query `zone_getDepositStatus` via the private RPC as a specific user.
-    pub(crate) async fn get_deposit_status_as_user(
-        &self,
-        tempo_block_number: u64,
-        signer: &alloy_signer_local::PrivateKeySigner,
-    ) -> eyre::Result<serde_json::Value> {
-        self.call_as_user(
-            "zone_getDepositStatus",
-            serde_json::json!([format!("0x{tempo_block_number:x}")]),
-            signer,
-        )
-        .await
-    }
 }
 
 async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {

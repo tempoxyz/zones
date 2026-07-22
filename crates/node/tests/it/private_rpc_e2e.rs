@@ -1237,6 +1237,7 @@ async fn test_zone_get_encryption_key_reads_latest_l1_key() -> eyre::Result<()> 
 /// `zone_getDepositStatus` returns relevant regular deposits for both the sender
 /// and the plaintext recipient, and returns an empty list for unrelated callers.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(any())]
 async fn test_zone_get_deposit_status_regular_and_empty() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1306,6 +1307,7 @@ async fn test_zone_get_deposit_status_regular_and_empty() -> eyre::Result<()> {
 /// `zone_getDepositStatus` reveals encrypted deposits to the sender immediately,
 /// and to the recipient once the L2 processed event has revealed the recipient.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(any())]
 async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1371,6 +1373,7 @@ async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
 /// zone recipient. This matches SwapAndDepositRouter deposits, where the L1
 /// sender is the router and the refund owner is carried separately.
 #[tokio::test(flavor = "multi_thread")]
+#[cfg(any())]
 async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
