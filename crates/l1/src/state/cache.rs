@@ -147,6 +147,7 @@ impl L1StateCacheInner {
     }
 
     /// Returns the current anchor block.
+    #[cfg(test)]
     pub fn anchor(&self) -> NumHash {
         self.anchor
     }

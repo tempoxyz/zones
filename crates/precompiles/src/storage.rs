@@ -4,11 +4,13 @@
 use alloc::{rc::Rc, string::String};
 use core::{cell::Cell, fmt};
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_sol_types::SolValue;
 use revm::{context::result::AnyError, precompile::PrecompileError};
 use tempo_precompiles::tip20::tip20_slots;
 use tempo_primitives::TempoAddressExt;
 use thiserror::Error;
+use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
 
 pub(crate) use tempo_precompiles::storage::*;
 
@@ -108,6 +110,17 @@ impl<P: L1StorageReader> L1State<P> {
     ) -> Result<B256, L1StateError> {
         self.set_anchor(block_number)?;
         self.provider.read_l1_storage(account, slot, block_number)
+    }
+
+    /// Return whether `account` belongs to the active sequencer set at `block_number`.
+    pub fn is_active_sequencer(
+        &self,
+        portal_address: Address,
+        account: Address,
+        block_number: u64,
+    ) -> Result<bool, L1StateError> {
+        let slot = keccak256((account, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        Ok(self.read_l1_storage(portal_address, slot, block_number)? != B256::ZERO)
     }
 }
 
@@ -233,5 +246,22 @@ mod tests {
         l1.reset_anchor();
         l1.advance_anchor(10, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
+    }
+
+    #[test]
+    fn sequencer_membership_uses_requested_anchor() {
+        let portal = Address::repeat_byte(0x11);
+        let current = Address::repeat_byte(0x22);
+        let next = Address::repeat_byte(0x33);
+        let reader = MockL1Reader::default();
+        reader.seed_active_sequencer(portal, 7, current);
+        reader.seed_active_sequencer(portal, 8, next);
+        let l1 = L1State::new(reader);
+
+        assert!(l1.is_active_sequencer(portal, current, 7).unwrap());
+        assert!(!l1.is_active_sequencer(portal, next, 7).unwrap());
+        l1.reset_anchor();
+        assert!(l1.is_active_sequencer(portal, next, 8).unwrap());
+        assert!(!l1.is_active_sequencer(portal, current, 8).unwrap());
     }
 }

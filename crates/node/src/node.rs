@@ -894,7 +894,12 @@ where
         let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
         // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
-        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider);
+        let evm_config = ZoneEvmConfig::new(
+            ctx.chain_spec(),
+            tempo_chain_spec,
+            l1_provider,
+            self.l1_state_provider_config.portal_address,
+        );
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)

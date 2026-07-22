@@ -20,9 +20,8 @@ pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 use crate::{
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        L1State, L1StorageReader, SequencerSetExt, TIP403_REGISTRY_ADDRESS, TempoState,
-        ZONE_TIP20_FACTORY_ADDRESS, ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile,
-        create_tip403_precompile,
+        L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_TIP20_FACTORY_ADDRESS,
+        ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile, create_tip403_precompile,
     },
     tx_context::ZoneTxContext,
 };
@@ -33,6 +32,7 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
 };
+use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
@@ -70,15 +70,19 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
     l1_reader: L1,
+    portal_address: Address,
 }
 
 impl<L1> ZoneEvmFactory<L1>
 where
-    L1: L1StorageReader + SequencerSetExt,
+    L1: L1StorageReader,
 {
-    /// Create a new factory with the given L1 state reader.
-    pub fn new(l1_reader: L1) -> Self {
-        Self { l1_reader }
+    /// Create a new factory with the given L1 state reader and Zone portal address.
+    pub fn new(l1_reader: L1, portal_address: Address) -> Self {
+        Self {
+            l1_reader,
+            portal_address,
+        }
     }
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>>(
@@ -108,11 +112,17 @@ where
         precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
             Some(create_tip403_precompile(&tip403_env))
         });
-        let sequencers: Arc<dyn SequencerSetExt> = Arc::new(self.l1_reader.clone());
+        let tip20_l1 = l1.clone();
+        let portal_address = self.portal_address;
         let tempo_env = PrecompileEnv::new(&cfg, actions, non_creditable_slots);
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
-                Some(create_tip20_precompile(*address, &env, sequencers.clone()))
+                Some(create_tip20_precompile(
+                    *address,
+                    &env,
+                    tip20_l1.clone(),
+                    portal_address,
+                ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
                 Some(TipFeeManager::create_precompile(&tempo_env))
             } else if *address == STABLECOIN_DEX_ADDRESS {
@@ -133,7 +143,7 @@ where
 
 impl<L1> EvmFactory for ZoneEvmFactory<L1>
 where
-    L1: L1StorageReader + SequencerSetExt,
+    L1: L1StorageReader,
 {
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I, L1>;
     type Context<DB: Database> = TempoCtx<L1OverlayDB<DB, L1>>;
@@ -185,7 +195,7 @@ impl ZoneBlockAssembler {
 
 impl<L1> BlockAssembler<ZoneEvmConfig<L1>> for ZoneBlockAssembler
 where
-    L1: L1StorageReader + SequencerSetExt,
+    L1: L1StorageReader,
 {
     type Block = Block;
 
@@ -236,20 +246,25 @@ pub struct ZoneEvmConfig<L1 = L1StateProvider> {
 
 impl<L1> ZoneEvmConfig<L1>
 where
-    L1: L1StorageReader + SequencerSetExt,
+    L1: L1StorageReader,
 {
     /// Creates a Zone EVM config using Tempo hardfork conditions from the parent L1 spec.
     pub fn new(
         zone_chain_spec: Arc<ZoneChainSpec>,
         tempo_chain_spec: Arc<TempoChainSpec>,
         l1_provider: L1,
+        portal_address: Address,
     ) -> Self {
         let chain_spec = compose_chain_spec(&zone_chain_spec, &tempo_chain_spec);
-        Self::from_chain_spec(chain_spec, l1_provider)
+        Self::from_chain_spec(chain_spec, l1_provider, portal_address)
     }
 
-    fn from_chain_spec(chain_spec: Arc<ZoneChainSpec>, l1_provider: L1) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_provider);
+    fn from_chain_spec(
+        chain_spec: Arc<ZoneChainSpec>,
+        l1_provider: L1,
+        portal_address: Address,
+    ) -> Self {
+        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let tempo_chain_spec = chain_spec.inner.clone();
         let inner = TempoEvmConfig::new(tempo_chain_spec);
         let block_assembler = ZoneBlockAssembler::new(chain_spec.clone());
@@ -290,7 +305,7 @@ impl ZoneEvmConfig {
             ..Default::default()
         };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::from_chain_spec(chain_spec, l1_provider)
+        Self::from_chain_spec(chain_spec, l1_provider, Address::ZERO)
     }
 }
 
@@ -306,7 +321,7 @@ impl<L1> fmt::Debug for ZoneEvmConfig<L1> {
 
 impl<L1> BlockExecutorFactory for ZoneEvmConfig<L1>
 where
-    L1: L1StorageReader + SequencerSetExt,
+    L1: L1StorageReader,
 {
     type EvmFactory = ZoneEvmFactory<L1>;
     type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
@@ -335,7 +350,7 @@ where
 
 impl<L1> ConfigureEvm for ZoneEvmConfig<L1>
 where
-    L1: L1StorageReader + SequencerSetExt + Unpin,
+    L1: L1StorageReader + Unpin,
 {
     type Primitives = TempoPrimitives;
     type Error = TempoEvmError;
@@ -411,7 +426,7 @@ where
 
 impl<L1> ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig<L1>
 where
-    L1: L1StorageReader + SequencerSetExt + Unpin,
+    L1: L1StorageReader + Unpin,
 {
     fn evm_env_for_payload(
         &self,
