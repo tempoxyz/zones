@@ -10,8 +10,7 @@ use crate::{
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
-    Evm, EvmFactory,
-    block::{BlockExecutorFactory, CommitChanges, TxResult},
+    Evm, EvmFactory, block::BlockExecutorFactory,
     revm::context_interface::block::Block as RevmBlock,
 };
 use alloy_primitives::{Bytes, U256};
@@ -254,7 +253,7 @@ where
         })?;
 
         let pending_withdrawals_at_block_start =
-            read_pending_withdrawals_from_outbox(&mut builder, block_number)?;
+            read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
         let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
@@ -553,7 +552,8 @@ where
         return Ok(());
     }
 
-    let pending_withdrawals = read_pending_withdrawals_from_outbox(builder, block_number)?;
+    let pending_withdrawals =
+        read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
     let encrypted_senders = pending_withdrawals
         .iter()
         .map(|request| {
@@ -646,69 +646,42 @@ where
 }
 
 /// Read all pending withdrawals in the ZoneOutbox
-fn read_pending_withdrawals_from_outbox<B>(
-    builder: &mut B,
+fn read_pending_withdrawals_from_outbox<E>(
+    evm: &mut E,
     block_number: u64,
 ) -> Result<Vec<abi::ZoneOutbox::PendingWithdrawal>, PayloadBuilderError>
 where
-    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
+    E: Evm,
 {
     let calldata = abi::ZoneOutbox::getPendingWithdrawalsCall {}.abi_encode();
-    let output = execute_outbox_view_call(
-        builder,
-        calldata.into(),
-        block_number,
-        "getPendingWithdrawals",
-    )?;
+    let call_result = evm
+        .transact_system_call(TEMPO_SYSTEM_TX_SENDER, ZONE_OUTBOX_ADDRESS, calldata.into())
+        .map_err(|err| {
+            error!(
+                ?err,
+                block_number, "ZoneOutbox getPendingWithdrawals view call failed"
+            );
+            PayloadBuilderError::evm(err)
+        })?;
+
+    if !call_result.result.is_success() {
+        error!(
+            target: "zone::payload",
+            block_number,
+            result = ?call_result.result,
+            "ZoneOutbox getPendingWithdrawals view call failed"
+        );
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!("ZoneOutbox getPendingWithdrawals view failed at zone block {block_number}"),
+        )));
+    }
+    let output = call_result.result.into_output().unwrap_or_default();
 
     abi::ZoneOutbox::getPendingWithdrawalsCall::abi_decode_returns(&output).map_err(|err| {
         PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
             "failed to decode getPendingWithdrawals return data: {err}"
         )))
     })
-}
-
-fn execute_outbox_view_call<B>(
-    builder: &mut B,
-    calldata: Bytes,
-    block_number: u64,
-    label: &str,
-) -> Result<Bytes, PayloadBuilderError>
-where
-    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
-{
-    let tx = TxLegacy {
-        chain_id: None,
-        nonce: 0,
-        gas_price: 0,
-        // Tempo applies its fixed internal system-call limit and reports zero gas used.
-        // Keeping the envelope limit at zero also lets this simulation run after a full block.
-        gas_limit: 0,
-        to: ZONE_OUTBOX_ADDRESS.into(),
-        value: U256::ZERO,
-        input: calldata,
-    };
-    let tx = Recovered::new_unchecked(
-        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
-        TEMPO_SYSTEM_TX_SENDER,
-    );
-    let mut output = None;
-
-    match builder.execute_transaction_with_commit_condition(tx, |result| {
-        let evm_result = result.result();
-        output = Some(evm_result.result.output().cloned().unwrap_or_default());
-        CommitChanges::No
-    }) {
-        Ok(_) => output.ok_or_else(|| {
-            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                "ZoneOutbox {label} view returned no output at zone block {block_number}"
-            )))
-        }),
-        Err(err) => {
-            error!(?err, label, "ZoneOutbox view simulation failed");
-            Err(PayloadBuilderError::evm(err))
-        }
-    }
 }
 
 /// Build the `advanceTempo(header, deposits, decryptions, enabledTokens)` system transaction.
