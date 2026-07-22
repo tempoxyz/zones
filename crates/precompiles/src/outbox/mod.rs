@@ -12,7 +12,8 @@ use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, StorageCtx},
-    tip20::{ITIP20, TIP20Token},
+    tip20::{ITIP20, TIP20Error, TIP20Token},
+    tip20_factory::TIP20Factory,
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
@@ -166,10 +167,15 @@ impl ZoneOutbox {
 
         validate_gas_limit(call.gasLimit)?;
 
-        self.ensure_token_enabled(l1, portal_address, call.token)?;
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
         }
+        if !TIP20Factory::new().is_tip20(call.token)? {
+            return Err(TIP20Error::invalid_token().into());
+        }
+
+        let mut zone_token = TIP20Token::from_address(call.token)?;
+        self.ensure_token_enabled(l1, portal_address, call.token)?;
         self.enforce_withdrawal_block_cap()?;
 
         // If necessary, validate reveal
@@ -178,7 +184,6 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
-        let mut zone_token = TIP20Token::from_address(call.token)?;
         if caller == fee_payer {
             let total = call
                 .amount

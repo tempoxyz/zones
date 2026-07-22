@@ -286,6 +286,31 @@ fn request_withdrawal_rejects_missing_transaction_hash() -> eyre::Result<()> {
         .abi_encode(),
     );
     assert_revert(result, ZoneOutboxError::invalid_current_tx_hash());
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "missing transaction context must be rejected before portal reads"
+    );
+    Ok(())
+}
+
+#[test]
+fn request_withdrawal_rejects_unknown_token_before_portal_read() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let result = harness.request_custom(ZoneOutboxAbi::requestWithdrawalCall {
+        token: address!("0x20c000000000000000000000000000000000ffff"),
+        to: BOB,
+        amount: 1,
+        memo: B256::ZERO,
+        gasLimit: 0,
+        fallbackRecipient: ALICE,
+        data: Bytes::new(),
+        revealTo: Bytes::new(),
+    });
+    assert_revert(result, TIP20Error::invalid_token());
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "unknown tokens must be rejected before portal reads"
+    );
     Ok(())
 }
 

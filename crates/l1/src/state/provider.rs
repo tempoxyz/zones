@@ -8,7 +8,7 @@
 //! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
 //! ([`L1StateProvider::get_storage_async`]) entry point are provided. The synchronous variant is
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
-//! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
+//! call a bounded number of times with exponential backoff.
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -23,6 +23,8 @@ use zone_precompiles::{L1StateError, L1StorageReader, SequencerExt};
 
 use super::cache::L1StateCache;
 use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
+
+const DEFAULT_MAX_SYNC_ATTEMPTS: NonZeroU32 = NonZeroU32::new(3).unwrap();
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -42,7 +44,8 @@ pub struct L1StateProviderConfig {
     /// Interval between WebSocket reconnection attempts.
     /// Defaults to 100ms.
     pub retry_connection_interval: std::time::Duration,
-    /// Maximum number of synchronous RPC attempts per cache miss. `None` retries indefinitely.
+    /// Maximum number of synchronous RPC attempts per cache miss. Defaults to 3.
+    /// `None` retries indefinitely and should only be used by trusted callers.
     pub max_sync_attempts: Option<NonZeroU32>,
 }
 
@@ -55,7 +58,7 @@ impl Default for L1StateProviderConfig {
             max_retries: 10,
             initial_backoff_ms: 20,
             retry_connection_interval: std::time::Duration::from_millis(100),
-            max_sync_attempts: None,
+            max_sync_attempts: Some(DEFAULT_MAX_SYNC_ATTEMPTS),
         }
     }
 }
@@ -167,10 +170,8 @@ impl L1StateProvider {
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
-    /// On cache miss it retries the RPC call indefinitely until the value is fetched. The
-    /// transport layer handles backoff internally via [`RetryBackoffLayer`], so retries here
-    /// are immediate. This ensures a transient L1 RPC outage stalls block production rather
-    /// than bricking the chain with a hard precompile error.
+    /// On cache miss it retries the RPC call up to the configured attempt limit. The transport
+    /// layer handles backoff internally via [`RetryBackoffLayer`], so retries here are immediate.
     ///
     /// # Panics
     ///
