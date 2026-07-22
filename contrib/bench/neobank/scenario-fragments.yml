@@ -8,6 +8,7 @@ fragments:
       sender: value
       recipient: value
       token: value
+      amount: value
       memo: value
     outputs:
       processed: log
@@ -23,6 +24,7 @@ fragments:
             sender: { param: sender }
             to: { param: recipient }
             token: { param: token }
+            amount: { param: amount }
             memo: { param: memo }
           max_block_range: 1000
         save: processed
@@ -90,6 +92,7 @@ fragments:
           sender: { param: sender_address }
           recipient: { param: recipient }
           token: { param: token }
+          amount: { var: enqueued.args.netAmount }
           memo: { param: memo }
 
   earn-deposit-and-return:
@@ -107,6 +110,7 @@ fragments:
       refund_recipient: address
     outputs:
       request: submit
+      request_receipt: receipt
       requested: log
       withdrawal_processed: log
       callback: log
@@ -154,6 +158,12 @@ fragments:
                         refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
+      - wait_receipt:
+          chain: zone
+          transaction_hash: { var: request.tx_hash }
+          sender: { var: request.sender }
+        timeout: 45s
+        save: request_receipt
       - wait_log:
           chain: zone
           from_block: { var: zone_before.block_number }
@@ -208,6 +218,7 @@ fragments:
           sender: "__GATEWAY__"
           recipient: { param: recipient }
           token: "__EARN_TOKEN__"
+          amount: { var: callback.args.shares }
           memo: { param: action_id }
 
   earn-redeem-and-return:
@@ -225,6 +236,7 @@ fragments:
       refund_recipient: address
     outputs:
       request: submit
+      request_receipt: receipt
       requested: log
       withdrawal_processed: log
       callback: log
@@ -272,6 +284,12 @@ fragments:
                         refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
+      - wait_receipt:
+          chain: zone
+          transaction_hash: { var: request.tx_hash }
+          sender: { var: request.sender }
+        timeout: 45s
+        save: request_receipt
       - wait_log:
           chain: zone
           from_block: { var: zone_before.block_number }
@@ -326,4 +344,5 @@ fragments:
           sender: "__GATEWAY__"
           recipient: { param: recipient }
           token: { param: output_token }
+          amount: { var: callback.args.outputAmount }
           memo: { param: action_id }

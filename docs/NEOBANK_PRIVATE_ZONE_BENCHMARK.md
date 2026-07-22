@@ -24,17 +24,20 @@ the Zone specs; benchmark provisioning never fetches or clones external source.
 
 Provision the existing two-validator L1 plus authenticated private Zone RPC.
 The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile creates
-EarnToken through the native TIP-20 factory, makes DLUSD the initial Zone token,
-deploys the copied Earn proxy stack outside the measured interval, enables
-EarnToken on the portal, and keeps pathUSD as L1-only vault collateral. It does
-not replace those assets with ordinary ERC-20 test contracts.
+EarnToken through the native TIP-20 factory and selects the initial Zone token
+for the requested preset: DLUSD for the full and swapped lifecycle flows, or
+pathUSD for the direct lifecycle flow. It deploys the copied Earn proxy stack
+outside the measured interval and enables EarnToken on the portal. The stable
+asset not selected by the preset remains L1-only. The profile does not replace
+these assets with ordinary ERC-20 test contracts.
 
 The profile has zero user bridge and withdrawal protocol fees. It retains a
 separate generic profile with nonzero bootstrap fees. The token authorization
-map must permit only DLUSD and EarnToken in the Zone. The only callback target
-is the gateway fixture and the only terminal off-ramp recipient is the bridge
-wallet fixture. No authorization map, mnemonic, private key, encryption
-payload, or bearer token belongs in rendered output or an uploaded artifact.
+map must permit only the preset's selected stable asset and EarnToken in the
+Zone. The only callback target is the gateway fixture and the only terminal
+off-ramp recipient is the bridge wallet fixture. No authorization map,
+mnemonic, private key, encryption payload, or bearer token belongs in rendered
+output or an uploaded artifact.
 
 Each composable request uses the exact eight-argument withdrawal overload, a
 10,000,000-gas callback budget, an empty `revealTo`, an account fallback
@@ -49,10 +52,12 @@ event. Balance polling is not a completion signal.
 `contrib/bench/neobank/private-flow-scenario.yml` describes the complete
 journey. `swapped-lifecycle-scenario.yml` isolates the encrypted DLUSD entry,
 swapped Earn deposit, and swapped Earn redemption path used by the lifecycle
-load test. Both compose shared, receipt-correlated boundaries from
-`scenario-fragments.yml`. `l1-onramp.yml` and `zone-flow.yml` contain the
-underlying transaction templates and remain separate from the generic
-roundtrip assets.
+load test. `direct-lifecycle-scenario.yml` instead measures an encrypted pathUSD
+entry, a pathUSD vault deposit without a DEX swap, and redemption of the exact
+EarnToken shares emitted by that deposit back to pathUSD. All three compose
+shared, receipt-correlated boundaries from `scenario-fragments.yml`.
+`l1-onramp.yml` and `zone-flow.yml` contain the underlying transaction templates
+and remain separate from the generic roundtrip assets.
 
 The transaction generator prepares all three encrypted payloads in memory from
 the leased account, action ID, portal address, and current portal encryption
@@ -71,7 +76,11 @@ non-secret runtime metadata:
 
 ```bash
 forge build --root specs/ref-impls
-ZONES_BENCH_PROFILE=neobank contrib/bench/provision-topology.sh up
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/neobank-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=direct-lifecycle
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
 ```
 
 The dedicated runner renders the profile assets, prepares account approvals and
@@ -80,13 +89,26 @@ scenario, and writes the standard scenario report consumed by the existing
 workflow results renderer:
 
 ```bash
-ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle \
-  contrib/bench/run-neobank-private-flow.sh
+contrib/bench/run-neobank-private-flow.sh
 ```
 
-Use `ZONES_BENCH_NEOBANK_PRESET=full-journey` for the five-boundary journey.
+Set `ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle` before provisioning for the
+swapped stablecoin lifecycle, or `full-journey` for the five-boundary journey.
 The selected preset is recorded in the workflow summary and run metadata while
 the rendered scenario remains at the stable results-renderer path.
+
+To provision and run the direct path independently, use the same preset for
+both commands so provisioning selects pathUSD as the enabled Zone stable asset:
+
+```bash
+forge build --root specs/ref-impls
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/direct-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=direct-lifecycle
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
+contrib/bench/run-neobank-private-flow.sh
+```
 
 That runner should provision the existing topology, deploy and configure the
 fixtures outside measurement, create the private-RPC authorization map in a

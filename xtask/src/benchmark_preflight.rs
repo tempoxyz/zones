@@ -157,6 +157,10 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long, default_value_t = 1)]
     transactions_per_account: u64,
 
+    /// Number of untimed, sponsored Zone approval rounds to fund during bootstrap.
+    #[arg(long, default_value_t = 1)]
+    sponsored_approval_rounds: u64,
+
     /// Balance/allowance checks to enforce. All networks are still queried and reported.
     #[arg(long)]
     check_phase: CheckPhase,
@@ -274,6 +278,7 @@ struct PreflightReport {
     activity_fee_bump: u128,
     activity_max_fee_per_gas: u128,
     transactions_per_account: u64,
+    sponsored_approval_rounds: u64,
     bootstrap_deposit_amount: u128,
     bootstrap_minimum_deposit_amount: String,
     sponsored_approval_fee_required: String,
@@ -316,6 +321,10 @@ impl BenchmarkPreflight {
         ensure!(
             self.transactions_per_account > 0,
             "--transactions-per-account must be greater than zero"
+        );
+        ensure!(
+            self.sponsored_approval_rounds > 0,
+            "--sponsored-approval-rounds must be greater than zero"
         );
         ensure!(
             self.deposit_amount > 0,
@@ -757,6 +766,7 @@ impl BenchmarkPreflight {
             calc_gas_balance_spending(self.fee_config_gas_limit, zone_max_fee_per_gas);
         let all_sponsored_approval_fees = zone_approval_fee
             .checked_mul(U256::from(self.accounts))
+            .and_then(|value| value.checked_mul(U256::from(self.sponsored_approval_rounds)))
             .ok_or_else(|| eyre!("sponsored approval fee requirement overflowed U256"))?;
         let bootstrap_net_required = zone_fee_config_fee
             .checked_add(all_sponsored_approval_fees)
@@ -770,9 +780,10 @@ impl BenchmarkPreflight {
         ) {
             ensure!(
                 U256::from(self.bootstrap_deposit_amount) >= bootstrap_minimum_deposit_amount,
-                "bootstrap deposit amount {} is below required {} for sequencer fee configuration and {} sponsored approvals",
+                "bootstrap deposit amount {} is below required {} for sequencer fee configuration and {} rounds of {} sponsored approvals",
                 self.bootstrap_deposit_amount,
                 bootstrap_minimum_deposit_amount,
+                self.sponsored_approval_rounds,
                 self.accounts
             );
         }
@@ -929,6 +940,7 @@ impl BenchmarkPreflight {
             activity_fee_bump,
             activity_max_fee_per_gas,
             transactions_per_account: self.transactions_per_account,
+            sponsored_approval_rounds: self.sponsored_approval_rounds,
             bootstrap_deposit_amount: self.bootstrap_deposit_amount,
             bootstrap_minimum_deposit_amount: bootstrap_minimum_deposit_amount.to_string(),
             sponsored_approval_fee_required: sponsored_approval_fee_required.to_string(),
@@ -976,6 +988,10 @@ impl BenchmarkPreflight {
         println!("  Zone max fee:       {zone_max_fee_per_gas}");
         println!("  Approval fee bump: {approval_fee_bump}");
         println!("  Activity fee bump: {activity_fee_bump}");
+        println!(
+            "  Sponsored approval rounds: {}",
+            self.sponsored_approval_rounds
+        );
         println!("  Bootstrap amount:  {}", self.bootstrap_deposit_amount);
         println!("  Bootstrap minimum: {bootstrap_minimum_deposit_amount}");
         println!("  Approval sponsor:  {sequencer_address}");
@@ -1887,6 +1903,7 @@ mod tests {
             activity_fee_bump: 1,
             activity_max_fee_per_gas: 2,
             transactions_per_account: 1,
+            sponsored_approval_rounds: 1,
             bootstrap_deposit_amount: 10,
             bootstrap_minimum_deposit_amount: "10".into(),
             sponsored_approval_fee_required: "1".into(),
@@ -2091,6 +2108,10 @@ mod tests {
         let mut replacements = common_replacements(&config);
         replacements.extend(HashMap::from([
             (
+                "__ZONE_TOKEN__".into(),
+                Value::from("0x2000000000000000000000000000000000000001"),
+            ),
+            (
                 "__DLUSD__".into(),
                 Value::from("0x2000000000000000000000000000000000000001"),
             ),
@@ -2124,6 +2145,7 @@ mod tests {
             "../neobank/scenario-fragments.yml",
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
+            "../neobank/direct-lifecycle-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2177,12 +2199,67 @@ mod tests {
             "0x2000000000000000000000000000000000000001"
         );
 
+        let direct: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("direct-lifecycle-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let direct_steps = direct["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(direct_steps.len(), 3);
+        assert_eq!(direct_steps[0]["use"], "encrypted-zone-entry");
+        assert_eq!(direct_steps[1]["use"], "earn-deposit-and-return");
+        assert_eq!(direct_steps[2]["use"], "earn-redeem-and-return");
+        for step in direct_steps {
+            assert_eq!(
+                step["with"]["fee_token"],
+                "0x2000000000000000000000000000000000000002"
+            );
+        }
+        assert_eq!(
+            direct_steps[0]["with"]["token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        assert_eq!(
+            direct_steps[1]["with"]["input_token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        assert_eq!(
+            direct_steps[2]["with"]["output_token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        assert_eq!(
+            direct_steps[2]["with"]["amount"]["var"],
+            "earn_deposit.callback.args.shares"
+        );
+
         let fragments: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("scenario-fragments.yml")).unwrap(),
         )
         .unwrap();
+        assert_eq!(
+            fragments["fragments"]["wait-encrypted-zone-deposit"]["steps"][0]["wait_log"]["where"]
+                ["amount"]["param"],
+            "amount"
+        );
+        assert_eq!(
+            fragments["fragments"]["encrypted-zone-entry"]["steps"][4]["with"]["amount"]["var"],
+            "enqueued.args.netAmount"
+        );
+        assert_eq!(
+            fragments["fragments"]["earn-deposit-and-return"]["steps"][8]["with"]["amount"]["var"],
+            "callback.args.shares"
+        );
+        assert_eq!(
+            fragments["fragments"]["earn-redeem-and-return"]["steps"][8]["with"]["amount"]["var"],
+            "callback.args.outputAmount"
+        );
         for name in ["earn-deposit-and-return", "earn-redeem-and-return"] {
-            let requested = &fragments["fragments"][name]["steps"][4];
+            let receipt = &fragments["fragments"][name]["steps"][4];
+            assert_eq!(
+                receipt["wait_receipt"]["transaction_hash"]["var"],
+                "request.tx_hash"
+            );
+            assert_eq!(receipt["timeout"], "45s");
+            let requested = &fragments["fragments"][name]["steps"][5];
             assert_eq!(
                 requested["wait_log"]["from_block"]["var"],
                 "zone_before.block_number"
@@ -2238,10 +2315,6 @@ mod tests {
                     == "address"
         }));
 
-        let swapped: Value = serde_yaml::from_str(
-            &fs::read_to_string(output.join("swapped-lifecycle-scenario.yml")).unwrap(),
-        )
-        .unwrap();
         let swapped_steps = swapped["scenario"]["steps"].as_sequence().unwrap();
         assert_eq!(swapped_steps.len(), 3);
         assert_eq!(swapped_steps[0]["use"], "encrypted-zone-entry");
@@ -2562,6 +2635,10 @@ mod tests {
         let mut replacements = common_replacements(&config);
         replacements.extend(HashMap::from([
             (
+                "__ZONE_TOKEN__".into(),
+                Value::from("0x2000000000000000000000000000000000000001"),
+            ),
+            (
                 "__DLUSD__".into(),
                 Value::from("0x2000000000000000000000000000000000000001"),
             ),
@@ -2595,6 +2672,7 @@ mod tests {
             "../neobank/scenario-fragments.yml",
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
+            "../neobank/direct-lifecycle-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2621,7 +2699,8 @@ mod tests {
 
         for (scenario, expected_steps) in [
             ("private-flow-scenario.yml", 22),
-            ("swapped-lifecycle-scenario.yml", 21),
+            ("swapped-lifecycle-scenario.yml", 23),
+            ("direct-lifecycle-scenario.yml", 23),
         ] {
             let rendered_path = output.join(format!("{scenario}.rendered.yml"));
             let validation = Command::new(txgen)

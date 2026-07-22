@@ -36,15 +36,15 @@ load_benchmark_mnemonic() {
 load_benchmark_mnemonic
 
 for name in L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
-    L1_PORTAL_ADDRESS ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
+    L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
     ZONES_BENCH_GATEWAY ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_SEED
 do need "$name"; done
 
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
 ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
 ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
-ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-100}"
-ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-10}"
+ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-1000}"
+ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-20}"
 ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-100}"
 ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-2000000}"
 ZONES_BENCH_ACTIVITY_AMOUNT="${ZONES_BENCH_ACTIVITY_AMOUNT:-1}"
@@ -60,12 +60,27 @@ ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
-ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-swapped-lifecycle}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-direct-lifecycle}"
 case "$ZONES_BENCH_NEOBANK_PRESET" in
-    full-journey) scenario_file=private-flow-scenario.yml ;;
-    swapped-lifecycle) scenario_file=swapped-lifecycle-scenario.yml ;;
+    direct-lifecycle)
+        scenario_file=direct-lifecycle-scenario.yml
+        base_token_label=pathusd
+        expected_base_token="$ZONES_BENCH_PATHUSD"
+        ;;
+    full-journey)
+        scenario_file=private-flow-scenario.yml
+        base_token_label=dlusd
+        expected_base_token="$ZONES_BENCH_DLUSD"
+        ;;
+    swapped-lifecycle)
+        scenario_file=swapped-lifecycle-scenario.yml
+        base_token_label=dlusd
+        expected_base_token="$ZONES_BENCH_DLUSD"
+        ;;
     *) die "unsupported neobank preset: $ZONES_BENCH_NEOBANK_PRESET" ;;
 esac
+[[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
+    die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"
 for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
@@ -73,6 +88,7 @@ for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER
 do uint "$name"; done
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
 (( 10#$ZONES_BENCH_MAX_CONCURRENT <= 10#$ZONES_BENCH_ACCOUNTS )) || die "max-concurrent cannot exceed accounts"
+journeys_per_account=$(((10#$ZONES_BENCH_COUNT + 10#$ZONES_BENCH_ACCOUNTS - 1) / 10#$ZONES_BENCH_ACCOUNTS))
 
 stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
@@ -100,10 +116,11 @@ trap cleanup EXIT INT TERM
 preflight_phase() {
     local phase="$1" fixture="$2"
     local -a command=("${preflight[@]}" --l1-rpc-url "$L1_RPC_URL" --zone-rpc-url "$ZONE_RPC_URL" \
-        --token "$ZONES_BENCH_DLUSD" --account-start "$ZONES_BENCH_ACCOUNT_START" \
+        --token "$ZONES_BENCH_TOKEN" --account-start "$ZONES_BENCH_ACCOUNT_START" \
         --accounts "$ZONES_BENCH_ACCOUNTS" --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
         --activity-amount "$ZONES_BENCH_ACTIVITY_AMOUNT" --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
-        --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" --transactions-per-account 1 \
+        --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" --transactions-per-account "$journeys_per_account" \
+        --sponsored-approval-rounds 2 \
         --check-phase "$phase" --output "$ZONES_BENCH_OUTPUT")
     [[ -z "$fixture" ]] || command+=(--fixture-state "$fixture")
     "${command[@]}"
@@ -127,10 +144,10 @@ send_zone_approval_round() {
         printf 'accounts:\n  users:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    range: [%s, %s]\n  sponsor:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    index: %s\n\n' "$ZONES_BENCH_ACCOUNT_START" "$account_end" "$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX"
         printf 'artifacts:\n  TIP20: txgen/abis/tip20.json\n\nsetup:\n  steps:\n'
         for ((index = 0; index < 10#$ZONES_BENCH_ACCOUNTS; index++)); do
-            printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        expiring_nonce: true\n        valid_for_secs: 25\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$token_label" "$index" "$index" "$ZONES_BENCH_DLUSD" "$token"
+        printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        expiring_nonce: true\n        valid_for_secs: 25\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$token_label" "$index" "$index" "$ZONES_BENCH_TOKEN" "$token"
         done
         # The txgen generator requires a positive mix even with --count 0.
-        printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    expiring_nonce: true\n    valid_for_secs: 25\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_DLUSD" "$token"
+        printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    expiring_nonce: true\n    valid_for_secs: 25\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_TOKEN" "$token"
     } >"$spec"
 
     echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID stage=zone_approval approval_round=$token_label"
@@ -155,7 +172,8 @@ send_zone_approval_round() {
     echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID stage=zone_approval approval_round=$token_label"
 }
 
-# The bootstrap gives the sequencer DLUSD for sponsored, untimed Zone approvals.
+# The bootstrap gives the sequencer the preset's Zone fee token for sponsored,
+# untimed Zone approvals.
 stage_start bootstrap
 preflight_phase bootstrap empty
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
@@ -201,6 +219,7 @@ for source in l1-onramp.yml zone-flow.yml scenario-fragments.yml "$scenario_file
         -e "s|__L1_MAX_FEE_PER_GAS__|$l1_fee|g" -e "s|__L1_MAX_PRIORITY_FEE_PER_GAS__|$l1_fee|g" \
         -e "s|__ZONE_MAX_FEE_PER_GAS__|$zone_fee|g" -e "s|__ZONE_MAX_PRIORITY_FEE_PER_GAS__|$zone_fee|g" \
         -e "s|__PORTAL__|$L1_PORTAL_ADDRESS|g" -e "s|__INBOX__|0x1c00000000000000000000000000000000000001|g" -e "s|__OUTBOX__|0x1c00000000000000000000000000000000000002|g" \
+        -e "s|__ZONE_TOKEN__|$ZONES_BENCH_TOKEN|g" \
         -e "s|__DLUSD__|$ZONES_BENCH_DLUSD|g" -e "s|__PATHUSD__|$ZONES_BENCH_PATHUSD|g" -e "s|__EARN_TOKEN__|$ZONES_BENCH_EARN_TOKEN|g" \
         -e "s|__GATEWAY__|$ZONES_BENCH_GATEWAY|g" -e "s|__BRIDGE_WALLET__|$ZONES_BENCH_BRIDGE_WALLET|g" \
         -e "s|__ONRAMP_AMOUNT__|$ZONES_BENCH_DEPOSIT_AMOUNT|g" -e "s|__PRIVATE_TRANSFER_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" \
@@ -238,7 +257,7 @@ stage_end auth_token_map
 
 # Approve both Zone assets before timing. EarnToken needs no user balance for approval;
 # the sequencer sponsors these setup transactions from its untimed bootstrap balance.
-send_zone_approval_round dlusd "$ZONES_BENCH_DLUSD"
+send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
 send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
 
 stage_start private_flow

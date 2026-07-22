@@ -90,6 +90,7 @@ scenario:
         sender: { var: account.address }
         recipient: { var: account.address }
         token: "__DLUSD__"
+        amount: { var: onramp_enqueued.args.netAmount }
         memo: { var: onramp_action_id }
 
     - submit:
@@ -169,6 +170,7 @@ scenario:
         sender: "__GATEWAY__"
         recipient: { var: account.address }
         token: "__EARN_TOKEN__"
+        amount: { var: earn_deposit.args.shares }
         memo: { var: earn_deposit_action_id }
 
     - checkpoint: { chain: l1 }
@@ -233,6 +235,7 @@ scenario:
         sender: "__GATEWAY__"
         recipient: { var: account.address }
         token: "__DLUSD__"
+        amount: { var: earn_redeem.args.outputAmount }
         memo: { var: earn_redeem_action_id }
 
     - checkpoint: { chain: l1 }

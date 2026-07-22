@@ -7,8 +7,9 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-swapped-lifecycle
+        default: neobank-direct-lifecycle
         options:
+          - neobank-direct-lifecycle
           - neobank-swapped-lifecycle
           - neobank-full-journey
           - roundtrip
@@ -90,7 +91,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: swapped-lifecycle
+  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: direct-lifecycle
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -178,6 +179,10 @@ jobs:
             requested_phase="neobank-$ZONES_BENCH_DEFAULT_NEOBANK_PRESET"
           fi
           case "$requested_phase" in
+            neobank-direct-lifecycle)
+              phase=neobank-e2e
+              neobank_preset=direct-lifecycle
+              ;;
             neobank-full-journey)
               phase=neobank-e2e
               neobank_preset=full-journey
@@ -223,9 +228,9 @@ jobs:
               exit 1
             fi
           done
-          if [ "$phase" = roundtrip ] \
+          if { [ "$phase" = roundtrip ] || [ "$phase" = neobank-e2e ]; } \
             && (( 10#$INPUT_MAX_CONCURRENT > 10#$INPUT_ACCOUNTS )); then
-            echo "::error::max-concurrent cannot exceed accounts for roundtrip leases"
+            echo "::error::max-concurrent cannot exceed accounts for scenario leases"
             exit 1
           fi
           case "$INPUT_STATE_BLOAT_GIB" in 0|1|10|100) ;; *) exit 1 ;; esac
@@ -502,7 +507,7 @@ jobs:
           set +a
           for name in \
             L1_RPC_URL ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS \
-            ZONE_RPC_URL ZONE_PRIVATE_RPC_URL L1_PORTAL_ADDRESS \
+            ZONE_RPC_URL ZONE_PRIVATE_RPC_URL L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
             ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
             ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
             ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
