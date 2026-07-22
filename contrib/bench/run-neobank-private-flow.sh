@@ -55,6 +55,7 @@ ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT="${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT:-10
 ZONES_BENCH_CALLBACK_GAS_LIMIT="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/neobank-e2e}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-neobank-e2e.json}"
+ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUTPUT/private-flow-scenario.rendered.yml}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
@@ -75,7 +76,7 @@ bench_bin="${TXGEN_BENCH_BIN:-bench}"
 for command in "$txgen_bin" "$bench_bin" cast grep jq sed; do command -v "$command" >/dev/null || die "missing $command"; done
 if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark-preflight); else preflight=(cargo run --profile release -p tempo-xtask -- benchmark-preflight); fi
 
-mkdir -p "$ZONES_BENCH_OUTPUT"
+mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_RENDERED_SCENARIO")"
 secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-neobank-auth.XXXXXX")"
 chmod 700 "$secret_dir"
 auth_pid=""
@@ -206,6 +207,13 @@ if grep -En '__[A-Z0-9_]+__' \
 then
     die "unresolved placeholder in rendered private-flow spec"
 fi
+# Run the composed source document so txgen retains fragment provenance in the
+# report. Results consume the deterministic flattened copy below.
+"$txgen_bin" scenario render \
+    --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" \
+    --output "$ZONES_BENCH_RENDERED_SCENARIO"
+[[ -s "$ZONES_BENCH_RENDERED_SCENARIO" ]] ||
+    die "txgen did not render the composed private-flow scenario"
 stage_end render_scenario
 
 export ZONES_BENCH_ZONE_AUTH_MAP="$secret_dir/zone-auth.json"

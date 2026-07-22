@@ -1,5 +1,8 @@
 version: 1
 
+include:
+  - ./scenario-fragments.yml
+
 chains:
   l1:
     network: tempo
@@ -79,20 +82,15 @@ scenario:
         max_block_range: 1000
       save: onramp_enqueued
 
-    - wait_log:
-        chain: zone
+    - use: wait-encrypted-zone-deposit
+      as: onramp_processed
+      with:
         from_block: { var: zone_before_onramp.block_number }
-        address: "__INBOX__"
-        abi: ZoneInbox
-        event: EncryptedDepositProcessed
-        where:
-          depositHash: { var: onramp_enqueued.args.newCurrentDepositQueueHash }
-          sender: { var: account.address }
-          to: { var: account.address }
-          token: "__DLUSD__"
-          memo: { var: onramp_action_id }
-        max_block_range: 1000
-      save: onramp_processed
+        deposit_hash: { var: onramp_enqueued.args.newCurrentDepositQueueHash }
+        sender: { var: account.address }
+        recipient: { var: account.address }
+        token: "__DLUSD__"
+        memo: { var: onramp_action_id }
 
     - submit:
         chain: zone
@@ -163,20 +161,15 @@ scenario:
         max_block_range: 1000
       save: earn_deposit
 
-    - wait_log:
-        chain: zone
+    - use: wait-encrypted-zone-deposit
+      as: earn_deposit_processed
+      with:
         from_block: { var: zone_before_earn_deposit.block_number }
-        address: "__INBOX__"
-        abi: ZoneInbox
-        event: EncryptedDepositProcessed
-        where:
-          depositHash: { var: earn_deposit.args.zoneDepositHash }
-          sender: "__GATEWAY__"
-          to: { var: account.address }
-          token: "__EARN_TOKEN__"
-          memo: { var: earn_deposit_action_id }
-        max_block_range: 1000
-      save: earn_deposit_processed
+        deposit_hash: { var: earn_deposit.args.zoneDepositHash }
+        sender: "__GATEWAY__"
+        recipient: { var: account.address }
+        token: "__EARN_TOKEN__"
+        memo: { var: earn_deposit_action_id }
 
     - checkpoint: { chain: l1 }
       save: l1_before_earn_redeem
@@ -232,20 +225,15 @@ scenario:
         max_block_range: 1000
       save: earn_redeem
 
-    - wait_log:
-        chain: zone
+    - use: wait-encrypted-zone-deposit
+      as: earn_redeem_processed
+      with:
         from_block: { var: zone_before_earn_redeem.block_number }
-        address: "__INBOX__"
-        abi: ZoneInbox
-        event: EncryptedDepositProcessed
-        where:
-          depositHash: { var: earn_redeem.args.zoneDepositHash }
-          sender: "__GATEWAY__"
-          to: { var: account.address }
-          token: "__DLUSD__"
-          memo: { var: earn_redeem_action_id }
-        max_block_range: 1000
-      save: earn_redeem_processed
+        deposit_hash: { var: earn_redeem.args.zoneDepositHash }
+        sender: "__GATEWAY__"
+        recipient: { var: account.address }
+        token: "__DLUSD__"
+        memo: { var: earn_redeem_action_id }
 
     - checkpoint: { chain: l1 }
       save: l1_before_offramp

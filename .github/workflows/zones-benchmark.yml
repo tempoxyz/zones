@@ -518,7 +518,7 @@ jobs:
           if [ -s "$ZONES_BENCH_REPORT" ]; then
             if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
               results_args+=(
-                --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
+                --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.rendered.yml"
               )
             elif [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
               results_args+=(

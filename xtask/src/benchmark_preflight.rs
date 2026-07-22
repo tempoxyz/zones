@@ -2121,6 +2121,7 @@ mod tests {
         for source in [
             "../neobank/l1-onramp.yml",
             "../neobank/zone-flow.yml",
+            "../neobank/scenario-fragments.yml",
             "../neobank/private-flow-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
@@ -2553,6 +2554,7 @@ mod tests {
         for source in [
             "../neobank/l1-onramp.yml",
             "../neobank/zone-flow.yml",
+            "../neobank/scenario-fragments.yml",
             "../neobank/private-flow-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
@@ -2562,8 +2564,11 @@ mod tests {
         let txgen_abis = output.join("txgen/abis");
         fs::create_dir_all(&txgen_abis).unwrap();
         for name in ["tip20.json", "zone-outbox.json"] {
-            fs::copy(Path::new(SOURCE_DIR).join("abis").join(name), txgen_abis.join(name))
-                .unwrap();
+            fs::copy(
+                Path::new(SOURCE_DIR).join("abis").join(name),
+                txgen_abis.join(name),
+            )
+            .unwrap();
         }
         let fixture_abis = output.join("abis");
         fs::create_dir_all(&fixture_abis).unwrap();
@@ -2577,9 +2582,11 @@ mod tests {
 
         let validation = Command::new(txgen)
             .arg("scenario")
-            .arg("validate")
+            .arg("render")
             .arg("--scenario")
             .arg(output.join("private-flow-scenario.yml"))
+            .arg("--output")
+            .arg(output.join("private-flow-scenario.rendered.yml"))
             .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
             .env("L1_RPC_URL", "http://l1.invalid")
             .env("ZONES_BENCH_L1_QUERY_RPC_URL", "http://l1-query.invalid")
@@ -2590,10 +2597,15 @@ mod tests {
             .unwrap();
         assert!(
             validation.status.success(),
-            "txgen-tempo scenario validate failed\nstdout:\n{}\nstderr:\n{}",
+            "txgen-tempo scenario render failed\nstdout:\n{}\nstderr:\n{}",
             String::from_utf8_lossy(&validation.stdout),
             String::from_utf8_lossy(&validation.stderr)
         );
+        let rendered: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("private-flow-scenario.rendered.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_flattened_scenario(&rendered, 22);
         fs::remove_dir_all(output).unwrap();
     }
 

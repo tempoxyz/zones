@@ -1,0 +1,32 @@
+version: 1
+
+# These fragments capture the shared encrypted-return boundary used by the
+# initial encrypted deposit and both gateway callback flows. The individual
+# steps still own their L1 receipt correlation; this fragment owns the exact
+# Zone receipt-scoped terminal event.
+fragments:
+  wait-encrypted-zone-deposit:
+    parameters:
+      from_block: value
+      deposit_hash: value
+      sender: value
+      recipient: value
+      token: value
+      memo: value
+    outputs:
+      processed: log
+    steps:
+      - wait_log:
+          chain: zone
+          from_block: { param: from_block }
+          address: "__INBOX__"
+          abi: ZoneInbox
+          event: EncryptedDepositProcessed
+          where:
+            depositHash: { param: deposit_hash }
+            sender: { param: sender }
+            to: { param: recipient }
+            token: { param: token }
+            memo: { param: memo }
+          max_block_range: 1000
+        save: processed
