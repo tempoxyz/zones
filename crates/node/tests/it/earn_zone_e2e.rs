@@ -30,9 +30,12 @@ const PUBLIC_USER_BALANCE: u128 = 50_000_000;
 const PRIVATE_FEE_BALANCE: u128 = 10_000_000;
 const DEX_LIQUIDITY: u128 = 300_000_000;
 const TOKEN_SUPPLY: u128 = 1_000_000_000;
-// Exercise the protocol's full callback allowance. The sequencer logs the measured L1
-// processWithdrawals gas; this value is the callback budget, not the total transaction gas.
-const WITHDRAWAL_CALLBACK_GAS_LIMIT: u64 = 10_000_000;
+// Callback budgets include headroom above the measured inclusive gateway traces:
+// direct deposit 3.22M, swapped deposit 5.12M, direct redeem 1.45M, swapped redeem 3.10M.
+const DIRECT_DEPOSIT_CALLBACK_GAS_LIMIT: u64 = 5_000_000;
+const SWAPPED_DEPOSIT_CALLBACK_GAS_LIMIT: u64 = 7_000_000;
+const DIRECT_REDEEM_CALLBACK_GAS_LIMIT: u64 = 3_000_000;
+const SWAPPED_REDEEM_CALLBACK_GAS_LIMIT: u64 = 5_000_000;
 const REWARD_FUNDING_TX_GAS_LIMIT: u64 = 5_000_000;
 const MIGRATION_TX_GAS_LIMIT: u64 = 10_000_000;
 // The transaction cap is 30M. VaultAdapter currently deploys at ~24.86M, leaving 17.1% headroom.
@@ -727,6 +730,11 @@ impl EarnZoneFixture {
                 EarnLimits::default(),
             )
             .await?;
+        let callback_gas_limit = if input_token == self.vault_asset {
+            DIRECT_DEPOSIT_CALLBACK_GAS_LIMIT
+        } else {
+            SWAPPED_DEPOSIT_CALLBACK_GAS_LIMIT
+        };
         self.user
             .withdraw_token_with(
                 input_token,
@@ -734,8 +742,8 @@ impl EarnZoneFixture {
                     amount: AMOUNT,
                     to: Some(self.gateway),
                     memo: B256::ZERO,
-                    gas_limit: WITHDRAWAL_CALLBACK_GAS_LIMIT,
-                    fallback_recipient: Some(self.user.address()),
+                    gas_limit: callback_gas_limit,
+                    zone_fallback_recipient: Some(self.user.address()),
                     data,
                     reveal_to: Bytes::new(),
                 },
@@ -809,6 +817,11 @@ impl EarnZoneFixture {
                 limits,
             )
             .await?;
+        let callback_gas_limit = if input_token == self.vault_asset {
+            DIRECT_DEPOSIT_CALLBACK_GAS_LIMIT
+        } else {
+            SWAPPED_DEPOSIT_CALLBACK_GAS_LIMIT
+        };
         self.user
             .withdraw_token_with(
                 input_token,
@@ -816,8 +829,8 @@ impl EarnZoneFixture {
                     amount: AMOUNT,
                     to: Some(self.gateway),
                     memo: B256::ZERO,
-                    gas_limit: WITHDRAWAL_CALLBACK_GAS_LIMIT,
-                    fallback_recipient: Some(self.user.address()),
+                    gas_limit: callback_gas_limit,
+                    zone_fallback_recipient: Some(self.user.address()),
                     data,
                     reveal_to: Bytes::new(),
                 },
@@ -915,8 +928,8 @@ impl EarnZoneFixture {
                     amount: AMOUNT,
                     to: Some(self.gateway),
                     memo: B256::ZERO,
-                    gas_limit: WITHDRAWAL_CALLBACK_GAS_LIMIT,
-                    fallback_recipient: Some(self.user.address()),
+                    gas_limit: DIRECT_DEPOSIT_CALLBACK_GAS_LIMIT,
+                    zone_fallback_recipient: Some(self.user.address()),
                     data,
                     reveal_to: Bytes::new(),
                 },
@@ -1010,6 +1023,11 @@ impl EarnZoneFixture {
                 EarnLimits::default(),
             )
             .await?;
+        let callback_gas_limit = if output_token == self.vault_asset {
+            DIRECT_REDEEM_CALLBACK_GAS_LIMIT
+        } else {
+            SWAPPED_REDEEM_CALLBACK_GAS_LIMIT
+        };
         account
             .withdraw_token_with(
                 self.share_token,
@@ -1017,8 +1035,8 @@ impl EarnZoneFixture {
                     amount: shares,
                     to: Some(self.gateway),
                     memo: B256::ZERO,
-                    gas_limit: WITHDRAWAL_CALLBACK_GAS_LIMIT,
-                    fallback_recipient: Some(account.address()),
+                    gas_limit: callback_gas_limit,
+                    zone_fallback_recipient: Some(account.address()),
                     data,
                     reveal_to: Bytes::new(),
                 },
@@ -1152,7 +1170,7 @@ impl EarnZoneFixture {
                     amount: earn_shares_u128,
                     keyIndex: key_index,
                     encrypted,
-                    bouncebackRecipient: user,
+                    tempoRefundRecipient: user,
                 }
                 .abi_encode()
                 .into(),
