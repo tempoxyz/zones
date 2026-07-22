@@ -109,7 +109,9 @@ async fn ws_next_json(ws: &mut PrivateRpcWs) -> eyre::Result<Value> {
 
     match msg? {
         Message::Text(text) => Ok(serde_json::from_str(&text)?),
-        other => eyre::bail!("expected text websocket message, got {other:?}"),
+        other => {
+            eyre::bail!("expected text websocket message, got {other:?}");
+        }
     }
 }
 
@@ -136,7 +138,9 @@ async fn ws_collect_messages_until_quiet(
             Err(_) => return Ok(messages),
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(messages),
             Ok(Some(Ok(Message::Text(text)))) => messages.push(serde_json::from_str(&text)?),
-            Ok(Some(Ok(other))) => eyre::bail!("unexpected websocket frame: {other:?}"),
+            Ok(Some(Ok(other))) => {
+                eyre::bail!("unexpected websocket frame: {other:?}");
+            }
             Ok(Some(Err(err))) => return Err(err.into()),
         }
     }
