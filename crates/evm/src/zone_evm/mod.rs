@@ -12,7 +12,10 @@ use revm::context::{
     DBErrorMarker,
     result::{EVMError, ResultAndState},
 };
-use tempo_evm::{TempoBlockEnv, TempoHaltReason, evm::TempoEvm};
+use tempo_evm::{
+    TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, TempoPoolValidationResult,
+    evm::TempoEvm,
+};
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::L1StorageReader;
@@ -85,6 +88,27 @@ where
 
         self.clear_l1_overlay_state();
         result
+    }
+}
+
+impl<DB, I, L1> TempoPoolValidationEvm for ZoneEvm<DB, I, L1>
+where
+    DB: Database,
+    L1: L1StorageReader,
+    I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
+{
+    fn configure_for_pool(&mut self) {
+        self.inner.configure_for_pool();
+    }
+
+    fn validate_pool_transaction(
+        &mut self,
+        tx: TempoTxEnv,
+    ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
+        let (result, tx) = self.inner.validate_pool_transaction(tx);
+        let result = result.map_err(map_adapter_error);
+        self.clear_l1_overlay_state();
+        (result, tx)
     }
 }
 

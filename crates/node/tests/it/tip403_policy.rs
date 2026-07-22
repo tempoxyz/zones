@@ -97,7 +97,6 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
 
 /// Protocol fee collection must use the finalized L1 policy even when the tx does not call TIP-20.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "TODO: re-enable when Tempo pool validation supports the Zones L1 overlay"]
 async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
