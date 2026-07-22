@@ -48,6 +48,10 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// Clones share the selected anchor and provider handle so the Zone database adapter, `TempoState`,
 /// and other native precompiles enforce one view of L1 state. A new `L1State` must be created for
 /// each EVM execution context; it must not be shared across independent EVMs.
+///
+/// IMPORTANT: anchor coordination is not a canonicality proof. The batch proof must bind the
+/// Tempo header hash and state root to the canonical settlement anchor, then authenticate both
+/// direct [`L1StorageReader`] reads and mirrored `L1OverlayDB` reads against that same root.
 #[derive(Clone)]
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.

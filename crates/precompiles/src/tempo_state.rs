@@ -102,6 +102,13 @@ impl TempoState {
 
     /// Validate and apply a finalized Tempo checkpoint transition.
     ///
+    /// IMPORTANT: this operation only enforces local continuity: the decoded block number must
+    /// increment by one and its parent hash must match the previously stored Tempo hash.
+    ///
+    /// Canonicality is a separate proof obligation: the batch proof must bind the imported header
+    /// hash and state root to the canonical settlement anchor and authenticate every Tempo storage
+    /// read against that exact root.
+    ///
     /// This typed operation is shared by the public `finalizeTempo` ABI and the native Inbox.
     pub(crate) fn finalize_checkpoint<P>(
         &mut self,

@@ -4,6 +4,12 @@
 //! queue. The implementation shares one execution-local [`L1State`] with `TempoState` and the
 //! Zone EVM database adapter: sequencer admission is checked at the parent checkpoint, then
 //! `finalizeTempo` selects the child anchor used by every deposit, policy, and portal read.
+//!
+//! Runtime execution processes a contiguous prefix of the portal deposit queue and reads its
+//! canonical head at the selected child anchor. The batch proof, not this precompile, proves that
+//! the post-state processed hash is an ancestor of that head by validating the unprocessed suffix.
+//! Observing the head read in the execution witness is not sufficient without that explicit proof
+//! constraint.
 
 #[cfg(test)]
 mod tests;
