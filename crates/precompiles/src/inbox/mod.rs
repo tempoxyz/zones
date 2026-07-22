@@ -17,44 +17,28 @@ use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     EncodePrecompileResult, charge_input_cost, dispatch,
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, StorageCtx},
+    storage::{Handler, Mapping, StorageCtx, StorageKey},
     tip20::{ITIP20, TIP20Token},
     view,
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
-    DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, QueuedDeposit,
-    ZoneInbox as ZoneInboxAbi, ZoneInboxError, ZoneInboxEvent,
+    DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneOutbox,
+    QueuedDeposit, ZoneInbox as ZoneInboxAbi, ZoneInboxError, ZoneInboxEvent,
 };
 use zone_primitives::constants::{
-    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_SEQUENCER_SLOT,
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_IS_SEQUENCER_SLOT,
     TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS,
 };
 
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
     ecies::{ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, hkdf_info, hkdf_sha256},
+    outbox::ZoneOutbox,
     storage::{L1State, L1StorageReader},
     tempo_state::TempoState,
     tip20_factory::{ZoneTokenFactory, enableTokenCall},
 };
-
-/// The two native Outbox operations required while processing deposits.
-///
-/// Keeping this interface narrow lets Inbox and Outbox be developed independently. The native
-/// Outbox implementation supplies the production implementation; tests use a recording fake.
-pub trait InboxOutbox: Clone + 'static {
-    /// Enqueue a failed-deposit withdrawal back to the Tempo recipient.
-    fn enqueue_deposit_bounce_back(
-        &mut self,
-        token: Address,
-        amount: u128,
-        bounceback_recipient: Address,
-    ) -> ZoneResult<()>;
-
-    /// Resolve and consume the private fallback recipient for a withdrawal bounce-back.
-    fn consume_fallback_recipient(&mut self, fallback_nonce: u64) -> ZoneResult<Address>;
-}
 
 /// Zone-side bridge Inbox state and deposit-processing logic.
 #[contract(addr = ZONE_INBOX_ADDRESS)]
@@ -74,30 +58,27 @@ impl ZoneInbox {
     }
 
     /// Create the direct-call-only native Inbox precompile.
-    pub fn create<P, O>(l1: L1State<P>, outbox: O, env: &crate::ZonePrecompileEnv) -> DynPrecompile
+    pub fn create<P>(l1: L1State<P>, env: &crate::ZonePrecompileEnv) -> DynPrecompile
     where
         P: L1StorageReader,
-        O: InboxOutbox,
     {
         crate::execution::create_precompile(
             "ZoneInbox",
             env,
             crate::execution::NoCallRules,
-            move |data, caller| Self::new().call_with_l1_state(&l1, outbox.clone(), data, caller),
+            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
         )
     }
 
     /// Dispatch an Inbox ABI call using execution-local L1 state.
-    pub(crate) fn call_with_l1_state<P, O>(
+    pub(crate) fn call_with_l1_state<P>(
         &mut self,
         l1: &L1State<P>,
-        mut outbox: O,
         calldata: &[u8],
         msg_sender: Address,
     ) -> PrecompileResult
     where
         P: L1StorageReader,
-        O: InboxOutbox,
     {
         if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
@@ -126,7 +107,7 @@ impl ZoneInbox {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
-                            self.advance_tempo(l1, &mut outbox, msg_sender, call)
+                            self.advance_tempo(l1, msg_sender, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },
@@ -135,16 +116,14 @@ impl ZoneInbox {
         )
     }
 
-    fn advance_tempo<P, O>(
+    fn advance_tempo<P>(
         &mut self,
         l1: &L1State<P>,
-        outbox: &mut O,
         caller: Address,
         call: ZoneInboxAbi::advanceTempoCall,
     ) -> ZoneResult<()>
     where
         P: L1StorageReader,
-        O: InboxOutbox,
     {
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
@@ -155,13 +134,14 @@ impl ZoneInbox {
         let previous_block_number = tempo_state.tempo_block_number()?;
 
         if !caller.is_zero() {
-            let sequencer = Address::from_word(l1.read_l1_storage_unanchored(
+            let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
+            let is_sequencer = l1.read_l1_storage_unanchored(
                 portal,
-                PORTAL_SEQUENCER_SLOT,
+                membership_slot.into(),
                 previous_block_number,
-            )?);
+            )?;
 
-            if caller != sequencer {
+            if is_sequencer.is_zero() {
                 return Err(ZoneInboxError::only_sequencer().into());
             }
         }
@@ -173,13 +153,14 @@ impl ZoneInbox {
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
         let mut current_hash = self.processed_deposit_queue_hash.read()?;
         let mut decryptions = call.decryptions.into_iter();
+        let mut outbox = ZoneOutbox::new();
 
         for queued in deposits {
             current_hash = queued.hash_with_tail(current_hash)?;
 
             match queued {
                 DecodedQueuedDeposit::Regular(deposit) => {
-                    self.process_deposit(outbox, current_hash, deposit)
+                    self.process_deposit(&mut outbox, current_hash, deposit)
                 }
                 DecodedQueuedDeposit::Encrypted(deposit) => {
                     let Some(decryption) = decryptions.next() else {
@@ -188,7 +169,7 @@ impl ZoneInbox {
                     let key =
                         read_encryption_key(l1, portal, tempo_block_number, deposit.keyIndex)?;
                     self.process_deposit_encrypted(
-                        outbox,
+                        &mut outbox,
                         portal,
                         current_hash,
                         deposit,
@@ -242,9 +223,9 @@ impl ZoneInbox {
         Ok(())
     }
 
-    fn process_deposit<O: InboxOutbox>(
+    fn process_deposit(
         &mut self,
-        outbox: &mut O,
+        outbox: &mut ZoneOutbox,
         current_hash: B256,
         deposit: Deposit,
     ) -> ZoneResult<()> {
@@ -256,18 +237,21 @@ impl ZoneInbox {
             self.emit_event(deposit.processed_event(current_hash))?;
         } else {
             outbox.enqueue_deposit_bounce_back(
-                deposit.token,
-                deposit.amount,
-                deposit.bouncebackRecipient,
+                ZONE_INBOX_ADDRESS,
+                IZoneOutbox::enqueueDepositBounceBackCall {
+                    token: deposit.token,
+                    amount: deposit.amount,
+                    bouncebackRecipient: deposit.bouncebackRecipient,
+                },
             )?;
             self.emit_event(deposit.failed_event(current_hash))?;
         }
         Ok(())
     }
 
-    fn process_deposit_encrypted<O: InboxOutbox>(
+    fn process_deposit_encrypted(
         &mut self,
-        outbox: &mut O,
+        outbox: &mut ZoneOutbox,
         portal: Address,
         current_hash: B256,
         deposit: EncryptedDeposit,
@@ -287,24 +271,27 @@ impl ZoneInbox {
         }
     }
 
-    fn fail_encrypted_deposit<O: InboxOutbox>(
+    fn fail_encrypted_deposit(
         &mut self,
-        outbox: &mut O,
+        outbox: &mut ZoneOutbox,
         current_hash: B256,
         deposit: EncryptedDeposit,
     ) -> ZoneResult<()> {
         outbox.enqueue_deposit_bounce_back(
-            deposit.token,
-            deposit.amount,
-            deposit.bouncebackRecipient,
+            ZONE_INBOX_ADDRESS,
+            IZoneOutbox::enqueueDepositBounceBackCall {
+                token: deposit.token,
+                amount: deposit.amount,
+                bouncebackRecipient: deposit.bouncebackRecipient,
+            },
         )?;
         self.emit_event(deposit.failed_event(current_hash))?;
         Ok(())
     }
 
-    fn process_withdrawal_bounce_back<O: InboxOutbox>(
+    fn process_withdrawal_bounce_back(
         &mut self,
-        outbox: &mut O,
+        outbox: &mut ZoneOutbox,
         deposit: Deposit,
     ) -> ZoneResult<()> {
         let fallback_nonce = u64::from_be_bytes(
@@ -312,7 +299,7 @@ impl ZoneInbox {
                 .try_into()
                 .expect("address suffix is eight bytes"),
         );
-        let recipient = outbox.consume_fallback_recipient(fallback_nonce)?;
+        let recipient = outbox.consume_fallback_recipient(ZONE_INBOX_ADDRESS, fallback_nonce)?;
         if self.try_mint(deposit.token, recipient, deposit.amount)? {
             self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {

@@ -205,7 +205,7 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn enqueue_deposit_bounce_back(
+    pub(crate) fn enqueue_deposit_bounce_back(
         &mut self,
         caller: Address,
         call: IZoneOutbox::enqueueDepositBounceBackCall,
@@ -217,7 +217,11 @@ impl ZoneOutbox {
         self.enqueue(PendingWithdrawal::from_bounce_back(call))
     }
 
-    fn consume_fallback_recipient(&mut self, caller: Address, nonce: u64) -> ZoneResult<Address> {
+    pub(crate) fn consume_fallback_recipient(
+        &mut self,
+        caller: Address,
+        nonce: u64,
+    ) -> ZoneResult<Address> {
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
@@ -227,6 +231,20 @@ impl ZoneOutbox {
         }
         self.fallback_recipients[nonce].delete()?;
         Ok(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_fallback_recipient(
+        &mut self,
+        nonce: u64,
+        recipient: Address,
+    ) -> TempoResult<()> {
+        self.fallback_recipients[nonce].write(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fallback_recipient(&self, nonce: u64) -> TempoResult<Address> {
+        self.fallback_recipients[nonce].read()
     }
 
     fn finalize_withdrawal_batch<P: L1StorageReader>(

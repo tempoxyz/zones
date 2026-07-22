@@ -17,10 +17,10 @@ pub use executor::ZoneBlockExecutor;
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::precompiles::{
-    AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
     L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_TIP20_FACTORY_ADDRESS,
-    ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile, create_tip403_precompile,
-    tx_context::ZoneTxContext,
+    ZoneInbox, ZonePrecompileEnv, ZoneTokenFactory, create_tip20_precompile,
+    create_tip403_precompile, tx_context::ZoneTxContext,
+    AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
 };
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
@@ -57,7 +57,9 @@ use tempo_precompiles::{
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
+};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_precompiles::create_outbox_precompile;
@@ -97,6 +99,11 @@ where
             Some(TempoState::create(l1.clone(), &env))
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
+        let inbox_env = env.clone();
+        let inbox_l1 = l1.clone();
+        precompiles.apply_precompile(&ZONE_INBOX_ADDRESS, move |_| {
+            Some(ZoneInbox::create(inbox_l1.clone(), &inbox_env))
+        });
         let outbox_env = env.clone();
         let outbox_l1 = l1.clone();
         let outbox_portal = self.portal_address;

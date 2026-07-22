@@ -34,7 +34,6 @@ pub use error::{Result, ZonePrecompileError, ZoneResult};
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
-#[cfg(feature = "std")]
 pub mod outbox;
 
 /// Zone dispatch helpers: generic typed operations plus Tempo's concrete metadata helper.
@@ -59,7 +58,6 @@ pub mod ztip20;
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use inbox::ZoneInbox;
-#[cfg(feature = "std")]
 pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;

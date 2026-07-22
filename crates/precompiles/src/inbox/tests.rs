@@ -4,10 +4,6 @@ use alloy_evm::EvmInternals;
 use alloy_primitives::{address, keccak256};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     storage::{ContractStorage, StorageCtx},
@@ -27,56 +23,6 @@ const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000a1"
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a2");
 const BOB: Address = address!("0x00000000000000000000000000000000000000b0");
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct BounceBack {
-    token: Address,
-    amount: u128,
-    recipient: Address,
-}
-
-#[derive(Clone, Default)]
-struct FakeOutbox {
-    bounce_backs: Arc<Mutex<Vec<BounceBack>>>,
-    fallback_recipients: Arc<Mutex<HashMap<u64, Address>>>,
-}
-
-impl FakeOutbox {
-    fn bounce_backs(&self) -> Vec<BounceBack> {
-        self.bounce_backs.lock().unwrap().clone()
-    }
-
-    fn insert_fallback(&self, nonce: u64, recipient: Address) {
-        self.fallback_recipients
-            .lock()
-            .unwrap()
-            .insert(nonce, recipient);
-    }
-}
-
-impl InboxOutbox for FakeOutbox {
-    fn enqueue_deposit_bounce_back(
-        &mut self,
-        token: Address,
-        amount: u128,
-        bounceback_recipient: Address,
-    ) -> ZoneResult<()> {
-        self.bounce_backs.lock().unwrap().push(BounceBack {
-            token,
-            amount,
-            recipient: bounceback_recipient,
-        });
-        Ok(())
-    }
-
-    fn consume_fallback_recipient(&mut self, fallback_nonce: u64) -> ZoneResult<Address> {
-        self.fallback_recipients
-            .lock()
-            .unwrap()
-            .remove(&fallback_nonce)
-            .ok_or_else(|| TempoPrecompileError::Fatal("missing fallback recipient".into()).into())
-    }
-}
-
 fn encode_header(header: &TempoHeader) -> Bytes {
     let mut encoded = Vec::new();
     header.encode(&mut encoded);
@@ -87,8 +33,8 @@ struct Harness {
     ctx: TestContext,
     l1: MockL1Reader,
     l1_state: L1State<MockL1Reader>,
-    outbox: FakeOutbox,
     precompile: DynPrecompile,
+    outbox_precompile: DynPrecompile,
     genesis_hash: B256,
 }
 
@@ -106,6 +52,7 @@ impl Harness {
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
                 TempoState::new().initialize(&genesis_rlp)?;
                 ZoneInbox::new().initialize()?;
+                ZoneOutbox::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
                     .with_issuer(ALICE)
                     .with_issuer(ZONE_INBOX_ADDRESS)
@@ -116,21 +63,18 @@ impl Harness {
         }
 
         let portal = l1.portal_address();
-        l1.set_u256(
-            portal,
-            U256::from_be_bytes(PORTAL_SEQUENCER_SLOT.0),
-            0,
-            SEQUENCER.into_word().into(),
-        );
+        let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
+        l1.set_u256(portal, membership_slot, 0, U256::ONE);
         let l1_state = L1State::new(l1.clone());
-        let outbox = FakeOutbox::default();
-        let precompile = ZoneInbox::create(l1_state.clone(), outbox.clone(), &test_env(&ctx));
+        let env = test_env(&ctx);
+        let precompile = ZoneInbox::create(l1_state.clone(), &env);
+        let outbox_precompile = crate::create_outbox_precompile(portal, l1_state.clone(), &env);
         Ok(Self {
             ctx,
             l1,
             l1_state,
-            outbox,
             precompile,
+            outbox_precompile,
             genesis_hash,
         })
     }
@@ -201,6 +145,52 @@ impl Harness {
                 .balance_of(ITIP20::balanceOfCall { account: owner })?)
         })
     }
+
+    fn pending_withdrawals(&mut self) -> eyre::Result<Vec<IZoneOutbox::PendingWithdrawal>> {
+        let calldata = IZoneOutbox::getPendingWithdrawalsCall {}.abi_encode();
+        let output = call_precompile(
+            &mut self.ctx,
+            &self.outbox_precompile,
+            Address::ZERO,
+            &calldata,
+            GAS,
+            true,
+            ZONE_OUTBOX_ADDRESS,
+            ZONE_OUTBOX_ADDRESS,
+        )?;
+        Ok(IZoneOutbox::getPendingWithdrawalsCall::abi_decode_returns(
+            &output.bytes,
+        )?)
+    }
+
+    fn seed_fallback_recipient(&mut self, nonce: u64, recipient: Address) -> eyre::Result<()> {
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            ZoneOutbox::new().seed_fallback_recipient(nonce, recipient)?;
+            Ok(())
+        })
+    }
+
+    fn fallback_recipient(&mut self, nonce: u64) -> eyre::Result<Address> {
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            Ok(ZoneOutbox::new().fallback_recipient(nonce)?)
+        })
+    }
+
+    fn assert_single_bounce_back(
+        &mut self,
+        token: Address,
+        amount: u128,
+        recipient: Address,
+    ) -> eyre::Result<()> {
+        let pending = self.pending_withdrawals()?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].token, token);
+        assert_eq!(pending[0].amount, amount);
+        assert_eq!(pending[0].to, recipient);
+        Ok(())
+    }
 }
 
 #[test]
@@ -215,7 +205,8 @@ fn advance_checks_parent_sequencer_and_reads_queue_at_child_anchor() -> eyre::Re
 
     assert_eq!(harness.l1_state.get_anchor(), Some(1));
     let requests = harness.l1.storage_requests();
-    assert!(requests.contains(&(harness.l1.portal_address(), PORTAL_SEQUENCER_SLOT, 0)));
+    let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
+    assert!(requests.contains(&(harness.l1.portal_address(), membership_slot.into(), 0)));
     assert!(requests.contains(&(
         harness.l1.portal_address(),
         PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
@@ -234,9 +225,10 @@ fn zero_system_caller_skips_sequencer_read() -> eyre::Result<()> {
         harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
     )?;
 
+    let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
     assert!(!harness.l1.storage_requests().contains(&(
         harness.l1.portal_address(),
-        PORTAL_SEQUENCER_SLOT,
+        membership_slot.into(),
         0
     )));
     Ok(())
@@ -381,7 +373,7 @@ fn regular_deposit_mints_and_updates_hash_and_number() -> eyre::Result<()> {
     )?;
 
     assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(500));
-    assert!(harness.outbox.bounce_backs().is_empty());
+    assert!(harness.pending_withdrawals()?.is_empty());
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
         assert_eq!(
@@ -431,14 +423,7 @@ fn failed_regular_mint_enqueues_one_bounce_back() -> eyre::Result<()> {
             .abi_encode(),
     )?;
 
-    assert_eq!(
-        harness.outbox.bounce_backs(),
-        vec![BounceBack {
-            token: uninitialized_token,
-            amount: 222,
-            recipient: ALICE,
-        }]
-    );
+    harness.assert_single_bounce_back(uninitialized_token, 222, ALICE)?;
     Ok(())
 }
 
@@ -555,7 +540,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         harness.balance(PATH_USD_ADDRESS, fixture.to)?,
         U256::from(900)
     );
-    assert!(harness.outbox.bounce_backs().is_empty());
+    assert!(harness.pending_withdrawals()?.is_empty());
     assert!(
         harness
             .l1
@@ -621,14 +606,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     )?;
 
     assert_eq!(harness.balance(PATH_USD_ADDRESS, fixture.to)?, U256::ZERO);
-    assert_eq!(
-        harness.outbox.bounce_backs(),
-        vec![BounceBack {
-            token: PATH_USD_ADDRESS,
-            amount: 333,
-            recipient: BOB,
-        }]
-    );
+    harness.assert_single_bounce_back(PATH_USD_ADDRESS, 333, BOB)?;
     Ok(())
 }
 
@@ -732,7 +710,7 @@ fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
 fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let nonce = 8u64;
-    harness.outbox.insert_fallback(nonce, BOB);
+    harness.seed_fallback_recipient(nonce, BOB)?;
     let token = address!("0x20c00000000000000000000000000000000000cc");
     let mut encoded_nonce = [0u8; 20];
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
@@ -766,7 +744,8 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
         assert_eq!(ZoneInbox::new().refunds[token][BOB].read()?, 555);
         Ok(())
     })?;
-    assert!(harness.outbox.bounce_backs().is_empty());
+    drop(storage);
+    assert!(harness.pending_withdrawals()?.is_empty());
     Ok(())
 }
 
@@ -774,7 +753,7 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
 fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let nonce = 7u64;
-    harness.outbox.insert_fallback(nonce, BOB);
+    harness.seed_fallback_recipient(nonce, BOB)?;
     let mut encoded_nonce = [0u8; 20];
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = Deposit {
@@ -803,14 +782,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     )?;
 
     assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(321));
-    assert!(harness.outbox.bounce_backs().is_empty());
-    assert!(
-        !harness
-            .outbox
-            .fallback_recipients
-            .lock()
-            .unwrap()
-            .contains_key(&nonce)
-    );
+    assert!(harness.pending_withdrawals()?.is_empty());
+    assert_eq!(harness.fallback_recipient(nonce)?, Address::ZERO);
     Ok(())
 }
