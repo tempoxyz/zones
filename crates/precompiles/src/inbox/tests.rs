@@ -332,13 +332,14 @@ fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
         bouncebackRecipient: ALICE,
         memo: B256::repeat_byte(0x11),
     };
+    let first_hash =
+        keccak256((DepositType::Regular, first.clone(), B256::ZERO).abi_encode_params());
+    let first_data = first.abi_encode();
     let second = Deposit {
         amount: 200,
         memo: B256::repeat_byte(0x22),
-        ..first.clone()
+        ..first
     };
-    let first_hash =
-        keccak256((DepositType::Regular, first.clone(), B256::ZERO).abi_encode_params());
     let tempo_head = keccak256((DepositType::Regular, second, first_hash).abi_encode_params());
     harness.set_queue_hash(tempo_head);
 
@@ -348,7 +349,7 @@ fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
             .advance_call(
                 vec![QueuedDeposit {
                     depositType: DepositType::Regular,
-                    depositData: first.abi_encode().into(),
+                    depositData: first_data.into(),
                 }],
                 Vec::new(),
             )
