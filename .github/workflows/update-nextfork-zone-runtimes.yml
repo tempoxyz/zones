@@ -1,0 +1,37 @@
+name: Update nextfork Zone runtimes
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-nextfork-zone-runtimes
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update changed runtimes
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Foundry
+        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          version: nightly
+
+      - name: Build Zone runtimes
+        run: forge build --root specs/ref-impls --skip test --no-lint
+
+      - name: Update changed runtimes
+        env:
+          RPC_URL: ${{ secrets.TEMPO_NEXTFORK_RPC_URL }}
+          FACTORY_OWNER_PRIVATE_KEY: ${{ secrets.ZONE_FACTORY_OWNER_PRIVATE_KEY }}
+        run: scripts/update-nextfork-zone-runtimes.sh

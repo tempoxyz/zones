@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 # tempo
 tempo-chainspec.workspace = true
-tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
@@ -75,7 +74,8 @@ k256.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url = "2"
+url = { version = "2", optional = true }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
 alloy = { workspace = true, features = [
@@ -104,12 +104,14 @@ reqwest.workspace = true
 revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
+tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
+url = "2"
 
 [features]
 default = []
@@ -118,6 +120,8 @@ cli = [
   "dep:reth-consensus",
   "dep:reth-ethereum",
   "dep:reth-tracing",
+  "dep:url",
+  "dep:zeroize",
   "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]

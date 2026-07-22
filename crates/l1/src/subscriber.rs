@@ -1,7 +1,11 @@
 use super::*;
+use std::collections::HashSet;
+use tempo_primitives::is_tip20_prefix;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>);
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -10,14 +14,8 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
-    /// Optional genesis Tempo block number override. When set, used instead of
-    /// the portal's on-chain `genesisTempoBlockNumber` (which may be 0 for
-    /// portals not created via ZoneFactory).
+    /// Optional genesis Tempo block number used to backfill a fresh zone.
     pub genesis_tempo_block_number: Option<u64>,
-    /// Shared TIP-403 policy cache. The subscriber applies policy events
-    /// extracted from L1 receipts directly into this cache before enqueuing
-    /// blocks.
-    pub policy_cache: crate::state::tip403::PolicyCache,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// finalized block.
     pub l1_state_cache: crate::state::cache::L1StateCache,
@@ -52,11 +50,6 @@ pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
     pub(crate) deposit_queue: DepositQueue,
-    /// Mutable set of token addresses tracked for TIP-403 policy events.
-    /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
-    pub(crate) tracked_tokens: Vec<Address>,
-    /// TIP-403 metrics (cache sizes, events applied).
-    pub(crate) tip403_metrics: crate::state::tip403::Tip403Metrics,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
@@ -75,15 +68,12 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        let tracked_tokens = config.policy_cache.read().tracked_tokens();
         let subscriber = Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
             deposit_queue,
-            tracked_tokens,
-            tip403_metrics: Default::default(),
             subscriber_metrics: Default::default(),
         };
 
@@ -91,7 +81,7 @@ impl L1Subscriber {
             "l1-deposit-subscriber",
             Box::pin(async move {
                 loop {
-                    if let Err(e) = subscriber.clone().run().await {
+                    if let Err(e) = subscriber.run().await {
                         let retry_interval = subscriber.config.retry_connection_interval;
                         subscriber.subscriber_metrics.reconnects.increment(1);
                         error!(
@@ -170,12 +160,9 @@ impl L1Subscriber {
     ///
     /// Uses the zone's local `tempoBlockNumber` as the primary starting point —
     /// this is the authoritative source for where the zone left off. Falls back
-    /// to the CLI genesis override or the portal's `genesisTempoBlockNumber`
-    /// when the zone hasn't processed any blocks yet.
-    pub(crate) async fn resolve_start_block(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<Option<u64>> {
+    /// to the CLI genesis override when the zone hasn't processed any blocks
+    /// yet. Without either checkpoint, live subscription starts at the L1 tip.
+    pub(crate) async fn resolve_start_block(&self) -> eyre::Result<Option<u64>> {
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.
@@ -190,18 +177,11 @@ impl L1Subscriber {
             return Ok(Some(genesis + 1));
         }
 
-        let portal = ZonePortal::new(self.config.portal_address, l1_provider);
-        let on_chain = portal.genesisTempoBlockNumber().call().await?;
-        if on_chain == 0 {
-            warn!(
-                "Portal genesisTempoBlockNumber is 0 — skipping backfill. \
-                 Set --l1.genesis-block-number to backfill from the correct block."
-            );
-            return Ok(None);
-        }
-
-        info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
-        Ok(Some(on_chain + 1))
+        warn!(
+            "No local Tempo checkpoint or genesis block override — skipping backfill. \
+             Set --l1.genesis-block-number to backfill from the correct block."
+        );
+        Ok(None)
     }
 
     /// Resolve the first L1 block that has not already been ingested.
@@ -209,7 +189,7 @@ impl L1Subscriber {
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
     ) -> eyre::Result<u64> {
-        let resolved = self.resolve_start_block(l1_provider).await?;
+        let resolved = self.resolve_start_block().await?;
         let queued = self
             .deposit_queue
             .last_enqueued()
@@ -241,11 +221,10 @@ impl L1Subscriber {
 
     /// Synchronize all missing blocks through the current finalized L1 head.
     ///
-    /// This single, deterministic step is the test boundary for the subscriber:
-    /// callers provide the next block number and receive the next cursor after a
-    /// successful sync.
+    /// Callers provide the next block number and receive the next cursor after
+    /// a successful sync.
     pub(crate) async fn sync_finalized_once(
-        &mut self,
+        &self,
         l1_provider: &impl Provider<TempoNetwork>,
         next_block: u64,
     ) -> eyre::Result<u64> {
@@ -265,23 +244,20 @@ impl L1Subscriber {
         );
 
         let start = std::time::Instant::now();
-        let result = self.backfill(l1_provider, next_block, finalized).await;
+        self.backfill(l1_provider, next_block, finalized).await?;
         self.subscriber_metrics
             .backfill_duration_seconds
             .record(start.elapsed().as_secs_f64());
-        result?;
-
         self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
         Ok(finalized.saturating_add(1))
     }
 
-    /// Follow finalized L1 using transport-specific head notifications as
-    /// wake-up signals.
+    /// Follow finalized L1 using transport-specific head notifications as wakeups.
     ///
     /// Header contents are intentionally ignored. Canonical block selection is
     /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
     pub(crate) async fn follow_finalized<S>(
-        &mut self,
+        &self,
         l1_provider: &impl Provider<TempoNetwork>,
         triggers: S,
     ) -> eyre::Result<()>
@@ -291,8 +267,8 @@ impl L1Subscriber {
         let mut triggers = Box::pin(triggers);
         let mut next_block = self.next_block_to_sync(l1_provider).await?;
 
-        // The caller subscribes before this initial sync so a head published
-        // while catching up remains queued as another trigger.
+        // Subscribe before the initial sync so a head published while catching
+        // up remains queued as another trigger.
         next_block = self.sync_finalized_once(l1_provider, next_block).await?;
 
         while let Some(trigger) = triggers.next().await {
@@ -306,12 +282,12 @@ impl L1Subscriber {
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
     ///
     /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
-    /// parallel, then processes them sequentially (event extraction, policy
-    /// application, enqueue). Receipts are fetched by the corresponding block
+    /// parallel, then processes them sequentially (event extraction and enqueue).
+    /// Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(
-        &mut self,
+        &self,
         l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
@@ -373,15 +349,12 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, policy_events) = self.extract_events(block_number, &receipts);
+            let (events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash());
-            self.apply_policy_events(block_number, &policy_events);
-            self.apply_portal_state_events(block_number, &events);
-            self.deposit_queue
-                .enqueue_sealed(sealed, events, policy_events);
+            self.update_l1_state_anchor(block_number, sealed.hash(), &invalidated);
+            self.deposit_queue.enqueue_sealed(sealed, events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
 
@@ -413,18 +386,12 @@ impl L1Subscriber {
     /// Run the L1 subscriber until an RPC operation fails.
     ///
     /// The subscriber follows only the L1 `finalized` tag. WebSocket
-    /// `newHeads` or HTTP block-filter updates are used as wake-up signals;
-    /// each notification ingests the missing finalized range in order, so no
-    /// confirmation buffer or reorg handling is needed.
+    /// `newHeads` or HTTP block-filter updates are used as wakeups; each
+    /// notification ingests the missing finalized range in order.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
-    pub async fn run(mut self) -> eyre::Result<()> {
-        // Re-read tracked tokens from the policy cache so we pick up any
-        // tokens discovered during a previous run (before a reconnect).
-        self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
-
+    pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
-
         let triggers = self.head_triggers(&provider).await?;
         info!(
             portal = %self.config.portal_address,
@@ -433,49 +400,38 @@ impl L1Subscriber {
         self.follow_finalized(&provider, triggers).await
     }
 
-    /// Extract portal and policy events from pre-fetched receipts (no RPC).
+    /// Extract portal events and raw-cache mutation barriers from fetched receipts.
     fn extract_events(
-        &mut self,
+        &self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> (L1PortalEvents, Vec<PolicyEvent>) {
+    ) -> L1ProcessedEvents {
         use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
-        let mut policy_events = Vec::new();
+        let mut invalidated = HashSet::new();
 
         for receipt in receipts {
             for log in receipt.logs() {
-                let addr = log.address();
+                let address = log.address();
 
-                if addr == portal_address {
-                    let prev_len = portal_events.enabled_tokens.len();
+                if address == portal_address {
+                    invalidated.insert(address);
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
-                    if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
-                        let token = enabled.token;
-                        if !self.tracked_tokens.contains(&token) {
-                            info!(%token, "New token enabled, adding to tracked tokens");
-                            self.tracked_tokens.push(token);
-                        }
-                    }
-                } else if addr == TIP403_REGISTRY_ADDRESS {
-                    if let Some(event) = PolicyEvent::decode_registry(log) {
-                        policy_events.push(event);
-                    }
-                } else if self.tracked_tokens.contains(&addr)
-                    && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
-                    && let Some(event) = PolicyEvent::decode_tip20(log)
+                } else if address == TIP403_REGISTRY_ADDRESS
+                    || (is_tip20_prefix(address)
+                        && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH))
                 {
-                    policy_events.push(event);
+                    invalidated.insert(address);
                 }
             }
         }
 
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, policy_events)
+        (portal_events, invalidated)
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -490,18 +446,10 @@ impl L1Subscriber {
     fn record_portal_event_metrics(&self, portal_events: &L1PortalEvents) {
         let mut regular = 0u64;
         let mut encrypted = 0u64;
-        let mut transfer_started = 0u64;
-        let mut transferred = 0u64;
         for deposit in &portal_events.deposits {
             match deposit {
                 L1Deposit::Regular(_) => regular += 1,
                 L1Deposit::Encrypted(_) => encrypted += 1,
-            }
-        }
-        for event in &portal_events.sequencer_events {
-            match event {
-                L1SequencerEvent::TransferStarted { .. } => transfer_started += 1,
-                L1SequencerEvent::Transferred { .. } => transferred += 1,
             }
         }
         if regular > 0 {
@@ -519,61 +467,21 @@ impl L1Subscriber {
                 .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
         }
-        if transfer_started > 0 {
-            self.subscriber_metrics
-                .sequencer_transfer_started_events
-                .increment(transfer_started);
-        }
-        if transferred > 0 {
-            self.subscriber_metrics
-                .sequencer_transferred_events
-                .increment(transferred);
-        }
-    }
-
-    /// Write decoded policy events into the shared cache.
-    ///
-    /// The subscriber may write events ahead of the engine's processed L1 height;
-    /// the engine advances the cache baseline after it accepts the corresponding
-    /// zone payload.
-    pub(crate) fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
-        let mut cache = self.config.policy_cache.write();
-        cache.apply_events(block_number, policy_events);
-        if !policy_events.is_empty() {
-            self.tip403_metrics
-                .listener_events_applied
-                .increment(policy_events.len() as u64);
-        }
-        self.tip403_metrics
-            .cached_policies
-            .set(cache.policies().len() as f64);
-        self.tip403_metrics
-            .cached_token_policies
-            .set(cache.num_token_policies() as f64);
-    }
-
-    /// Write decoded portal state changes into the shared L1 cache at the
-    /// confirmed block height.
-    fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
-            return;
-        }
-
-        let mut cache = self.config.l1_state_cache.write();
-        apply_sequencer_events_to_cache(
-            &mut cache,
-            self.config.portal_address,
-            block_number,
-            &portal_events.sequencer_events,
-        );
     }
 
     /// Update the L1 state cache anchor to the latest ingested finalized block.
-    pub(crate) fn update_l1_state_anchor(&self, number: u64, hash: B256) {
-        self.config
-            .l1_state_cache
-            .write()
-            .update_anchor(NumHash::new(number, hash));
+    pub(crate) fn update_l1_state_anchor(
+        &self,
+        number: u64,
+        hash: B256,
+        invalidated_accounts: &HashSet<Address>,
+    ) {
+        let mut guard = self.config.l1_state_cache.write();
+        for &address in invalidated_accounts {
+            guard.invalidate(address, number);
+        }
+        // Publish receipt coverage only after every mutation barrier from this block is visible.
+        guard.update_anchor(NumHash::new(number, hash));
     }
 }
 
@@ -633,56 +541,4 @@ pub(crate) fn verify_receipts(
         );
     }
     Ok(())
-}
-
-pub(crate) fn apply_sequencer_events_to_cache(
-    cache: &mut L1StateCacheInner,
-    portal_address: Address,
-    block_number: u64,
-    sequencer_events: &[L1SequencerEvent],
-) {
-    for event in sequencer_events {
-        match *event {
-            L1SequencerEvent::TransferStarted {
-                current_sequencer,
-                pending_sequencer,
-            } => {
-                cache.set(
-                    portal_address,
-                    PORTAL_SEQUENCER_SLOT,
-                    block_number,
-                    address_to_storage_value(current_sequencer),
-                );
-                cache.set(
-                    portal_address,
-                    PORTAL_PENDING_SEQUENCER_SLOT,
-                    block_number,
-                    address_to_storage_value(pending_sequencer),
-                );
-            }
-            L1SequencerEvent::Transferred {
-                previous_sequencer: _,
-                new_sequencer,
-            } => {
-                cache.set(
-                    portal_address,
-                    PORTAL_SEQUENCER_SLOT,
-                    block_number,
-                    address_to_storage_value(new_sequencer),
-                );
-                cache.set(
-                    portal_address,
-                    PORTAL_PENDING_SEQUENCER_SLOT,
-                    block_number,
-                    B256::ZERO,
-                );
-            }
-        }
-    }
-}
-
-pub(crate) fn address_to_storage_value(address: Address) -> B256 {
-    let mut bytes = [0u8; 32];
-    bytes[12..].copy_from_slice(address.as_slice());
-    B256::new(bytes)
 }

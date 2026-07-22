@@ -12,13 +12,14 @@ import {
     IZoneFactory,
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     Withdrawal,
-    ZoneInfo,
-    ZoneParams
+    ZONE_MESSENGER_ADDRESS,
+    ZONE_VERIFIER_ADDRESS,
+    ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -63,8 +64,8 @@ contract MockZoneFactoryForIntegrationMessenger {
         _zones[zoneId].portal = portal;
     }
 
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
-        return _zones[zoneId];
+    function zones(uint32 id) external view returns (ZoneInfo memory) {
+        return _zones[id];
     }
 
 }
@@ -74,7 +75,6 @@ contract MockZoneFactoryForIntegrationMessenger {
 contract ZoneIntegrationTest is BaseTest {
 
     // L1 contracts
-    ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
 
     // L2 contracts
@@ -95,7 +95,7 @@ contract ZoneIntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        l1Factory = _deployZoneFactory(); // Keep for verifier only
+        _installSharedZoneRuntimes();
         receiver = new TrackingReceiver();
 
         // Deploy zone token FIRST
@@ -110,34 +110,47 @@ contract ZoneIntegrationTest is BaseTest {
 
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Deploy portal directly (bypass factory TIP20 prefix check), but use a
-        // mock factory registry so the shared messenger can authenticate the source portal.
-        MockZoneFactoryForIntegrationMessenger messengerFactory =
-            new MockZoneFactoryForIntegrationMessenger();
-        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
+        // Deploy portal directly (bypass factory TIP20 prefix check).
+        ZoneMessenger messengerContract = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         l1Portal = new ZonePortal();
-        address verifier = l1Factory.verifier();
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
         vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1,
             address(l2ZoneToken),
             address(messengerContract),
             admin,
-            sequencer,
-            verifier,
-            GENESIS_BLOCK_HASH,
-            genesisTempoBlockNumber,
+            sequencers,
+            1,
+            ZONE_VERIFIER_ADDRESS,
             ""
         );
         zoneId = 1;
-        messengerFactory.setPortal(zoneId, address(l1Portal));
+        vm.mockCall(
+            _ZONE_FACTORY,
+            abi.encodeWithSelector(IZoneFactory.zones.selector, zoneId),
+            abi.encode(
+                ZoneInfo({
+                    zoneId: zoneId,
+                    portal: address(l1Portal),
+                    admin: admin,
+                    sequencers: sequencers,
+                    threshold: 1,
+                    verifier: ZONE_VERIFIER_ADDRESS,
+                    rpcUrl: ""
+                })
+            )
+        );
 
         // L2 setup
         l2TempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
-            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+            address(l1Portal),
+            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            bytes32(uint256(1))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
         l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
@@ -191,7 +204,6 @@ contract ZoneIntegrationTest is BaseTest {
             senderTag: _senderTag(sender, txSequence),
             to: to,
             amount: amount,
-            fee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackNonce: uint64(txSequence),
@@ -341,7 +353,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Submit L1 batch for first deposit
         vm.roll(block.number + 1);
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -444,7 +457,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Submit L1 batch
         vm.roll(block.number + 1);
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -465,7 +479,7 @@ contract ZoneIntegrationTest is BaseTest {
         Withdrawal memory w = _withdrawal(
             1, alice, address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback"
         );
-        l1Portal.processWithdrawal(w, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         // Verify callback was executed
         assertEq(receiver.callCount(), 1);
@@ -515,7 +529,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         bytes32 wHash1 = _finalizeWithdrawalBatch(type(uint256).max);
 
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -543,7 +558,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         bytes32 wHash2 = _finalizeWithdrawalBatch(type(uint256).max);
 
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -571,7 +587,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         bytes32 wHash3 = _finalizeWithdrawalBatch(type(uint256).max);
 
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -597,17 +614,17 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
 
         Withdrawal memory w1 = _withdrawal(1, alice, bob, 1000e6, bytes32("to bob"), 0, alice, "");
-        l1Portal.processWithdrawal(w1, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w1), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
 
         Withdrawal memory w2 =
             _withdrawal(2, alice, charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
-        l1Portal.processWithdrawal(w2, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w2), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(charlie), charlieBefore + 2000e6);
 
         Withdrawal memory w3 =
             _withdrawal(3, alice, alice, 3000e6, bytes32("to self"), 0, alice, "");
-        l1Portal.processWithdrawal(w3, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w3), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 3000e6);
 
         // All processed
@@ -677,7 +694,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Submit batch with withdrawals
         vm.roll(block.number + 1);
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -725,8 +743,8 @@ contract ZoneIntegrationTest is BaseTest {
         bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
         uint256 charlieBefore = l2ZoneToken.balanceOf(charlie);
 
-        l1Portal.processWithdrawal(w1, innerHash);
-        l1Portal.processWithdrawal(w2, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w1), innerHash);
+        l1Portal.processWithdrawals(_singleWithdrawal(w2), bytes32(0));
 
         assertEq(l2ZoneToken.balanceOf(charlie), charlieBefore + 3500e6);
     }

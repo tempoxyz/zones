@@ -73,7 +73,7 @@ pub struct ZoneSequencerHandle {
 ///   shared store, builds [`crate::BatchData`], and submits each batch synchronously to the
 ///   ZonePortal on Tempo L1. Local state only advances on successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
-///   `processWithdrawal` for each pending withdrawal.
+///   `processWithdrawals` for each pending withdrawal.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
@@ -84,10 +84,13 @@ pub async fn spawn_zone_sequencer(
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
-    let l1_provider =
-        connect_l1_provider(&config.l1_rpc_url, config.retry_connection_interval, signer)
-            .await
-            .expect("valid L1 RPC URL");
+    let l1_provider = connect_l1_provider(
+        &config.l1_rpc_url,
+        config.retry_connection_interval,
+        signer.clone(),
+    )
+    .await
+    .expect("valid L1 RPC URL");
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
@@ -121,6 +124,7 @@ pub async fn spawn_zone_sequencer(
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
         l1_provider,
+        signer,
         withdrawal_store,
         withdrawal_notify,
         withdrawal_repair_notify,

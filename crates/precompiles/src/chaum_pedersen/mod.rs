@@ -21,7 +21,7 @@ use k256::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
-use revm::precompile::PrecompileId;
+use tempo_precompiles::Precompile as _;
 
 /// Chaum-Pedersen Verify precompile address on Zone L2.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
@@ -67,37 +67,13 @@ pub use IChaumPedersenVerify::verifyProofCall;
 pub struct ChaumPedersenVerify;
 
 impl ChaumPedersenVerify {
-    /// Wrap this precompile in a [`DynPrecompile`] with the Tempo storage context
-    /// required by the upstream dispatch macro.
-    pub fn create(
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> DynPrecompile {
-        use tempo_precompiles::{
-            Precompile as _,
-            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-        };
-
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-        DynPrecompile::new_stateful(
-            PrecompileId::Custom("ChaumPedersenVerify".into()),
-            move |input| {
-                let mut storage = EvmPrecompileStorageProvider::new(
-                    input.internals,
-                    input.gas,
-                    input.reservoir,
-                    spec,
-                    amsterdam_eip8037_enabled,
-                    input.is_static,
-                    gas_params.clone(),
-                );
-
-                StorageCtx::enter(&mut storage, || {
-                    let mut precompile = Self;
-                    precompile.call(input.data, input.caller)
-                })
-            },
+    /// Creates the Chaum-Pedersen precompile with the shared zone execution environment.
+    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "ChaumPedersenVerify",
+            env,
+            crate::execution::NoCallRules,
+            |data, caller| Self.call(data, caller),
         )
     }
 }

@@ -5,7 +5,7 @@ use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter};
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
 use alloy_sol_types::{SolEvent, SolValue};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
@@ -22,25 +22,39 @@ use std::{
     collections::BTreeMap,
     future::Future,
     net::{SocketAddr, TcpListener},
+    num::NonZeroU32,
     ops::Deref,
     pin::Pin,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TempoChainSpec};
+use tempo_chainspec::{
+    hardfork::TempoHardfork,
+    spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
+};
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
 };
-use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
+use tempo_precompiles::{
+    PATH_USD_ADDRESS,
+    storage::{
+        Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
+    },
+    tip20::tip20_slots,
+    tip403_registry::{
+        ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
+        TIP403Registry, tip403_registry_slots,
+    },
+};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
@@ -127,7 +141,7 @@ where
 }
 
 fn portal_token_config_slot(token: Address) -> B256 {
-    let portal_token_configs_slot = B256::with_last_byte(8);
+    let portal_token_configs_slot = B256::with_last_byte(6);
     keccak256((token, portal_token_configs_slot).abi_encode())
 }
 
@@ -194,94 +208,41 @@ fn forge_deployed_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Byt
     ))
 }
 
-fn forge_deployed_bytecode_with_address_immutable(
-    contract: &str,
-    address: Address,
-) -> eyre::Result<alloy_primitives::Bytes> {
-    let specs_dir =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
-    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
-    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
-    })?;
-    let artifact: serde_json::Value = serde_json::from_str(&json)?;
-    let mut bytecode = alloy_primitives::hex::decode(
-        artifact["deployedBytecode"]["object"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("missing deployed bytecode in {contract} artifact"))?,
-    )?;
-    let references = artifact["deployedBytecode"]["immutableReferences"]
-        .as_object()
-        .ok_or_else(|| eyre::eyre!("missing immutable references in {contract} artifact"))?;
-    let mut patched = 0;
-    for reference in references.values().flat_map(|value| {
-        value
-            .as_array()
-            .into_iter()
-            .flat_map(|references| references.iter())
-    }) {
-        let start = reference["start"]
-            .as_u64()
-            .ok_or_else(|| eyre::eyre!("invalid immutable start in {contract} artifact"))?
-            as usize;
-        let length = reference["length"]
-            .as_u64()
-            .ok_or_else(|| eyre::eyre!("invalid immutable length in {contract} artifact"))?
-            as usize;
-        eyre::ensure!(length == 32, "unexpected immutable size in {contract}");
-        bytecode[start + 12..start + length].copy_from_slice(address.as_slice());
-        patched += 1;
-    }
-    eyre::ensure!(patched > 0, "no immutable references found in {contract}");
-    Ok(bytecode.into())
-}
+fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
+    use tempo_zone_contracts::{
+        ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+    };
 
-fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::Result<()> {
-    const VERIFIER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000001");
-    const MESSENGER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000002");
-
-    let one = B256::with_last_byte(1);
+    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot 0 packs
+    // `uint32 nextZoneId`, `address owner`, and the implementation lock flag.
+    let packed_factory_config: U256 = U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32);
     let mut factory_storage = BTreeMap::new();
-    factory_storage.insert(B256::ZERO, one);
-    factory_storage.insert(
-        keccak256((VERIFIER_ADDRESS, U256::from(3)).abi_encode()),
-        one,
-    );
-    factory_storage.insert(
-        B256::with_last_byte(4),
-        B256::left_padding_from(VERIFIER_ADDRESS.as_slice()),
-    );
-    factory_storage.insert(
-        B256::with_last_byte(5),
-        B256::left_padding_from(MESSENGER_ADDRESS.as_slice()),
-    );
-    factory_storage.insert(
-        B256::with_last_byte(6),
-        B256::left_padding_from(owner.as_slice()),
-    );
-    factory_storage.insert(B256::with_last_byte(7), B256::with_last_byte(3));
+    factory_storage.insert(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()));
 
     genesis.alloc.insert(
         ZONE_FACTORY_ADDRESS,
         GenesisAccount::default()
-            .with_nonce(Some(3))
-            .with_code(Some(forge_deployed_bytecode("ZoneFactory")?))
+            .with_nonce(Some(1))
+            .with_code(Some(vec![0xef].into()))
             .with_storage(Some(factory_storage)),
     );
     genesis.alloc.insert(
-        VERIFIER_ADDRESS,
+        ZONE_VERIFIER_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
             .with_code(Some(forge_deployed_bytecode("Verifier")?)),
     );
     genesis.alloc.insert(
-        MESSENGER_ADDRESS,
+        ZONE_PORTAL_IMPL_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode_with_address_immutable(
-                "ZoneMessenger",
-                ZONE_FACTORY_ADDRESS,
-            )?)),
+            .with_code(Some(forge_deployed_bytecode("ZonePortal")?)),
+    );
+    genesis.alloc.insert(
+        ZONE_MESSENGER_ADDRESS,
+        GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
     );
     Ok(())
 }
@@ -293,21 +254,137 @@ fn install_reference_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
 
-/// Seed the local test policy cache with the default pathUSD transfer policy.
-///
-/// Self-contained zone tests boot without a real L1, so startup can't resolve the
-/// token's `transferPolicyId` via RPC. pathUSD defaults to builtin policy `1`
-/// (allow all), and local tests rely on that behavior for outbox `transferFrom`
-/// flows.
-fn seed_local_policy_cache(policy_cache: &zone_l1::PolicyCache) {
-    const LOCAL_POLICY_CACHE_SEED_BLOCK: u64 = 1;
-
-    policy_cache.set_last_l1_block(LOCAL_POLICY_CACHE_SEED_BLOCK);
-    policy_cache.write().set_token_policy(
-        PATH_USD_ADDRESS,
-        LOCAL_POLICY_CACHE_SEED_BLOCK,
-        ALLOW_ALL_POLICY_ID,
+/// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
+pub(crate) fn seed_raw_tip403_token_policy(
+    cache: &mut zone_l1::state::L1StateCacheInner,
+    block_number: u64,
+    token: Address,
+    policy_id: u64,
+) {
+    let slot = keccak256((token, tip403_registry_slots::TOKEN_TRANSFER_POLICIES).abi_encode());
+    let packed: U256 = U256::from(policy_id) | (U256::ONE << 64);
+    cache.set(
+        TIP403_REGISTRY_ADDRESS,
+        slot,
+        block_number,
+        B256::from(packed.to_be_bytes()),
     );
+}
+
+/// Seed the token-local transfer-policy field used by Tempo's TIP-1092 compatibility fallback.
+fn seed_raw_legacy_tip20_policy(
+    cache: &mut zone_l1::state::L1StateCacheInner,
+    block_number: u64,
+    token: Address,
+    policy_id: u64,
+) {
+    let packed = U256::from(policy_id) << (tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8);
+    cache.set(
+        token,
+        B256::from(tip20_slots::TRANSFER_POLICY_ID.to_be_bytes()),
+        block_number,
+        B256::from(packed.to_be_bytes()),
+    );
+}
+
+/// A TIP-403 policy write for [`seed_raw_tip403_policy`].
+pub(crate) struct PolicySeed<'a> {
+    pub(crate) id: u64,
+    pub(crate) ty: PolicyType,
+    pub(crate) members: &'a [(Address, bool)],
+    pub(crate) compound: Option<(u64, u64, u64)>,
+}
+
+impl<'a> PolicySeed<'a> {
+    pub(crate) fn simple(id: u64, ty: PolicyType, members: &'a [(Address, bool)]) -> Self {
+        Self {
+            id,
+            ty,
+            members,
+            compound: None,
+        }
+    }
+
+    pub(crate) fn compound(id: u64, sender: u64, recipient: u64, mint_recipient: u64) -> Self {
+        Self {
+            id,
+            ty: PolicyType::COMPOUND,
+            members: &[],
+            compound: Some((sender, recipient, mint_recipient)),
+        }
+    }
+}
+
+/// Materialize one or more TIP-403 policy writes into the raw L1 cache.
+/// A batch shares a single storage snapshot, so multiple policy writes can reference each other.
+pub(crate) fn seed_raw_tip403_policy(
+    cache: &L1StateCache,
+    block_number: u64,
+    policies: &[PolicySeed<'_>],
+) -> eyre::Result<()> {
+    let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T8);
+    let registry = TIP403Registry::new();
+    let counter_slot = registry.policy_id_counter.slot();
+    let existing_next_policy_id = cache
+        .read()
+        .get(TIP403_REGISTRY_ADDRESS, counter_slot.into(), block_number)
+        .and_then(|value| U256::from_be_bytes(value.0).try_into().ok())
+        .unwrap_or(2u64);
+    let mut slots = vec![counter_slot];
+    for policy in policies {
+        slots.push(registry.policy_records[policy.id].base.base_slot());
+        if policy.compound.is_some() {
+            slots.push(registry.policy_records[policy.id].compound.base_slot());
+        }
+        slots.extend(
+            policy
+                .members
+                .iter()
+                .map(|(account, _)| registry.policy_set[policy.id][*account].slot()),
+        );
+    }
+
+    StorageCtx::enter(&mut storage, || -> tempo_precompiles::Result<()> {
+        let mut registry = TIP403Registry::new();
+        let next_policy_id = policies
+            .iter()
+            .map(|policy| policy.id + 1)
+            .max()
+            .unwrap_or(2)
+            .max(existing_next_policy_id);
+        registry.policy_id_counter.write(next_policy_id)?;
+        for policy in policies {
+            registry.policy_records[policy.id].base.write(PolicyData {
+                policy_type: policy.ty as u8,
+                admin: Address::ZERO,
+            })?;
+            if let Some((sender, recipient, mint_recipient)) = policy.compound {
+                registry.policy_records[policy.id]
+                    .compound
+                    .write(RawCompoundPolicyData {
+                        sender_policy_id: sender,
+                        recipient_policy_id: recipient,
+                        mint_recipient_policy_id: mint_recipient,
+                    })?;
+            }
+            for &(account, in_set) in policy.members {
+                registry.policy_set[policy.id][account].write(in_set)?;
+            }
+        }
+        Ok(())
+    })?;
+
+    let mut cache = cache.write();
+    for slot in slots {
+        let value = storage.sload(TIP403_REGISTRY_ADDRESS, slot)?;
+        cache.set(
+            TIP403_REGISTRY_ADDRESS,
+            slot.into(),
+            block_number,
+            value.into(),
+        );
+    }
+    Ok(())
 }
 
 /// Compute the TIP-20 token address for a given sender and salt.
@@ -316,12 +393,8 @@ fn seed_local_policy_cache(policy_cache: &zone_l1::PolicyCache) {
 pub(crate) fn compute_tip20_address(sender: Address, salt: B256) -> Address {
     let hash = keccak256((sender, salt).abi_encode());
 
-    let tip20_prefix: [u8; 12] = [
-        0x20, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    ];
-
     let mut address_bytes = [0u8; 20];
-    address_bytes[..12].copy_from_slice(&tip20_prefix);
+    address_bytes[..12].copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
     address_bytes[12..].copy_from_slice(&hash[..8]);
 
     Address::from(address_bytes)
@@ -377,7 +450,6 @@ pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
     l1_state_cache: L1StateCache,
-    policy_cache: zone_l1::PolicyCache,
     rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
     _tasks: Runtime,
@@ -404,11 +476,6 @@ impl ZoneTestNode {
     /// Returns a handle to the L1 state cache for seeding precompile data.
     pub(crate) fn l1_state_cache(&self) -> &L1StateCache {
         &self.l1_state_cache
-    }
-
-    /// Returns a handle to the policy cache for TIP-403 authorization.
-    pub(crate) fn policy_cache(&self) -> &zone_l1::PolicyCache {
-        &self.policy_cache
     }
 
     /// Builds the real private RPC API backed by the node's EthHandlers.
@@ -608,15 +675,12 @@ impl ZoneTestNode {
         .await
     }
 
-    /// Start a zone node connected to a real L1, anchoring genesis to a specific
-    /// L1 block and optionally overriding the initial token list used for
-    /// startup policy cache seeding.
-    pub(crate) async fn start_from_l1_at_block_with_initial_tokens(
+    /// Start a zone node connected to a real L1, anchoring genesis to a specific L1 block.
+    pub(crate) async fn start_from_l1_at_block(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
         portal_address: Address,
         block_number: u64,
-        initial_tokens: Option<Vec<Address>>,
     ) -> eyre::Result<Self> {
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis_at_block(l1_http_url, portal_address, block_number).await?;
@@ -630,7 +694,6 @@ impl ZoneTestNode {
             Some(genesis),
             signer,
             8,
-            initial_tokens,
             None,
             true,
         )
@@ -655,28 +718,23 @@ impl ZoneTestNode {
             Some(genesis),
             signer,
             withdrawal_batch_interval_blocks,
-            Some(vec![]),
             None,
             true,
         )
         .await
     }
 
-    /// Start a zone node connected to a real L1, anchoring genesis to the
-    /// portal's on-chain `genesisTempoBlockNumber`.
+    /// Start a zone node connected to a real L1 at an explicit genesis block.
     ///
     /// Unlike [`start_from_l1`], this preserves the full replay gap between the
     /// portal genesis and the current L1 tip, which is useful for long-downtime
     /// catch-up tests.
-    pub(crate) async fn start_from_l1_portal_genesis(
+    pub(crate) async fn start_from_l1_genesis_block(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
         portal_address: Address,
+        genesis_block_number: u64,
     ) -> eyre::Result<Self> {
-        let l1_provider =
-            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
-        let portal = tempo_zone_contracts::ZonePortal::new(portal_address, &l1_provider);
-        let genesis_block_number = portal.genesisTempoBlockNumber().call().await?;
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis_at_block(l1_http_url, portal_address, genesis_block_number)
                 .await?;
@@ -731,7 +789,6 @@ impl ZoneTestNode {
             None,
             signer,
             8,
-            Some(vec![]),
             Some(p2p_config),
             true,
         )
@@ -774,7 +831,6 @@ impl ZoneTestNode {
             custom_genesis,
             sequencer_signer,
             8,
-            Some(vec![]),
             None,
             true,
         )
@@ -790,13 +846,11 @@ impl ZoneTestNode {
         custom_genesis: Option<Genesis>,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
         withdrawal_batch_interval_blocks: u64,
-        initial_tokens: Option<Vec<Address>>,
         p2p_config: Option<P2pConfig>,
         spawn_engine: bool,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
-        let l1_provider_url = l1_ws_url.clone();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -814,10 +868,9 @@ impl ZoneTestNode {
         )
         .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks);
         if is_local_dummy_l1 {
-            zone_node = zone_node.with_l1_chain_id(1337);
-        }
-        if let Some(initial_tokens) = initial_tokens {
-            zone_node = zone_node.with_initial_tokens(initial_tokens);
+            zone_node = zone_node
+                .with_l1_chain_id(1337)
+                .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         let p2p_enabled = p2p_config.is_some();
         if let Some(p2p_config) = p2p_config {
@@ -846,9 +899,9 @@ impl ZoneTestNode {
 
         let deposit_queue = zone_node.deposit_queue();
         let l1_state_cache = zone_node.l1_state_cache();
-        let policy_cache = zone_node.policy_cache();
         if is_local_dummy_l1 {
-            seed_local_policy_cache(&policy_cache);
+            let mut cache = l1_state_cache.write();
+            seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         }
 
         let node_handle = NodeBuilder::new(node_config)
@@ -858,15 +911,6 @@ impl ZoneTestNode {
             .await?;
 
         if spawn_engine {
-            let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect(&l1_provider_url)
-                .await?
-                .erased();
-            let policy_provider = zone_l1::PolicyProvider::new(
-                policy_cache.clone(),
-                l1_provider,
-                tokio::runtime::Handle::current(),
-            );
             let provider = node_handle.node.provider();
             let last_header = provider
                 .sealed_header(provider.best_block_number()?)?
@@ -880,7 +924,6 @@ impl ZoneTestNode {
                 sequencer_signer.address(),
                 SecretKey::from(sequencer_signer.credential()),
                 portal_address,
-                policy_provider,
             );
             node_handle
                 .node
@@ -914,7 +957,6 @@ impl ZoneTestNode {
             deposit_queue,
             http_url,
             l1_state_cache,
-            policy_cache,
             rpc_api_factory,
             node_handle: Box::new(node_handle),
             _tasks: tasks,
@@ -1146,12 +1188,12 @@ impl L1TestNode {
             .erased()
     }
 
-    /// Deploy the ZoneFactory and create a zone in one step.
+    /// Create a zone through the native ZoneFactory.
     ///
-    /// Combines [`deploy_zone_factory`](Self::deploy_zone_factory) and
+    /// Combines [`native_zone_factory`](Self::native_zone_factory) and
     /// [`create_zone`](Self::create_zone). Returns the portal address.
     pub(crate) async fn deploy_zone(&self) -> eyre::Result<Address> {
-        let factory = self.deploy_zone_factory().await?;
+        let factory = self.native_zone_factory().await?;
         self.create_zone(factory).await
     }
 
@@ -1292,9 +1334,9 @@ impl L1TestNode {
             .await?)
     }
 
-    /// Install the ZoneFactory at TIP-1091's fixed address.
-    pub(crate) async fn deploy_zone_factory(&self) -> eyre::Result<Address> {
-        zone_node::dev::deploy_zone_factory(
+    /// Verify and return the native ZoneFactory at TIP-1091's fixed address.
+    pub(crate) async fn native_zone_factory(&self) -> eyre::Result<Address> {
+        zone_node::dev::native_zone_factory(
             self.http_url.as_str(),
             alloy_network::EthereumWallet::from(self.dev_signer()),
         )
@@ -1337,31 +1379,12 @@ impl L1TestNode {
         let l1_provider = self.dev_provider();
         let factory = ZoneFactory::new(factory_address, &l1_provider);
 
-        // Capture genesis anchor from the current L1 header
-        let l1_tempo_provider =
-            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(self.http_url.clone());
-        let block = l1_tempo_provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
-        let l1_header: &TempoHeader = block.header.as_ref();
-
-        let mut rlp_buf = Vec::new();
-        l1_header.encode(&mut rlp_buf);
-        let genesis_tempo_block_hash = keccak256(&rlp_buf);
-
-        let verifier_address = factory.verifier().call().await?;
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
-                sequencer,
-                verifier: verifier_address,
-                zoneParams: ZoneFactory::ZoneParams {
-                    genesisBlockHash: B256::ZERO,
-                    genesisTempoBlockHash: genesis_tempo_block_hash,
-                    genesisTempoBlockNumber: l1_header.inner.number,
-                },
+                sequencers: vec![sequencer],
+                threshold: 1,
                 rpcUrl: String::new(),
             })
             .send()
@@ -1428,7 +1451,7 @@ impl L1TestNode {
         sequencer_a: alloy_signer_local::PrivateKeySigner,
         sequencer_b: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<(Address, Address, Address)> {
-        let factory = self.deploy_zone_factory().await?;
+        let factory = self.native_zone_factory().await?;
         let portal_a = self
             .create_zone_with_admin_and_sequencer(
                 factory,
@@ -1870,7 +1893,7 @@ impl L1TestNode {
         let genesis: serde_json::Value =
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
         let mut genesis = serde_json::from_value(genesis)?;
-        install_reference_zone_factory(&mut genesis, l1_dev_signer().address())?;
+        install_native_zone_factory(&mut genesis, l1_dev_signer().address())?;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
@@ -2573,10 +2596,6 @@ pub(crate) async fn start_local_zone_with_fixture(
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
 
-    // Local tests have no real L1, so the RPC fallback in resolve_transfer_policy_id
-    // fails. Seed pathUSD with the default allow-all policy (mirrors L1 default).
-    seed_local_policy_cache(zone.policy_cache());
-
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
         Address::ZERO,
@@ -2646,6 +2665,10 @@ pub(crate) async fn start_local_p2p_pair(
         Ed25519PrivateKey::from_seed(103),
     ];
     let public_keys = identities.each_ref().map(|key| key.public_key());
+    let secp256k1_keys = [101_u64, 102, 103].map(|key| format!("0x{key:064x}"));
+    let secp256k1_signers = secp256k1_keys
+        .each_ref()
+        .map(|key| key.parse::<PrivateKeySigner>().unwrap());
 
     let unique = NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed);
     let config_dir = std::env::temp_dir().join(format!(
@@ -2658,10 +2681,16 @@ pub(crate) async fn start_local_p2p_pair(
         "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
         const_hex::encode_prefixed(public_keys[0].as_ref())
     );
-    for (index, (public_key, address)) in public_keys.iter().zip(addresses).enumerate() {
+    for (index, ((public_key, secp256k1_signer), address)) in public_keys
+        .iter()
+        .zip(&secp256k1_signers)
+        .zip(addresses)
+        .enumerate()
+    {
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
-            const_hex::encode_prefixed(public_key.as_ref())
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref()),
+            secp256k1_signer.address(),
         ));
     }
     std::fs::write(&manifest_path, manifest)?;
@@ -2672,9 +2701,12 @@ pub(crate) async fn start_local_p2p_pair(
             &key_path,
             const_hex::encode_prefixed(identities[index].encode().as_ref()),
         )?;
+        let secp256k1_key_path = config_dir.join(format!("node-{index}-secp256k1.key"));
+        std::fs::write(&secp256k1_key_path, &secp256k1_keys[index])?;
         configs.push(P2pConfig::load(
             &manifest_path,
             &key_path,
+            &secp256k1_key_path,
             addresses[index],
             false,
             0,
@@ -2695,7 +2727,6 @@ pub(crate) async fn start_local_p2p_pair(
         Some(genesis.clone()),
         signer.clone(),
         8,
-        Some(vec![]),
         Some(configs.remove(0)),
         true,
     )
@@ -2708,7 +2739,6 @@ pub(crate) async fn start_local_p2p_pair(
         Some(genesis),
         signer,
         8,
-        Some(vec![]),
         Some(configs.remove(0)),
         false,
     )
@@ -2716,7 +2746,6 @@ pub(crate) async fn start_local_p2p_pair(
 
     let fixture = L1Fixture::new();
     for zone in [&leader, &follower] {
-        seed_local_policy_cache(zone.policy_cache());
         fixture.seed_l1_cache(
             zone.l1_state_cache(),
             Address::ZERO,
@@ -2738,6 +2767,10 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
         Ed25519PrivateKey::from_seed(203),
     ];
     let public_keys = identities.each_ref().map(|key| key.public_key());
+    let secp256k1_keys = [201_u64, 202, 203].map(|key| format!("0x{key:064x}"));
+    let secp256k1_signers = secp256k1_keys
+        .each_ref()
+        .map(|key| key.parse::<PrivateKeySigner>().unwrap());
     let addresses = [listen, available_address()?, available_address()?];
     let config_dir = std::env::temp_dir().join(format!(
         "tempo-zone-p2p-config-{}-{}",
@@ -2751,10 +2784,16 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
         "zone_id = 0\nleader_ed25519_public_key = \"{}\"\n",
         const_hex::encode_prefixed(public_keys[0].as_ref())
     );
-    for (index, (public_key, address)) in public_keys.iter().zip(addresses).enumerate() {
+    for (index, ((public_key, secp256k1_signer), address)) in public_keys
+        .iter()
+        .zip(&secp256k1_signers)
+        .zip(addresses)
+        .enumerate()
+    {
         manifest.push_str(&format!(
-            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\n",
-            const_hex::encode_prefixed(public_key.as_ref())
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref()),
+            secp256k1_signer.address(),
         ));
     }
     std::fs::write(&manifest_path, manifest)?;
@@ -2762,9 +2801,12 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
         &key_path,
         const_hex::encode_prefixed(identities[0].encode().as_ref()),
     )?;
+    let secp256k1_key_path = config_dir.join("leader-secp256k1.key");
+    std::fs::write(&secp256k1_key_path, &secp256k1_keys[0])?;
     let config = P2pConfig::load(
         &manifest_path,
         &key_path,
+        &secp256k1_key_path,
         listen,
         false,
         0,
@@ -3496,6 +3538,8 @@ pub(crate) struct L1Fixture {
     next_block_number: u64,
     next_timestamp: u64,
     last_hash: B256,
+    /// Raw L1 caches seeded by this fixture, updated with state implied by injected deposits.
+    caches: Mutex<Vec<L1StateCache>>,
 }
 
 impl L1Fixture {
@@ -3511,6 +3555,7 @@ impl L1Fixture {
             next_block_number: 1,
             next_timestamp: 1_000_000,
             last_hash: genesis_hash,
+            caches: Mutex::new(Vec::new()),
         }
     }
 
@@ -3522,27 +3567,38 @@ impl L1Fixture {
     /// for each block we plan to inject.
     pub(crate) fn seed_l1_cache(
         &self,
-        cache: &L1StateCache,
+        cache_handle: &L1StateCache,
         portal_address: Address,
         sequencer: Address,
         num_blocks: u64,
     ) {
-        let mut cache = cache.write();
-        let deposit_queue_hash_slot = B256::with_last_byte(5);
-        let refunds_slot = B256::with_last_byte(10);
+        let mut cache = cache_handle.write();
+        let deposit_queue_hash_slot = B256::with_last_byte(3);
+        let refunds_slot = B256::with_last_byte(8);
+        let sequencer_membership_slot =
+            keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
+        let outbox_receive_policy_slot =
+            ZONE_OUTBOX_ADDRESS.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
+
+        // Local fixtures have no RPC fallback. A withdrawal transfers to the outbox, so seed the
+        // absence of its address-level receive policy as baseline raw L1 state.
+        cache.set(
+            TIP403_REGISTRY_ADDRESS,
+            B256::from(outbox_receive_policy_slot.to_be_bytes()),
+            0,
+            B256::ZERO,
+        );
 
         for block in 0..=num_blocks {
-            let mut sequencer_bytes = [0u8; 32];
-            sequencer_bytes[12..].copy_from_slice(sequencer.as_slice());
             cache.set(
                 portal_address,
-                B256::ZERO,
+                sequencer_membership_slot,
                 block,
-                B256::new(sequencer_bytes),
+                B256::with_last_byte(1),
             );
-            // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
+            // Deposit queue hash slot (3) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
@@ -3558,10 +3614,83 @@ impl L1Fixture {
             );
         }
 
+        // System transactions resolve their zero-address fee token before execution. Keep that
+        // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
+        seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
+        seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         cache.update_anchor(NumHash {
             number: num_blocks,
             hash: B256::ZERO,
         });
+        drop(cache);
+        self.caches.lock().unwrap().push(cache_handle.clone());
+    }
+
+    /// Seed the absence of an address-level TIP-403 receive policy at the current Zone anchor.
+    pub(crate) fn seed_no_receive_policy(&self, recipient: Address) -> eyre::Result<()> {
+        let current_anchor = self.next_block_number.saturating_sub(1);
+        self.seed_no_receive_policy_at(current_anchor, recipient)
+    }
+
+    fn seed_no_receive_policy_at(&self, block_number: u64, recipient: Address) -> eyre::Result<()> {
+        // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
+        let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
+        for cache in self.caches.lock().unwrap().iter() {
+            cache.write().set(
+                TIP403_REGISTRY_ADDRESS,
+                B256::from(receive_policy_slot.to_be_bytes()),
+                block_number,
+                B256::ZERO,
+            );
+        }
+        Ok(())
+    }
+
+    fn seed_regular_deposit_policy_state(&self, block_number: u64, deposits: &[Deposit]) {
+        for deposit in deposits {
+            self.seed_no_receive_policy_at(block_number, deposit.to)
+                .expect("deposit receive-policy fixture seed must be admitted");
+        }
+    }
+
+    fn seed_enabled_token_policy_state(&self, block_number: u64, tokens: &[EnabledToken]) {
+        for cache in self.caches.lock().unwrap().iter() {
+            let mut cache = cache.write();
+            for token in tokens {
+                seed_raw_tip403_token_policy(
+                    &mut cache,
+                    block_number,
+                    token.token,
+                    ALLOW_ALL_POLICY_ID,
+                );
+                // Synthetic enable-token events do not include the accompanying L1 state
+                // transition. Model both the TIP-1092 registry binding and its supported
+                // token-local fallback so same-block deposits remain self-contained.
+                seed_raw_legacy_tip20_policy(
+                    &mut cache,
+                    block_number,
+                    token.token,
+                    ALLOW_ALL_POLICY_ID,
+                );
+            }
+        }
+    }
+
+    /// Extend the fixture caches' contiguous receipt coverage through a generated block.
+    ///
+    /// `seed_l1_cache` may seed only the blocks a test normally needs. Tests that subsequently
+    /// cross that horizon still need unchanged slots to inherit their last seeded value rather
+    /// than falling back to the deliberately unavailable dummy L1 RPC.
+    fn extend_cache_coverage(&self, block_number: u64) {
+        for cache in self.caches.lock().unwrap().iter() {
+            let mut cache = cache.write();
+            if block_number > cache.anchor().number {
+                cache.update_anchor(NumHash {
+                    number: block_number,
+                    hash: B256::ZERO,
+                });
+            }
+        }
     }
 
     /// Build a [`TempoHeader`] for the next L1 block.
@@ -3587,6 +3716,15 @@ impl L1Fixture {
         self.last_hash = keccak256(&rlp_buf);
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
+        self.extend_cache_coverage(number);
+
+        // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
+        // coverage the subscriber would publish before the engine consumes this block.
+        for cache in self.caches.lock().unwrap().iter() {
+            cache
+                .write()
+                .update_anchor(NumHash::new(number, self.last_hash));
+        }
 
         header
     }
@@ -3607,9 +3745,10 @@ impl L1Fixture {
         queue: &DepositQueue,
         deposits: Vec<Deposit>,
     ) {
+        self.seed_regular_deposit_policy_state(block.header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
-        queue.enqueue(block.header.clone(), events, vec![]);
+        queue.enqueue(block.header.clone(), events);
     }
 
     /// Enqueue a pre-built block into a deposit queue with full portal events.
@@ -3619,7 +3758,15 @@ impl L1Fixture {
         queue: &DepositQueue,
         events: L1PortalEvents,
     ) {
-        queue.enqueue(block.header.clone(), events, vec![]);
+        let block_number = block.header.inner.number;
+        self.seed_enabled_token_policy_state(block_number, &events.enabled_tokens);
+        for deposit in &events.deposits {
+            if let L1Deposit::Regular(deposit) = deposit {
+                self.seed_no_receive_policy_at(block_number, deposit.to)
+                    .expect("event receive-policy fixture seed must be admitted");
+            }
+        }
+        queue.enqueue(block.header.clone(), events);
     }
 
     /// Create a [`Deposit`] for a specific L1 block.
@@ -3647,18 +3794,18 @@ impl L1Fixture {
         tokens: Vec<EnabledToken>,
     ) {
         let header = self.next_header();
+        self.seed_enabled_token_policy_state(header.inner.number, &tokens);
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
-            ..Default::default()
         };
-        queue.enqueue(header, events, vec![]);
+        queue.enqueue(header, events);
     }
 
     /// Inject an empty L1 block (no deposits) into the queue.
     pub(crate) fn inject_empty_block(&mut self, queue: &DepositQueue) {
         let header = self.next_header();
-        queue.enqueue(header, L1PortalEvents::default(), vec![]);
+        queue.enqueue(header, L1PortalEvents::default());
     }
 
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
@@ -3671,9 +3818,10 @@ impl L1Fixture {
     /// Inject an L1 block with the given deposits into the queue.
     pub(crate) fn inject_deposits(&mut self, queue: &DepositQueue, deposits: Vec<Deposit>) {
         let header = self.next_header();
+        self.seed_regular_deposit_policy_state(header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
-        queue.enqueue(header, events, vec![]);
+        queue.enqueue(header, events);
     }
 
     /// Inject an L1 block with mixed regular and encrypted deposits.
@@ -3681,7 +3829,7 @@ impl L1Fixture {
     pub(crate) fn inject_l1_deposits(&mut self, queue: &DepositQueue, deposits: Vec<L1Deposit>) {
         let header = self.next_header();
         let events = L1PortalEvents::from_deposits(deposits);
-        queue.enqueue(header, events, vec![]);
+        queue.enqueue(header, events);
     }
 
     /// Create an [`EncryptedDeposit`] for testing with dummy ECIES parameters.

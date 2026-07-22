@@ -1,4 +1,9 @@
-//! Zone-specific precompile implementations.
+//! Zone-native precompiles and shared execution for Tempo precompiles on a Zone.
+//!
+//! All implementations use ordinary EVM storage. The Zone EVM installs an anchored database below
+//! the revm journal, so upstream TIP-20, TIP-403, and fee-manager code transparently observe
+//! finalized Tempo policy state. Zone admission, delegate-call, fixed-gas, and privacy rules remain
+//! outside the forwarded business logic.
 //!
 //! This crate is `no_std` compatible so these precompiles can run inside the
 //! SP1 prover guest (RISC-V) as well as in the zone node.
@@ -14,16 +19,13 @@
 //! ## Policy/token precompiles
 //!
 //! - **TIP-20 Factory** ([`tip20_factory`]) — zone-side TIP-20 token factory.
-//! - **TIP-403 Proxy** ([`tip403_proxy`]) — read-only TIP-403 registry proxy.
-//! - **Zone TIP-20** ([`ztip20`]) — policy-aware TIP-20 wrapper.
+//! - **TIP-403 Registry** ([`tip403_proxy`]) — upstream registry over finalized L1 state.
+//! - **Zone TIP-20** ([`ztip20`]) — upstream TIP-20 with zone call rules.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
-
-// Required by the `#[contract]` proc macro expansion (references `crate::storage`).
-pub(crate) use tempo_precompiles::storage;
 
 pub mod error;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
@@ -40,7 +42,9 @@ pub mod dispatch {
     };
 }
 
-pub mod policy;
+mod execution;
+pub use execution::ZonePrecompileEnv;
+pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
 pub mod tip403_proxy;
@@ -48,27 +52,41 @@ pub mod ztip20;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
-pub use tempo_state::{L1StorageReader, TempoState};
+pub use storage::{L1State, L1StateError, L1StorageReader};
+pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
-pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
-pub use ztip20::{SequencerExt, ZoneTip20Token};
+pub use ztip20::SequencerSetExt;
 
-use revm::precompile::PrecompileError;
+use alloc::sync::Arc;
 
-const ZONE_RPC_ERROR_PREFIX: &str = "[zone rpc]";
+use alloy_evm::precompiles::DynPrecompile;
+use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
 
-/// Create a [`PrecompileError::Fatal`] for transient L1 RPC errors.
-///
-/// Fatal errors propagate out of the EVM as `Err` (instead of a revert),
-/// allowing the builder to skip the pool transaction rather than charging gas.
-pub fn zone_rpc_error(msg: impl core::fmt::Display) -> PrecompileError {
-    PrecompileError::Fatal(alloc::format!("{ZONE_RPC_ERROR_PREFIX} {msg}"))
+/// Creates upstream TIP-403 execution with zone read-only rules and adapter-backed L1 reads.
+pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
+    execution::create_precompile(
+        "ZoneTip403Registry",
+        env,
+        tip403_proxy::Tip403Rules,
+        |data, caller| TIP403Registry::new().call(data, caller),
+    )
 }
 
-/// Returns `true` if the error string was produced by [`zone_rpc_error`].
-pub fn is_zone_rpc_error(err: &str) -> bool {
-    err.starts_with(ZONE_RPC_ERROR_PREFIX)
+/// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
+pub fn create_tip20_precompile(
+    address: alloy_primitives::Address,
+    env: &ZonePrecompileEnv,
+    sequencers: Arc<dyn SequencerSetExt>,
+) -> DynPrecompile {
+    execution::create_precompile(
+        "TIP20Token",
+        env,
+        ztip20::TIP20Rules::new(sequencers),
+        move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
+    )
 }
 
-#[cfg(test)]
-mod test_utils;
+#[cfg(any(test, feature = "test-utils"))]
+#[doc(hidden)]
+pub mod test_utils;

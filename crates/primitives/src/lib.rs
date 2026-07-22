@@ -5,9 +5,4 @@
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
-extern crate alloc;
-
 pub mod constants;
-mod header;
-pub mod policy;
-pub use header::ZoneHeader;

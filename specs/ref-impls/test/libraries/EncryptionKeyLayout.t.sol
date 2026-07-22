@@ -9,16 +9,14 @@ import { Test } from "forge-std/Test.sol";
 ///      derived slot arithmetic is identical.
 contract EncryptionKeyLayoutHarness {
 
-    // Slots 0-6: padding to match ZonePortal layout
+    // Slots 0-4: padding to match ZonePortal layout
     uint256 private _pad0;
     uint256 private _pad1;
     uint256 private _pad2;
     uint256 private _pad3;
     uint256 private _pad4;
-    uint256 private _pad5;
-    uint256 private _pad6;
 
-    // Slot 7: _encryptionKeys — must be at PORTAL_ENCRYPTION_KEYS_SLOT
+    // Slot 5: _encryptionKeys — must be at PORTAL_ENCRYPTION_KEYS_SLOT
     EncryptionKeyEntry[] internal _encryptionKeys;
 
     function push(bytes32 x, uint8 yParity, uint64 activationBlock) external {

@@ -19,7 +19,6 @@ crate::sol! {
             bytes32 senderTag;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
@@ -138,16 +137,6 @@ crate::sol! {
 
         event BouncebackGasUpdated(uint64 bouncebackGas);
 
-        event SequencerTransferStarted(
-            address indexed currentSequencer,
-            address indexed pendingSequencer
-        );
-
-        event SequencerTransferred(
-            address indexed previousSequencer,
-            address indexed newSequencer
-        );
-
         event AdminTransferStarted(
             address indexed currentAdmin,
             address indexed pendingAdmin
@@ -162,7 +151,6 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
-        error NotPendingSequencer();
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
@@ -173,8 +161,13 @@ crate::sol! {
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
-        function sequencer() external view returns (address);
         function verifier() external view returns (address);
+        function sequencerSetVersion() external view returns (uint64);
+        function sequencerThreshold() external view returns (uint8);
+        function zoneHeight() external view returns (uint256);
+        function isSequencer(address account) external view returns (bool);
+        function sequencerCount() external view returns (uint256);
+        function sequencerAt(uint256 index) external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
@@ -183,7 +176,6 @@ crate::sol! {
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
         function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
-        function genesisTempoBlockNumber() external view returns (uint64);
         function calculateDepositFee() external view returns (uint128 fee);
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
@@ -202,7 +194,7 @@ crate::sol! {
             external
             returns (bytes32 newCurrentDepositQueueHash);
 
-        function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+        function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -211,15 +203,15 @@ crate::sol! {
             DepositQueueTransition calldata depositQueueTransition,
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
-            bytes calldata proof
+            bytes calldata proof,
+            uint256 nextZoneHeight,
+            bytes[] calldata signatures
         ) external;
 
         function enableToken(address token) external;
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
 
-        function transferSequencer(address newSequencer) external;
-        function acceptSequencer() external;
         function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
@@ -251,13 +243,14 @@ crate::sol! {
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);
-        function pendingSequencer() external view returns (address);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
 
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+            external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
     }
 }
@@ -338,7 +331,6 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
-            Self::NotPendingSequencer(_) => f.write_str("NotPendingSequencer"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
@@ -379,7 +371,6 @@ impl Withdrawal {
             senderTag: sender_tag,
             to: event.to,
             amount: event.amount,
-            fee: event.fee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackNonce: event.fallbackNonce,

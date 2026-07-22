@@ -182,6 +182,10 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `zone_getZoneInfo()` — returns zone metadata.
     fn zone_get_zone_info(&self, auth: AuthContext) -> BoxFut<'_>;
 
+    /// `zone_getEncryptionKey()` — returns the active encryption key at the
+    /// current Tempo L1 head.
+    fn zone_get_encryption_key(&self, auth: AuthContext) -> BoxFut<'_>;
+
     /// `zone_getDepositStatus(tempoBlockNumber)` — returns per-caller deposit
     /// processing state for a Tempo L1 block.
     fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_>;
@@ -339,6 +343,11 @@ pub async fn dispatch(
             id,
             "zone_getZoneInfo",
             api.zone_get_zone_info(auth.clone()).await,
+        ),
+        "zone_getEncryptionKey" => api_result(
+            id,
+            "zone_getEncryptionKey",
+            api.zone_get_encryption_key(auth.clone()).await,
         ),
         "zone_getDepositStatus" => handle_zone_get_deposit_status(id, raw, auth, api).await,
         _ => {
@@ -853,11 +862,14 @@ mod tests {
                 to_raw(&json!({
                     "zoneId": "0x1",
                     "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
-                    "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
+                    "sequencers": [format!("{:#x}", Address::repeat_byte(0x22))],
                     "chainId": "0x2a",
+                    "tempoBlockNumber": "0x7",
                 }))
             })
         }
+
+        stub!(zone_get_encryption_key, _auth: AuthContext);
 
         fn zone_get_deposit_status(
             &self,
@@ -957,10 +969,11 @@ mod tests {
             format!("{:#x}", Address::repeat_byte(0x11))
         );
         assert_eq!(
-            body["sequencer"],
+            body["sequencers"][0],
             format!("{:#x}", Address::repeat_byte(0x22))
         );
         assert_eq!(body["chainId"], "0x2a");
+        assert_eq!(body["tempoBlockNumber"], "0x7");
     }
 
     #[tokio::test]

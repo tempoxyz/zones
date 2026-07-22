@@ -66,8 +66,10 @@ cargo run --release --bin tempo-zone -- dev \
   --l1.rpc-url ws://127.0.0.1:8545
 ```
 
-This provisions a new ZoneFactory and portal, writes the generated zone files to
+This uses the protocol-managed ZoneFactory to create a portal, writes the generated zone files to
 `/tmp/tempo-zone-dev`, and serves the zone HTTP RPC at `http://127.0.0.1:9545`.
+The configured dev key must own the native ZoneFactory. Stock owner-gated T9 chains require an
+ownership transfer before provisioning; separate factory-owner credentials are not yet supported.
 
 Older Anvil builds are rejected because they mine Ethereum header hashes and only
 add Tempo fields to the RPC response. Zones require canonical Tempo header hashes
@@ -141,7 +143,7 @@ View on explorer: `https://explore.moderato.tempo.xyz/address/<SEQUENCER_ADDR>`
 
 ### 4. Create the Zone on L1
 
-This deploys a ZonePortal on L1, wired to the factory's shared ZoneMessenger, and generates the zone's genesis file:
+This creates a ZonePortal through the protocol-managed factory, wired to the shared ZoneMessenger, and generates the zone's genesis file:
 
 ```bash
 export PRIVATE_KEY="$SEQUENCER_KEY"
@@ -330,6 +332,10 @@ cast rpc zone_getAuthorizationTokenInfo \
   --rpc-url http://localhost:8544 \
   --rpc-headers "X-Authorization-Token: $TOKEN"
 
+cast rpc zone_getEncryptionKey \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+
 cast rpc eth_blockNumber \
   --rpc-url http://localhost:8544 \
   --rpc-headers "X-Authorization-Token: $TOKEN"
@@ -515,7 +521,7 @@ graph TB
     end
 
     Portal -- "WSS subscription<br/>(deposits, headers)" --> Tasks
-    Tasks -- "submitBatch / processWithdrawal" --> Portal
+    Tasks -- "submitBatch / processWithdrawals" --> Portal
 ```
 
 ### Precompiles
@@ -527,9 +533,9 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Precompile | Address | Zone Behavior |
 |------------|---------|---------------|
 | Standard EVM (ecrecover, SHA-256, etc.) | `0x01`–`0x0a`, `0x0100` on T1C+ | **Unchanged** — standard Ethereum precompiles inherited from Tempo's active hardfork (Prague pre-T1C, Osaka at T1C+) are available as-is. |
-| TIP-20 tokens | `0x20C0…` prefix | **Replaced** — routed through `ZoneTip20Token`, which adds privacy (caller-scoped reads), fixed gas for transfers, bridge-auth for mint/burn, and TIP-403 policy enforcement via the L1-synced cache. |
+| TIP-20 tokens | `0x20C0…` prefix | **Adapted** — upstream Tempo TIP-20 business logic runs over zone-local token state and exact-block L1 policy state, with zone privacy (caller-scoped reads), fixed gas for transfers, and bridge authorization for mint/burn. |
 | TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
-| TIP403Registry | `0x403C…0000` | **Replaced** — read-only `ZoneTip403ProxyRegistry` serves authorization queries from a cache-first, L1-RPC-fallback provider. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert — policy state is managed on L1. |
+| TIP403Registry | `0x403C…0000` | **Adapted** — the upstream Tempo registry executes read-only against raw L1 storage at the exact finalized block recorded in `TempoState`. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert because policy state is managed on L1. |
 | TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
 | StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
 | NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
@@ -555,46 +561,26 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Contract | Address |
 |----------|---------|
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
-| ZoneFactory (moderato) | `0xd97052545B978cc79Dd083912C72CA62f889dFaF` |
+| ZoneFactory | `0x5aF2000000000000000000000000000000000000` |
+| ZonePortal implementation | `0x5AD1000000000000000000000000000000000000` |
+| Zone verifier | `0x5a56000000000000000000000000000000000000` |
+| ZoneMessenger | `0x5A4d000000000000000000000000000000000000` |
 
 The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` uses `zoneFactory` from `zone.json` before falling back to this address. Pass `--zone-factory` or set `ZONE_FACTORY` to override it.
 
-### Deploying a New ZoneFactory
+### Verifying the ZoneFactory
 
-Deploy a fresh shared factory when the Solidity `ZoneFactory`, `ZonePortal`, `ZoneMessenger`, or verifier ABI changes in a way that existing factory deployments cannot serve.
-
-```bash
-cd specs/ref-impls
-export ETH_RPC_URL=https://rpc.moderato.tempo.xyz
-export PRIVATE_KEY=<deployer_private_key>
-
-forge build
-forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/tempo/ZoneFactory.sol:ZoneFactory
-```
-
-The `--private-key "$PRIVATE_KEY"` form is useful for controlled non-interactive deployments. For manual deployments, prefer replacing it with `--interactive` and paste the key at Foundry's prompt so the key is not written into shell history or process arguments.
-
-After deployment, capture the `Deployed to` address and transaction hash, then verify the contract:
+TIP-1091 makes the factory and its shared dependencies protocol-managed accounts. Verify them at their fixed addresses:
 
 ```bash
-export ZONE_FACTORY=0x...
+export ZONE_FACTORY=0x5aF2000000000000000000000000000000000000
 
 cast code "$ZONE_FACTORY" --rpc-url "$ETH_RPC_URL"
-cast call "$ZONE_FACTORY" "zoneCount()(uint32)" --rpc-url "$ETH_RPC_URL"
-cast call "$ZONE_FACTORY" "verifier()(address)" --rpc-url "$ETH_RPC_URL"
-cast call "$ZONE_FACTORY" "messenger()(address)" --rpc-url "$ETH_RPC_URL"
+cast call "$ZONE_FACTORY" "nextZoneId()(uint32)" --rpc-url "$ETH_RPC_URL"
+cast code 0x5AD1000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
+cast code 0x5a56000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
+cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 ```
-
-`zoneCount()` should be `0` on a fresh deployment, and `verifier()` and `messenger()` should return the contracts deployed by the factory constructor. Update `MODERATO_ZONE_FACTORY` in `xtask/src/zone_utils.rs`, the Key Addresses table above, and any other `rg` hits for the previous address.
-
-Current deployment:
-
-| Field | Value |
-|-------|-------|
-| Address | `0xd97052545B978cc79Dd083912C72CA62f889dFaF` |
-| Transaction | `0xb99ae18e4223b4176fac475dfa6fdfe2c43da9e95777bd5ff0387b6b20b99b44` |
-| Block | `26546762` |
-| Deployed | `2026-07-14 18:26:32 UTC` |
 
 ### Zone Node CLI Options
 
@@ -605,7 +591,8 @@ Current deployment:
 | `--l1.genesis-block-number` | (from zone.json) | L1 block when the zone was created |
 | `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `421700000 + (zone_id % 1002610000)` (mainnet) or `1424310000 + (zone_id % 723173648)` (testnet). |
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
-| `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled |
+| `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled; conflicts with `--sequencer-key-file` |
+| `--sequencer-key-file` | (optional) | File or FIFO containing the sequencer private key; avoids exposing it in process arguments |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
 | `--zone.poll-interval-secs` | 1 | How often (seconds) the zone monitor polls for new L2 blocks |
@@ -620,6 +607,7 @@ Current deployment:
 |----------|----------|-------------|
 | `L1_RPC_URL` | Yes | Certified Tempo follower WebSocket RPC URL (`wss://...`) |
 | `SEQUENCER_KEY` | For sequencing | Sequencer private key |
+| `SEQUENCER_KEY_FILE` | For sequencing | File or FIFO containing the sequencer private key |
 | `ADMIN_KEY` | For portal governance | Portal admin private key for `enableToken` / deposit pause controls. `SEQUENCER_KEY` only works for legacy zones where admin == sequencer. |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
