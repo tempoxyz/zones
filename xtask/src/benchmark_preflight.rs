@@ -2176,6 +2176,20 @@ mod tests {
             redeem["with"]["fee_token"],
             "0x2000000000000000000000000000000000000001"
         );
+
+        let fragments: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("scenario-fragments.yml")).unwrap(),
+        )
+        .unwrap();
+        for name in ["earn-deposit-and-return", "earn-redeem-and-return"] {
+            let requested = &fragments["fragments"][name]["steps"][4];
+            assert_eq!(
+                requested["wait_log"]["from_block"]["var"],
+                "zone_before.block_number"
+            );
+            assert!(requested["wait_log"]["transaction_hash"].is_mapping());
+            assert_eq!(requested["timeout"], "45s");
+        }
         for (flow, token, action) in [
             (
                 0_u64,

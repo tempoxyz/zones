@@ -156,6 +156,7 @@ fragments:
         save: request
       - wait_log:
           chain: zone
+          from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
           address: "__OUTBOX__"
@@ -169,6 +170,7 @@ fragments:
             memo: { param: action_id }
             gasLimit: __CALLBACK_GAS_LIMIT__
           max_block_range: 1000
+        timeout: 45s
         save: requested
       - wait_log:
           chain: l1
@@ -272,6 +274,7 @@ fragments:
         save: request
       - wait_log:
           chain: zone
+          from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
           address: "__OUTBOX__"
@@ -285,6 +288,7 @@ fragments:
             memo: { param: action_id }
             gasLimit: __CALLBACK_GAS_LIMIT__
           max_block_range: 1000
+        timeout: 45s
         save: requested
       - wait_log:
           chain: l1
