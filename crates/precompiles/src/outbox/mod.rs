@@ -11,21 +11,19 @@ use alloy_sol_types::SolValue;
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{ContractStorage, Handler, Mapping, StorageCtx},
+    storage::{ContractStorage, Handler, Mapping},
     tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent};
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
-    ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_IS_SEQUENCER_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
-    ZoneResult,
+    TempoState, ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
     storage::{L1State, L1StorageReader},
-    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
@@ -59,7 +57,7 @@ impl ZoneOutbox {
         portal_address: Address,
         slot: B256,
     ) -> ZoneResult<U256> {
-        let anchor = TempoState::new().tempo_block_number.read()?;;
+        let anchor = TempoState::new().tempo_block_number.read()?;
         Ok(l1.read_l1_storage(portal_address, slot, anchor)?.into())
     }
 
