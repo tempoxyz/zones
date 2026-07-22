@@ -325,7 +325,7 @@ fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
         sender: ALICE,
         to: BOB,
         amount: 100,
-        bouncebackRecipient: ALICE,
+        tempoRefundRecipient: ALICE,
         memo: B256::repeat_byte(0x11),
     };
     let first_hash =
@@ -375,7 +375,7 @@ fn regular_deposit_mints_and_updates_hash_and_number() -> eyre::Result<()> {
         sender: ALICE,
         to: BOB,
         amount: 500,
-        bouncebackRecipient: ALICE,
+        tempoRefundRecipient: ALICE,
         memo: B256::repeat_byte(0x11),
     };
     let expected_hash =
@@ -422,7 +422,7 @@ fn failed_regular_mint_enqueues_one_bounce_back() -> eyre::Result<()> {
         sender: ALICE,
         to: BOB,
         amount: 222,
-        bouncebackRecipient: ALICE,
+        tempoRefundRecipient: ALICE,
         memo: B256::ZERO,
     };
     let expected_hash =
@@ -521,7 +521,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 900,
-        bouncebackRecipient: ALICE,
+        tempoRefundRecipient: ALICE,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::EncryptedDepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -590,7 +590,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 333,
-        bouncebackRecipient: BOB,
+        tempoRefundRecipient: BOB,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::EncryptedDepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -636,7 +636,7 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 1,
-        bouncebackRecipient: BOB,
+        tempoRefundRecipient: BOB,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::EncryptedDepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -738,7 +738,7 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
         sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 555,
-        bouncebackRecipient: Address::ZERO,
+        tempoRefundRecipient: Address::ZERO,
         memo: B256::ZERO,
     };
     let expected_hash =
@@ -780,7 +780,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
         sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 321,
-        bouncebackRecipient: Address::ZERO,
+        tempoRefundRecipient: Address::ZERO,
         memo: B256::ZERO,
     };
     let expected_hash =

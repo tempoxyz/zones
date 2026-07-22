@@ -239,7 +239,7 @@ impl ZoneInbox {
         current_hash: B256,
         deposit: Deposit,
     ) -> ZoneResult<()> {
-        if deposit.bouncebackRecipient.is_zero() {
+        if deposit.tempoRefundRecipient.is_zero() {
             return self.process_withdrawal_bounce_back(outbox, deposit);
         }
 
@@ -251,7 +251,7 @@ impl ZoneInbox {
                 IZoneOutbox::enqueueDepositBounceBackCall {
                     token: deposit.token,
                     amount: deposit.amount,
-                    bouncebackRecipient: deposit.bouncebackRecipient,
+                    tempoRefundRecipient: deposit.tempoRefundRecipient,
                 },
             )?;
             self.emit_event(deposit.failed_event(current_hash))?;
@@ -292,7 +292,7 @@ impl ZoneInbox {
             IZoneOutbox::enqueueDepositBounceBackCall {
                 token: deposit.token,
                 amount: deposit.amount,
-                bouncebackRecipient: deposit.bouncebackRecipient,
+                tempoRefundRecipient: deposit.tempoRefundRecipient,
             },
         )?;
         self.emit_event(deposit.failed_event(current_hash))?;
