@@ -482,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_forbids_direct_transfers_with_unauthorized() -> eyre::Result<()> {
+    fn wrapper_enforces_call_rules() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
 
         let private_balance = harness.call(
