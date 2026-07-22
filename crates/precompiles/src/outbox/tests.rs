@@ -5,9 +5,7 @@ use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{storage::FromWord, test_util::TIP20Setup};
-use tempo_zone_contracts::{
-    ILegacyZoneOutbox, IZoneOutbox as ZoneOutboxAbi, portal_token_config_slot,
-};
+use tempo_zone_contracts::{ILegacyZoneOutbox, IZoneOutbox as ZoneOutboxAbi};
 
 use crate::{
     create_outbox_precompile,
@@ -44,13 +42,6 @@ impl Harness {
             ANCHOR,
             SEQUENCER.to_word(),
         );
-        l1.insert(
-            PORTAL,
-            portal_token_config_slot(token).into(),
-            ANCHOR,
-            U256::ONE,
-        );
-
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -111,16 +102,6 @@ impl Harness {
 
     fn call_static(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
         self.call_inner(caller, caller, data, false, true)
-    }
-
-    fn set_token_enabled(&mut self, enabled: bool) -> eyre::Result<()> {
-        self.l1.insert(
-            PORTAL,
-            portal_token_config_slot(self.token).into(),
-            ANCHOR,
-            if enabled { U256::ONE } else { U256::ZERO },
-        );
-        Ok(())
     }
 
     fn pending(&mut self) -> eyre::Result<Vec<ZoneOutboxAbi::PendingWithdrawal>> {
@@ -250,20 +231,8 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
 
     assert_eq!(
         harness.l1.storage_requests(),
-        vec![
-            (PORTAL, PORTAL_SEQUENCER_SLOT, ANCHOR),
-            (PORTAL, portal_token_config_slot(harness.token), ANCHOR,),
-        ]
+        vec![(PORTAL, PORTAL_SEQUENCER_SLOT, ANCHOR),]
     );
-    Ok(())
-}
-
-#[test]
-fn request_withdrawal_rejects_disabled_token() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    harness.set_token_enabled(false)?;
-    let result = harness.request(1, BOB, B256::ZERO);
-    assert_revert(result, ZonePortalError::token_not_enabled());
     Ok(())
 }
 
@@ -286,6 +255,31 @@ fn request_withdrawal_rejects_missing_transaction_hash() -> eyre::Result<()> {
         .abi_encode(),
     );
     assert_revert(result, ZoneOutboxError::invalid_current_tx_hash());
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "missing transaction context must be rejected before portal reads"
+    );
+    Ok(())
+}
+
+#[test]
+fn request_withdrawal_rejects_unknown_token_before_portal_read() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let result = harness.request_custom(ZoneOutboxAbi::requestWithdrawalCall {
+        token: address!("0x20c000000000000000000000000000000000ffff"),
+        to: BOB,
+        amount: 1,
+        memo: B256::ZERO,
+        gasLimit: 0,
+        fallbackRecipient: ALICE,
+        data: Bytes::new(),
+        revealTo: Bytes::new(),
+    });
+    assert_revert(result, TIP20Error::uninitialized());
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "unknown tokens must be rejected before portal reads"
+    );
     Ok(())
 }
 
@@ -677,7 +671,6 @@ fn malformed_legacy_withdrawal_reverts_with_empty_data() -> eyre::Result<()> {
 #[test]
 fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
-    harness.set_token_enabled(false)?;
     let token = harness.token;
     assert_revert(
         harness.call_static(

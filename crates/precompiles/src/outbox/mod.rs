@@ -11,14 +11,11 @@ use revm::interpreter::instructions::utility::IntoAddress;
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, StorageCtx},
-    tip20::{ITIP20, TIP20Token},
+    storage::{ContractStorage, Handler, Mapping, StorageCtx},
+    tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
-use tempo_zone_contracts::{
-    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortalError,
-    portal_token_config_slot,
-};
+use tempo_zone_contracts::{IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent};
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS,
@@ -87,19 +84,6 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn ensure_token_enabled<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        portal_address: Address,
-        token: Address,
-    ) -> ZoneResult<()> {
-        let value = self.read_portal_slot(l1, portal_address, portal_token_config_slot(token))?;
-        if value.byte(0) == 0 {
-            return Err(ZonePortalError::token_not_enabled().into());
-        }
-        Ok(())
-    }
-
     fn calculate_fee_unchecked(&self, gas_limit: u64) -> TempoResult<u128> {
         let gas = u128::from(WITHDRAWAL_BASE_GAS) + u128::from(gas_limit);
         gas.checked_mul(self.tempo_gas_rate.read()?)
@@ -148,10 +132,8 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn request_withdrawal<P: L1StorageReader>(
+    fn request_withdrawal(
         &mut self,
-        l1: &L1State<P>,
-        portal_address: Address,
         caller: Address,
         fee_payer: Address,
         current_tx_hash: B256,
@@ -166,9 +148,12 @@ impl ZoneOutbox {
 
         validate_gas_limit(call.gasLimit)?;
 
-        self.ensure_token_enabled(l1, portal_address, call.token)?;
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
+        }
+        let mut zone_token = TIP20Token::from_address(call.token)?;
+        if !zone_token.is_initialized()? {
+            return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
         }
         self.enforce_withdrawal_block_cap()?;
 
@@ -178,7 +163,6 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
-        let mut zone_token = TIP20Token::from_address(call.token)?;
         if caller == fee_payer {
             let total = call
                 .amount
