@@ -64,17 +64,25 @@ pub fn validate_transaction(
     }
 
     for (target, input) in tx.calls() {
-        validate_call(*target, input)?;
+        validate_call(*target, input, tx.is_system_tx)?;
     }
 
     Ok(())
 }
 
-fn validate_call(target: TxKind, input: &[u8]) -> Result<(), TempoInvalidTransaction> {
+fn validate_call(
+    target: TxKind,
+    input: &[u8],
+    is_system_tx: bool,
+) -> Result<(), TempoInvalidTransaction> {
     if is_state_changing_system_operation(target, input) {
-        return Err(TempoInvalidTransaction::CallsValidation(
-            "zone system operations require a system transaction",
-        ));
+        return if is_system_tx {
+            Ok(())
+        } else {
+            Err(TempoInvalidTransaction::CallsValidation(
+                "zone system operations require a system transaction",
+            ))
+        };
     }
 
     let TxKind::Call(address) = target else {
