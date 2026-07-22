@@ -185,11 +185,6 @@ alloy_sol_types::sol! {
     }
 }
 
-/// Deterministic salt for the zone test token.
-pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-]);
-
 /// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
 ///
 /// Requires `forge build` to have been run in `specs/ref-impls`.
@@ -404,19 +399,6 @@ pub(crate) fn seed_raw_tip403_policy(
         );
     }
     Ok(())
-}
-
-/// Compute the TIP-20 token address for a given sender and salt.
-///
-/// Mirrors `compute_tip20_address` in the factory precompile.
-pub(crate) fn compute_tip20_address(sender: Address, salt: B256) -> Address {
-    let hash = keccak256((sender, salt).abi_encode());
-
-    let mut address_bytes = [0u8; 20];
-    address_bytes[..12].copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
-    address_bytes[12..].copy_from_slice(&hash[..8]);
-
-    Address::from(address_bytes)
 }
 
 pub(crate) trait TestNodeHandle: Send {

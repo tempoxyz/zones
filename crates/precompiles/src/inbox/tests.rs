@@ -437,6 +437,14 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
     let mut harness = Harness::new()?;
     let token = address!("0x20c00000000000000000000000000000000000aa");
     harness.set_queue_hash(B256::ZERO);
+    let anchored_policy = U256::from(7) | (U256::ONE << 64);
+    let binding_slot = TIP403Registry::new().token_transfer_policies[token].base_slot();
+    {
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            StorageCtx.sstore(TIP403_REGISTRY_ADDRESS, binding_slot, anchored_policy)
+        })?;
+    }
     let mut call = harness.advance_call(Vec::new(), Vec::new());
     call.enabledTokens.push(EnabledToken {
         token,
@@ -452,6 +460,13 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         let token = TIP20Token::from_address(token)?;
         assert!(token.is_initialized()?);
         assert_eq!(token.name()?, "Example Dollar");
+        assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
+        assert!(token.has_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?);
+        assert!(token.has_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?);
+        assert_eq!(
+            StorageCtx.sload(TIP403_REGISTRY_ADDRESS, binding_slot)?,
+            anchored_policy
+        );
         Ok(())
     })?;
     Ok(())

@@ -48,10 +48,6 @@ pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
 /// AES-GCM decryption precompile address.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
 
-/// TIP-20 zone token factory precompile address.
-pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
-    address!("0x20Fc000000000000000000000000000000000000");
-
 /// Zone-native fee manager precompile address.
 ///
 /// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.
