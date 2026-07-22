@@ -16,10 +16,11 @@ use reth_node_api::{
 use reth_payload_primitives::PayloadAttributes;
 use reth_primitives_traits::{AlloyBlockHeader, SealedBlock};
 use serde::{Deserialize, Serialize};
+use tempo_contracts::precompiles::ITIP20;
 use tempo_node::engine::TempoEngineValidator;
 use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
-use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
+use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope, is_tip20_prefix};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox};
 use zone_l1::PreparedL1Block;
 
 /// Zone RPC payload attributes — the type that flows through FCU.
@@ -140,10 +141,22 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
             )));
         }
 
-        if transactions.any(is_advance_tempo) {
-            return Err(NewPayloadError::other(reth_errors::RethError::msg(
-                "advanceTempo must appear exactly once in every zone block",
-            )));
+        for tx in transactions {
+            if is_advance_tempo(tx) {
+                return Err(NewPayloadError::other(reth_errors::RethError::msg(
+                    "advanceTempo must appear exactly once in every zone block",
+                )));
+            }
+
+            if tx.is_system_tx() {
+                if !is_finalize_withdrawal_batch(tx) {
+                    return Err(NewPayloadError::other(reth_errors::RethError::msg(
+                        "unrecognized zone system transaction",
+                    )));
+                }
+            } else {
+                parse_user_transaction(tx)?;
+            }
         }
 
         Ok(block)
@@ -165,4 +178,293 @@ fn is_advance_tempo(tx: &TempoTxEnvelope) -> bool {
     tx.is_system_tx()
         && tx.kind() == TxKind::Call(ZONE_INBOX_ADDRESS)
         && tx.input().get(..4) == Some(ZoneInbox::advanceTempoCall::SELECTOR.as_slice())
+}
+fn is_finalize_withdrawal_batch(tx: &TempoTxEnvelope) -> bool {
+    tx.is_system_tx()
+        && tx.kind() == TxKind::Call(ZONE_OUTBOX_ADDRESS)
+        && tx.input().get(..4) == Some(ZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR.as_slice())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParsedZoneUserCall {
+    TransferFrom,
+    Approve,
+    Other,
+}
+
+fn parse_user_transaction(tx: &TempoTxEnvelope) -> Result<(), NewPayloadError> {
+    tx.calls()
+        .try_for_each(|(target, input)| parse_user_call(target, input).map(drop))
+}
+
+fn parse_user_call(target: TxKind, input: &Bytes) -> Result<ParsedZoneUserCall, NewPayloadError> {
+    if is_state_changing_system_operation(target, input) {
+        return Err(NewPayloadError::other(reth_errors::RethError::msg(
+            "advanceTempo and finalizeWithdrawalBatch require a system transaction",
+        )));
+    }
+
+    let TxKind::Call(address) = target else {
+        return Ok(ParsedZoneUserCall::Other);
+    };
+
+    if !is_tip20_prefix(address) {
+        return Ok(ParsedZoneUserCall::Other);
+    }
+
+    if input.starts_with(&ITIP20::transferFromCall::SELECTOR) {
+        ITIP20::transferFromCall::abi_decode(input).map_err(|_| {
+            NewPayloadError::other(reth_errors::RethError::msg(
+                "malformed TIP-20 transferFrom call",
+            ))
+        })?;
+        Ok(ParsedZoneUserCall::TransferFrom)
+    } else if input.starts_with(&ITIP20::approveCall::SELECTOR) {
+        ITIP20::approveCall::abi_decode(input).map_err(|_| {
+            NewPayloadError::other(reth_errors::RethError::msg("malformed TIP-20 approve call"))
+        })?;
+        Ok(ParsedZoneUserCall::Approve)
+    } else {
+        Err(NewPayloadError::other(reth_errors::RethError::msg(
+            "TIP-20 operation is not allowed in a zone block",
+        )))
+    }
+}
+
+fn is_state_changing_system_operation(target: TxKind, input: &[u8]) -> bool {
+    match (target, input.get(..4)) {
+        (TxKind::Call(ZONE_INBOX_ADDRESS), Some(selector)) => {
+            selector == ZoneInbox::advanceTempoCall::SELECTOR
+        }
+        (TxKind::Call(ZONE_OUTBOX_ADDRESS), Some(selector)) => {
+            selector == ZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR
+        }
+        _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::{Signed, TxLegacy};
+    use alloy_primitives::{Address, Signature, U256, address};
+    use reth_primitives_traits::SealedBlock;
+    use tempo_primitives::{
+        BlockBody,
+        transaction::{
+            AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
+            envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+        },
+    };
+
+    const TOKEN: Address = address!("0x20C0000000000000000000000000000000000001");
+
+    fn legacy_call(target: Address, input: Bytes, signature: Signature) -> TempoTxEnvelope {
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                to: target.into(),
+                input,
+                ..Default::default()
+            },
+            signature,
+        ))
+    }
+
+    fn payload_with_call(
+        target: Address,
+        input: Bytes,
+        signature: Signature,
+    ) -> TempoExecutionData {
+        let advance_tempo = legacy_call(
+            ZONE_INBOX_ADDRESS,
+            ZoneInbox::advanceTempoCall::SELECTOR.to_vec().into(),
+            TEMPO_SYSTEM_TX_SIGNATURE,
+        );
+        let transaction = legacy_call(target, input, signature);
+        let block = Block {
+            header: TempoHeader::default(),
+            body: BlockBody {
+                transactions: vec![advance_tempo, transaction],
+                ommers: Vec::new(),
+                withdrawals: None,
+            },
+        };
+
+        TempoExecutionData {
+            block: SealedBlock::seal_slow(block).into(),
+            block_access_list: None,
+            validator_set: None,
+        }
+    }
+
+    fn convert_payload(payload: TempoExecutionData) -> Result<SealedBlock<Block>, NewPayloadError> {
+        <TempoEngineValidator as PayloadValidator<ZonePayloadTypes>>::convert_payload_to_block(
+            &TempoEngineValidator::new(),
+            payload,
+        )
+    }
+
+    #[test]
+    fn parses_allowed_tip20_user_calls() {
+        let transfer = ITIP20::transferFromCall {
+            from: Address::repeat_byte(0x11),
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        };
+        let approve = ITIP20::approveCall {
+            spender: Address::repeat_byte(0x33),
+            amount: U256::from(9),
+        };
+
+        for (input, expected) in [
+            (
+                Bytes::from(transfer.abi_encode()),
+                ParsedZoneUserCall::TransferFrom,
+            ),
+            (
+                Bytes::from(approve.abi_encode()),
+                ParsedZoneUserCall::Approve,
+            ),
+        ] {
+            assert_eq!(
+                parse_user_call(TxKind::Call(TOKEN), &input).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_disallowed_and_malformed_tip20_user_calls() {
+        let transfer = ITIP20::transferCall {
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        };
+
+        assert!(parse_user_call(TxKind::Call(TOKEN), &transfer.abi_encode().into()).is_err());
+        assert!(
+            parse_user_call(
+                TxKind::Call(TOKEN),
+                &ITIP20::approveCall::SELECTOR.to_vec().into(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn permits_non_tip20_protocol_calls() {
+        let target = Address::repeat_byte(0x1c);
+        assert_eq!(
+            parse_user_call(TxKind::Call(target), &Bytes::new()).unwrap(),
+            ParsedZoneUserCall::Other
+        );
+    }
+
+    #[test]
+    fn parses_every_call_in_an_aa_batch() {
+        let allowed = ITIP20::approveCall {
+            spender: Address::repeat_byte(0x33),
+            amount: U256::from(9),
+        };
+        let forbidden = ITIP20::mintCall {
+            to: Address::repeat_byte(0x44),
+            amount: U256::from(1),
+        };
+        let transaction = TempoTransaction {
+            calls: vec![
+                Call {
+                    to: TxKind::Call(TOKEN),
+                    value: U256::ZERO,
+                    input: allowed.abi_encode().into(),
+                },
+                Call {
+                    to: TxKind::Call(TOKEN),
+                    value: U256::ZERO,
+                    input: forbidden.abi_encode().into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let signature =
+            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
+        let envelope = AASigned::new_unhashed(transaction, signature).into();
+
+        assert!(parse_user_transaction(&envelope).is_err());
+    }
+
+    #[test]
+    fn enforces_user_call_policy_during_payload_conversion() {
+        let allowed = ITIP20::transferFromCall {
+            from: Address::repeat_byte(0x11),
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        };
+        assert!(
+            convert_payload(payload_with_call(
+                TOKEN,
+                allowed.abi_encode().into(),
+                Signature::test_signature(),
+            ))
+            .is_ok()
+        );
+
+        let forbidden = ITIP20::transferCall {
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        };
+        let error = convert_payload(payload_with_call(
+            TOKEN,
+            forbidden.abi_encode().into(),
+            Signature::test_signature(),
+        ))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("TIP-20 operation is not allowed in a zone block")
+        );
+    }
+
+    #[test]
+    fn enforces_system_and_user_signature_roles_during_payload_conversion() {
+        let transfer = ITIP20::transferFromCall {
+            from: Address::repeat_byte(0x11),
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        };
+        let error = convert_payload(payload_with_call(
+            TOKEN,
+            transfer.abi_encode().into(),
+            TEMPO_SYSTEM_TX_SIGNATURE,
+        ))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unrecognized zone system transaction")
+        );
+
+        let finalize: Bytes = ZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR
+            .to_vec()
+            .into();
+        assert!(
+            convert_payload(payload_with_call(
+                ZONE_OUTBOX_ADDRESS,
+                finalize.clone(),
+                TEMPO_SYSTEM_TX_SIGNATURE,
+            ))
+            .is_ok()
+        );
+
+        let error = convert_payload(payload_with_call(
+            ZONE_OUTBOX_ADDRESS,
+            finalize,
+            Signature::test_signature(),
+        ))
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("advanceTempo and finalizeWithdrawalBatch require a system transaction")
+        );
+    }
 }
