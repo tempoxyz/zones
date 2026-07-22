@@ -37,7 +37,7 @@ use alloy_rlp::Encodable;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain};
-use eyre::Result;
+use eyre::{OptionExt as _, Result};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use schnellru::{ByLength, LruMap};
@@ -434,12 +434,13 @@ impl BatchSubmitter {
                 .l1_provider
                 .get_block_by_number(anchor_block_number.into())
                 .await?
-                .ok_or_else(|| eyre::eyre!("L1 anchor block {anchor_block_number} not found"))?
+                .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
                 .header
                 .hash;
-            let signer = self.signer.as_ref().ok_or_else(|| {
-                eyre::eyre!("TIP-1091 batch submission requires the local sequencer signer")
-            })?;
+            let signer = self
+                .signer
+                .as_ref()
+                .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
             vec![
                 self.sign_settlement_attestation(
                     signer,
@@ -703,12 +704,10 @@ impl BatchSubmitter {
             .l1_provider
             .get_block_by_number(attestation.anchorBlockNumber.into())
             .await?
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "missing certified L1 anchor block {}",
-                    attestation.anchorBlockNumber
-                )
-            })?;
+            .ok_or_eyre(format!(
+                "missing certified L1 anchor block {}",
+                attestation.anchorBlockNumber
+            ))?;
         eyre::ensure!(
             anchor.header.hash == attestation.anchorBlockHash,
             "certificate anchor hash changed"

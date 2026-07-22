@@ -29,6 +29,7 @@ use zone_sequencer::{
 };
 
 use alloy_signer_local::PrivateKeySigner;
+use eyre::{OptionExt as _, WrapErr as _};
 
 use crate::settlement_attestation::build_settlement_attestation;
 
@@ -450,16 +451,19 @@ async fn run_leader_backfill_server<P>(
                             let signed = SignedSettlementAttestation::decode(&signature)?;
                             let signer = signed.recover_signer(attestation.domain)?;
                             let expected_signer = attestation.addresses.get(&follower).copied()
-                                .ok_or_else(|| eyre::eyre!("unknown follower identity"))?;
+                                .ok_or_eyre("unknown follower identity")?;
                             eyre::ensure!(signer == expected_signer, "settlement signer does not match authenticated peer");
-                            let height: u64 = signed.attestation.zoneHeight.try_into()
-                                .map_err(|_| eyre::eyre!("settlement height does not fit in u64"))?;
+                            let height: u64 = signed
+                                .attestation
+                                .zoneHeight
+                                .try_into()
+                                .wrap_err("settlement height does not fit in u64")?;
                             let expected = build_settlement_attestation(
                                 &provider,
                                 height,
                                 &attestation,
                                 Some((signed.attestation.anchorBlockNumber, signed.attestation.anchorBlockHash)),
-                            ).await?.ok_or_else(|| eyre::eyre!("signed block is not a batch boundary"))?;
+                            ).await?.ok_or_eyre("signed block is not a batch boundary")?;
                             eyre::ensure!(signed.attestation == expected, "settlement signature does not match leader state");
                             let (_, signatures) = attestation.store.as_ref()
                                 .expect("leader must have an attestation store")
@@ -542,14 +546,16 @@ async fn run_follower_block_sync<P>(
                     P2pEvent::SettlementProposalReceived { leader, proposal } => {
                         let result = async {
                             let proposal = SettlementAttestation::decode(&proposal)?;
-                            let height: u64 = proposal.zoneHeight.try_into()
-                                .map_err(|_| eyre::eyre!("settlement height does not fit in u64"))?;
+                            let height: u64 = proposal
+                                .zoneHeight
+                                .try_into()
+                                .wrap_err("settlement height does not fit in u64")?;
                             let expected = build_settlement_attestation(
                                 &provider,
                                 height,
                                 &attestation,
                                 Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
-                            ).await?.ok_or_else(|| eyre::eyre!("proposed block is not a batch boundary"))?;
+                            ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
                             eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
 
                             let signed = SignedSettlementAttestation::sign(
@@ -561,7 +567,7 @@ async fn run_follower_block_sync<P>(
                             // Return the signed settlement attestation back to the leader
                             commands.send(P2pCommand::SendSettlementSignature(signed.encode()))
                                 .await
-                                .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
+                                .wrap_err("P2P command channel closed")?;
                             Ok::<_, eyre::Report>(height)
                         }.await;
                         match result {

@@ -12,6 +12,7 @@ use commonware_p2p::{
     AddressableManager as _, Receiver as _, Recipients, Sender as _, authenticated::lookup,
 };
 use commonware_runtime::{Runner as _, Spawner as _};
+use eyre::WrapErr as _;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -600,7 +601,7 @@ async fn run_commands(
                     .settlement_proposals
                     .send(Recipients::Some(followers.clone()), proposal, true)
                     .await
-                    .map_err(|err| eyre::eyre!("failed broadcasting settlement proposal: {err}"))?;
+                    .wrap_err("failed broadcasting settlement proposal")?;
             }
 
             P2pCommand::SendSettlementSignature(signature) => {
@@ -612,7 +613,7 @@ async fn run_commands(
                     .settlement_signatures
                     .send(Recipients::Some(vec![leader.clone()]), signature, true)
                     .await
-                    .map_err(|err| eyre::eyre!("failed sending settlement signature: {err}"))?;
+                    .wrap_err("failed sending settlement signature")?;
             }
 
             P2pCommand::RequestBackfill { start } => {
@@ -716,7 +717,7 @@ async fn run_receivers(
 
             // Got a settlement proposal at a batch boundary
             result = settlement_proposals.recv() => {
-                let (peer, bytes) = result.map_err(|err| eyre::eyre!("settlement proposal channel receive failed: {err}"))?;
+                let (peer, bytes) = result.wrap_err("settlement proposal channel receive failed")?;
                 if role != Role::Follower || peer != leader {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement proposal from ineligible peer");
                     continue;
@@ -726,7 +727,7 @@ async fn run_receivers(
 
             // Got a response from a follower to the settlement proposal
             result = settlement_signatures.recv() => {
-                let (peer, bytes) = result.map_err(|err| eyre::eyre!("settlement signature channel receive failed: {err}"))?;
+                let (peer, bytes) = result.wrap_err("settlement signature channel receive failed")?;
                 if role != Role::Leader || peer == leader {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement signature from ineligible peer");
                     continue;

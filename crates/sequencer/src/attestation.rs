@@ -9,7 +9,8 @@ use alloy_primitives::{Address, B256, Bytes, Signature};
 use alloy_signer::SignerSync as _;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{Eip712Domain, SolStruct as _, SolValue as _, eip712_domain, sol};
-use tokio::sync::Notify;
+use eyre::WrapErr as _;
+use tokio::sync::{Notify, watch};
 
 type SettlementSignatures =
     BTreeMap<u64, BTreeMap<B256, BTreeMap<Address, SignedSettlementAttestation>>>;
@@ -70,8 +71,7 @@ impl SettlementAttestation {
     }
 
     pub fn decode(encoded: &[u8]) -> eyre::Result<Self> {
-        Self::abi_decode(encoded)
-            .map_err(|err| eyre::eyre!("invalid settlement proposal encoding: {err}"))
+        Self::abi_decode(encoded).wrap_err("invalid settlement proposal encoding")
     }
 }
 
@@ -93,18 +93,17 @@ impl SignedSettlementAttestation {
     }
 
     pub fn decode(encoded: &[u8]) -> eyre::Result<Self> {
-        Self::abi_decode(encoded)
-            .map_err(|err| eyre::eyre!("invalid settlement signature encoding: {err}"))
+        Self::abi_decode(encoded).wrap_err("invalid settlement signature encoding")
     }
 
     pub fn recover_signer(&self, domain: AttestationDomain) -> eyre::Result<Address> {
         let signature = Signature::try_from(self.signature.as_ref())
-            .map_err(|err| eyre::eyre!("invalid settlement signature: {err}"))?;
+            .wrap_err("invalid settlement signature")?;
         alloy_consensus::crypto::secp256k1::recover_signer(
             &signature,
             domain.settlement_digest(&self.attestation),
         )
-        .map_err(|err| eyre::eyre!("failed recovering settlement signer: {err}"))
+        .wrap_err("failed recovering settlement signer")
     }
 }
 
@@ -118,10 +117,22 @@ pub struct SettlementCertificate {
 }
 
 /// Settlement certificates shared by P2P and batch submission.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AttestationStore {
     settlements: Arc<RwLock<SettlementSignatures>>,
     settlement_changed: Arc<Notify>,
+    submitted_height: watch::Sender<u64>,
+}
+
+impl Default for AttestationStore {
+    fn default() -> Self {
+        let (submitted_height, _) = watch::channel(0);
+        Self {
+            settlements: Arc::default(),
+            settlement_changed: Arc::default(),
+            submitted_height,
+        }
+    }
 }
 
 impl AttestationStore {
@@ -213,6 +224,19 @@ impl AttestationStore {
             .write()
             .expect("attestation store lock poisoned")
             .retain(|settlement_height, _| *settlement_height > height);
+        self.submitted_height.send_if_modified(|submitted| {
+            if height > *submitted {
+                *submitted = height;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// Subscribe to the latest zone height confirmed by a batch submission or portal resync.
+    pub fn subscribe_submitted_height(&self) -> watch::Receiver<u64> {
+        self.submitted_height.subscribe()
     }
 }
 

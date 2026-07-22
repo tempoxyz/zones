@@ -7,6 +7,7 @@ use alloy_eips::BlockHashOrNumber;
 use alloy_primitives::{B256, Bytes, Sealable as _, U256};
 use alloy_provider::Provider as _;
 use alloy_sol_types::{SolEvent as _, SolValue as _};
+use eyre::{OptionExt as _, WrapErr as _};
 use futures::StreamExt as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_provider::HeaderProvider;
@@ -15,7 +16,7 @@ use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
     IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZonePortal,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
 use zone_p2p::P2pCommand;
 
@@ -38,7 +39,9 @@ where
 {
     let receipts = provider
         .receipts_by_block(BlockHashOrNumber::Number(number))?
-        .ok_or_else(|| eyre::eyre!("receipts for canonical block {number} are not persisted"))?;
+        .ok_or_eyre(format!(
+            "receipts for canonical block {number} are not persisted"
+        ))?;
     let mut anchor_hash = None;
     let mut tempo_block_number = None;
     let mut processed_deposit_hash = None;
@@ -50,9 +53,8 @@ where
             if log.address == ZONE_INBOX_ADDRESS
                 && log.topics().first() == Some(&ZoneInbox::TempoAdvanced::SIGNATURE_HASH)
             {
-                let event = ZoneInbox::TempoAdvanced::decode_log(log).map_err(|err| {
-                    eyre::eyre!("invalid TempoAdvanced log in block {number}: {err}")
-                })?;
+                let event = ZoneInbox::TempoAdvanced::decode_log(log)
+                    .wrap_err_with(|| format!("invalid TempoAdvanced log in block {number}"))?;
                 anchor_hash = Some(event.tempoBlockHash);
                 tempo_block_number = Some(event.tempoBlockNumber);
                 processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
@@ -60,9 +62,8 @@ where
             } else if log.address == ZONE_OUTBOX_ADDRESS
                 && log.topics().first() == Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
             {
-                let event = IZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
-                    eyre::eyre!("invalid BatchFinalized log in block {number}: {err}")
-                })?;
+                let event = IZoneOutbox::BatchFinalized::decode_log(log)
+                    .wrap_err_with(|| format!("invalid BatchFinalized log in block {number}"))?;
                 withdrawal = Some((event.withdrawalQueueHash, event.withdrawalBatchIndex));
             }
         }
@@ -70,13 +71,13 @@ where
 
     Ok(BlockCommitments {
         tempo_block_hash: anchor_hash
-            .ok_or_else(|| eyre::eyre!("block {number} is missing TempoAdvanced"))?,
+            .ok_or_eyre(format!("block {number} is missing TempoAdvanced"))?,
         tempo_block_number: tempo_block_number
-            .ok_or_else(|| eyre::eyre!("block {number} is missing its Tempo block number"))?,
+            .ok_or_eyre(format!("block {number} is missing its Tempo block number"))?,
         processed_deposit_hash: processed_deposit_hash
-            .ok_or_else(|| eyre::eyre!("block {number} is missing its deposit commitment"))?,
+            .ok_or_eyre(format!("block {number} is missing its deposit commitment"))?,
         processed_deposit_number: processed_deposit_number
-            .ok_or_else(|| eyre::eyre!("block {number} is missing its deposit number"))?,
+            .ok_or_eyre(format!("block {number} is missing its deposit number"))?,
         withdrawal,
     })
 }
@@ -94,7 +95,7 @@ where
             let hash = provider
                 .sealed_header(candidate)?
                 .map(|header| header.hash())
-                .ok_or_else(|| eyre::eyre!("missing prior batch-boundary header {candidate}"))?;
+                .ok_or_eyre(format!("missing prior batch-boundary header {candidate}"))?;
             return Ok((
                 hash,
                 commitments.processed_deposit_hash,
@@ -123,7 +124,7 @@ where
     };
     let next_tip = provider
         .sealed_header(number)?
-        .ok_or_else(|| eyre::eyre!("missing batch-tip header {number}"))?
+        .ok_or_eyre(format!("missing batch-tip header {number}"))?
         .hash();
     let (previous_tip, previous_deposit_hash, previous_deposit_number) =
         previous_batch(provider, number)?;
@@ -166,7 +167,7 @@ where
                 .l1_provider
                 .get_header_by_number(anchor_number.into())
                 .await?
-                .ok_or_else(|| eyre::eyre!("missing L1 anchor header {anchor_number}"))?
+                .ok_or_eyre(format!("missing L1 anchor header {anchor_number}"))?
                 .inner
                 .inner;
             (anchor_number, header.hash_slow())
@@ -234,7 +235,9 @@ async fn validate_settlement_anchor(
         .l1_provider
         .get_header_by_number(anchor_block_number.into())
         .await?
-        .ok_or_else(|| eyre::eyre!("missing proposed L1 anchor header {anchor_block_number}"))?
+        .ok_or_eyre(format!(
+            "missing proposed L1 anchor header {anchor_block_number}"
+        ))?
         .inner
         .inner;
     eyre::ensure!(
@@ -246,7 +249,7 @@ async fn validate_settlement_anchor(
         .l1_provider
         .get_header_by_number(tempo_block_number.into())
         .await?
-        .ok_or_else(|| eyre::eyre!("missing Tempo header {tempo_block_number}"))?
+        .ok_or_eyre(format!("missing Tempo header {tempo_block_number}"))?
         .inner
         .inner;
     eyre::ensure!(
@@ -278,6 +281,11 @@ pub(crate) async fn collect_leader_settlements<P>(
     // persisted-block stream is latest-value based, so notifications are wake-ups rather than a
     // lossless sequence of every persisted block.
     let mut persisted = provider.persisted_block_stream();
+    let store = context
+        .store
+        .as_ref()
+        .expect("leader must have an attestation store");
+    let mut submitted_heights = store.subscribe_submitted_height();
     let head = match provider.last_block_number() {
         Ok(head) => head,
         Err(err) => {
@@ -313,24 +321,42 @@ pub(crate) async fn collect_leader_settlements<P>(
                 }
 
                 if pending_boundary.is_none() {
-                    for candidate in last_scanned.saturating_add(1)..=tip.number {
-                        match propose_settlement(&provider, candidate, &commands, &context).await {
-                            Ok(true) => {
-                                pending_boundary = Some(candidate);
-                                break;
-                            }
-                            Ok(false) => {}
-                            Err(err) => {
-                                // Retain the candidate so the timer retries it even if no further
-                                // persisted-block notification arrives.
-                                pending_boundary = Some(candidate);
-                                tracing::warn!(target: "zone::p2p", %err, height = candidate, "Failed proposing settlement boundary");
-                                break;
-                            }
-                        }
-                    }
+                    pending_boundary = propose_persisted_settlement_range(
+                        &provider,
+                        &commands,
+                        &context,
+                        last_scanned.saturating_add(1),
+                        tip.number,
+                    ).await;
                 }
                 last_scanned = tip.number;
+            }
+            submitted = wait_for_submitted_height(
+                &mut submitted_heights,
+                pending_boundary.unwrap_or(u64::MAX),
+            ), if pending_boundary.is_some() => {
+                let submitted = match submitted {
+                    Ok(submitted) => submitted,
+                    Err(err) => {
+                        tracing::error!(target: "zone::p2p", %err, "Settlement submission notification channel closed");
+                        return;
+                    }
+                };
+                let head = match provider.last_block_number() {
+                    Ok(head) => head,
+                    Err(err) => {
+                        tracing::warn!(target: "zone::p2p", %err, "Failed reading persisted head after settlement confirmation");
+                        continue;
+                    }
+                };
+                pending_boundary = propose_persisted_settlement_range(
+                    &provider,
+                    &commands,
+                    &context,
+                    submitted.saturating_add(1),
+                    head,
+                ).await;
+                last_scanned = head;
             }
             _ = retry.tick(), if pending_boundary.is_some() => {
                 let number = pending_boundary.expect("guarded by is_some");
@@ -360,11 +386,53 @@ pub(crate) async fn collect_leader_settlements<P>(
                                 Err(err) => debug!(target: "zone::p2p", %err, height = candidate, "Skipped non-current settlement boundary while advancing"),
                             }
                         }
+                        last_scanned = head;
                     }
                 }
             }
         }
     }
+}
+
+/// Wait until the submitter or portal resync confirms at least `pending_height`.
+async fn wait_for_submitted_height(
+    submitted_heights: &mut watch::Receiver<u64>,
+    pending_height: u64,
+) -> Result<u64, watch::error::RecvError> {
+    loop {
+        let submitted_height = *submitted_heights.borrow_and_update();
+        if submitted_height >= pending_height {
+            return Ok(submitted_height);
+        }
+        submitted_heights.changed().await?;
+    }
+}
+
+/// Propose the first batch boundary in an already-persisted range.
+///
+/// A failed candidate is retained for timer-based retry so a transient L1 failure cannot strand
+/// it when no further persisted-block notification arrives.
+async fn propose_persisted_settlement_range<P>(
+    provider: &P,
+    commands: &mpsc::Sender<P2pCommand>,
+    context: &AttestationContext,
+    start: u64,
+    end: u64,
+) -> Option<u64>
+where
+    P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
+{
+    for candidate in start..=end {
+        match propose_settlement(provider, candidate, commands, context).await {
+            Ok(true) => return Some(candidate),
+            Ok(false) => {}
+            Err(err) => {
+                tracing::warn!(target: "zone::p2p", %err, height = candidate, "Failed proposing settlement boundary");
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 /// Before we settle on L1 with `submitBatch`, we need to collect follower signatures for this
@@ -397,7 +465,36 @@ where
             attestation.encode(),
         ))
         .await
-        .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
+        .wrap_err("P2P command channel closed")?;
     info!(target: "zone::p2p", height = number, %signer, signatures, "Signed and broadcast settlement proposal");
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zone_sequencer::attestation::AttestationStore;
+
+    #[tokio::test]
+    async fn submission_confirmation_wakes_pending_boundary_without_retry_tick() {
+        let store = AttestationStore::default();
+        let mut submitted_heights = store.subscribe_submitted_height();
+        let waiting =
+            tokio::spawn(
+                async move { wait_for_submitted_height(&mut submitted_heights, 2_070).await },
+            );
+
+        tokio::task::yield_now().await;
+        store.remove_submitted(2_068);
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+
+        store.remove_submitted(2_070);
+        let submitted = tokio::time::timeout(Duration::from_millis(100), waiting)
+            .await
+            .expect("confirmation should wake the collector without its five-second retry")
+            .expect("submission wait task should not panic")
+            .expect("submission notification channel should remain open");
+        assert_eq!(submitted, 2_070);
+    }
 }
