@@ -1375,7 +1375,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
     let tip20 = tempo_contracts::precompiles::ITIP20::new(ZONE_TOKEN_ADDRESS, &alice_provider);
     let transfer = tip20
-        .transfer(bob, U256::from(200_000u128))
+        .transferFrom(alice, bob, U256::from(200_000u128))
         .from(alice)
         .call()
         .await;

@@ -129,9 +129,31 @@ pub(crate) async fn approve_outbox<P>(
 where
     P: Provider + Clone,
 {
-    let zone_token = ITIP20::new(PATH_USD_ADDRESS, provider);
+    approve_tip20(
+        fixture,
+        zone,
+        provider,
+        PATH_USD_ADDRESS,
+        ZONE_OUTBOX_ADDRESS,
+        U256::MAX,
+    )
+    .await
+}
+
+pub(crate) async fn approve_tip20<P>(
+    fixture: &mut L1Fixture,
+    zone: &ZoneTestNode,
+    provider: P,
+    token: Address,
+    spender: Address,
+    amount: U256,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone,
+{
+    let zone_token = ITIP20::new(token, provider);
     let approve_pending = zone_token
-        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+        .approve(spender, amount)
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()

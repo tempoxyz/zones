@@ -8,13 +8,15 @@ use alloy::primitives::{U256, address};
 use zone_l1::{EnabledToken, L1Deposit, L1PortalEvents};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, local_dev_zone_account, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, L1Fixture, TEST_MNEMONIC, TIP20_TX_GAS, start_local_zone_with_fixture,
 };
 
 // Imports for real-L1 tests
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::B256;
 use alloy_provider::Provider;
+use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 
@@ -122,11 +124,16 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-    let (provider, sender) = local_dev_zone_account(&zone)?;
+    let signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let sender = signer.address();
+    let provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+        .wallet(signer)
+        .connect_http(zone.http_url().clone());
     let recipient = address!("0x000000000000000000000000000000000000B0B0");
     let token_address = address!("0x20C0000000000000000000000000000000CC0001");
     let deposit_amount = 1_000_000u128;
-    let transfer_amount = 100_000u128;
 
     let block = fixture.next_block();
     let deposit = L1Fixture::make_deposit_for_block(token_address, sender, sender, deposit_amount);
@@ -161,18 +168,24 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
         "execution should observe the anchored allow-all policy"
     );
 
-    // Stateful RPC simulation uses ZoneEvmConfig and therefore the L1 overlay.
+    // Stateful RPC simulation uses ZoneEvmConfig and therefore the L1 overlay. Use the allowed
+    // transferFrom operation with a zero amount so the test stays focused on policy anchoring and
+    // FeeAMM admission without needing a preceding approval transaction.
     let simulated = token
-        .transfer(recipient, U256::from(transfer_amount))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .transferFrom(sender, recipient, U256::ZERO)
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
         .gas(TIP20_TX_GAS)
         .call()
         .await?;
     assert!(simulated, "the anchored policy should allow execution");
 
     let error = token
-        .transfer(recipient, U256::from(transfer_amount))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .transferFrom(sender, recipient, U256::ZERO)
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
         .gas(TIP20_TX_GAS)
         .send()
         .await

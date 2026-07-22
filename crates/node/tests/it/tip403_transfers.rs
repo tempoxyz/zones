@@ -19,7 +19,7 @@ use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox, approve_tip20,
     local_dev_zone_account, start_local_zone_with_fixture,
 };
 
@@ -55,6 +55,15 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     let transfer_amount: u128 = 400_000;
     // Seed the current anchor before estimation/pool validation. The next empty block inherits it.
     fixture.seed_no_receive_policy(bob)?;
+    approve_tip20(
+        &mut fixture,
+        &zone,
+        &provider,
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::MAX,
+    )
+    .await?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
     let native_balance = provider.get_balance(dev_address).await?;
@@ -64,14 +73,14 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     );
 
     let estimated_gas = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .estimate_gas()
         .await?;
     assert!(estimated_gas > 0, "transfer gas estimate should be nonzero");
 
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .send()
         .await?;
@@ -240,10 +249,19 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
         .wallet(alice_signer)
         .connect_http(zone.http_url().clone());
     fixture.seed_no_receive_policy(bob)?;
+    approve_tip20(
+        &mut fixture,
+        &zone,
+        &alice_provider,
+        PATH_USD_ADDRESS,
+        alice,
+        U256::MAX,
+    )
+    .await?;
     let tip20_alice = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
 
     let pending = tip20_alice
-        .transfer(bob, U256::from(alice_to_bob))
+        .transferFrom(alice, bob, U256::from(alice_to_bob))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -269,10 +287,19 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
         .wallet(bob_signer)
         .connect_http(zone.http_url().clone());
     fixture.seed_no_receive_policy(charlie)?;
+    approve_tip20(
+        &mut fixture,
+        &zone,
+        &bob_provider,
+        PATH_USD_ADDRESS,
+        bob,
+        U256::MAX,
+    )
+    .await?;
     let tip20_bob = ITIP20::new(PATH_USD_ADDRESS, &bob_provider);
 
     let pending = tip20_bob
-        .transfer(charlie, U256::from(bob_to_charlie))
+        .transferFrom(bob, charlie, U256::from(bob_to_charlie))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -353,10 +380,19 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
 
     // Transfer to Bob. Seed its receive-policy baseline before pool validation.
     fixture.seed_no_receive_policy(bob)?;
+    approve_tip20(
+        &mut fixture,
+        &zone,
+        &provider,
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::MAX,
+    )
+    .await?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -393,19 +429,18 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     Ok(())
 }
 
-/// `transferWithMemo` emits a `TransferWithMemo` event with the correct memo.
+/// `approve` emits an `Approval` event with the correct fields.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_transfer_with_memo() -> eyre::Result<()> {
+async fn test_approve_emits_event() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
 
-    let bob = address!("0x0000000000000000000000000000000000000B0B");
+    let spender = address!("0x0000000000000000000000000000000000000B0B");
     let deposit_amount: u128 = 1_000_000;
-    let transfer_amount: u128 = 300_000;
-    let memo = B256::with_last_byte(0x42);
+    let allowance_amount: u128 = 300_000;
 
     // Deposit to dev
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
@@ -418,43 +453,28 @@ async fn test_transfer_with_memo() -> eyre::Result<()> {
     )
     .await?;
 
-    // Transfer with memo. Seed its receive-policy baseline before pool validation.
-    fixture.seed_no_receive_policy(bob)?;
-    let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
-
-    let pending = tip20
-        .transferWithMemo(bob, U256::from(transfer_amount), memo)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(TIP20_TX_GAS)
-        .send()
-        .await?;
-
-    // Inject L1 block to finalize
-    fixture.inject_empty_block(zone.deposit_queue());
-    let receipt = pending.get_receipt().await?;
-    assert!(receipt.status(), "transferWithMemo should succeed");
-
-    // Wait for Bob's balance
-    zone.wait_for_balance(
+    approve_tip20(
+        &mut fixture,
+        &zone,
+        &provider,
         PATH_USD_ADDRESS,
-        bob,
-        U256::from(transfer_amount),
-        DEFAULT_TIMEOUT,
+        spender,
+        U256::from(allowance_amount),
     )
     .await?;
 
-    // Query TransferWithMemo events
+    // Query Approval events from pathUSD.
     let tip20_readonly = ITIP20::new(PATH_USD_ADDRESS, zone.provider());
-    let memo_filter = tip20_readonly.TransferWithMemo_filter().from_block(0);
-    let events = memo_filter.query().await?;
+    let approval_filter = tip20_readonly.Approval_filter().from_block(0);
+    let events = approval_filter.query().await?;
 
     let found = events.iter().any(|(e, _)| {
-        e.from == dev_address
-            && e.to == bob
-            && e.amount == U256::from(transfer_amount)
-            && e.memo == memo
+        e.owner == dev_address && e.spender == spender && e.amount == U256::from(allowance_amount)
     });
-    assert!(found, "should find TransferWithMemo event with memo {memo}");
+    assert!(
+        found,
+        "should find Approval event from {dev_address} to {spender} for {allowance_amount}"
+    );
 
     Ok(())
 }
