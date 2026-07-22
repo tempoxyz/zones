@@ -20,7 +20,7 @@ use alloy_rpc_types_eth::{
     FilterId, TransactionRequest,
     state::{EvmOverrides, StateOverride},
 };
-use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
+use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use futures::StreamExt;
 use reth_provider::CanonStateSubscriptions;
@@ -138,7 +138,6 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::PrivateRpcConfig,
     l1_provider: DynProvider<TempoNetwork>,
-    zone_provider: DynProvider<TempoNetwork>,
     tempo_state: tempo_zone_contracts::TempoState::TempoStateInstance<
         DynProvider<TempoNetwork>,
         TempoNetwork,
@@ -178,7 +177,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             eth,
             config,
             l1_provider,
-            zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
         };

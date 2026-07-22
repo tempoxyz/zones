@@ -8,9 +8,8 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, ZoneAccount, now_secs,
-    start_zone_with_private_rpc, start_zone_with_private_rpc_l1,
-    start_zone_with_private_rpc_l1_with_encryption,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, now_secs, start_zone_with_private_rpc,
+    start_zone_with_private_rpc_l1, start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
     primitives::{Address, B256, U256, address, hex},
@@ -31,8 +30,7 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
 use tempo_zone_contracts::{
-    EncryptedDepositPayload, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS,
-    ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
+    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
