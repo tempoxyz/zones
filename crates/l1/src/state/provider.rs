@@ -31,7 +31,7 @@ pub struct L1StateProviderConfig {
     pub chain_id: Option<u64>,
     /// HTTP RPC endpoint for Tempo L1.
     pub l1_rpc_url: String,
-    /// Zone portal address on Tempo L1, forwarded to Zone execution for sequencer lookups.
+    /// Zone portal address on Tempo L1, used for sequencer lookups.
     pub portal_address: Address,
     /// Maximum number of transport-level retries for failed/rate-limited RPC requests.
     /// Defaults to 10.

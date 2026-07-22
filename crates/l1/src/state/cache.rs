@@ -146,12 +146,6 @@ impl L1StateCacheInner {
         self.anchor = anchor;
     }
 
-    /// Returns the current anchor block.
-    #[cfg(test)]
-    pub fn anchor(&self) -> NumHash {
-        self.anchor
-    }
-
     /// Returns `true` if the given address is one of the tracked contracts.
     pub fn is_tracked(&self, address: &Address) -> bool {
         self.tracked_contracts.contains(address)
@@ -309,14 +303,14 @@ mod tests {
 
         assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
         assert!(cache.invalidations.is_empty());
-        assert_eq!(cache.anchor(), NumHash::default());
+        assert_eq!(cache.anchor, NumHash::default());
         assert_eq!(cache.block_floor(), 90);
     }
 
     #[test]
     fn anchor_defaults_to_zero() {
         let cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
-        assert_eq!(cache.anchor(), NumHash::default());
+        assert_eq!(cache.anchor, NumHash::default());
     }
 
     #[test]
@@ -324,7 +318,7 @@ mod tests {
         let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
         let hash = B256::with_last_byte(0xbe);
         cache.update_anchor(NumHash { number: 42, hash });
-        assert_eq!(cache.anchor(), NumHash { number: 42, hash });
+        assert_eq!(cache.anchor, NumHash { number: 42, hash });
     }
 
     #[test]

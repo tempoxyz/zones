@@ -421,11 +421,19 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     );
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
+    let stable_account = address!("0x0000000000000000000000000000000000000ABC");
+    let stable_slot = B256::with_last_byte(3);
+    let stable_value = B256::with_last_byte(4);
     subscriber
         .config
         .l1_state_cache
         .write()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
+    subscriber
+        .config
+        .l1_state_cache
+        .write()
+        .set(stable_account, stable_slot, 10, stable_value);
 
     let hash_10 = B256::with_last_byte(10);
     subscriber.update_l1_state_anchor(10, hash_10, &HashSet::new());
@@ -444,7 +452,10 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
         &HashSet::from([TIP403_REGISTRY_ADDRESS]),
     );
     let cache = subscriber.config.l1_state_cache.read();
-    assert_eq!(cache.anchor().number, 11);
+    assert_eq!(
+        cache.get(stable_account, stable_slot, 11),
+        Some(stable_value)
+    );
     assert_eq!(cache.get(TIP403_REGISTRY_ADDRESS, slot, 11), None);
 }
 
