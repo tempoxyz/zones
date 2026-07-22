@@ -111,12 +111,14 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 | ITIP20::ITIP20Calls::ISSUER_ROLE(_)
                 | ITIP20::ITIP20Calls::BURN_BLOCKED_ROLE(_)
                 | ITIP20::ITIP20Calls::transferFrom(_)
-                | ITIP20::ITIP20Calls::transfer(_)
                 | ITIP20::ITIP20Calls::approve(_)
-                | ITIP20::ITIP20Calls::transferWithMemo(_)
                 | ITIP20::ITIP20Calls::transferFromWithMemo(_)
                 | ITIP20::ITIP20Calls::permit(_)
                 | ITIP20::ITIP20Calls::DOMAIN_SEPARATOR(_) => CallCheck::Continue,
+                ITIP20::ITIP20Calls::transfer(_)
+                | ITIP20::ITIP20Calls::transferWithMemo(_) => {
+                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                }
             };
         }
 
@@ -480,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_still_enforces_privacy_and_fixed_gas() -> eyre::Result<()> {
+    fn wrapper_forbids_direct_transfers_with_unauthorized() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
 
         let private_balance = harness.call(
@@ -499,20 +501,28 @@ mod tests {
             Bytes::from(Unauthorized {}.abi_encode())
         );
 
-        let transfer = harness.call(
-            harness.alice,
-            ITIP20::transferCall {
+        for calldata in [
+            ITIP20::ITIP20Calls::transfer(ITIP20::transferCall {
                 to: harness.bob,
                 amount: U256::from(12_345u64),
-            }
-            .abi_encode()
-            .into(),
-            TIP20_FIXED_TRANSFER_GAS,
-            false,
-        )?;
-        assert!(transfer.is_success());
-        assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
-        assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
+            }),
+            ITIP20::ITIP20Calls::transferWithMemo(ITIP20::transferWithMemoCall {
+                to: harness.bob,
+                amount: U256::from(12_345u64),
+                memo: Default::default(),
+            }),
+        ] {
+            let transfer = harness.call(
+                harness.alice,
+                calldata.abi_encode().into(),
+                TIP20_FIXED_TRANSFER_GAS,
+                false,
+            )?;
+            assert!(transfer.is_revert());
+            assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
+            assert_eq!(transfer.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+        }
+        assert_eq!(harness.balance_of(harness.bob)?, U256::ZERO);
 
         Ok(())
     }
