@@ -5,6 +5,7 @@
 #![allow(clippy::too_many_arguments)]
 
 use eyre as _;
+use url as _;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -14,6 +15,7 @@ pub mod genesis;
 pub mod node;
 mod replication;
 pub mod rpc;
+mod tx_forwarding;
 
 pub use engine::ZoneEngine;
 pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};

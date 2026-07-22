@@ -7,6 +7,7 @@ use crate::{
     ZoneEngine,
     replication::{broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
+    tx_forwarding::{forward_new_transactions, insert_forwarded_transactions, route_p2p_events},
 };
 use alloy_primitives::Address;
 use alloy_provider::Provider as _;
@@ -35,7 +36,7 @@ use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{
-    Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
+    Pool, TransactionPool as _, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
 use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
@@ -473,6 +474,7 @@ where
                 network_id,
                 &task_executor,
                 ctx.node.provider().clone(),
+                ctx.node.pool().clone(),
                 ctx.beacon_engine_handle.clone(),
             )?;
         }
@@ -529,9 +531,13 @@ where
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
+        pool: N::Pool,
         engine: ConsensusEngineHandle<ZonePayloadTypes>,
     ) -> eyre::Result<()> {
         let role = config.role();
+        // Subscribe before starting Commonware (and, importantly, before RPC launch) so a
+        // follower cannot admit a transaction in a startup gap.
+        let new_transactions = (role == Role::Follower).then(|| pool.new_transactions_listener());
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
@@ -541,16 +547,39 @@ where
             events,
         } = handle.into_parts();
 
-        if role == Role::Leader {
-            // Only a leader can build + broadcast blocks
-            task_executor.spawn_critical_task(
-                "zone-p2p-block-broadcast",
-                broadcast_persisted_blocks(provider.clone(), commands.clone()),
-            );
-        }
+        let sync_events = match role {
+            Role::Leader => {
+                task_executor.spawn_critical_task(
+                    "zone-p2p-block-broadcast",
+                    broadcast_persisted_blocks(provider.clone(), commands.clone()),
+                );
+                let (sync_events_tx, sync_events) = tokio::sync::mpsc::channel(128);
+                let (transaction_events_tx, transaction_events) = tokio::sync::mpsc::channel(128);
+                task_executor.spawn_critical_task(
+                    "zone-p2p-event-router",
+                    route_p2p_events(events, sync_events_tx, transaction_events_tx),
+                );
+                task_executor.spawn_critical_task(
+                    "zone-p2p-transaction-import",
+                    insert_forwarded_transactions(pool, transaction_events),
+                );
+                sync_events
+            }
+            Role::Follower => {
+                task_executor.spawn_critical_task(
+                    "zone-p2p-transaction-forward",
+                    forward_new_transactions(
+                        pool,
+                        new_transactions.expect("follower listener must be initialized"),
+                        commands.clone(),
+                    ),
+                );
+                events
+            }
+        };
         task_executor.spawn_critical_task(
             "zone-p2p-block-sync",
-            run_block_sync(role, provider, engine, events, commands),
+            run_block_sync(role, provider, engine, sync_events, commands),
         );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
