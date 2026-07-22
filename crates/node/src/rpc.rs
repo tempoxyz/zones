@@ -308,10 +308,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     }
 
     async fn zone_sequencers(&self) -> Result<Vec<Address>, JsonRpcError> {
-        if self.config.zone_portal.is_zero() {
-            return Ok(Vec::new());
-        }
-
         let portal = ZonePortal::new(self.config.zone_portal, &self.l1_provider);
         let count = portal.sequencerCount().call().await.map_err(internal)?;
         let count = count.to::<usize>();
@@ -335,9 +331,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     ) -> Result<(), JsonRpcError> {
         let caller = auth.caller;
         zone_rpc::policy::enforce_authorized(request, auth, async {
-            if self.config.zone_portal.is_zero() {
-                return Ok(false);
-            }
             ZonePortal::new(self.config.zone_portal, &self.l1_provider)
                 .isSequencer(caller)
                 .call()
