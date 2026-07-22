@@ -1,7 +1,8 @@
 //! Contract creation validation and runtime enforcement.
 
 use alloy_evm::Database;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, TxKind};
+use alloy_sol_types::SolCall;
 use revm::{
     bytecode::opcode::{CREATE, CREATE2},
     context::Transaction,
@@ -11,8 +12,11 @@ use revm::{
         interpreter_types::InputsTr,
     },
 };
+use tempo_contracts::precompiles::ITIP20;
 use tempo_evm::evm::TempoEvm;
+use tempo_primitives::is_tip20_prefix;
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, evm::TempoContext};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type ZoneInstructionCtx<'a, DB> = InstructionContext<'a, TempoContext<DB>, EthInterpreter>;
@@ -59,7 +63,54 @@ pub fn validate_transaction(
         ));
     }
 
+    for (target, input) in tx.calls() {
+        validate_call(*target, input)?;
+    }
+
     Ok(())
+}
+
+fn validate_call(target: TxKind, input: &[u8]) -> Result<(), TempoInvalidTransaction> {
+    if is_state_changing_system_operation(target, input) {
+        return Err(TempoInvalidTransaction::CallsValidation(
+            "zone system operations require a system transaction",
+        ));
+    }
+
+    let TxKind::Call(address) = target else {
+        return Ok(());
+    };
+    if !is_tip20_prefix(address) {
+        return Ok(());
+    }
+
+    if input.starts_with(&ITIP20::transferFromCall::SELECTOR) {
+        ITIP20::transferFromCall::abi_decode(input).map_err(|_| {
+            TempoInvalidTransaction::CallsValidation("malformed TIP-20 transferFrom call")
+        })?;
+    } else if input.starts_with(&ITIP20::approveCall::SELECTOR) {
+        ITIP20::approveCall::abi_decode(input).map_err(|_| {
+            TempoInvalidTransaction::CallsValidation("malformed TIP-20 approve call")
+        })?;
+    } else {
+        return Err(TempoInvalidTransaction::CallsValidation(
+            "TIP-20 operation is not allowed on zones",
+        ));
+    }
+
+    Ok(())
+}
+
+fn is_state_changing_system_operation(target: TxKind, input: &[u8]) -> bool {
+    match (target, input.get(..4)) {
+        (TxKind::Call(ZONE_INBOX_ADDRESS), Some(selector)) => {
+            selector == ZoneInbox::advanceTempoCall::SELECTOR
+        }
+        (TxKind::Call(ZONE_OUTBOX_ADDRESS), Some(selector)) => {
+            selector == ZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR
+        }
+        _ => false,
+    }
 }
 
 fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
@@ -75,7 +126,7 @@ mod tests {
     use super::*;
     use crate::{L1OverlayDB, ZoneEvm};
     use alloy_evm::{Evm, EvmEnv};
-    use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
+    use alloy_primitives::{Address, Bytes, TxKind, U256, address, bytes};
     use revm::{
         bytecode::Bytecode,
         context::{
@@ -95,6 +146,7 @@ mod tests {
     type TestAdaptedDb = L1OverlayDB<TestDb, TestL1>;
 
     const TEST_DEPLOYER: Address = Address::new([0x42; 20]);
+    const TOKEN: Address = address!("0x20C0000000000000000000000000000000000001");
 
     fn test_create<const IS_CREATE2: bool>(
         context: ZoneInstructionCtx<'_, TestAdaptedDb>,
@@ -314,5 +366,67 @@ mod tests {
 
         assert!(validate_transaction(&tx, &[]).is_err());
         assert!(validate_transaction(&tx, &[caller]).is_ok());
+    }
+
+    #[test]
+    fn validates_tip20_calls_for_pool_and_rpc_execution() {
+        let mut tx = call_tx(Address::repeat_byte(0x11), TOKEN);
+        tx.inner.data = ITIP20::transferFromCall {
+            from: Address::repeat_byte(0x11),
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        }
+        .abi_encode()
+        .into();
+        assert!(validate_transaction(&tx, &[]).is_ok());
+
+        tx.inner.data = ITIP20::transferCall {
+            to: Address::repeat_byte(0x22),
+            amount: U256::from(7),
+        }
+        .abi_encode()
+        .into();
+        assert!(validate_transaction(&tx, &[]).is_err());
+
+        tx.inner.data = ITIP20::approveCall::SELECTOR.to_vec().into();
+        assert!(validate_transaction(&tx, &[]).is_err());
+    }
+
+    #[test]
+    fn validates_every_tip20_call_in_an_aa_batch() {
+        let tx = TempoTxEnv {
+            inner: TxEnv {
+                caller: Address::repeat_byte(0x11),
+                ..Default::default()
+            },
+            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
+                aa_calls: vec![
+                    Call {
+                        to: TxKind::Call(TOKEN),
+                        value: U256::ZERO,
+                        input: ITIP20::approveCall {
+                            spender: Address::repeat_byte(0x33),
+                            amount: U256::from(9),
+                        }
+                        .abi_encode()
+                        .into(),
+                    },
+                    Call {
+                        to: TxKind::Call(TOKEN),
+                        value: U256::ZERO,
+                        input: ITIP20::mintCall {
+                            to: Address::repeat_byte(0x44),
+                            amount: U256::from(1),
+                        }
+                        .abi_encode()
+                        .into(),
+                    },
+                ],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        assert!(validate_transaction(&tx, &[]).is_err());
     }
 }
