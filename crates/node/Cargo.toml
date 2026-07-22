@@ -104,6 +104,7 @@ reqwest.workspace = true
 revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
+tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tempo-revm.workspace = true
