@@ -131,7 +131,7 @@ impl ZoneOutbox {
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
-        if call.fallbackRecipient.is_zero() {
+        if call.zoneFallbackRecipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
         }
         if call.data.len() > MAX_CALLBACK_DATA_SIZE {
@@ -174,7 +174,7 @@ impl ZoneOutbox {
             .checked_add(1)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.last_fallback_nonce.write(fallback_nonce)?;
-        self.fallback_recipients[fallback_nonce].write(call.fallbackRecipient)?;
+        self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
         self.enqueue(PendingWithdrawal::from_request(
             caller,
             current_tx_hash,
@@ -391,7 +391,7 @@ impl PendingWithdrawal {
     fn from_bounce_back(call: IZoneOutbox::enqueueDepositBounceBackCall) -> Self {
         Self {
             token: call.token,
-            to: call.bouncebackRecipient,
+            to: call.tempoRefundRecipient,
             amount: call.amount,
             ..Default::default()
         }

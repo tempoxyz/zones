@@ -133,7 +133,7 @@ impl Harness {
             amount,
             memo,
             gasLimit: 0,
-            fallbackRecipient: ALICE,
+            zoneFallbackRecipient: ALICE,
             data: Bytes::new(),
             revealTo: Bytes::new(),
         })
@@ -256,7 +256,7 @@ fn request_withdrawal_rejects_missing_transaction_hash() -> eyre::Result<()> {
             amount: 1,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: ALICE,
+            zoneFallbackRecipient: ALICE,
             data: Bytes::new(),
             revealTo: Bytes::new(),
         }
@@ -279,7 +279,7 @@ fn request_withdrawal_rejects_unknown_token_before_portal_read() -> eyre::Result
         amount: 1,
         memo: B256::ZERO,
         gasLimit: 0,
-        fallbackRecipient: ALICE,
+        zoneFallbackRecipient: ALICE,
         data: Bytes::new(),
         revealTo: Bytes::new(),
     });
@@ -297,7 +297,7 @@ fn enqueue_bounce_back_is_inbox_only() -> eyre::Result<()> {
     let call = ZoneOutboxAbi::enqueueDepositBounceBackCall {
         token: harness.token,
         amount: 100,
-        bouncebackRecipient: BOB,
+        tempoRefundRecipient: BOB,
     }
     .abi_encode();
 
@@ -422,7 +422,7 @@ fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
         amount: 1,
         memo: B256::ZERO,
         gasLimit: 0,
-        fallbackRecipient: ALICE,
+        zoneFallbackRecipient: ALICE,
         data,
         revealTo: reveal_to,
     };
@@ -465,7 +465,7 @@ fn fallback_recipient_and_zero_amount_semantics_match_reference() -> eyre::Resul
             amount: 1,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: Address::ZERO,
+            zoneFallbackRecipient: Address::ZERO,
             data: Bytes::new(),
             revealTo: Bytes::new(),
         }),
@@ -508,7 +508,7 @@ fn request_charges_withdrawal_fee_to_effective_fee_payer() -> eyre::Result<()> {
             amount: 100,
             memo: B256::ZERO,
             gasLimit: 0,
-            fallbackRecipient: ALICE,
+            zoneFallbackRecipient: ALICE,
             data: Bytes::new(),
             revealTo: Bytes::new(),
         }
@@ -637,7 +637,7 @@ fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
                 amount: 1,
                 memo: B256::ZERO,
                 gasLimit: 0,
-                fallbackRecipient: ALICE,
+                zoneFallbackRecipient: ALICE,
                 data: Bytes::new(),
                 revealTo: Bytes::new(),
             }
