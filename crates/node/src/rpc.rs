@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use alloy_consensus::BlockHeader;
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -307,16 +308,21 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
-    async fn zone_sequencer(&self) -> Result<Address, JsonRpcError> {
-        if self.config.zone_portal.is_zero() {
-            return Ok(Address::ZERO);
+    async fn zone_sequencers(&self) -> Result<Vec<Address>, JsonRpcError> {
+        let portal = ZonePortal::new(self.config.zone_portal, &self.l1_provider);
+        let count = portal.sequencerCount().call().await.map_err(internal)?;
+        let count = count.to::<usize>();
+        let mut sequencers = Vec::with_capacity(count);
+        for index in 0..count {
+            sequencers.push(
+                portal
+                    .sequencerAt(U256::from(index))
+                    .call()
+                    .await
+                    .map_err(internal)?,
+            );
         }
-
-        ZonePortal::new(self.config.zone_portal, &self.l1_provider)
-            .sequencer()
-            .call()
-            .await
-            .map_err(internal)
+        Ok(sequencers)
     }
 
     async fn enforce_authorized(
@@ -326,7 +332,11 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     ) -> Result<(), JsonRpcError> {
         let caller = auth.caller;
         zone_rpc::policy::enforce_authorized(request, auth, async {
-            Ok(self.zone_sequencer().await? == caller)
+            ZonePortal::new(self.config.zone_portal, &self.l1_provider)
+                .isSequencer(caller)
+                .call()
+                .await
+                .map_err(internal)
         })
         .await
     }
@@ -454,7 +464,13 @@ where
     }
 
     fn coinbase(&self) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&self.zone_sequencer().await?) })
+        Box::pin(async move {
+            let header = EthBlocks::rpc_block_header(&self.eth.api, BlockId::latest())
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| JsonRpcError::internal("latest block not found"))?;
+            to_raw(&header.beneficiary())
+        })
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
@@ -900,12 +916,19 @@ where
     fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
-            let sequencer = self.zone_sequencer().await?;
+            let sequencers = self.zone_sequencers().await?;
+            let tempo_block_number = self
+                .tempo_state
+                .tempoBlockNumber()
+                .call()
+                .await
+                .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
                 zone_tokens,
-                sequencer,
+                sequencers,
                 chain_id: U64::from(self.config.chain_id),
+                tempo_block_number: U64::from(tempo_block_number),
             })
         })
     }

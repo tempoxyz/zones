@@ -17,7 +17,8 @@ import {
     QueuedDeposit,
     TokenConfig,
     Withdrawal,
-    ZONE_FACTORY_ADDRESS
+    ZONE_FACTORY_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
@@ -63,21 +64,24 @@ contract ZonePortal is IZonePortal {
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
-    /// @dev The fixed account holding the shared portal logic contract runtime.
-    address internal constant ZONE_PORTAL_LOGIC_ADDRESS =
-        0x5AD1000000000000000000000000000000000000;
+    /// @notice Maximum number of independently countable settlement signers.
+    /// @dev Matches the creation and replacement bound fixed by TIP-1091.
+    uint256 public constant MAX_SEQUENCERS = 8;
+
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
+    bytes32 internal constant VERSION_HASH = keccak256("1");
+    bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+    );
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Current sequencer address
-    address public sequencer;
-
     /// @notice Governance admin address
     address public admin;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
 
     /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
@@ -103,19 +107,19 @@ contract ZonePortal is IZonePortal {
     uint64 public lastSyncedTempoBlockNumber;
 
     /// @notice Gas amount used to price a failed-deposit bounce-back on Tempo.
-    /// @dev Packed into the unused bytes in slot 6. Defaults to zero.
+    /// @dev Packed into the unused bytes in slot 4. Defaults to zero.
     uint64 public bouncebackGas;
 
     /// @notice Historical encryption keys with activation blocks
     /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
-    ///      Stored at slot 7 in the ZonePortal storage layout.
+    ///      Stored at slot 5 in the ZonePortal storage layout.
     EncryptionKeyEntry[] internal _encryptionKeys;
 
-    /// @notice Per-token configuration (stored at slot 8)
+    /// @notice Per-token configuration (stored at slot 6)
     /// @dev TokenConfig.enabled is permanent (write-once true); depositsActive can be toggled.
     mapping(address => TokenConfig) internal _tokenConfigs;
 
-    /// @notice Append-only list of enabled tokens (stored at slot 9)
+    /// @notice Append-only list of enabled tokens (stored at slot 7)
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
@@ -140,8 +144,14 @@ contract ZonePortal is IZonePortal {
     uint32 public zoneId;
     address public messenger;
     address public verifier;
-    uint64 public genesisTempoBlockNumber;
     bool internal _initialized;
+
+    /// @notice Configuration nonce for the active sequencer set and threshold.
+    uint64 public sequencerSetVersion;
+    uint8 public sequencerThreshold;
+    uint256 public zoneHeight;
+    address[] internal _sequencers;
+    mapping(address => bool) public isSequencer;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -152,10 +162,9 @@ contract ZonePortal is IZonePortal {
         address _initialToken,
         address _messenger,
         address _admin,
-        address _sequencer,
+        address[] calldata initialSequencers,
+        uint8 _threshold,
         address _verifier,
-        bytes32 _genesisBlockHash,
-        uint64 _genesisTempoBlockNumber,
         string calldata _rpcUrl
     )
         external
@@ -168,11 +177,10 @@ contract ZonePortal is IZonePortal {
         zoneId = _zoneId;
         messenger = _messenger;
         admin = _admin;
-        sequencer = _sequencer;
         verifier = _verifier;
-        blockHash = _genesisBlockHash;
-        genesisTempoBlockNumber = _genesisTempoBlockNumber;
         rpcUrl = _rpcUrl;
+
+        _replaceSequencerSet(initialSequencers, _threshold, false);
 
         // Enable the initial token
         _enableTokenInternal(_initialToken);
@@ -184,12 +192,12 @@ contract ZonePortal is IZonePortal {
 
     /// @dev Initialization is valid only in a portal proxy's storage context.
     modifier onlyDelegateCall() {
-        if (address(this) == ZONE_PORTAL_LOGIC_ADDRESS) revert MustDelegateCall();
+        if (address(this) == ZONE_PORTAL_IMPL_ADDRESS) revert MustDelegateCall();
         _;
     }
 
     modifier onlySequencer() {
-        if (msg.sender != sequencer) revert NotSequencer();
+        if (!isSequencer[msg.sender]) revert NotSequencer();
         _;
     }
 
@@ -210,35 +218,79 @@ contract ZonePortal is IZonePortal {
         _withdrawalReentrancyStatus = 0;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    /// @param newSequencer The address that will become sequencer after accepting.
-    function transferSequencer(address newSequencer) external onlySequencer {
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
+    /// @inheritdoc IZonePortal
+    function setSequencerSet(
+        address[] calldata newSequencers,
+        uint8 newThreshold
+    )
+        external
+        onlyAdmin
+    {
+        _replaceSequencerSet(newSequencers, newThreshold, true);
     }
 
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    /// @dev The explicit `pendingSequencer == address(0)` check because it is technically
-    ///      possible to make a system tx on L1 with msg.sender == 0.
-    ///      The Sequencer key can only be rotated, never renounced.
-    function acceptSequencer() external {
-        if (pendingSequencer == address(0) || msg.sender != pendingSequencer) {
-            revert NotPendingSequencer();
+    function _replaceSequencerSet(
+        address[] calldata newSequencers,
+        uint8 newThreshold,
+        bool rejectUnchanged
+    )
+        internal
+    {
+        uint256 length = newSequencers.length;
+        if (length == 0 || length > MAX_SEQUENCERS || newThreshold == 0 || newThreshold > length) {
+            revert InvalidSequencerSet();
         }
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
+
+        for (uint256 i = 0; i < length; ++i) {
+            address signer = newSequencers[i];
+            if (signer == address(0)) revert InvalidSequencerSet();
+
+            for (uint256 j = 0; j < i; ++j) {
+                if (newSequencers[j] == signer) revert InvalidSequencerSet();
+            }
+        }
+
+        bool membersUnchanged = length == _sequencers.length;
+        if (membersUnchanged) {
+            for (uint256 i = 0; i < length; ++i) {
+                if (!isSequencer[newSequencers[i]]) {
+                    membersUnchanged = false;
+                    break;
+                }
+            }
+        }
+        if (rejectUnchanged && membersUnchanged && newThreshold == sequencerThreshold) {
+            revert SequencerConfigurationUnchanged();
+        }
+
+        for (uint256 i = 0; i < _sequencers.length; ++i) {
+            isSequencer[_sequencers[i]] = false;
+        }
+        delete _sequencers;
+        for (uint256 i = 0; i < length; ++i) {
+            address signer = newSequencers[i];
+            _sequencers.push(signer);
+            isSequencer[signer] = true;
+        }
+
+        sequencerThreshold = newThreshold;
+        uint64 nonce = sequencerSetVersion;
+        if (rejectUnchanged) nonce = ++sequencerSetVersion;
+        emit SequencerSetUpdated(nonce, newThreshold, newSequencers);
+    }
+
+    /// @inheritdoc IZonePortal
+    function sequencerCount() external view returns (uint256) {
+        return _sequencers.length;
+    }
+
+    /// @inheritdoc IZonePortal
+    function sequencerAt(uint256 index) external view returns (address) {
+        return _sequencers[index];
     }
 
     /// @notice Set zone gas rate. Only callable by sequencer.
-    /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
-    ///      If actual zone gas is higher, sequencer covers the difference.
-    ///      If actual zone gas is lower, sequencer keeps the surplus.
+    /// @dev Sequencers publish the operational rate; collected deposit fees are paid to the admin.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
@@ -563,7 +615,7 @@ contract ZonePortal is IZonePortal {
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         if (fee > 0) {
-            ITIP20(_token).transfer(sequencer, fee);
+            ITIP20(_token).transfer(admin, fee);
         }
     }
 
@@ -576,7 +628,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
-    /// @dev Fee is deducted from amount and paid to sequencer in the same token.
+    /// @dev Fee is deducted from amount and paid to the admin in the same token.
     ///      The token must be enabled and deposits must be active.
     /// @param _token The TIP-20 token to deposit
     /// @param to Recipient address on the zone
@@ -599,7 +651,7 @@ contract ZonePortal is IZonePortal {
         _validateDepositPolicy(_token, to, bouncebackRecipient);
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
-        // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
+        // Build deposit struct with net amount (fee already paid to the admin on Tempo)
         Deposit memory depositData = Deposit({
             token: _token,
             sender: msg.sender,
@@ -826,9 +878,8 @@ contract ZonePortal is IZonePortal {
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
-            // If the fee transfer fails, (e.g. TIP-403 blacklist), the sequencer
-            // forgoes the fee so the bounce-back itself does not stall.
-            _tryTransfer(_token, sequencer, bouncebackFee); // ignore failure
+            // A recipient-policy failure must not block deposits or withdrawals.
+            _tryTransfer(_token, admin, bouncebackFee);
         }
 
         bool success = _tryTransfer(_token, withdrawal.to, refundAmount);
@@ -900,9 +951,7 @@ contract ZonePortal is IZonePortal {
                            BATCH SUBMISSION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
-    /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
-    /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
+    /// @inheritdoc IZonePortal
     function submitBatch(
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
@@ -910,18 +959,15 @@ contract ZonePortal is IZonePortal {
         DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
-        bytes calldata proof
+        bytes calldata proof,
+        uint256 nextZoneHeight,
+        bytes[] calldata signatures
     )
         external
         onlySequencer
     {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
-        }
-
-        // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
-        if (tempoBlockNumber < genesisTempoBlockNumber) {
-            revert InvalidTempoBlockNumber();
         }
 
         // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
@@ -951,6 +997,21 @@ contract ZonePortal is IZonePortal {
 
         if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
+        // The certificate binds every value that affects settlement, rather than only the
+        // zone block hash. A leader therefore cannot reuse signatures for this block with a
+        // different withdrawal root, deposit transition, Tempo anchor, or verifier config.
+        if (!_verifySettlement(
+                nextZoneHeight,
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                blockTransition,
+                depositQueueTransition,
+                withdrawalQueueHash,
+                verifierConfig,
+                signatures
+            )) revert InvalidQuorumCertificate();
+
         // These are strictly not necessary, but we'll assert them here since they are cheap while
         // the prover doesn't (yet) enforce them.
         //   - continuity:  prevDepositNumber must equal where we last left off
@@ -973,7 +1034,6 @@ contract ZonePortal is IZonePortal {
                 anchorBlockNumber,
                 anchorBlockHash,
                 withdrawalBatchIndex + 1,
-                sequencer,
                 blockTransition,
                 depositQueueTransition,
                 withdrawalQueueHash,
@@ -987,6 +1047,7 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
+        zoneHeight = nextZoneHeight;
 
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
@@ -998,6 +1059,77 @@ contract ZonePortal is IZonePortal {
             blockHash,
             withdrawalQueueHash,
             lastProcessedDepositNumber
+        );
+    }
+
+    function _verifySettlement(
+        uint256 nextZoneHeight,
+        uint64 tempoBlockNumber,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes calldata verifierConfig,
+        bytes[] memory signatures
+    )
+        internal
+        view
+        returns (bool)
+    {
+        uint256 threshold = sequencerThreshold;
+        if (
+            nextZoneHeight <= zoneHeight || signatures.length < threshold
+                || signatures.length > _sequencers.length
+        ) return false;
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SETTLEMENT_ATTESTATION_TYPEHASH,
+                zoneId,
+                sequencerSetVersion,
+                nextZoneHeight,
+                withdrawalBatchIndex + 1,
+                verifier,
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                keccak256(abi.encode(blockTransition)),
+                keccak256(abi.encode(depositQueueTransition)),
+                withdrawalQueueHash,
+                keccak256(verifierConfig)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        address[] memory recovered = new address[](signatures.length);
+
+        for (uint256 i = 0; i < signatures.length; ++i) {
+            bytes memory signature = signatures[i];
+            address signer;
+            // The shared TIP-1020 verifier owns signature-format and canonicality checks.
+            // Convert its reverts into `false` so the public verifier remains non-reverting.
+            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signature) returns (
+                address recoveredSigner
+            ) {
+                signer = recoveredSigner;
+            } catch {
+                return false;
+            }
+            if (signer == address(0) || !isSequencer[signer]) return false;
+            for (uint256 j = 0; j < i; ++j) {
+                if (recovered[j] == signer) return false;
+            }
+            recovered[i] = signer;
+        }
+
+        return signatures.length >= threshold;
+    }
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)
+            )
         );
     }
 

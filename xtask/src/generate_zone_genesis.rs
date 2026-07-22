@@ -94,10 +94,6 @@ pub(crate) struct GenerateZoneGenesis {
     /// controls whether it remains in the final genesis state.
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
-
-    /// Bundle ZoneFactory creation bytecode as dev-only top-level metadata.
-    #[arg(long)]
-    pub(crate) with_zone_factory_bytecode: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -302,18 +298,8 @@ impl GenerateZoneGenesis {
         genesis.alloc = genesis_alloc;
         genesis.config = chain_config;
 
-        let mut genesis_json =
+        let genesis_json =
             serde_json::to_value(&genesis).wrap_err("failed encoding genesis as JSON")?;
-        if self.with_zone_factory_bytecode {
-            let factory_bytecode = load_artifact(&self.specs_out, "ZoneFactory")?;
-            genesis_json
-                .as_object_mut()
-                .ok_or_else(|| eyre!("encoded genesis is not a JSON object"))?
-                .insert(
-                    "zoneFactoryBytecode".to_owned(),
-                    serde_json::Value::String(format!("0x{}", const_hex::encode(factory_bytecode))),
-                );
-        }
         let mut json = serde_json::to_string_pretty(&genesis_json)
             .wrap_err("failed encoding genesis as JSON")?;
         json.push('\n');

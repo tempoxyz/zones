@@ -6,8 +6,8 @@ mod tests;
 
 use alloc::vec::Vec;
 
-use alloy_primitives::{Address, B256, Bytes, U256};
-use revm::interpreter::instructions::utility::IntoAddress;
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_sol_types::SolValue;
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
@@ -17,7 +17,7 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent};
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS,
 };
 
@@ -75,10 +75,8 @@ impl ZoneOutbox {
         if caller == Address::ZERO {
             return Ok(());
         }
-        let sequencer = self
-            .read_portal_slot(l1, portal_address, PORTAL_SEQUENCER_SLOT)?
-            .into_address();
-        if caller != sequencer {
+        let membership_slot = keccak256((caller, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        if self.read_portal_slot(l1, portal_address, membership_slot)? == U256::ZERO {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())

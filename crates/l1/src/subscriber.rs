@@ -5,7 +5,7 @@ use tempo_primitives::is_tip20_prefix;
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
-type L1ProcessedEvents = (L1PortalEvents, Vec<PolicyEvent>, HashSet<Address>);
+type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>);
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -14,14 +14,8 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
-    /// Optional genesis Tempo block number override. When set, used instead of
-    /// the portal's on-chain `genesisTempoBlockNumber` (which may be 0 for
-    /// portals not created via ZoneFactory).
+    /// Optional genesis Tempo block number used to backfill a fresh zone.
     pub genesis_tempo_block_number: Option<u64>,
-    /// Shared TIP-403 policy cache. The subscriber applies policy events
-    /// extracted from L1 receipts directly into this cache before enqueuing
-    /// blocks.
-    pub policy_cache: crate::state::tip403::PolicyCache,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// confirmed block and clears it on reorgs.
     pub l1_state_cache: crate::state::cache::L1StateCache,
@@ -56,11 +50,6 @@ pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
     pub(crate) deposit_queue: DepositQueue,
-    /// Mutable set of token addresses tracked for TIP-403 policy events.
-    /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
-    pub(crate) tracked_tokens: Vec<Address>,
-    /// TIP-403 metrics (cache sizes, events applied).
-    pub(crate) tip403_metrics: crate::state::tip403::Tip403Metrics,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
@@ -79,15 +68,12 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        let tracked_tokens = config.policy_cache.read().tracked_tokens();
         let subscriber = Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
             deposit_queue,
-            tracked_tokens,
-            tip403_metrics: Default::default(),
             subscriber_metrics: Default::default(),
         };
 
@@ -95,7 +81,7 @@ impl L1Subscriber {
             "l1-deposit-subscriber",
             Box::pin(async move {
                 loop {
-                    if let Err(e) = subscriber.clone().run().await {
+                    if let Err(e) = subscriber.run().await {
                         let retry_interval = subscriber.config.retry_connection_interval;
                         subscriber.subscriber_metrics.reconnects.increment(1);
                         error!(
@@ -248,12 +234,9 @@ impl L1Subscriber {
     ///
     /// Uses the zone's local `tempoBlockNumber` as the primary starting point —
     /// this is the authoritative source for where the zone left off. Falls back
-    /// to the CLI genesis override or the portal's `genesisTempoBlockNumber`
-    /// when the zone hasn't processed any blocks yet.
-    pub(crate) async fn resolve_start_block(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<Option<u64>> {
+    /// to the CLI genesis override when the zone hasn't processed any blocks
+    /// yet. Without either checkpoint, live subscription starts at the L1 tip.
+    pub(crate) async fn resolve_start_block(&self) -> eyre::Result<Option<u64>> {
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.
@@ -268,27 +251,17 @@ impl L1Subscriber {
             return Ok(Some(genesis + 1));
         }
 
-        let portal = ZonePortal::new(self.config.portal_address, l1_provider);
-        let on_chain = portal.genesisTempoBlockNumber().call().await?;
-        if on_chain == 0 {
-            warn!(
-                "Portal genesisTempoBlockNumber is 0 — skipping backfill. \
-                 Set --l1.genesis-block-number to backfill from the correct block."
-            );
-            return Ok(None);
-        }
-
-        info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
-        Ok(Some(on_chain + 1))
+        warn!(
+            "No local Tempo checkpoint or genesis block override — skipping backfill. \
+             Set --l1.genesis-block-number to backfill from the correct block."
+        );
+        Ok(None)
     }
 
     /// Backfill deposit events from the starting block to the current L1 tip.
     #[instrument(skip(self, l1_provider))]
-    async fn sync_to_l1_tip(
-        &mut self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<()> {
-        let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
+    async fn sync_to_l1_tip(&self, l1_provider: &impl Provider<TempoNetwork>) -> eyre::Result<()> {
+        let Some(mut from) = self.resolve_start_block().await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
         };
@@ -335,12 +308,12 @@ impl L1Subscriber {
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
     ///
     /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
-    /// parallel, then processes them sequentially (event extraction, policy
-    /// application, enqueue). Receipts are fetched by the corresponding block
+    /// parallel, then processes them sequentially (event extraction and enqueue).
+    /// Receipts are fetched by the corresponding block
     /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(
-        &mut self,
+        &self,
         l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
@@ -402,7 +375,7 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, policy_events, invalidated) = self.extract_events(block_number, &receipts);
+            let (events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
@@ -412,10 +385,7 @@ impl L1Subscriber {
                 sealed.parent_hash(),
                 &invalidated,
             );
-            self.apply_policy_events(block_number, &policy_events);
-            self.apply_portal_state_events(block_number, &events);
-            self.deposit_queue
-                .enqueue_sealed(sealed, events, policy_events);
+            self.deposit_queue.enqueue_sealed(sealed, events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
 
@@ -457,11 +427,7 @@ impl L1Subscriber {
     /// prevents the zone from committing to an L1 tip that gets reorged away.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
-    pub async fn run(mut self) -> eyre::Result<()> {
-        // Re-read tracked tokens from the policy cache so we pick up any
-        // tokens discovered during a previous run (before a reconnect).
-        self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
-
+    pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
 
         // Backfill to the current tip before subscribing.
@@ -488,26 +454,18 @@ impl L1Subscriber {
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let (events, policy_events, invalidated) = self.extract_events(block_number, &receipts);
+            let (events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, (tip_events, tip_policy_events, tip_invalidated))) =
-                unconfirmed_tip.take()
-            {
+            if let Some((tip_header, (tip_events, tip_invalidated))) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — update the L1 state anchor, apply events, and
-                    // flush to the queue.
+                    // Confirmed — update the L1 state anchor and flush to the queue.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
                     self.update_l1_state_anchor(tip_number, tip_hash, tip_parent, &tip_invalidated);
-                    self.apply_policy_events(tip_number, &tip_policy_events);
-                    self.apply_portal_state_events(tip_number, &tip_events);
-                    match self
-                        .deposit_queue
-                        .try_enqueue(tip_header, tip_events, tip_policy_events)
-                    {
+                    match self.deposit_queue.try_enqueue(tip_header, tip_events) {
                         EnqueueOutcome::Accepted => {
                             self.subscriber_metrics.blocks_enqueued.increment(1);
                         }
@@ -526,8 +484,7 @@ impl L1Subscriber {
                         }
                     }
                 } else {
-                    // Reorg — discard the buffered tip and clear L1 state and
-                    // policy caches.
+                    // Reorg — discard the buffered tip and clear raw L1 state.
                     self.subscriber_metrics.reorgs_detected.increment(1);
                     warn!(
                         discarded_block = tip_header.number(),
@@ -541,21 +498,20 @@ impl L1Subscriber {
                     cache.clear();
                     cache.initialize_floor(confirmed_anchor);
                     drop(cache);
-                    self.config.policy_cache.write().clear();
                 }
             }
 
             // Buffer the new block as unconfirmed tip.
-            unconfirmed_tip = Some((sealed, (events, policy_events, invalidated)));
+            unconfirmed_tip = Some((sealed, (events, invalidated)));
         }
 
         warn!("L1 block subscription stream ended");
         Ok(())
     }
 
-    /// Extract portal and policy events plus raw-cache mutation barriers from fetched receipts.
+    /// Extract portal events and raw-cache mutation barriers from fetched receipts.
     fn extract_events(
-        &mut self,
+        &self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> L1ProcessedEvents {
@@ -563,46 +519,28 @@ impl L1Subscriber {
 
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
-        let mut policy_events = Vec::new();
         let mut invalidated = HashSet::new();
 
         for receipt in receipts {
             for log in receipt.logs() {
-                let addr = log.address();
+                let address = log.address();
 
-                if addr == portal_address {
-                    invalidated.insert(addr);
-                    let prev_len = portal_events.enabled_tokens.len();
+                if address == portal_address {
+                    invalidated.insert(address);
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
-                    if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
-                        let token = enabled.token;
-                        if !self.tracked_tokens.contains(&token) {
-                            info!(%token, "New token enabled, adding to tracked tokens");
-                            self.tracked_tokens.push(token);
-                        }
-                    }
-                } else if addr == TIP403_REGISTRY_ADDRESS {
-                    invalidated.insert(addr);
-                    if let Some(event) = PolicyEvent::decode_registry(log) {
-                        policy_events.push(event);
-                    }
-                } else if is_tip20_prefix(addr)
-                    && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
+                } else if address == TIP403_REGISTRY_ADDRESS
+                    || (is_tip20_prefix(address)
+                        && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH))
                 {
-                    invalidated.insert(addr);
-                    if self.tracked_tokens.contains(&addr)
-                        && let Some(event) = PolicyEvent::decode_tip20(log)
-                    {
-                        policy_events.push(event);
-                    }
+                    invalidated.insert(address);
                 }
             }
         }
 
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, policy_events, invalidated)
+        (portal_events, invalidated)
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -617,18 +555,10 @@ impl L1Subscriber {
     fn record_portal_event_metrics(&self, portal_events: &L1PortalEvents) {
         let mut regular = 0u64;
         let mut encrypted = 0u64;
-        let mut transfer_started = 0u64;
-        let mut transferred = 0u64;
         for deposit in &portal_events.deposits {
             match deposit {
                 L1Deposit::Regular(_) => regular += 1,
                 L1Deposit::Encrypted(_) => encrypted += 1,
-            }
-        }
-        for event in &portal_events.sequencer_events {
-            match event {
-                L1SequencerEvent::TransferStarted { .. } => transfer_started += 1,
-                L1SequencerEvent::Transferred { .. } => transferred += 1,
             }
         }
         if regular > 0 {
@@ -646,53 +576,6 @@ impl L1Subscriber {
                 .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
         }
-        if transfer_started > 0 {
-            self.subscriber_metrics
-                .sequencer_transfer_started_events
-                .increment(transfer_started);
-        }
-        if transferred > 0 {
-            self.subscriber_metrics
-                .sequencer_transferred_events
-                .increment(transferred);
-        }
-    }
-
-    /// Write decoded policy events into the shared cache.
-    ///
-    /// The subscriber may write events ahead of the engine's processed L1 height;
-    /// the engine advances the cache baseline after it accepts the corresponding
-    /// zone payload.
-    pub(crate) fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
-        let mut cache = self.config.policy_cache.write();
-        cache.apply_events(block_number, policy_events);
-        if !policy_events.is_empty() {
-            self.tip403_metrics
-                .listener_events_applied
-                .increment(policy_events.len() as u64);
-        }
-        self.tip403_metrics
-            .cached_policies
-            .set(cache.policies().len() as f64);
-        self.tip403_metrics
-            .cached_token_policies
-            .set(cache.num_token_policies() as f64);
-    }
-
-    /// Write decoded portal state changes into the shared L1 cache at the
-    /// confirmed block height.
-    fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
-            return;
-        }
-
-        let mut cache = self.config.l1_state_cache.write();
-        apply_sequencer_events_to_cache(
-            &mut cache,
-            self.config.portal_address,
-            block_number,
-            &portal_events.sequencer_events,
-        );
     }
 
     /// Update the L1 state cache anchor. Detects reorgs by comparing
@@ -719,7 +602,6 @@ impl L1Subscriber {
             // Receipt coverage before the replacement block is no longer trustworthy. Rebase the
             // non-advancing floor so later historical reads cannot repopulate stale baselines.
             guard.initialize_floor(number);
-            self.config.policy_cache.write().clear();
         }
         for &address in invalidated_accounts {
             guard.invalidate(address, number);
@@ -785,32 +667,4 @@ pub(crate) fn verify_receipts(
         );
     }
     Ok(())
-}
-
-pub(crate) fn apply_sequencer_events_to_cache(
-    cache: &mut L1StateCacheInner,
-    portal_address: Address,
-    block_number: u64,
-    sequencer_events: &[L1SequencerEvent],
-) {
-    let mut set_cache_slot = |slot, value| cache.set(portal_address, slot, block_number, value);
-
-    for event in sequencer_events {
-        match *event {
-            L1SequencerEvent::TransferStarted {
-                current_sequencer,
-                pending_sequencer,
-            } => {
-                set_cache_slot(PORTAL_SEQUENCER_SLOT, current_sequencer.into_word());
-                set_cache_slot(PORTAL_PENDING_SEQUENCER_SLOT, pending_sequencer.into_word());
-            }
-            L1SequencerEvent::Transferred {
-                previous_sequencer: _,
-                new_sequencer,
-            } => {
-                set_cache_slot(PORTAL_SEQUENCER_SLOT, new_sequencer.into_word());
-                set_cache_slot(PORTAL_PENDING_SEQUENCER_SLOT, B256::ZERO);
-            }
-        }
-    }
 }

@@ -134,7 +134,7 @@ contract ZoneOutbox is IZoneOutbox {
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
@@ -144,7 +144,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
     function setMaxWithdrawalsPerBlock(uint32 maxWithdrawals) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         maxWithdrawalsPerBlock = maxWithdrawals;
         emit MaxWithdrawalsPerBlockUpdated(maxWithdrawals);
     }
@@ -393,7 +393,7 @@ contract ZoneOutbox is IZoneOutbox {
         internal
         returns (bytes32 withdrawalQueueHash)
     {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
         uint256 pending = _pendingWithdrawals.length;
@@ -452,11 +452,13 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         return _pendingWithdrawals.length;
     }
 
     /// @notice Pending withdrawals in FIFO order.
     function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         uint256 count = _pendingWithdrawals.length;
         pending = new PendingWithdrawal[](count);
         for (uint256 i = 0; i < count;) {

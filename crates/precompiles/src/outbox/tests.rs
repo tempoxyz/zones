@@ -1,10 +1,10 @@
 use super::*;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Bytes, address};
-use alloy_sol_types::{SolCall, SolInterface};
+use alloy_primitives::{Bytes, address, keccak256};
+use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{storage::FromWord, test_util::TIP20Setup};
+use tempo_precompiles::test_util::TIP20Setup;
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 
 use crate::{
@@ -36,11 +36,13 @@ impl Harness {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
         let l1 = MockL1Reader::default();
+        let sequencer_membership_slot =
+            keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
         l1.insert(
             PORTAL,
-            PORTAL_SEQUENCER_SLOT.into(),
+            sequencer_membership_slot.into(),
             ANCHOR,
-            SEQUENCER.to_word(),
+            U256::from(1),
         );
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -231,7 +233,11 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
 
     assert_eq!(
         harness.l1.storage_requests(),
-        vec![(PORTAL, PORTAL_SEQUENCER_SLOT, ANCHOR),]
+        vec![(
+            PORTAL,
+            keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
+            ANCHOR
+        ),]
     );
     Ok(())
 }

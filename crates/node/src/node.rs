@@ -54,18 +54,13 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
-use tracing::{debug, info, warn};
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tracing::{debug, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
-    state::{
-        L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider,
-        spawn_policy_resolution_task, spawn_pool_prefetch_task,
-    },
+    DepositQueue, L1Subscriber, L1SubscriberConfig, TempoStateExt,
+    state::{L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
@@ -182,14 +177,8 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: L1StateCache,
-    /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](zone_l1::L1Subscriber)
-    /// and read by the precompile during block building.
-    policy_cache: PolicyCache,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
-    /// Optional pre-configured list of enabled token addresses. When set, the
-    /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
-    initial_tokens: Option<Vec<Address>>,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
@@ -213,13 +202,11 @@ impl ZoneNode {
     ) -> Self {
         let deposit_queue = DepositQueue::default();
 
-        let policy_cache = PolicyCache::default();
         let l1_state_cache = L1StateCache::new(HashSet::from([portal_address]));
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
-            policy_cache: policy_cache.clone(),
             l1_state_cache: l1_state_cache.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
@@ -237,9 +224,7 @@ impl ZoneNode {
             l1_config,
             l1_state_provider_config,
             l1_state_cache,
-            policy_cache,
             portal_address,
-            initial_tokens: None,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
             private_rpc_config: ZonePrivateRpcConfig::default(),
@@ -281,13 +266,6 @@ impl ZoneNode {
         self
     }
 
-    /// Set the initial list of enabled token addresses.
-    /// When set, the startup L1 RPC query for enabled tokens is skipped.
-    pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
-        self.initial_tokens = Some(tokens);
-        self
-    }
-
     /// Set the parent L1 chain ID, avoiding a startup RPC lookup.
     pub fn with_l1_chain_id(mut self, chain_id: u64) -> Self {
         self.l1_state_provider_config.chain_id = Some(chain_id);
@@ -320,11 +298,6 @@ impl ZoneNode {
     /// Returns the current l1 state cache
     pub fn l1_state_cache(&self) -> L1StateCache {
         self.l1_state_cache.clone()
-    }
-
-    /// Returns the current TIP-403 policy cache
-    pub fn policy_cache(&self) -> PolicyCache {
-        self.policy_cache.clone()
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
@@ -393,12 +366,8 @@ where
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
-    /// TIP-403 policy cache
-    policy_cache: PolicyCache,
     /// ZonePortal address on L1.
     portal_address: Address,
-    /// Pre-configured list of initial tokens.
-    initial_tokens: Option<Vec<Address>>,
     /// Private RPC configuration.
     private_rpc_config: ZonePrivateRpcConfig,
     /// Sequencer configuration.
@@ -425,9 +394,7 @@ where
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
-        policy_cache: PolicyCache,
         portal_address: Address,
-        initial_tokens: Option<Vec<Address>>,
         private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
@@ -443,9 +410,7 @@ where
             ),
             deposit_queue,
             l1_config,
-            policy_cache,
             portal_address,
-            initial_tokens,
             private_rpc_config,
             sequencer_config,
             p2p_config,
@@ -473,7 +438,6 @@ where
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
-        self.policy_cache.set_last_l1_block(tempo_block_number);
         self.l1_config
             .l1_state_cache
             .write()
@@ -488,7 +452,6 @@ where
             .await?
             .erased();
 
-        self.resolve_and_seed_tokens(&l1_provider).await?;
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
         if p2p_role == Some(Role::Follower) {
             // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
@@ -500,7 +463,6 @@ where
         } else {
             self.spawn_l1_subscriber(&ctx);
         }
-        self.spawn_policy_tasks(&l1_provider, &ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         if let Some(config) = self.p2p_config.take() {
@@ -518,7 +480,7 @@ where
         if let Some(ref config) = self.sequencer_config {
             let sequencer_addr = config.sequencer_signer.address();
             let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
-            self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
+            self.spawn_zone_engine(&ctx, sequencer_addr, sequencer_key)?;
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
@@ -628,61 +590,6 @@ where
         Ok(())
     }
 
-    /// Resolve enabled tokens and seed the policy cache.
-    async fn resolve_and_seed_tokens(
-        &mut self,
-        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
-    ) -> eyre::Result<()> {
-        let portal = self.portal_address;
-        let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
-            info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
-            tokens
-        } else {
-            let block_number = self.policy_cache.last_l1_block();
-            let tokens = match ZonePortal::new(portal, l1_provider)
-                .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
-                .await
-            {
-                Ok(tokens) => tokens,
-                Err(err) => {
-                    warn!(
-                        target: "reth::cli",
-                        %err,
-                        block_number,
-                        %portal,
-                        "Failed to discover enabled tokens from L1 for policy cache seeding; continuing without initial token policy seed"
-                    );
-                    return Ok(());
-                }
-            };
-            info!(
-                target: "reth::cli",
-                count = tokens.len(),
-                ?tokens,
-                block_number,
-                "Discovered enabled tokens from L1"
-            );
-            tokens
-        };
-
-        if let Err(err) = self
-            .policy_cache
-            .seed_token_policies(portal, &tracked_tokens, l1_provider)
-            .await
-        {
-            warn!(
-                target: "reth::cli",
-                %err,
-                count = tracked_tokens.len(),
-                %portal,
-                "Failed to seed token policies from L1; continuing with RPC fallback"
-            );
-            return Ok(());
-        }
-        info!(target: "reth::cli", "Seeded token policies from L1");
-        Ok(())
-    }
-
     /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
     fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
         L1Subscriber::spawn(
@@ -694,40 +601,13 @@ where
         info!(target: "reth::cli", "Unified L1 subscriber started");
     }
 
-    /// Spawn TIP-403 policy resolution and pool prefetch tasks.
-    fn spawn_policy_tasks(
-        &self,
-        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
-        ctx: &AddOnsContext<'_, N>,
-    ) {
-        let policy_task_handle = spawn_policy_resolution_task(
-            self.policy_cache.clone(),
-            l1_provider.clone(),
-            16,
-            256,
-            ctx.node.task_executor().clone(),
-        );
-        spawn_pool_prefetch_task(
-            ctx.node.pool().clone(),
-            policy_task_handle,
-            ctx.node.task_executor().clone(),
-        );
-        info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
-    }
-
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
     fn spawn_zone_engine(
         &self,
-        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
         sequencer_key: SecretKey,
     ) -> eyre::Result<()> {
-        let policy_provider = PolicyProvider::new(
-            self.policy_cache.clone(),
-            l1_provider,
-            tokio::runtime::Handle::current(),
-        );
         let provider = ctx.node.provider();
         let last_header = provider
             .sealed_header(provider.best_block_number()?)?
@@ -741,7 +621,6 @@ where
             fee_recipient,
             sequencer_key,
             self.portal_address,
-            policy_provider,
         );
         ctx.node
             .task_executor()
@@ -932,9 +811,7 @@ where
         ZoneAddOns::new(
             self.deposit_queue.clone(),
             self.l1_config.clone(),
-            self.policy_cache.clone(),
             self.portal_address,
-            self.initial_tokens.clone(),
             self.private_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),

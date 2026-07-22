@@ -177,10 +177,12 @@ pub struct ZoneInfoResponse {
     pub zone_id: U64,
     /// The enabled zone token contract addresses.
     pub zone_tokens: Vec<Address>,
-    /// The active sequencer address.
-    pub sequencer: Address,
+    /// The active sequencer addresses.
+    pub sequencers: Vec<Address>,
     /// The zone chain ID.
     pub chain_id: U64,
+    /// The latest Tempo block imported into the zone.
+    pub tempo_block_number: U64,
 }
 
 /// Response payload for `zone_getDepositStatus`.

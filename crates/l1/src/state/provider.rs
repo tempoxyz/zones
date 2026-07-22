@@ -10,19 +10,20 @@
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
 //! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
+use alloy_sol_types::SolValue;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use std::num::NonZeroU32;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
-use zone_precompiles::{L1StateError, L1StorageReader, SequencerExt};
+use zone_precompiles::{L1StateError, L1StorageReader, SequencerSetExt};
 
 use super::cache::L1StateCache;
-use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
+use crate::{abi::PORTAL_IS_SEQUENCER_SLOT, rpc::rpc_connection_config};
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -243,10 +244,10 @@ impl L1StateProvider {
         self.get_storage(address, slot, block_number)
     }
 
-    /// Read the active sequencer address from the configured portal at the latest known L1 height.
-    pub fn get_latest_sequencer(&self) -> Result<Address> {
-        let value = self.get_latest_storage(self.portal_address, PORTAL_SEQUENCER_SLOT)?;
-        Ok(Address::from_slice(&value.as_slice()[12..]))
+    /// Read active sequencer membership from the configured portal at the latest known L1 height.
+    pub fn is_active_sequencer(&self, account: Address) -> Result<bool> {
+        let slot = keccak256((account, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        Ok(self.get_latest_storage(self.portal_address, slot)? != B256::ZERO)
     }
 
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
@@ -311,9 +312,9 @@ impl L1StorageReader for L1StateProvider {
     }
 }
 
-impl SequencerExt for L1StateProvider {
-    fn latest_sequencer(&self) -> Option<Address> {
-        self.get_latest_sequencer().ok()
+impl SequencerSetExt for L1StateProvider {
+    fn is_active_sequencer(&self, account: Address) -> Option<bool> {
+        self.is_active_sequencer(account).ok()
     }
 }
 

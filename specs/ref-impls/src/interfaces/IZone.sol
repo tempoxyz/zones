@@ -3,6 +3,10 @@ pragma solidity ^0.8.13;
 
 // Protocol-managed ZoneFactory precompile defined by TIP-1091.
 address constant ZONE_FACTORY_ADDRESS = 0x5aF2000000000000000000000000000000000000;
+bytes12 constant ZONE_PORTAL_PREFIX = 0x5AD000000000000000000000;
+address constant ZONE_PORTAL_IMPL_ADDRESS = 0x5AD1000000000000000000000000000000000000;
+address constant ZONE_VERIFIER_ADDRESS = 0x5a56000000000000000000000000000000000000;
+address constant ZONE_MESSENGER_ADDRESS = 0x5A4d000000000000000000000000000000000000;
 
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
@@ -24,21 +28,11 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address admin;
-    address sequencer;
+    address[] sequencers;
+    uint8 threshold;
     address verifier;
-    bytes32 genesisBlockHash;
-    bytes32 genesisTempoBlockHash;
-    uint64 genesisTempoBlockNumber;
     string rpcUrl;
-}
-
-/// @notice Zone creation parameters stored in genesis
-struct ZoneParams {
-    bytes32 genesisBlockHash;
-    bytes32 genesisTempoBlockHash;
-    uint64 genesisTempoBlockNumber;
 }
 
 /// @notice Block transition for zone batch proofs
@@ -269,7 +263,7 @@ interface IAesGcmDecrypt {
 
 // Maximum callback gas a withdrawal may request.
 // The processor adds fixed overhead, so this value keeps the outer
-// keeps the outer `processWithdrawals` transaction well below a 30M gas L1 block
+// `processWithdrawals` transaction well below a 30M gas L1 block
 // limit.
 uint64 constant MAX_WITHDRAWAL_CALLBACK_GAS = 10_000_000;
 
@@ -331,38 +325,40 @@ interface IZoneTxContext {
 //////////////////////////////////////////////////////////////*/
 
 // ZonePortal storage layout:
-//   slot 0: sequencer (address)
-//   slot 1: admin (address)
-//   slot 2: pendingSequencer (address)
-//   slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-//   slot 4: blockHash (bytes32)
-//   slot 5: currentDepositQueueHash (bytes32)
-//   slot 6: depositCount (uint64) + lastProcessedDepositNumber (uint64) + lastSyncedTempoBlockNumber (uint64) [packed]
-//   slot 7: _encryptionKeys (EncryptionKeyEntry[])
-//   slot 8: _tokenConfigs (mapping(address => TokenConfig))
-//   slot 9: _enabledTokens (address[])
-//   slot 10: refunds (mapping(address => mapping(address => uint128)))
-//   slot 11: _withdrawalQueue.head
-//   slot 12: _withdrawalQueue.tail
-//   slot 13: _withdrawalQueue.slots (mapping(uint256 => bytes32))
-//   slot 14: rpcUrl (string)
-//   slot 15: pendingAdmin (address)
-//   slot 16: _withdrawalReentrancyStatus (uint256)
-//   slot 17: zoneId (uint32) + messenger (address) [packed]
-//   slot 18: verifier (address) + genesisTempoBlockNumber (uint64) + _initialized (bool) [packed]
+//   slot 0: admin (address)
+//   slot 1: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+//   slot 2: blockHash (bytes32)
+//   slot 3: currentDepositQueueHash (bytes32)
+//   slot 4: depositCount (uint64) + lastProcessedDepositNumber (uint64)
+//           + lastSyncedTempoBlockNumber (uint64) + bouncebackGas (uint64) [packed]
+//   slot 5: _encryptionKeys (EncryptionKeyEntry[])
+//   slot 6: _tokenConfigs (mapping(address => TokenConfig))
+//   slot 7: _enabledTokens (address[])
+//   slot 8: refunds (mapping(address => mapping(address => uint128)))
+//   slot 9: _withdrawalQueue.head
+//   slot 10: _withdrawalQueue.tail
+//   slot 11: _withdrawalQueue.slots (mapping(uint256 => bytes32))
+//   slot 12: rpcUrl (string)
+//   slot 13: pendingAdmin (address)
+//   slot 14: _withdrawalReentrancyStatus (uint256)
+//   slot 15: zoneId (uint32) + messenger (address) [packed]
+//   slot 16: verifier (address) + _initialized (bool) + sequencerSetVersion (uint64)
+//            + sequencerThreshold (uint8) [packed]
+//   slot 17: zoneHeight (uint256)
+//   slot 18: _sequencers (address[])
+//   slot 19: isSequencer (mapping(address => bool))
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
 // TempoState.readTempoStorageSlot(). If the portal layout changes,
 // update these constants and the vm.load regression tests will catch mismatches.
-bytes32 constant PORTAL_SEQUENCER_SLOT = bytes32(uint256(0));
-bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(1));
-bytes32 constant PORTAL_PENDING_SEQUENCER_SLOT = bytes32(uint256(2));
-bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
-bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
-bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(8));
-bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(9));
-bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(15));
+bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(0));
+bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
+bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(5));
+bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
+bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
+bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
+bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -376,14 +372,12 @@ interface IVerifier {
     ///      4. If anchorBlockNumber > tempoBlockNumber: ancestry chain from tempoBlockNumber to anchorBlockNumber
     ///      5. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
     ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueHash
-    ///      7. Zone block beneficiary matches sequencer
-    ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
+    ///      7. Deposit processing is correct (validated via Tempo state read inside proof)
     /// @param zoneId Unique identifier of the zone whose batch is being verified
     /// @param tempoBlockNumber Block zone committed to (from TempoState)
     /// @param anchorBlockNumber Block whose hash is verified (tempoBlockNumber or recent block)
     /// @param anchorBlockHash Hash of anchorBlockNumber (from EIP-2935)
     /// @param expectedWithdrawalBatchIndex Expected batch index (portal.withdrawalBatchIndex + 1)
-    /// @param sequencer Sequencer address (zone block beneficiary must match)
     /// @param blockTransition Zone block hash transition
     /// @param depositQueueTransition Deposit queue processing transition
     /// @param withdrawalQueueHash Withdrawal queue hash chain for this batch (0 if none)
@@ -395,7 +389,6 @@ interface IVerifier {
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
-        address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash,
@@ -417,73 +410,75 @@ interface IZoneFactory {
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (sequencer can enable more later)
         address admin;
-        address sequencer;
-        address verifier;
-        ZoneParams zoneParams;
+        address[] sequencers;
+        uint8 threshold;
         string rpcUrl;
     }
+
+    event PortalUpdated(address indexed source, bytes32 indexed codeHash);
+
+    event MessengerUpdated(address indexed source, bytes32 indexed codeHash);
+
+    event VerifierUpdated(address indexed source, bytes32 indexed codeHash);
 
     event ZoneCreated(
         uint32 indexed zoneId,
         address indexed portal,
         address initialToken,
         address admin,
-        address sequencer,
-        address verifier,
-        bytes32 genesisBlockHash,
-        bytes32 genesisTempoBlockHash,
-        uint64 genesisTempoBlockNumber
+        address[] sequencers,
+        uint8 threshold,
+        address verifier
     );
 
     error InvalidToken();
-    error InvalidOwner();
     error NotOwner();
     error InvalidAdmin();
-    error InvalidSequencer();
-    error InvalidVerifier();
-    error InsufficientGas();
-    error ZoneIdOverflow();
+    error InvalidSequencerSet();
+    error InvalidPortalImplementation();
+    error InvalidZoneMessengerImplementation();
+    error InvalidVerifierImplementation();
+    error ImplementationUpdatesLocked();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
 
+    /// @notice Returns whether shared runtime updates have been permanently disabled.
+    function implementationUpdatesLocked() external view returns (bool);
+
     /// @notice Transfers zone-creation authority to `newOwner`.
     function transferOwnership(address newOwner) external;
 
-    /// @notice Returns whether a verifier contract is approved for zone creation.
-    /// @param verifier The verifier contract address to check.
-    /// @return valid True if `verifier` can be passed to `createZone`.
-    function isValidVerifier(address verifier) external view returns (bool);
+    /// @notice Permanently disables updates to the shared protocol-managed runtimes.
+    function lockImplementationUpdates() external;
 
-    /// @notice Returns the default verifier deployed by the factory.
-    /// @return verifier The default verifier contract address.
-    function verifier() external view returns (address);
+    /// @notice Copies a deployed runtime to the protocol-managed portal implementation account.
+    function setPortalImplementation(address source) external;
+
+    /// @notice Copies a deployed runtime to the protocol-managed messenger account.
+    function setZoneMessengerImplementation(address source) external;
+
+    /// @notice Copies a deployed runtime to the protocol-managed verifier account.
+    function setVerifierImplementation(address source) external;
 
     /// @notice Creates a new zone and deploys its portal contract.
-    /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
+    /// @param params The initial token, admin, sequencer set, threshold, and RPC URL.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
     function createZone(CreateZoneParams calldata params)
         external
         returns (uint32 zoneId, address portal);
 
-    /// @notice Returns the number of zones created so far.
-    /// @return count The total number of created zones, excluding reserved zone ID 0.
-    function zoneCount() external view returns (uint32);
+    /// @notice Returns the next zone ID that will be assigned.
+    function nextZoneId() external view returns (uint32);
 
     /// @notice Returns the stored metadata for a zone.
-    /// @param zoneId The zone ID to query.
-    /// @return info The zone metadata recorded for `zoneId`.
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory);
+    function zones(uint32 id) external view returns (ZoneInfo memory info);
 
     /// @notice Returns whether an address is a portal deployed by this factory.
     /// @param portal The portal address to check.
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
-
-    /// @notice Returns the shared messenger used for withdrawal callbacks.
-    /// @return messenger The shared messenger contract address.
-    function messenger() external view returns (address);
 
 }
 
@@ -540,14 +535,6 @@ interface IZonePortal {
         uint128 amount,
         uint64 depositNumber
     );
-
-    /// @notice Emitted when the current sequencer nominates a new sequencer (two-step transfer).
-    /// @dev A `pendingSequencer` of address(0) signals cancellation of a pending transfer.
-    event SequencerTransferStarted(
-        address indexed currentSequencer, address indexed pendingSequencer
-    );
-    /// @notice Emitted when a pending sequencer accepts and the sequencer role is handed over.
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /// @notice Emitted when the current admin nominates a new admin (two-step transfer).
     /// @dev A `newAdmin` of address(0) signals cancellation of a pending transfer.
@@ -606,12 +593,14 @@ interface IZonePortal {
     /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
+    /// @notice Emitted when the admin replaces the batch-attestation signer set.
+    event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
+
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
     error AlreadyInitialized();
     error MustDelegateCall();
-    error NotPendingSequencer();
     error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
@@ -633,16 +622,18 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
+    error InvalidSequencerSet();
+    error SequencerConfigurationUnchanged();
+    error InvalidQuorumCertificate();
 
     function initialize(
         uint32 zoneId,
         address initialToken,
         address messenger,
         address admin,
-        address sequencer,
+        address[] calldata sequencers,
+        uint8 threshold,
         address verifier,
-        bytes32 genesisBlockHash,
-        uint64 genesisTempoBlockNumber,
         string calldata rpcUrl
     )
         external;
@@ -660,11 +651,7 @@ interface IZonePortal {
 
     function messenger() external view returns (address);
 
-    function sequencer() external view returns (address);
-
     function admin() external view returns (address);
-
-    function pendingSequencer() external view returns (address);
 
     function pendingAdmin() external view returns (address);
 
@@ -688,7 +675,23 @@ interface IZonePortal {
 
     function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
 
-    function genesisTempoBlockNumber() external view returns (uint64);
+    /// @notice Configuration nonce for the active sequencer set and threshold.
+    function sequencerSetVersion() external view returns (uint64);
+
+    /// @notice Number of distinct registered signatures required for batch settlement.
+    function sequencerThreshold() external view returns (uint8);
+
+    /// @notice Highest zone block height accepted with a quorum certificate.
+    function zoneHeight() external view returns (uint256);
+
+    /// @notice Whether an account belongs to the active settlement signer set.
+    function isSequencer(address account) external view returns (bool);
+
+    /// @notice Number of accounts in the active settlement signer set.
+    function sequencerCount() external view returns (uint256);
+
+    /// @notice Return a signer-set member by index.
+    function sequencerAt(uint256 index) external view returns (address);
 
     /*//////////////////////////////////////////////////////////////
                           TOKEN REGISTRY
@@ -729,12 +732,9 @@ interface IZonePortal {
     /// @param rpcUrl The new RPC URL (may be empty to clear it)
     function setRpcUrl(string calldata rpcUrl) external;
 
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    /// @param newSequencer The address that will become sequencer after accepting.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
+    /// @notice Atomically replace the sequencer set and settlement threshold. Only callable by admin.
+    /// @dev Signers must be nonzero and unique; their order has no protocol meaning.
+    function setSequencerSet(address[] calldata sequencers, uint8 threshold) external;
 
     /// @notice Start an admin transfer. Only callable by the current admin.
     /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
@@ -855,6 +855,7 @@ interface IZonePortal {
 
     function claimRefund(address token) external returns (uint128 amount);
 
+    /// @notice Submit a batch with an n-of-m certificate for its zone tip.
     function submitBatch(
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
@@ -862,7 +863,9 @@ interface IZonePortal {
         DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
-        bytes calldata proof
+        bytes calldata proof,
+        uint256 zoneHeight,
+        bytes[] calldata signatures
     )
         external;
 
@@ -1203,7 +1206,7 @@ interface IZoneOutbox {
 /// @title IZoneConfig
 /// @notice Interface for zone configuration and L1 state access
 /// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
-///      Provides centralized access to zone metadata and reads sequencer from L1.
+///      Provides centralized access to zone metadata and reads the sequencer set from L1.
 interface IZoneConfig {
 
     error NotSequencer();
@@ -1215,18 +1218,11 @@ interface IZoneConfig {
     /// @notice TempoState predeploy for L1 reads
     function tempoState() external view returns (ITempoState);
 
-    /// @notice Get current sequencer by reading from L1 ZonePortal
-    /// @dev Reads from finalized Tempo state. L1 is single source of truth.
-    function sequencer() external view returns (address);
-
-    /// @notice Get pending sequencer by reading from L1 ZonePortal
-    function pendingSequencer() external view returns (address);
-
     /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
     /// @dev Used for encrypted deposits (ECIES).
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
-    /// @notice Check if an address is the current sequencer
+    /// @notice Check if an address belongs to the active sequencer set.
     function isSequencer(address account) external view returns (bool);
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal

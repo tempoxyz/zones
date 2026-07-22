@@ -31,7 +31,8 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
 use tempo_zone_contracts::{
-    EncryptedDepositPayload, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
+    EncryptedDepositPayload, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS,
+    ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
@@ -109,7 +110,9 @@ async fn ws_next_json(ws: &mut PrivateRpcWs) -> eyre::Result<Value> {
 
     match msg? {
         Message::Text(text) => Ok(serde_json::from_str(&text)?),
-        other => eyre::bail!("expected text websocket message, got {other:?}"),
+        other => {
+            eyre::bail!("expected text websocket message, got {other:?}");
+        }
     }
 }
 
@@ -136,7 +139,9 @@ async fn ws_collect_messages_until_quiet(
             Err(_) => return Ok(messages),
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(messages),
             Ok(Some(Ok(Message::Text(text)))) => messages.push(serde_json::from_str(&text)?),
-            Ok(Some(Ok(other))) => eyre::bail!("unexpected websocket frame: {other:?}"),
+            Ok(Some(Ok(other))) => {
+                eyre::bail!("unexpected websocket frame: {other:?}");
+            }
             Ok(Some(Err(err))) => return Err(err.into()),
         }
     }
@@ -665,7 +670,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
 async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let ctx = start_zone_with_private_rpc().await?;
+    let ctx = start_zone_with_private_rpc_l1().await?;
 
     let owner_signer = PrivateKeySigner::random();
     let owner = owner_signer.address();
@@ -1095,7 +1100,7 @@ async fn test_ws_pending_transaction_subscriptions_are_disabled() -> eyre::Resul
 async fn test_zone_metadata_methods() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let ctx = start_zone_with_private_rpc().await?;
+    let ctx = start_zone_with_private_rpc_l1().await?;
     let user_signer = PrivateKeySigner::random();
 
     let auth_info = ctx
@@ -1133,6 +1138,14 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
     assert_eq!(
         zone_info["result"]["chainId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.chain_id),
+    );
+    let tempo_block_number = TempoState::new(TEMPO_STATE_ADDRESS, ctx.zone.provider())
+        .tempoBlockNumber()
+        .call()
+        .await?;
+    assert_eq!(
+        zone_info["result"]["tempoBlockNumber"],
+        format!("0x{tempo_block_number:x}"),
     );
 
     Ok(())

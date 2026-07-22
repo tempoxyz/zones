@@ -195,7 +195,7 @@ contract ZoneInbox is IZoneInbox {
     )
         external
     {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) {
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) {
             revert OnlySequencer();
         }
 
