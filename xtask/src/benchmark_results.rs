@@ -845,6 +845,29 @@ scenario:
     }
 
     #[test]
+    fn accepts_flattened_fragment_steps_and_runtime_provenance() {
+        let scenario = SCENARIO.replacen(
+            "      save: deposit\n",
+            "      save: deposit_to_zone.submission\n",
+            1,
+        );
+        let mut report: serde_json::Value = serde_json::from_str(REPORT).unwrap();
+        report["steps"][0]["name"] = "deposit_to_zone.submission".into();
+        report["steps"][0]["provenance"] = serde_json::json!({
+            "source_file": "scenario-fragments.yml",
+            "fragment": "deposit-and-wait-zone",
+            "instance_alias": "deposit_to_zone",
+            "local_step_name": "submission",
+            "local_step_index": 0
+        });
+
+        let output =
+            render_results(&serde_json::to_string(&report).unwrap(), Some(&scenario)).unwrap();
+
+        assert!(output.contains("`deposit_to_zone.submission` | `l1`"));
+    }
+
+    #[test]
     fn renders_receipt_metrics_for_multiple_labeled_scenario_inputs() {
         let mut report: serde_json::Value = serde_json::from_str(REPORT).unwrap();
         report["receipt_metrics"] = serde_json::json!([

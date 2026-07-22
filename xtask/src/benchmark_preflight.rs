@@ -1450,6 +1450,12 @@ fn render_all_specs(
             .collect::<eyre::Result<Vec<_>>>()?,
     )?;
     render_document(
+        "scenario-fragments.yml",
+        &output.join("scenario-fragments.yml"),
+        &common,
+        false,
+    )?;
+    render_document(
         "bootstrap-scenario.yml",
         &output.join("bootstrap-scenario.yml"),
         &common,
@@ -1920,6 +1926,7 @@ mod tests {
             "withdrawal.yml",
             "bootstrap-deposit.yml",
             "zone-roundtrip.yml",
+            "scenario-fragments.yml",
             "bootstrap-scenario.yml",
             "roundtrip-scenario.yml",
         ] {
@@ -2017,25 +2024,51 @@ mod tests {
             &fs::read_to_string(output.join("bootstrap-scenario.yml")).unwrap(),
         )
         .unwrap();
+        assert_eq!(bootstrap_scenario["include"][0], "./scenario-fragments.yml");
         let bootstrap_steps = bootstrap_scenario["scenario"]["steps"]
             .as_sequence()
             .unwrap();
-        assert_eq!(bootstrap_steps.len(), 6);
+        assert_eq!(bootstrap_steps.len(), 4);
+        assert_eq!(bootstrap_steps[2]["use"], "deposit-and-wait-zone");
+        assert_eq!(bootstrap_steps[2]["as"], "bootstrap_deposit");
         assert_eq!(
-            bootstrap_steps[2]["submit"]["with"]["call"]["args"][1],
+            bootstrap_steps[2]["with"]["recipient"],
             config.sequencer.to_string()
         );
         assert_eq!(
-            bootstrap_steps[2]["submit"]["with"]["call"]["args"][4]["var"],
+            bootstrap_steps[2]["with"]["sender_address"]["var"],
             "account.address"
         );
-        assert_eq!(bootstrap_steps[4]["wait_log"]["event"], "DepositProcessed");
-        assert_eq!(bootstrap_steps[5]["wait_log"]["event"], "BatchSubmitted");
+        assert_eq!(bootstrap_steps[3]["wait_log"]["event"], "BatchSubmitted");
+        assert_eq!(
+            bootstrap_steps[3]["wait_log"]["where"]["lastProcessedDepositNumber"]["var"],
+            "bootstrap_deposit.deposit_made.args.depositNumber"
+        );
+
+        let scenario_fragments: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("scenario-fragments.yml")).unwrap(),
+        )
+        .unwrap();
+        assert!(scenario_fragments.get("chains").is_none());
+        assert!(scenario_fragments.get("scenario").is_none());
+        let deposit_fragment = &scenario_fragments["fragments"]["deposit-and-wait-zone"];
+        assert_eq!(deposit_fragment["parameters"]["sender"], "account_ref");
+        assert_eq!(deposit_fragment["outputs"]["deposit_made"], "log");
+        let fragment_steps = deposit_fragment["steps"].as_sequence().unwrap();
+        assert_eq!(fragment_steps.len(), 3);
+        assert_eq!(fragment_steps[0]["submit"]["template"]["param"], "template");
+        assert_eq!(
+            fragment_steps[0]["submit"]["with"]["call"]["args"][0],
+            config.token.to_string()
+        );
+        assert_eq!(fragment_steps[1]["wait_log"]["event"], "DepositMade");
+        assert_eq!(fragment_steps[2]["wait_log"]["event"], "DepositProcessed");
 
         let roundtrip_scenario: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("roundtrip-scenario.yml")).unwrap(),
         )
         .unwrap();
+        assert_eq!(roundtrip_scenario["include"][0], "./scenario-fragments.yml");
         assert_eq!(
             roundtrip_scenario["chains"]["zone"]["rpc_url"],
             "${ZONE_PRIVATE_RPC_URL}"
@@ -2047,22 +2080,23 @@ mod tests {
         let roundtrip_steps = roundtrip_scenario["scenario"]["steps"]
             .as_sequence()
             .unwrap();
-        assert_eq!(roundtrip_steps.len(), 11);
-        assert_eq!(roundtrip_steps[3]["wait_log"]["event"], "DepositProcessed");
+        assert_eq!(roundtrip_steps.len(), 9);
+        assert_eq!(roundtrip_steps[1]["use"], "deposit-and-wait-zone");
+        assert_eq!(roundtrip_steps[1]["as"], "deposit_to_zone");
         assert_eq!(
-            roundtrip_steps[9]["wait_log"]["event"],
+            roundtrip_steps[7]["wait_log"]["event"],
             "WithdrawalRequested"
         );
         assert_eq!(
-            roundtrip_steps[9]["wait_log"]["from_block"]["var"],
+            roundtrip_steps[7]["wait_log"]["from_block"]["var"],
             "zone_before_withdrawal.block_number"
         );
         assert_eq!(
-            roundtrip_steps[10]["wait_log"]["event"],
+            roundtrip_steps[8]["wait_log"]["event"],
             "WithdrawalProcessed"
         );
         assert_eq!(
-            roundtrip_steps[10]["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0],
+            roundtrip_steps[8]["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0],
             "address"
         );
 
@@ -2075,7 +2109,9 @@ mod tests {
     /// present. Set TXGEN_TEMPO_BIN to exercise a pinned binary in CI or locally.
     #[test]
     fn txgen_generates_representative_local_transactions_when_installed() {
-        let txgen = std::env::var_os("TXGEN_TEMPO_BIN").unwrap_or_else(|| "txgen-tempo".into());
+        let configured_txgen = std::env::var_os("TXGEN_TEMPO_BIN");
+        let require_scenario_support = configured_txgen.is_some();
+        let txgen = configured_txgen.unwrap_or_else(|| "txgen-tempo".into());
         match Command::new(&txgen).arg("--help").output() {
             Ok(output) if output.status.success() => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -2217,6 +2253,44 @@ mod tests {
         assert_eq!(setup.fee_payer(sender).unwrap(), config.sequencer);
         assert_workload_inclusion_keys(&zone_roundtrip);
 
+        let scenario_render = Command::new(&txgen)
+            .args(["scenario", "render", "--help"])
+            .output()
+            .unwrap();
+        if scenario_render.status.success() {
+            fs::write(output.join("zone-auth.json"), "{}").unwrap();
+            let bootstrap_scenario = render_scenario(
+                &txgen,
+                &output.join("bootstrap-scenario.yml"),
+                &output.join("bootstrap-scenario.rendered.yml"),
+                &output,
+            );
+            assert_flattened_scenario(&bootstrap_scenario, 6);
+            assert_eq!(
+                bootstrap_scenario["scenario"]["steps"][2]["save"],
+                "bootstrap_deposit.submission"
+            );
+
+            let roundtrip_scenario = render_scenario(
+                &txgen,
+                &output.join("roundtrip-scenario.yml"),
+                &output.join("roundtrip-scenario.rendered.yml"),
+                &output,
+            );
+            assert_flattened_scenario(&roundtrip_scenario, 11);
+            assert_eq!(
+                roundtrip_scenario["scenario"]["steps"][1]["save"],
+                "deposit_to_zone.submission"
+            );
+        } else if require_scenario_support {
+            panic!(
+                "configured txgen-tempo lacks scenario composition support: {}",
+                String::from_utf8_lossy(&scenario_render.stderr)
+            );
+        } else {
+            eprintln!("skipping scenario composition smoke test: installed txgen is too old");
+        }
+
         fs::remove_dir_all(output).unwrap();
     }
 
@@ -2295,6 +2369,46 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str(line).unwrap())
             .collect()
+    }
+
+    fn render_scenario(
+        txgen: &std::ffi::OsStr,
+        scenario: &Path,
+        rendered: &Path,
+        output_dir: &Path,
+    ) -> Value {
+        let output = Command::new(txgen)
+            .args(["scenario", "render", "--scenario"])
+            .arg(scenario)
+            .arg("--output")
+            .arg(rendered)
+            .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
+            .env("L1_RPC_URL", "http://127.0.0.1:18545")
+            .env("ZONES_BENCH_L1_QUERY_RPC_URL", "http://127.0.0.1:18546")
+            .env("ZONE_RPC_URL", "http://127.0.0.1:19545")
+            .env("ZONE_PRIVATE_RPC_URL", "http://127.0.0.1:19546")
+            .env(
+                "ZONES_BENCH_ZONE_AUTH_MAP",
+                output_dir.join("zone-auth.json"),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "txgen-tempo scenario render failed for {}\nstdout:\n{}\nstderr:\n{}",
+            scenario.display(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_yaml::from_str(&fs::read_to_string(rendered).unwrap()).unwrap()
+    }
+
+    fn assert_flattened_scenario(scenario: &Value, expected_steps: usize) {
+        assert!(scenario.get("include").is_none());
+        assert!(scenario.get("fragments").is_none());
+        let steps = scenario["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(steps.len(), expected_steps);
+        assert!(steps.iter().all(|step| step.get("use").is_none()));
     }
 
     fn workload_envelopes(generated: &[serde_json::Value]) -> Vec<TempoTxEnvelope> {

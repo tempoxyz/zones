@@ -1,5 +1,8 @@
 version: 1
 
+include:
+  - ./scenario-fragments.yml
+
 chains:
   l1:
     network: tempo
@@ -36,53 +39,15 @@ scenario:
         chain: l1
       save: l1_before_deposit
 
-    - submit:
-        chain: l1
+    - use: deposit-and-wait-zone
+      as: bootstrap_deposit
+      with:
         template: bootstrap_deposit
-        with:
-          from: { var: account.ref }
-          # Scenario bindings are materialized through `with`; repeat the
-          # account-dependent call arguments instead of leaving workload
-          # sequence variables in the base template.
-          call:
-            args:
-              - "__TOKEN__"
-              - "__SEQUENCER__"
-              - __BOOTSTRAP_DEPOSIT_AMOUNT__
-              - random_bytes: 32
-              - var: account.address
-      save: deposit
-
-    # The receipt-scoped event captures the randomly generated memo and the
-    # queue hash needed to identify this exact deposit on the Zone.
-    - wait_log:
-        chain: l1
-        transaction_hash: { var: deposit.tx_hash }
-        sender: { var: deposit.sender }
-        address: "__PORTAL__"
-        abi: ZonePortal
-        event: DepositMade
-        where:
-          sender: { var: account.address }
-          token: "__TOKEN__"
-          to: "__SEQUENCER__"
-      save: deposit_made
-
-    - wait_log:
-        chain: zone
-        from_block: { var: zone_before_deposit.block_number }
-        address: "__INBOX__"
-        abi: ZoneInbox
-        event: DepositProcessed
-        where:
-          depositHash: { var: deposit_made.args.newCurrentDepositQueueHash }
-          sender: { var: account.address }
-          to: "__SEQUENCER__"
-          token: "__TOKEN__"
-          amount: { var: deposit_made.args.netAmount }
-          memo: { var: deposit_made.args.memo }
-        max_block_range: 1000
-      save: deposit_processed
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
+        recipient: "__SEQUENCER__"
+        amount: __BOOTSTRAP_DEPOSIT_AMOUNT__
+        zone_from_block: { var: zone_before_deposit.block_number }
 
     # DepositProcessed proves the Zone credited the bootstrap. BatchSubmitted
     # proves L1 committed the same deposit number before ready preflight runs.
@@ -93,6 +58,6 @@ scenario:
         abi: ZonePortal
         event: BatchSubmitted
         where:
-          lastProcessedDepositNumber: { var: deposit_made.args.depositNumber }
+          lastProcessedDepositNumber: { var: bootstrap_deposit.deposit_made.args.depositNumber }
         max_block_range: 1000
       save: batch_submitted

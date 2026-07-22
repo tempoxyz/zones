@@ -80,6 +80,7 @@ ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT="${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT:-10
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/roundtrip}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-roundtrip.json}"
 ZONES_BENCH_BOOTSTRAP_REPORT="${ZONES_BENCH_BOOTSTRAP_REPORT:-target/zones-benchmark/report-bootstrap.json}"
+ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUTPUT/roundtrip-scenario.rendered.yml}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
@@ -126,7 +127,8 @@ else
 fi
 
 mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_REPORT")" \
-    "$(dirname "$ZONES_BENCH_BOOTSTRAP_REPORT")"
+    "$(dirname "$ZONES_BENCH_BOOTSTRAP_REPORT")" \
+    "$(dirname "$ZONES_BENCH_RENDERED_SCENARIO")"
 
 auth_pid=""
 progress_pid=""
@@ -691,6 +693,14 @@ run_parallel_approval_setup \
 
 # Verify every approval landed, then remove setup steps from the measured specs.
 preflight roundtrip ready --no-approval-setup
+
+# Run the composed document so txgen reports fragment provenance. The results renderer
+# consumes a deterministic flattened copy because it validates concrete scenario steps.
+"$txgen_bin" scenario render \
+    --scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml" \
+    --output "$ZONES_BENCH_RENDERED_SCENARIO"
+[[ -s "$ZONES_BENCH_RENDERED_SCENARIO" ]] ||
+    die "txgen did not render the composed roundtrip scenario"
 
 prepare_zone_health_monitor
 

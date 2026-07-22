@@ -1,0 +1,59 @@
+version: 1
+
+fragments:
+  deposit-and-wait-zone:
+    parameters:
+      template: string
+      sender: account_ref
+      sender_address: address
+      recipient: address
+      amount: u256
+      zone_from_block: u256
+    outputs:
+      submission: submit
+      deposit_made: log
+      deposit_processed: log
+    steps:
+      - submit:
+          chain: l1
+          template: { param: template }
+          with:
+            from: { param: sender }
+            call:
+              args:
+                - "__TOKEN__"
+                - { param: recipient }
+                - { param: amount }
+                - { random_bytes: 32 }
+                - { param: sender_address }
+        save: submission
+
+      # Capture the random memo and queue hash from this transaction's receipt.
+      - wait_log:
+          chain: l1
+          transaction_hash: { var: submission.tx_hash }
+          sender: { var: submission.sender }
+          address: "__PORTAL__"
+          abi: ZonePortal
+          event: DepositMade
+          where:
+            sender: { param: sender_address }
+            token: "__TOKEN__"
+            to: { param: recipient }
+        save: deposit_made
+
+      - wait_log:
+          chain: zone
+          from_block: { param: zone_from_block }
+          address: "__INBOX__"
+          abi: ZoneInbox
+          event: DepositProcessed
+          where:
+            depositHash: { var: deposit_made.args.newCurrentDepositQueueHash }
+            sender: { param: sender_address }
+            to: { param: recipient }
+            token: "__TOKEN__"
+            amount: { var: deposit_made.args.netAmount }
+            memo: { var: deposit_made.args.memo }
+          max_block_range: 1000
+        save: deposit_processed

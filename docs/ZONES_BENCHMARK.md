@@ -335,15 +335,12 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='1d0640b415eff89c322c366b41f9e7463d584731'
+export TXGEN_REV='03046937d67245d41c121ca840d7add4d95c9d73'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
 
-That commit is the current head of public txgen PR #155 and is reachable through
-`tempoxyz/txgen:dan/per-sender-http-auth`. The branch must remain reachable for
-fresh `cargo install --rev` operations until the PR merges; afterward this
-workflow should be repinned to its reachable merge commit.
+That commit is the merge commit for txgen PR #155 on `tempoxyz/txgen:main`.
 
 The paired-manifest and safe-root checks are standalone and do not start nodes
 or build contracts:
@@ -411,8 +408,10 @@ A separately prepared real deposit fixture uses `--check-phase activity`,
 Preflight always queries and reports both networks. The selected check controls
 which balance capacity and approval setup actions are enforced. Its output
 contains `deposit.yml`, `zone-activity.yml`, `withdrawal.yml`,
-`bootstrap-deposit.yml`, `zone-roundtrip.yml`, `bootstrap-scenario.yml`,
-`roundtrip-scenario.yml`, `preflight.json`, and their minimal ABI artifacts.
+`bootstrap-deposit.yml`, `zone-roundtrip.yml`, `scenario-fragments.yml`,
+`bootstrap-scenario.yml`, `roundtrip-scenario.yml`, `preflight.json`, and their
+minimal ABI artifacts. Both scenario roots reuse the fragment library's
+deposit-to-Zone submission and event-correlation steps.
 
 Set `--transactions-per-account` to a conservative upper bound for how many
 measured journeys or transactions any one account may send. Preflight uses that
@@ -456,8 +455,10 @@ contrib/bench/run-roundtrip.sh
 The runner calculates `ceil(count / accounts)` for preflight's per-account
 journey capacity, refuses more concurrent journeys than leased accounts, keeps
 the mnemonic and sequencer key out of argv, validates both scenario reports,
-and deletes its authorization map on exit. It renders approval-only streams,
-submits each account's expiring-nonce approval concurrently, logs receipt-wait
+and deletes its authorization map on exit. It runs the composed scenario so the
+txgen report retains fragment provenance, while emitting a flattened
+`roundtrip-scenario.rendered.yml` for the Zones results renderer. It renders
+approval-only streams, submits each account's expiring-nonce approval concurrently, logs receipt-wait
 heartbeats and completion counts, then reruns preflight with setup disabled to
 verify every allowance. While the measured scenario runs, it prints the number
 of successful events observed at every leg every 10 seconds by default. On this
@@ -521,6 +522,10 @@ neither the mnemonic nor raw private keys.
 Once the initial map exists, start the measured scenario:
 
 ```bash
+txgen-tempo scenario render \
+  --scenario target/zones-benchmark/roundtrip-scenario.yml \
+  --output target/zones-benchmark/roundtrip-scenario.rendered.yml
+
 txgen-tempo scenario run \
   --scenario target/zones-benchmark/roundtrip-scenario.yml \
   --count "$ZONES_BENCH_COUNT" \
@@ -542,13 +547,18 @@ started per second, not raw transaction TPS. `--tx-rate` can independently cap
 submissions on each chain when that is useful. Each journey holds its leased
 account until its terminal L1 withdrawal event or failure.
 
+Run the original composed file to retain fragment provenance in txgen's report.
+The flattened file is only for consumers such as `benchmark-results` that
+expect concrete inline steps. `scenario render` expands environment-backed URLs
+and paths; do not upload its output when those values contain credentials.
+
 Render the same results page published on the GitHub workflow overview from a
 completed local run with:
 
 ```bash
 cargo run -p tempo-xtask -- benchmark-results \
   --report target/zones-benchmark/report-roundtrip.json \
-  --scenario target/zones-benchmark/roundtrip/roundtrip-scenario.yml \
+  --scenario target/zones-benchmark/roundtrip/roundtrip-scenario.rendered.yml \
   --output target/zones-benchmark/summary.md
 ```
 
@@ -669,7 +679,7 @@ job:
    putting the phrase in workflow arguments or artifacts;
 2. restores private writable copies of the two isolated Schelk virgin volumes;
 3. checks out the exact Tempo revision and txgen commit
-   `1d0640b415eff89c322c366b41f9e7463d584731`, then builds Tempo and Zone
+   `03046937d67245d41c121ca840d7add4d95c9d73`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
@@ -686,7 +696,7 @@ job:
    deposit -> wait -> activity -> withdrawal -> wait scenario;
 8. for `deposit`, runs the independent preflight/generate/bench pipeline; and
 9. renders the JSON report into a Markdown results page on the workflow
-   overview, then uploads that page with the rendered non-secret assets,
+   overview, then uploads that page with the rendered benchmark assets,
    host/storage metadata, JSON reports, and node logs before stopping the nodes
    and restoring the benchmark volumes.
 
@@ -799,7 +809,3 @@ not restore the prior sysctls, CPU governor/turbo settings, swap, transparent
 huge-page settings, or `unattended-upgrades` service state. The dedicated runner
 therefore remains benchmark-tuned after this workflow, just as it does after
 Tempo's e2e benchmark.
-
-Finally, the pinned txgen commit is the head of unmerged txgen PR #155. Its
-branch must remain reachable until the PR merges and this workflow is repinned
-to the merge commit.
