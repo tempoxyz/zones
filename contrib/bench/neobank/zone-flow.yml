@@ -39,6 +39,8 @@ templates:
     from: { var: account.ref }
     gas_limit: __WITHDRAWAL_TX_GAS_LIMIT__
     fee_token: "__DLUSD__"
+    expiring_nonce: true
+    valid_for_secs: 25
     call:
       to: "__OUTBOX__"
       abi: ZoneOutbox
@@ -58,6 +60,8 @@ templates:
     from: { var: account.ref }
     gas_limit: __WITHDRAWAL_TX_GAS_LIMIT__
     fee_token: "__EARN_TOKEN__"
+    expiring_nonce: true
+    valid_for_secs: 25
     call:
       to: "__OUTBOX__"
       abi: ZoneOutbox
@@ -77,6 +81,8 @@ templates:
     from: { var: account.ref }
     gas_limit: __WITHDRAWAL_TX_GAS_LIMIT__
     fee_token: "__DLUSD__"
+    expiring_nonce: true
+    valid_for_secs: 25
     call:
       to: "__OUTBOX__"
       abi: ZoneOutbox

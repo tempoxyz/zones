@@ -7,9 +7,10 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-e2e
+        default: neobank-swapped-lifecycle
         options:
-          - neobank-e2e
+          - neobank-swapped-lifecycle
+          - neobank-full-journey
           - roundtrip
           - deposit
       accounts:
@@ -89,6 +90,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
+  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: swapped-lifecycle
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -101,6 +103,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       phase: ${{ steps.config.outputs.phase }}
+      neobank-preset: ${{ steps.config.outputs.neobank-preset }}
       sha: ${{ steps.config.outputs.sha }}
       accounts: ${{ steps.config.outputs.accounts }}
       count: ${{ steps.config.outputs.count }}
@@ -170,13 +173,24 @@ jobs:
         run: |
           set -euo pipefail
 
-          phase="$INPUT_PHASE"
+          requested_phase="$INPUT_PHASE"
           if [ "$EVENT_NAME" = pull_request ]; then
-            phase=neobank-e2e
+            requested_phase="neobank-$ZONES_BENCH_DEFAULT_NEOBANK_PRESET"
           fi
-          case "$phase" in
-            neobank-e2e|roundtrip|deposit) ;;
-            *) echo "::error::unsupported benchmark phase: $phase"; exit 1 ;;
+          case "$requested_phase" in
+            neobank-full-journey)
+              phase=neobank-e2e
+              neobank_preset=full-journey
+              ;;
+            neobank-swapped-lifecycle)
+              phase=neobank-e2e
+              neobank_preset=swapped-lifecycle
+              ;;
+            roundtrip|deposit)
+              phase="$requested_phase"
+              neobank_preset=none
+              ;;
+            *) echo "::error::unsupported benchmark phase: $requested_phase"; exit 1 ;;
           esac
 
           if [ -z "$INPUT_SEED" ]; then
@@ -238,6 +252,7 @@ jobs:
 
           {
             echo "phase=$phase"
+            echo "neobank-preset=$neobank_preset"
             echo "sha=$EVENT_SHA"
             echo "accounts=$INPUT_ACCOUNTS"
             echo "count=$INPUT_COUNT"
@@ -262,6 +277,7 @@ jobs:
     timeout-minutes: 300
     env:
       ZONES_BENCH_PHASE: ${{ needs.authorize.outputs.phase }}
+      ZONES_BENCH_NEOBANK_PRESET: ${{ needs.authorize.outputs.neobank-preset }}
       ZONES_BENCH_ACCOUNTS: ${{ needs.authorize.outputs.accounts }}
       ZONES_BENCH_COUNT: ${{ needs.authorize.outputs.count }}
       ZONES_BENCH_TPS: ${{ needs.authorize.outputs.tps }}
@@ -536,7 +552,7 @@ jobs:
 
           unit=Transactions
           rate="Target TPS"
-          if [ "$ZONES_BENCH_PHASE" = roundtrip ]; then
+          if [ "$ZONES_BENCH_PHASE" = roundtrip ] || [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
             unit=Journeys
             rate="Target journey starts/s"
           fi
@@ -549,6 +565,9 @@ jobs:
             echo "## Run configuration"
             echo
             echo "- Phase: \`$ZONES_BENCH_PHASE\`"
+            if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
+              echo "- Neobank preset: \`$ZONES_BENCH_NEOBANK_PRESET\`"
+            fi
             echo "- $unit: \`$ZONES_BENCH_COUNT\`"
             echo "- $rate: \`$ZONES_BENCH_TPS\`"
             echo "- Maximum concurrency: \`$ZONES_BENCH_MAX_CONCURRENT\`"
@@ -581,6 +600,7 @@ jobs:
             --arg rustflags "$RUSTFLAGS" \
             --arg targetId "${ZONES_BENCH_TARGET_ID:-}" \
             --arg phase "$ZONES_BENCH_PHASE" \
+            --arg neobankPreset "$ZONES_BENCH_NEOBANK_PRESET" \
             --arg l1ValidatorACpus "$ZONES_BENCH_L1_A_CPUS" \
             --arg l1ValidatorBCpus "$ZONES_BENCH_L1_B_CPUS" \
             --arg zoneCpus "$ZONES_BENCH_ZONE_CPUS" \
@@ -606,6 +626,7 @@ jobs:
               rustflags: $rustflags,
               targetId: $targetId,
               phase: $phase,
+              neobankPreset: $neobankPreset,
               accounts: $accounts,
               count: $count,
               targetRate: $targetRate,

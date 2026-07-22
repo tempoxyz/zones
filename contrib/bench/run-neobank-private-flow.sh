@@ -60,6 +60,12 @@ ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-swapped-lifecycle}"
+case "$ZONES_BENCH_NEOBANK_PRESET" in
+    full-journey) scenario_file=private-flow-scenario.yml ;;
+    swapped-lifecycle) scenario_file=swapped-lifecycle-scenario.yml ;;
+    *) die "unsupported neobank preset: $ZONES_BENCH_NEOBANK_PRESET" ;;
+esac
 for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
@@ -68,8 +74,8 @@ do uint "$name"; done
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
 (( 10#$ZONES_BENCH_MAX_CONCURRENT <= 10#$ZONES_BENCH_ACCOUNTS )) || die "max-concurrent cannot exceed accounts"
 
-stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID stage=$1"; }
-stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID stage=$1"; }
+stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
+stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
@@ -184,7 +190,9 @@ l1_fee="$(cast gas-price --rpc-url "$L1_RPC_URL")"
 zone_fee="$(cast gas-price --rpc-url "$ZONE_RPC_URL")"
 account_end=$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))
 sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
-for file in l1-onramp.yml zone-flow.yml private-flow-scenario.yml; do
+for source in l1-onramp.yml zone-flow.yml scenario-fragments.yml "$scenario_file"; do
+    destination="$source"
+    [[ "$source" != "$scenario_file" ]] || destination=private-flow-scenario.yml
     sed \
         -e "s|__L1_CHAIN_ID__|$l1_chain_id|g" -e "s|__ZONE_CHAIN_ID__|$zone_chain_id|g" \
         -e "s|__ZONE_ID__|$zone_id|g" -e "s|__ACCOUNT_START__|$ZONES_BENCH_ACCOUNT_START|g" -e "s|__ACCOUNT_END__|$account_end|g" \
@@ -198,11 +206,12 @@ for file in l1-onramp.yml zone-flow.yml private-flow-scenario.yml; do
         -e "s|__EARN_DEPOSIT_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__EARN_REDEEM_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" \
         -e "s|__OFFRAMP_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" -e "s|__CALLBACK_GAS_LIMIT__|$ZONES_BENCH_CALLBACK_GAS_LIMIT|g" \
         -e 's|__DEPOSIT_GAS_LIMIT__|2000000|g' -e 's|__ACTIVITY_GAS_LIMIT__|500000|g' -e 's|__WITHDRAWAL_TX_GAS_LIMIT__|10000000|g' \
-        "$ZONES_BENCH_OUTPUT/neobank/$file" >"$ZONES_BENCH_OUTPUT/$file"
+        "$ZONES_BENCH_OUTPUT/neobank/$source" >"$ZONES_BENCH_OUTPUT/$destination"
 done
 if grep -En '__[A-Z0-9_]+__' \
     "$ZONES_BENCH_OUTPUT/l1-onramp.yml" \
     "$ZONES_BENCH_OUTPUT/zone-flow.yml" \
+    "$ZONES_BENCH_OUTPUT/scenario-fragments.yml" \
     "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
 then
     die "unresolved placeholder in rendered private-flow spec"

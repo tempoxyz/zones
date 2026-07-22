@@ -2123,6 +2123,7 @@ mod tests {
             "../neobank/zone-flow.yml",
             "../neobank/scenario-fragments.yml",
             "../neobank/private-flow-scenario.yml",
+            "../neobank/swapped-lifecycle-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2158,9 +2159,8 @@ mod tests {
         .unwrap();
         let steps = scenario["scenario"]["steps"].as_sequence().unwrap();
         assert!(steps.iter().any(|step| {
-            step["wait_log"]["event"] == "EncryptedDepositProcessed"
-                && step["wait_log"]["where"]["depositHash"]["var"]
-                    == "earn_deposit.args.zoneDepositHash"
+            step["use"] == "wait-encrypted-zone-deposit"
+                && step["with"]["deposit_hash"]["var"] == "earn_deposit.args.zoneDepositHash"
         }));
         for (flow, token, action) in [
             (
@@ -2209,6 +2209,16 @@ mod tests {
                 && step["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0]
                     == "address"
         }));
+
+        let swapped: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("swapped-lifecycle-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let swapped_steps = swapped["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(swapped_steps.len(), 3);
+        assert_eq!(swapped_steps[0]["use"], "encrypted-zone-entry");
+        assert_eq!(swapped_steps[1]["use"], "earn-deposit-and-return");
+        assert_eq!(swapped_steps[2]["use"], "earn-redeem-and-return");
         fs::remove_dir_all(output).unwrap();
     }
 
@@ -2556,6 +2566,7 @@ mod tests {
             "../neobank/zone-flow.yml",
             "../neobank/scenario-fragments.yml",
             "../neobank/private-flow-scenario.yml",
+            "../neobank/swapped-lifecycle-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2580,32 +2591,36 @@ mod tests {
             .unwrap();
         }
 
-        let validation = Command::new(txgen)
-            .arg("scenario")
-            .arg("render")
-            .arg("--scenario")
-            .arg(output.join("private-flow-scenario.yml"))
-            .arg("--output")
-            .arg(output.join("private-flow-scenario.rendered.yml"))
-            .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
-            .env("L1_RPC_URL", "http://l1.invalid")
-            .env("ZONES_BENCH_L1_QUERY_RPC_URL", "http://l1-query.invalid")
-            .env("ZONE_PRIVATE_RPC_URL", "http://zone-private.invalid")
-            .env("ZONE_RPC_URL", "http://zone-query.invalid")
-            .env("ZONES_BENCH_ZONE_AUTH_MAP", output.join("zone-auth.json"))
-            .output()
-            .unwrap();
-        assert!(
-            validation.status.success(),
-            "txgen-tempo scenario render failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&validation.stdout),
-            String::from_utf8_lossy(&validation.stderr)
-        );
-        let rendered: Value = serde_yaml::from_str(
-            &fs::read_to_string(output.join("private-flow-scenario.rendered.yml")).unwrap(),
-        )
-        .unwrap();
-        assert_flattened_scenario(&rendered, 22);
+        for (scenario, expected_steps) in [
+            ("private-flow-scenario.yml", 22),
+            ("swapped-lifecycle-scenario.yml", 21),
+        ] {
+            let rendered_path = output.join(format!("{scenario}.rendered.yml"));
+            let validation = Command::new(txgen)
+                .arg("scenario")
+                .arg("render")
+                .arg("--scenario")
+                .arg(output.join(scenario))
+                .arg("--output")
+                .arg(&rendered_path)
+                .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
+                .env("L1_RPC_URL", "http://l1.invalid")
+                .env("ZONES_BENCH_L1_QUERY_RPC_URL", "http://l1-query.invalid")
+                .env("ZONE_PRIVATE_RPC_URL", "http://zone-private.invalid")
+                .env("ZONE_RPC_URL", "http://zone-query.invalid")
+                .env("ZONES_BENCH_ZONE_AUTH_MAP", output.join("zone-auth.json"))
+                .output()
+                .unwrap();
+            assert!(
+                validation.status.success(),
+                "txgen-tempo scenario render failed for {scenario}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&validation.stdout),
+                String::from_utf8_lossy(&validation.stderr)
+            );
+            let rendered: Value =
+                serde_yaml::from_str(&fs::read_to_string(rendered_path).unwrap()).unwrap();
+            assert_flattened_scenario(&rendered, expected_steps);
+        }
         fs::remove_dir_all(output).unwrap();
     }
 

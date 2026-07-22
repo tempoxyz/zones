@@ -1,9 +1,5 @@
 version: 1
 
-# These fragments capture the shared encrypted-return boundary used by the
-# initial encrypted deposit and both gateway callback flows. The individual
-# steps still own their L1 receipt correlation; this fragment owns the exact
-# Zone receipt-scoped terminal event.
 fragments:
   wait-encrypted-zone-deposit:
     parameters:
@@ -30,3 +26,300 @@ fragments:
             memo: { param: memo }
           max_block_range: 1000
         save: processed
+
+  encrypted-zone-entry:
+    parameters:
+      sender: account_ref
+      sender_address: address
+      recipient: address
+      token: address
+      fee_token: address
+      amount: u256
+      memo: value
+    outputs:
+      submission: submit
+      enqueued: log
+      zone_deposit.processed: log
+    steps:
+      - checkpoint: { chain: zone }
+        save: zone_before
+
+      - invoke:
+          chain: l1
+          action: prepare_encrypted_deposit
+          with:
+            recipient: { param: recipient }
+            zoneId: __ZONE_ID__
+            portalAddress: "__PORTAL__"
+            memo: { param: memo }
+        save: encryption
+
+      - submit:
+          chain: l1
+          template: encrypted_onramp
+          with:
+            from: { param: sender }
+            fee_token: { param: fee_token }
+            call:
+              args:
+                - { param: token }
+                - { param: amount }
+                - { var: encryption.keyIndex }
+                - { var: encryption.encrypted }
+                - { param: sender_address }
+        save: submission
+
+      - wait_log:
+          chain: l1
+          transaction_hash: { var: submission.tx_hash }
+          sender: { var: submission.sender }
+          address: "__PORTAL__"
+          abi: ZonePortal
+          event: EncryptedDepositMade
+          where:
+            sender: { param: sender_address }
+            token: { param: token }
+          max_block_range: 1000
+        save: enqueued
+
+      - use: wait-encrypted-zone-deposit
+        as: zone_deposit
+        with:
+          from_block: { var: zone_before.block_number }
+          deposit_hash: { var: enqueued.args.newCurrentDepositQueueHash }
+          sender: { param: sender_address }
+          recipient: { param: recipient }
+          token: { param: token }
+          memo: { param: memo }
+
+  earn-deposit-and-return:
+    parameters:
+      sender: account_ref
+      sender_address: address
+      recipient: address
+      input_token: address
+      fee_token: address
+      amount: u256
+      min_vault_assets: u256
+      min_vault_shares: u256
+      action_id: value
+      fallback_recipient: address
+      refund_recipient: address
+    outputs:
+      request: submit
+      requested: log
+      withdrawal_processed: log
+      callback: log
+      zone_return.processed: log
+    steps:
+      - checkpoint: { chain: l1 }
+        save: l1_before
+      - checkpoint: { chain: zone }
+        save: zone_before
+      - invoke:
+          chain: l1
+          action: prepare_encrypted_deposit
+          with:
+            recipient: { param: recipient }
+            zoneId: __ZONE_ID__
+            portalAddress: "__PORTAL__"
+            memo: { param: action_id }
+        save: encryption
+      - submit:
+          chain: zone
+          template: gateway_deposit
+          with:
+            from: { param: sender }
+            fee_token: { param: fee_token }
+            call:
+              args:
+                - { param: input_token }
+                - "__GATEWAY__"
+                - { param: amount }
+                - { param: action_id }
+                - __CALLBACK_GAS_LIMIT__
+                - { param: fallback_recipient }
+                - abi_encode:
+                    types:
+                      - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                    values:
+                      - flow: 0
+                        outputToken: "__EARN_TOKEN__"
+                        keyIndex: { var: encryption.keyIndex }
+                        encrypted: { var: encryption.encrypted }
+                        minVaultAssets: { param: min_vault_assets }
+                        minVaultShares: { param: min_vault_shares }
+                        minOutputAmount: 0
+                        actionId: { param: action_id }
+                        refundRecipient: { param: refund_recipient }
+                - "0x"
+        save: request
+      - wait_log:
+          chain: zone
+          transaction_hash: { var: request.tx_hash }
+          sender: { var: request.sender }
+          address: "__OUTBOX__"
+          abi: ZoneOutbox
+          event: WithdrawalRequested
+          where:
+            sender: { param: sender_address }
+            token: { param: input_token }
+            to: "__GATEWAY__"
+            amount: { param: amount }
+            memo: { param: action_id }
+            gasLimit: __CALLBACK_GAS_LIMIT__
+          max_block_range: 1000
+        save: requested
+      - wait_log:
+          chain: l1
+          from_block: { var: l1_before.block_number }
+          address: "__PORTAL__"
+          abi: ZonePortal
+          event: WithdrawalProcessed
+          where:
+            to: "__GATEWAY__"
+            senderTag:
+              keccak256_packed:
+                types: [address, bytes32]
+                values: [{ param: sender_address }, { var: request.tx_hash }]
+            token: { param: input_token }
+            amount: { param: amount }
+            callbackSuccess: true
+          max_block_range: 1000
+        save: withdrawal_processed
+      - wait_log:
+          chain: l1
+          transaction_hash: { var: withdrawal_processed.transaction_hash }
+          address: "__GATEWAY__"
+          abi: ZoneGateway
+          event: EarnDeposit
+          where:
+            actionId: { param: action_id }
+            inputToken: { param: input_token }
+            inputAmount: { param: amount }
+        save: callback
+      - use: wait-encrypted-zone-deposit
+        as: zone_return
+        with:
+          from_block: { var: zone_before.block_number }
+          deposit_hash: { var: callback.args.zoneDepositHash }
+          sender: "__GATEWAY__"
+          recipient: { param: recipient }
+          token: "__EARN_TOKEN__"
+          memo: { param: action_id }
+
+  earn-redeem-and-return:
+    parameters:
+      sender: account_ref
+      sender_address: address
+      recipient: address
+      output_token: address
+      fee_token: address
+      amount: u256
+      min_vault_assets: u256
+      min_output_amount: u256
+      action_id: value
+      fallback_recipient: address
+      refund_recipient: address
+    outputs:
+      request: submit
+      requested: log
+      withdrawal_processed: log
+      callback: log
+      zone_return.processed: log
+    steps:
+      - checkpoint: { chain: l1 }
+        save: l1_before
+      - checkpoint: { chain: zone }
+        save: zone_before
+      - invoke:
+          chain: l1
+          action: prepare_encrypted_deposit
+          with:
+            recipient: { param: recipient }
+            zoneId: __ZONE_ID__
+            portalAddress: "__PORTAL__"
+            memo: { param: action_id }
+        save: encryption
+      - submit:
+          chain: zone
+          template: gateway_redeem
+          with:
+            from: { param: sender }
+            fee_token: { param: fee_token }
+            call:
+              args:
+                - "__EARN_TOKEN__"
+                - "__GATEWAY__"
+                - { param: amount }
+                - { param: action_id }
+                - __CALLBACK_GAS_LIMIT__
+                - { param: fallback_recipient }
+                - abi_encode:
+                    types:
+                      - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                    values:
+                      - flow: 1
+                        outputToken: { param: output_token }
+                        keyIndex: { var: encryption.keyIndex }
+                        encrypted: { var: encryption.encrypted }
+                        minVaultAssets: { param: min_vault_assets }
+                        minVaultShares: 0
+                        minOutputAmount: { param: min_output_amount }
+                        actionId: { param: action_id }
+                        refundRecipient: { param: refund_recipient }
+                - "0x"
+        save: request
+      - wait_log:
+          chain: zone
+          transaction_hash: { var: request.tx_hash }
+          sender: { var: request.sender }
+          address: "__OUTBOX__"
+          abi: ZoneOutbox
+          event: WithdrawalRequested
+          where:
+            sender: { param: sender_address }
+            token: "__EARN_TOKEN__"
+            to: "__GATEWAY__"
+            amount: { param: amount }
+            memo: { param: action_id }
+            gasLimit: __CALLBACK_GAS_LIMIT__
+          max_block_range: 1000
+        save: requested
+      - wait_log:
+          chain: l1
+          from_block: { var: l1_before.block_number }
+          address: "__PORTAL__"
+          abi: ZonePortal
+          event: WithdrawalProcessed
+          where:
+            to: "__GATEWAY__"
+            senderTag:
+              keccak256_packed:
+                types: [address, bytes32]
+                values: [{ param: sender_address }, { var: request.tx_hash }]
+            token: "__EARN_TOKEN__"
+            amount: { param: amount }
+            callbackSuccess: true
+          max_block_range: 1000
+        save: withdrawal_processed
+      - wait_log:
+          chain: l1
+          transaction_hash: { var: withdrawal_processed.transaction_hash }
+          address: "__GATEWAY__"
+          abi: ZoneGateway
+          event: EarnRedeem
+          where:
+            actionId: { param: action_id }
+            outputToken: { param: output_token }
+            shares: { param: amount }
+        save: callback
+      - use: wait-encrypted-zone-deposit
+        as: zone_return
+        with:
+          from_block: { var: zone_before.block_number }
+          deposit_hash: { var: callback.args.zoneDepositHash }
+          sender: "__GATEWAY__"
+          recipient: { param: recipient }
+          token: { param: output_token }
+          memo: { param: action_id }

@@ -47,9 +47,12 @@ event. Balance polling is not a completion signal.
 ## Rendered assets
 
 `contrib/bench/neobank/private-flow-scenario.yml` describes the complete
-journey. `l1-onramp.yml` contains the encrypted L1 entry; `zone-flow.yml`
-contains the private transfer, both composable requests, and the off-ramp.
-They are intentionally separate from the generic roundtrip assets.
+journey. `swapped-lifecycle-scenario.yml` isolates the encrypted DLUSD entry,
+swapped Earn deposit, and swapped Earn redemption path used by the lifecycle
+load test. Both compose shared, receipt-correlated boundaries from
+`scenario-fragments.yml`. `l1-onramp.yml` and `zone-flow.yml` contain the
+underlying transaction templates and remain separate from the generic
+roundtrip assets.
 
 The transaction generator prepares all three encrypted payloads in memory from
 the leased account, action ID, portal address, and current portal encryption
@@ -77,8 +80,13 @@ scenario, and writes the standard scenario report consumed by the existing
 workflow results renderer:
 
 ```bash
-contrib/bench/run-neobank-private-flow.sh
+ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle \
+  contrib/bench/run-neobank-private-flow.sh
 ```
+
+Use `ZONES_BENCH_NEOBANK_PRESET=full-journey` for the five-boundary journey.
+The selected preset is recorded in the workflow summary and run metadata while
+the rendered scenario remains at the stable results-renderer path.
 
 That runner should provision the existing topology, deploy and configure the
 fixtures outside measurement, create the private-RPC authorization map in a

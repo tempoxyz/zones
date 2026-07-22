@@ -16,10 +16,11 @@ on the runner itself:
 1. `tempo-xtask generate-localnet` creates a two-validator Tempo genesis with
    DKG material and an explicitly supplied private mnemonic file.
 2. `tempo-xtask install-reference-zone-factory` installs the canonical EIP-2935
-   history contract plus constructor-equivalent reference ZoneFactory,
-   Verifier, and ZoneMessenger state before either validator database is
-   initialized. The provisioner verifies that both validators return the
-   canonical hash for a recent L1 block before creating the Zone.
+   history contract, native ZoneFactory marker and packed configuration, plus
+   the shared Portal, Verifier, and ZoneMessenger runtimes before either
+   validator database is initialized. The provisioner verifies that both
+   validators return the canonical hash for a recent L1 block before creating
+   the Zone.
 3. Two real `tempo node` consensus processes start from separate databases and
    identities. The provisioner waits for both RPCs, peering, and chain progress.
 4. The factory owner submits a real `createZone` transaction. A separate portal
@@ -119,9 +120,8 @@ boundaries.
 This is production-shaped rather than production-equivalent. Zones is currently
 documented as testnet-only, the optional multi-sequencer topology has a static
 leader with no automatic promotion, and proof generation is not final. The
-reference factory deploys full portal bytecode, while the proposed native
-TIP-1091 lifecycle uses a protocol-managed implementation, so portal deployment
-gas is not final-production exact.
+local genesis installs the native TIP-1091 marker and the same shared runtime
+boundaries used by the pinned Tempo implementation.
 
 The pinned Reth revision predates the retained-branch pruning fix in
 [reth#26376](https://github.com/paradigmxyz/reth/pull/26376). The provisioned
@@ -187,7 +187,7 @@ defaults to zero for a faster topology smoke test.
 ```bash
 export ZONES_ROOT="$PWD"
 export TEMPO_ROOT="$HOME/projects/tempo"
-export TEMPO_REV='436f6cf069a0c8aafa9a3a197ffa17488b5f1e81'
+export TEMPO_REV='2163eb53a6419b53f4388bfde9177ea96dffb570'
 
 # Use a clean, dedicated Tempo checkout at TEMPO_REV for this benchmark.
 test "$(git -C "$TEMPO_ROOT" rev-parse HEAD)" = "$TEMPO_REV"
