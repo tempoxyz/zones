@@ -883,6 +883,7 @@ where
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let runtime_handle = tokio::runtime::Handle::current();
+        let portal_address = self.l1_state_provider_config.portal_address;
         let l1_provider = L1StateProvider::new(
             self.l1_state_provider_config.clone(),
             self.l1_state_cache,
@@ -956,6 +957,7 @@ where
                 .disable_balance_check()
                 .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
                 .with_custom_tx_type(TempoTxType::AA as u8)
+                .no_eip7702()
                 .no_eip4844()
                 .build::<TempoPooledTransaction, _>(blob_store.clone());
 

@@ -2504,7 +2504,7 @@ impl ZoneAccount {
         args: WithdrawalArgs,
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
-        use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
         // Approve outbox for this token
         ITIP20::new(token, &self.l2_provider)
@@ -2518,7 +2518,7 @@ impl ZoneAccount {
         let to = args.to.unwrap_or(self.address);
         let fallback_recipient = args.fallback_recipient.unwrap_or(self.address);
 
-        let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider);
+        let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider);
         let receipt = outbox
             .requestWithdrawal(
                 token,

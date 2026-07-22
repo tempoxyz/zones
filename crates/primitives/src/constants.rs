@@ -58,6 +58,9 @@ pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000
 /// ZonePortal storage slot 0: `admin` (address).
 pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
+/// ZonePortal storage slot 6: `_tokenConfigs` mapping.
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
+
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
     let mut bytes = [0u8; 32];
@@ -71,23 +74,6 @@ pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
 
 /// ZoneInbox storage slot 0: `processedDepositQueueHash` (bytes32).
 pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
-
-/// ZoneOutbox storage slot 1: `_lastBatch.withdrawalQueueHash` (bytes32).
-///
-/// Slot 0 is packed `(tempoGasRate, nextWithdrawalIndex, withdrawalBatchIndex)`.
-/// The `_lastBatch` struct starts at slot 1 with `withdrawalQueueHash` occupying the full slot.
-pub const ZONE_OUTBOX_LAST_BATCH_HASH_SLOT: U256 = {
-    let mut le = [0u8; 32];
-    le[0] = 1;
-    U256::from_le_bytes(le)
-};
-
-/// ZoneOutbox storage slot 2: `_lastBatch.withdrawalBatchIndex` (uint64, lower 8 bytes).
-pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
-    let mut le = [0u8; 32];
-    le[0] = 2;
-    U256::from_le_bytes(le)
-};
 
 /// Base offset for deriving **mainnet** zone chain IDs.
 ///
