@@ -639,57 +639,6 @@ contract ZonePortal is IZonePortal {
         thisDeposit = ++depositCount;
     }
 
-    /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
-    /// @dev Fee is deducted from amount and paid to the admin in the same token.
-    ///      The token must be enabled and deposits must be active.
-    /// @param _token The TIP-20 token to deposit
-    /// @param to Recipient address on the zone
-    /// @param amount Total amount to deposit (fee will be deducted)
-    /// @param memo User-provided context
-    /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
-    function deposit(
-        address _token,
-        address to,
-        uint128 amount,
-        bytes32 memo,
-        address tempoRefundRecipient
-    )
-        external
-        returns (bytes32 newCurrentDepositQueueHash)
-    {
-        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
-
-        _validateDepositsActive(_token);
-        _validateDepositPolicy(_token, to, tempoRefundRecipient);
-        (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
-
-        // Build deposit struct with net amount (fee already paid to the admin on Tempo)
-        Deposit memory depositData = Deposit({
-            token: _token,
-            sender: msg.sender,
-            to: to,
-            amount: netAmount,
-            tempoRefundRecipient: tempoRefundRecipient,
-            memo: memo
-        });
-
-        // Insert deposit into queue
-        newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
-
-        emit DepositMade(
-            newCurrentDepositQueueHash,
-            msg.sender,
-            _token,
-            to,
-            netAmount,
-            fee,
-            memo,
-            tempoRefundRecipient,
-            thisDeposit
-        );
-    }
-
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key.
     ///      The token identity is public (not encrypted) since the portal must escrow it.

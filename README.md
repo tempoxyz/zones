@@ -83,12 +83,6 @@ export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 export PRIVATE_KEY=$(jq -r '.sequencerKey' generated/my-zone/zone.json)
 just max-approve-portal
 
-# deposit into the zone
-just send-deposit 1000000                       # deposit to your own address
-just send-deposit 1000000 <recipient-address>   # deposit to a specific address
-```
-
-```bash
 # send an encrypted deposit
 just send-deposit-encrypted 1000000                       # to your own address
 just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address

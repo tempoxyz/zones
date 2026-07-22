@@ -186,16 +186,6 @@ crate::sol! {
 
         // -- State-changing functions --
 
-        function deposit(
-            address token,
-            address to,
-            uint128 amount,
-            bytes32 memo,
-            address tempoRefundRecipient
-        )
-            external
-            returns (bytes32 newCurrentDepositQueueHash);
-
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
         function submitBatch(

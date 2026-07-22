@@ -494,18 +494,6 @@ struct TokenConfig {
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
 
-    event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash,
-        address indexed sender,
-        address token,
-        address to,
-        uint128 netAmount,
-        uint128 fee,
-        bytes32 memo,
-        address tempoRefundRecipient,
-        uint64 depositNumber
-    );
-
     /// @notice Emitted after a batch is accepted by `submitBatch`.
     /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
     ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
@@ -809,16 +797,6 @@ interface IZonePortal {
         external
         view
         returns (bool valid, uint64 expiresAtBlock);
-
-    function deposit(
-        address token,
-        address to,
-        uint128 amount,
-        bytes32 memo,
-        address tempoRefundRecipient
-    )
-        external
-        returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
