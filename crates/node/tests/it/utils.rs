@@ -12,7 +12,7 @@ use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519Private
 use eyre::WrapErr;
 use k256::SecretKey;
 use p256::ecdsa::SigningKey as P256SigningKey;
-use reth_node_api::{ConsensusEngineHandle, FullNodeComponents, PayloadTypes};
+use reth_node_api::{FullNodeComponents, PayloadTypes};
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::{args::RpcServerArgs, exit::NodeExitFuture};
 use reth_primitives_traits::SealedBlock;
