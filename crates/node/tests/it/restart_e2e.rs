@@ -9,7 +9,7 @@
 
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::{Address, U256};
-use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneOutbox, ZonePortal};
+use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -46,7 +46,7 @@ async fn wait_for_withdrawal_requested(
     sender: Address,
     amount: u128,
 ) -> eyre::Result<u64> {
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
     let expected_amount = U256::from(amount);
 
     crate::utils::poll_until(
@@ -459,7 +459,7 @@ async fn test_deferred_withdrawal_survives_sequencer_restart() -> eyre::Result<(
     let withdrawal_block =
         wait_for_withdrawal_requested(&zone, account.address(), withdrawal_amount).await?;
 
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
     let same_block_finalized = outbox
         .BatchFinalized_filter()
         .from_block(withdrawal_block)

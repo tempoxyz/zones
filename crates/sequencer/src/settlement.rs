@@ -26,7 +26,7 @@
 use std::{collections::BTreeMap, fmt};
 
 use crate::{
-    abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal},
+    abi::{self, BlockTransition, DepositQueueTransition, IZoneOutbox, ZonePortal},
     attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
 };
 use alloy_consensus::Transaction;
@@ -999,7 +999,7 @@ impl BatchSubmitter {
         }
 
         // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
-        let outbox = ZoneOutbox::new(outbox_address, zone_provider.clone());
+        let outbox = IZoneOutbox::new(outbox_address, zone_provider.clone());
         let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
         for portal_slot in head..tail {
             if !events.contains_key(&portal_slot) {
@@ -1191,7 +1191,7 @@ struct RequestedWithdrawalLog {
     tx_index: u64,
     log_index: u64,
     tx_hash: B256,
-    event: abi::ZoneOutbox::WithdrawalRequested,
+    event: abi::IZoneOutbox::WithdrawalRequested,
 }
 
 #[derive(Debug, Clone)]
@@ -1209,7 +1209,7 @@ struct FinalizedBatchLog {
 /// This includes zero-withdrawal batches because they still advance the L2
 /// withdrawal batch index and therefore require a matching L1 `submitBatch`.
 pub(crate) async fn fetch_finalized_batch_boundaries(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<u64>> {
@@ -1242,7 +1242,7 @@ pub(crate) async fn fetch_finalized_batch_boundaries(
 /// the immediately preceding batch boundary so the off-chain processor can
 /// service the portal queue.
 pub(crate) async fn fetch_finalized_batch(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
@@ -1298,7 +1298,7 @@ pub(crate) async fn fetch_finalized_batch(
             )
         })?;
     let encrypted_senders =
-        abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
+        abi::IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
             .map_err(|err| {
                 eyre::eyre!(
                     "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
@@ -1343,7 +1343,7 @@ pub(crate) async fn fetch_finalized_batch(
 
 /// Fetch `WithdrawalRequested` events for one portal queue slot.
 pub(crate) async fn fetch_slot_withdrawals(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
@@ -1354,7 +1354,7 @@ pub(crate) async fn fetch_slot_withdrawals(
 }
 
 async fn fetch_requested_withdrawal_logs(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<RequestedWithdrawalLog>> {
@@ -1386,7 +1386,7 @@ async fn fetch_requested_withdrawal_logs(
 }
 
 async fn fetch_finalized_batch_logs(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<FinalizedBatchLog>> {

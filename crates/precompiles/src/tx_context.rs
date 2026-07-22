@@ -1,14 +1,13 @@
-//! Transaction-hash execution context for authenticated withdrawals.
+//! Transaction execution context for authenticated withdrawals.
 //!
-//! The zone outbox needs the real hash of the currently executing user transaction so it can
-//! commit `senderTag = keccak256(sender || txHash)` on-chain. The block executor publishes that
-//! hash into a thread-local context before EVM execution, and this precompile exposes it to
-//! Solidity at a fixed system address.
+//! The zone outbox needs the real hash and effective fee payer of the currently executing user
+//! transaction. The block executor publishes both into a thread-local context before EVM
+//! execution. The native outbox and transaction-context precompile read the same context.
 
 use std::{cell::RefCell, thread_local};
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{B256, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileId, PrecompileOutput};
 use tracing::{debug, warn};
@@ -19,41 +18,51 @@ alloy_sol_types::sol! {
 }
 
 thread_local! {
-    static CURRENT_TX_HASH: RefCell<Option<B256>> = const { RefCell::new(None) };
+    static CURRENT_TRANSACTION: RefCell<Option<TransactionContext>> = const { RefCell::new(None) };
 }
 
-/// Guard that clears the current tx hash when dropped.
-pub(crate) struct TxHashGuard;
+#[derive(Clone, Copy)]
+struct TransactionContext {
+    tx_hash: B256,
+    fee_payer: Address,
+}
 
-impl Drop for TxHashGuard {
+/// Guard that clears the current transaction context when dropped.
+pub struct TransactionContextGuard;
+
+impl Drop for TransactionContextGuard {
     fn drop(&mut self) {
-        clear_current_tx_hash();
+        CURRENT_TRANSACTION.with(|slot| *slot.borrow_mut() = None);
     }
 }
 
-/// Publish the current executing transaction hash for the duration of EVM execution.
-pub(crate) fn set_current_tx_hash(tx_hash: B256) -> TxHashGuard {
-    CURRENT_TX_HASH.with(|slot| {
-        *slot.borrow_mut() = Some(tx_hash);
+/// Publish the current transaction hash and effective fee payer for EVM execution.
+pub fn set_current_transaction(tx_hash: B256, fee_payer: Address) -> TransactionContextGuard {
+    CURRENT_TRANSACTION.with(|slot| {
+        *slot.borrow_mut() = Some(TransactionContext { tx_hash, fee_payer });
     });
-    TxHashGuard
+    TransactionContextGuard
 }
 
-fn clear_current_tx_hash() {
-    CURRENT_TX_HASH.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
+/// Return the current transaction hash and effective fee payer, when published by the executor.
+pub(crate) fn current_transaction() -> Option<(B256, Address)> {
+    CURRENT_TRANSACTION.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|context| (context.tx_hash, context.fee_payer))
+    })
 }
 
 fn current_tx_hash() -> Option<B256> {
-    CURRENT_TX_HASH.with(|slot| *slot.borrow())
+    current_transaction().map(|(tx_hash, _)| tx_hash)
 }
 
-/// `DynPrecompile` implementation that returns the currently executing zone tx hash.
-pub(crate) struct ZoneTxContext;
+/// `DynPrecompile` implementation that returns the currently executing zone transaction hash.
+pub struct ZoneTxContext;
 
 impl ZoneTxContext {
-    pub(crate) fn create() -> DynPrecompile {
+    /// Creates the native transaction-context precompile.
+    pub fn create() -> DynPrecompile {
         DynPrecompile::new_stateful(PrecompileId::Custom("ZoneTxContext".into()), move |input| {
             if !input.is_direct_call() {
                 warn!(
@@ -109,7 +118,7 @@ mod tests {
         EvmInternals,
         precompiles::{Precompile, PrecompileInput},
     };
-    use alloy_primitives::{Address, U256};
+    use alloy_primitives::U256;
     use revm::{
         Context,
         database::{CacheDB, EmptyDB},
@@ -123,8 +132,9 @@ mod tests {
         CacheDB<EmptyDB>,
     >;
 
-    fn call_with_tx_hash(tx_hash: Option<B256>) -> PrecompileOutput {
-        let _guard = tx_hash.map(set_current_tx_hash);
+    fn call_with_context(context: Option<(B256, Address)>) -> PrecompileOutput {
+        let _guard =
+            context.map(|(tx_hash, fee_payer)| set_current_transaction(tx_hash, fee_payer));
         let mut ctx: TestContext =
             Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default());
         let calldata = currentTxHashCall {}.abi_encode();
@@ -147,18 +157,20 @@ mod tests {
     #[test]
     fn returns_current_transaction_hash() {
         let tx_hash = B256::repeat_byte(0x42);
-        let output = call_with_tx_hash(Some(tx_hash));
+        let fee_payer = Address::repeat_byte(0x24);
+        let output = call_with_context(Some((tx_hash, fee_payer)));
 
         assert!(!output.is_revert());
         assert_eq!(
             output.bytes,
             currentTxHashCall::abi_encode_returns(&tx_hash)
         );
+        assert_eq!(current_transaction(), None, "guard must clear the context");
     }
 
     #[test]
     fn reverts_when_current_transaction_hash_is_not_set() {
-        let output = call_with_tx_hash(None);
+        let output = call_with_context(None);
 
         assert!(output.is_revert());
         assert!(output.bytes.is_empty());

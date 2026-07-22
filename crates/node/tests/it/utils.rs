@@ -2504,7 +2504,7 @@ impl ZoneAccount {
         args: WithdrawalArgs,
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
-        use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
         // Approve outbox for this token
         ITIP20::new(token, &self.l2_provider)
@@ -2518,7 +2518,7 @@ impl ZoneAccount {
         let to = args.to.unwrap_or(self.address);
         let fallback_recipient = args.fallback_recipient.unwrap_or(self.address);
 
-        let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider);
+        let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider);
         let receipt = outbox
             .requestWithdrawal(
                 token,
@@ -3370,20 +3370,6 @@ impl PrivateRpcTestCtx {
         let receipt = pending.get_receipt().await?;
         eyre::ensure!(receipt.status(), "revokeKey failed");
         Ok(())
-    }
-
-    /// Query `zone_getDepositStatus` via the private RPC as a specific user.
-    pub(crate) async fn get_deposit_status_as_user(
-        &self,
-        tempo_block_number: u64,
-        signer: &alloy_signer_local::PrivateKeySigner,
-    ) -> eyre::Result<serde_json::Value> {
-        self.call_as_user(
-            "zone_getDepositStatus",
-            serde_json::json!([format!("0x{tempo_block_number:x}")]),
-            signer,
-        )
-        .await
     }
 }
 

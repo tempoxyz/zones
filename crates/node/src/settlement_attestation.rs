@@ -13,7 +13,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
-    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox, ZonePortal,
+    IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZonePortal,
 };
 use tokio::sync::mpsc;
 use tracing::{debug, info};
@@ -58,9 +58,9 @@ where
                 processed_deposit_hash = Some(event.newProcessedDepositQueueHash);
                 processed_deposit_number = Some(event.lastProcessedDepositNumber);
             } else if log.address == ZONE_OUTBOX_ADDRESS
-                && log.topics().first() == Some(&ZoneOutbox::BatchFinalized::SIGNATURE_HASH)
+                && log.topics().first() == Some(&IZoneOutbox::BatchFinalized::SIGNATURE_HASH)
             {
-                let event = ZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
+                let event = IZoneOutbox::BatchFinalized::decode_log(log).map_err(|err| {
                     eyre::eyre!("invalid BatchFinalized log in block {number}: {err}")
                 })?;
                 withdrawal = Some((event.withdrawalQueueHash, event.withdrawalBatchIndex));
