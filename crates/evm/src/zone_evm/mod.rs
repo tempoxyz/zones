@@ -204,7 +204,7 @@ mod tests {
     use zone_precompiles::test_utils::MockL1Reader;
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
-        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default());
+        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default(), Address::ZERO);
         ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
     }
 

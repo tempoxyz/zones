@@ -52,14 +52,17 @@ pub struct L1State<P> {
     anchor: Rc<Cell<Option<u64>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
+    /// Zone portal whose L1 state defines the active sequencer set.
+    portal_address: Address,
 }
 
 impl<P> L1State<P> {
-    /// Creates execution-local L1 state backed by `provider`.
-    pub fn new(provider: P) -> Self {
+    /// Creates execution-local L1 state backed by `provider` for `portal_address`.
+    pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
             anchor: Rc::new(Cell::new(None)),
             provider,
+            portal_address,
         }
     }
 
@@ -115,12 +118,11 @@ impl<P: L1StorageReader> L1State<P> {
     /// Return whether `account` belongs to the active sequencer set at `block_number`.
     pub fn is_active_sequencer(
         &self,
-        portal_address: Address,
         account: Address,
         block_number: u64,
     ) -> Result<bool, L1StateError> {
         let slot = keccak256((account, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
-        Ok(self.read_l1_storage(portal_address, slot, block_number)? != B256::ZERO)
+        Ok(self.read_l1_storage(self.portal_address, slot, block_number)? != B256::ZERO)
     }
 }
 
@@ -128,6 +130,7 @@ impl<P> fmt::Debug for L1State<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("L1State")
             .field("anchor", &self.get_anchor())
+            .field("portal_address", &self.portal_address)
             .finish_non_exhaustive()
     }
 }
@@ -204,14 +207,14 @@ mod tests {
 
     #[test]
     fn l1_state_rejects_advance_after_parent_read() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         assert!(l1.advance_anchor(10, 11).is_err());
     }
 
     #[test]
     fn l1_state_accepts_reads_at_advanced_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         l1.advance_anchor(10, 11).unwrap();
         read(&l1, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
@@ -219,7 +222,7 @@ mod tests {
 
     #[test]
     fn l1_state_clones_reject_reads_at_different_anchors() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         let clone = l1.clone();
         read(&l1, 10).unwrap();
         assert!(read(&clone, 11).is_err());
@@ -227,21 +230,21 @@ mod tests {
 
     #[test]
     fn l1_state_rejects_duplicate_advance() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         l1.advance_anchor(10, 11).unwrap();
         assert!(l1.advance_anchor(11, 12).is_err());
     }
 
     #[test]
     fn l1_state_rejects_non_contiguous_advance() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         assert!(l1.advance_anchor(10, 12).is_err());
         assert_eq!(l1.get_anchor(), None);
     }
 
     #[test]
     fn l1_state_reset_allows_a_new_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         l1.reset_anchor();
         l1.advance_anchor(10, 11).unwrap();
@@ -256,12 +259,12 @@ mod tests {
         let reader = MockL1Reader::default();
         reader.seed_active_sequencer(portal, 7, current);
         reader.seed_active_sequencer(portal, 8, next);
-        let l1 = L1State::new(reader);
+        let l1 = L1State::new(reader, portal);
 
-        assert!(l1.is_active_sequencer(portal, current, 7).unwrap());
-        assert!(!l1.is_active_sequencer(portal, next, 7).unwrap());
+        assert!(l1.is_active_sequencer(current, 7).unwrap());
+        assert!(!l1.is_active_sequencer(next, 7).unwrap());
         l1.reset_anchor();
-        assert!(l1.is_active_sequencer(portal, next, 8).unwrap());
-        assert!(!l1.is_active_sequencer(portal, current, 8).unwrap());
+        assert!(l1.is_active_sequencer(next, 8).unwrap());
+        assert!(!l1.is_active_sequencer(current, 8).unwrap());
     }
 }

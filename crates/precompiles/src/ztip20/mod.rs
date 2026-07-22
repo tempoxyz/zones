@@ -50,13 +50,11 @@ fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck)
 pub(crate) struct TIP20Rules<P> {
     /// Execution-local L1 state shared with other Tempo-backed reads.
     l1: L1State<P>,
-    /// Zone portal whose sequencer set authorizes private reads.
-    portal_address: Address,
 }
 
 impl<P> TIP20Rules<P> {
-    pub(crate) fn new(l1: L1State<P>, portal_address: Address) -> Self {
-        Self { l1, portal_address }
+    pub(crate) fn new(l1: L1State<P>) -> Self {
+        Self { l1 }
     }
 }
 
@@ -129,7 +127,7 @@ impl<P: L1StorageReader> TIP20Rules<P> {
             .map_err(CallRuleError::Tempo)?;
 
         self.l1
-            .is_active_sequencer(self.portal_address, caller, block_number)
+            .is_active_sequencer(caller, block_number)
             .map_err(|error| CallRuleError::Fatal(error.into()))
     }
 }
@@ -160,7 +158,7 @@ mod tests {
     fn rules(sequencer: Address) -> TIP20Rules<MockL1Reader> {
         let reader = MockL1Reader::default();
         reader.seed_active_sequencer(PORTAL_ADDRESS, TEMPO_BLOCK_NUMBER, sequencer);
-        TIP20Rules::new(L1State::new(reader), PORTAL_ADDRESS)
+        TIP20Rules::new(L1State::new(reader, PORTAL_ADDRESS))
     }
 
     fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
@@ -222,9 +220,8 @@ mod tests {
             let env = test_env(&ctx);
             let l1_reader = MockL1Reader::default();
             l1_reader.seed_active_sequencer(PORTAL_ADDRESS, TEMPO_BLOCK_NUMBER, sequencer);
-            let l1 = L1State::new(l1_reader.clone());
-            let precompile =
-                crate::create_tip20_precompile(token, &env, l1.clone(), PORTAL_ADDRESS);
+            let l1 = L1State::new(l1_reader.clone(), PORTAL_ADDRESS);
+            let precompile = crate::create_tip20_precompile(token, &env, l1.clone());
 
             Ok(Self {
                 ctx,
@@ -399,8 +396,7 @@ mod tests {
         let precompile = crate::create_tip20_precompile(
             token,
             &env,
-            L1State::new(MockL1Reader::failing_storage()),
-            PORTAL_ADDRESS,
+            L1State::new(MockL1Reader::failing_storage(), PORTAL_ADDRESS),
         );
         let calldata: Bytes = ITIP20::balanceOfCall { account }.abi_encode().into();
 
@@ -494,8 +490,7 @@ mod tests {
         let precompile = crate::create_tip20_precompile(
             token,
             &env,
-            L1State::new(MockL1Reader::default()),
-            PORTAL_ADDRESS,
+            L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
         );
         let calldata: Bytes = ITIP20::transferCall {
             to,

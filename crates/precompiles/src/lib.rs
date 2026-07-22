@@ -75,12 +75,11 @@ pub fn create_tip20_precompile<P: L1StorageReader>(
     address: alloy_primitives::Address,
     env: &ZonePrecompileEnv,
     l1: L1State<P>,
-    portal_address: alloy_primitives::Address,
 ) -> DynPrecompile {
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules::new(l1, portal_address),
+        ztip20::TIP20Rules::new(l1),
         move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
     )
 }

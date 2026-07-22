@@ -113,16 +113,10 @@ where
             Some(create_tip403_precompile(&tip403_env))
         });
         let tip20_l1 = l1.clone();
-        let portal_address = self.portal_address;
         let tempo_env = PrecompileEnv::new(&cfg, actions, non_creditable_slots);
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
-                Some(create_tip20_precompile(
-                    *address,
-                    &env,
-                    tip20_l1.clone(),
-                    portal_address,
-                ))
+                Some(create_tip20_precompile(*address, &env, tip20_l1.clone()))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
                 Some(TipFeeManager::create_precompile(&tempo_env))
             } else if *address == STABLECOIN_DEX_ADDRESS {
@@ -159,7 +153,7 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let db = L1OverlayDB::new(db, self.l1_reader.clone());
+        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
         ZoneEvm::new(self.register_precompiles(evm, l1))
@@ -171,7 +165,7 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let db = L1OverlayDB::new(db, self.l1_reader.clone());
+        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
         ZoneEvm::new(self.register_precompiles(evm, l1))
