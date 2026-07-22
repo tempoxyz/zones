@@ -4,12 +4,14 @@ pragma solidity ^0.8.13;
 import {
     BlockTransition,
     DepositQueueTransition,
+    IZoneFactory,
     IZonePortal,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
     ZONE_TX_CONTEXT,
-    ZONE_VERIFIER_ADDRESS
+    ZONE_VERIFIER_ADDRESS,
+    ZoneInfo
 } from "../src/interfaces/IZone.sol";
 import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/tempo/Verifier.sol";
@@ -178,6 +180,22 @@ contract BaseTest is Test {
             threshold,
             ZONE_VERIFIER_ADDRESS,
             rpcUrl
+        );
+
+        vm.mockCall(
+            ZONE_FACTORY_ADDRESS,
+            abi.encodeCall(IZoneFactory.zones, (zoneId)),
+            abi.encode(
+                ZoneInfo({
+                    zoneId: zoneId,
+                    portal: address(portal),
+                    admin: portalAdmin,
+                    sequencers: sequencers,
+                    threshold: threshold,
+                    verifier: ZONE_VERIFIER_ADDRESS,
+                    rpcUrl: rpcUrl
+                })
+            )
         );
     }
 
