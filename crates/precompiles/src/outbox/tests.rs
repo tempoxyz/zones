@@ -5,7 +5,7 @@ use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{storage::FromWord, test_util::TIP20Setup};
-use tempo_zone_contracts::{ILegacyZoneOutbox, IZoneOutbox as ZoneOutboxAbi};
+use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 
 use crate::{
     create_outbox_precompile,
@@ -612,58 +612,6 @@ fn many_withdrawals_finalize_and_clear_pending_state() -> eyre::Result<()> {
         harness.request(1, BOB, B256::from(U256::from(i)))?;
     }
     harness.finalize(20)?;
-    assert!(harness.pending()?.is_empty());
-    Ok(())
-}
-
-#[test]
-fn legacy_withdrawal_matches_current_overload_and_defaults_reveal_to() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let token = harness.token;
-    let memo = B256::repeat_byte(0x11);
-    let data = Bytes::from_static(b"callback");
-
-    harness.request_custom(ZoneOutboxAbi::requestWithdrawalCall {
-        token,
-        to: BOB,
-        amount: 123,
-        memo,
-        gasLimit: 7,
-        fallbackRecipient: ALICE,
-        data: data.clone(),
-        revealTo: Bytes::new(),
-    })?;
-    harness.call(
-        ALICE,
-        ILegacyZoneOutbox::requestWithdrawalCall {
-            token,
-            to: BOB,
-            amount: 123,
-            memo,
-            gasLimit: 7,
-            fallbackRecipient: ALICE,
-            data,
-        }
-        .abi_encode(),
-    )?;
-
-    let pending = harness.pending()?;
-    assert_eq!(pending.len(), 2);
-    assert_eq!(pending[0].fallbackNonce, 1);
-    assert_eq!(pending[1].fallbackNonce, 2);
-    let mut legacy = pending[1].clone();
-    legacy.fallbackNonce = pending[0].fallbackNonce;
-    assert_eq!(pending[0], legacy);
-    assert!(pending[1].revealTo.is_empty());
-    Ok(())
-}
-
-#[test]
-fn malformed_legacy_withdrawal_reverts_with_empty_data() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let output = harness.call(ALICE, ILegacyZoneOutbox::requestWithdrawalCall::SELECTOR)?;
-    assert!(output.is_revert());
-    assert!(output.bytes.is_empty());
     assert!(harness.pending()?.is_empty());
     Ok(())
 }

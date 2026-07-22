@@ -5,7 +5,7 @@ use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     charge_input_cost, dispatch, dispatch::typed::metadata as typed_metadata, storage::Handler,
 };
-use tempo_zone_contracts::{ILegacyZoneOutbox, IZoneOutbox};
+use tempo_zone_contracts::IZoneOutbox;
 use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
 
 use crate::{
@@ -60,14 +60,6 @@ impl ZoneOutbox {
                 enqueueDepositBounceBack(call) => mutate_void(call, msg_sender, |sender, call| self.enqueue_deposit_bounce_back(sender, call)),
                 consumeFallbackRecipient(call) => mutate(call, msg_sender, |sender, call| self.consume_fallback_recipient(sender, call.fallbackNonce)),
                 finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(l1, portal_address, sender, call)),
-            }
-            ILegacyZoneOutbox::ILegacyZoneOutboxCalls {
-                requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| self.request_withdrawal(
-                    sender,
-                    fee_payer,
-                    tx_hash,
-                    call.into(),
-                )),
             }
         })
     }
