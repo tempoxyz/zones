@@ -4,11 +4,13 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::test_util::TIP20Setup;
+use tempo_precompiles::{storage::StorageCtx, test_util::TIP20Setup};
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
+use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 use crate::{
     create_outbox_precompile,
+    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
         MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     },
