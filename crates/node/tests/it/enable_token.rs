@@ -173,10 +173,10 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
         .gas(TIP20_TX_GAS)
         .send()
         .await
-        .expect_err("missing FeeAMM liquidity should reject admission");
+        .expect_err("missing fee-token funds should reject admission");
     let error = error.to_string();
     assert!(
-        error.contains("insufficient liquidity in FeeAMM"),
+        error.contains("insufficient funds for gas"),
         "validation should pass the anchored policy check: {error}"
     );
     assert!(!error.contains("PolicyForbids"), "{error}");
