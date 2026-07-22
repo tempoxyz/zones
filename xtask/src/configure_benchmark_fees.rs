@@ -12,7 +12,7 @@ use alloy::{
 };
 use eyre::{WrapErr as _, ensure};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
-use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
+use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZonePortal};
 
 const DEFAULT_ZONE_GAS_RATE: u128 = 1;
 const DEFAULT_BOUNCEBACK_GAS: u64 = 300_000;
@@ -91,14 +91,14 @@ impl ConfigureBenchmarkFees {
             .await
             .wrap_err("failed connecting to Tempo L1 RPC")?;
         let portal = ZonePortal::new(self.portal, &l1);
-        let onchain_sequencer = portal
-            .sequencer()
+        let sequencer_active = portal
+            .isSequencer(sequencer)
             .call()
             .await
-            .wrap_err("failed querying ZonePortal sequencer")?;
+            .wrap_err("failed querying ZonePortal sequencer membership")?;
         ensure!(
-            onchain_sequencer == sequencer,
-            "SEQUENCER_KEY resolves to {sequencer}, but portal {} expects {onchain_sequencer}",
+            sequencer_active,
+            "SEQUENCER_KEY resolves to {sequencer}, but portal {} does not recognize it as an active sequencer",
             self.portal
         );
 
@@ -160,7 +160,7 @@ impl ConfigureBenchmarkFees {
                 .connect(&zone_rpc_url)
                 .await
                 .wrap_err("failed connecting to Zone RPC")?;
-            let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &zone);
+            let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &zone);
             let current_tempo_gas_rate = outbox
                 .tempoGasRate()
                 .call()

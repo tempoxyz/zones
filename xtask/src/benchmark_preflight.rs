@@ -23,7 +23,7 @@ use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::{
-    ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal,
+    IZoneOutbox, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use zone_primitives::constants::zone_chain_id as derive_zone_chain_id;
 use zone_rpc::{ZoneProvider, ZoneProviderConfig};
@@ -482,13 +482,13 @@ impl BenchmarkPreflight {
 
         let portal_contract = ZonePortal::new(portal, &l1);
         let zone_id_call = portal_contract.zoneId();
-        let sequencer_call = portal_contract.sequencer();
-        let (zone_id, configured_sequencer) =
+        let sequencer_call = portal_contract.isSequencer(sequencer_address);
+        let (zone_id, sequencer_active) =
             tokio::try_join!(zone_id_call.call(), sequencer_call.call())
                 .wrap_err("failed querying portal identity")?;
         ensure!(
-            configured_sequencer == sequencer_address,
-            "sequencer account index {} resolves to {sequencer_address}, but portal {portal} is configured for {configured_sequencer}",
+            sequencer_active,
+            "sequencer account index {} resolves to {sequencer_address}, but portal {portal} does not recognize it as an active sequencer",
             self.sequencer_account_index
         );
         if let Some(expected) = self.expected_zone_id {
@@ -550,7 +550,7 @@ impl BenchmarkPreflight {
             let portal_token_balance = l1_token.balanceOf(portal);
             let deposit_count = portal_contract.depositCount();
             let last_processed_deposit_number = portal_contract.lastProcessedDepositNumber();
-            let outbox_contract = ZoneOutbox::new(outbox, &zone_provider);
+            let outbox_contract = IZoneOutbox::new(outbox, &zone_provider);
             let withdrawal_fee = outbox_contract
                 .calculateWithdrawalFee(0)
                 .from(first_address);
@@ -2203,7 +2203,7 @@ mod tests {
         assert!(pool_addresses.contains(&sender));
         let (target, input) = only_call(withdrawal);
         assert_eq!(target, config.outbox);
-        let call = ZoneOutbox::requestWithdrawalCall::abi_decode(input).unwrap();
+        let call = IZoneOutbox::requestWithdrawalCall::abi_decode(input).unwrap();
         assert_eq!(call.token, config.token);
         assert_eq!(call.to, sender);
         assert_eq!(call.amount, config.withdrawal_amount);
@@ -2213,7 +2213,7 @@ mod tests {
         assert!(call.data.is_empty());
         assert!(call.revealTo.is_empty());
         let (_, second_input) = only_call(&withdrawals[1]);
-        let second_call = ZoneOutbox::requestWithdrawalCall::abi_decode(second_input).unwrap();
+        let second_call = IZoneOutbox::requestWithdrawalCall::abi_decode(second_input).unwrap();
         assert_ne!(call.memo, second_call.memo);
 
         let bootstrap = generate(&txgen, &output.join("bootstrap-deposit.yml"));
