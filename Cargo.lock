@@ -13410,6 +13410,8 @@ dependencies = [
  "alloy-evm",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-rlp",
+ "alloy-sol-types",
  "eyre",
  "reth-chainspec",
  "reth-evm",

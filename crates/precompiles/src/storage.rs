@@ -14,9 +14,6 @@ pub(crate) use tempo_precompiles::storage::*;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
-    /// ZonePortal account whose configuration is mirrored from Tempo L1.
-    fn portal_address(&self) -> Address;
-
     /// Read `account[slot]` at `block_number` on Tempo L1.
     fn read_l1_storage(
         &self,
@@ -35,10 +32,9 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 ///
 /// - For an ordinary transaction, the first L1 read selects the `tempoBlockNumber` loaded from the
 ///   chosen Zone state.
-/// - During `advanceTempo`, the Inbox may perform one class of explicit parent-checkpoint reads
-///   for pre-finalization admission without selecting the anchor. The native `TempoState`
-///   precompile then validates that the submitted header is the direct child of the stored
-///   checkpoint and advances the anchor to that child before any business-state reads.
+/// - During `advanceTempo`, the native `TempoState` precompile governs advancement: it first
+///   validates that the submitted header is the direct child of the stored checkpoint, then
+///   advances the anchor to that child before any reads at the new checkpoint.
 ///
 /// Once selected, the anchor is immutable for the transaction attempt. Reads at another block,
 /// advancement after a parent-anchor read, and duplicate or non-contiguous advancement are
@@ -48,10 +44,6 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// Clones share the selected anchor and provider handle so the Zone database adapter, `TempoState`,
 /// and other native precompiles enforce one view of L1 state. A new `L1State` must be created for
 /// each EVM execution context; it must not be shared across independent EVMs.
-///
-/// IMPORTANT: anchor coordination is not a canonicality proof. The batch proof must bind the
-/// Tempo header hash and state root to the canonical settlement anchor, then authenticate both
-/// direct [`L1StorageReader`] reads and mirrored `L1OverlayDB` reads against that same root.
 #[derive(Clone)]
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.
@@ -82,14 +74,6 @@ impl<P> L1State<P> {
         self.anchor.get()
     }
 
-    /// Returns the ZonePortal address configured by the underlying L1 reader.
-    pub fn portal_address(&self) -> Address
-    where
-        P: L1StorageReader,
-    {
-        self.provider.portal_address()
-    }
-
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
         match self.get_anchor() {
             None => {
@@ -118,27 +102,6 @@ impl<P> L1State<P> {
 }
 
 impl<P: L1StorageReader> L1State<P> {
-    /// Reads L1 storage without selecting a transaction anchor.
-    ///
-    /// This operation is reserved for admission checks against the parent checkpoint immediately
-    /// before `advanceTempo` selects its child anchor. It is only valid while the anchor is unset;
-    /// once any anchored read or advancement has occurred, it returns
-    /// [`L1StateError::PreAdvanceTempoConflict`].
-    ///
-    /// Unlike [`Self::read_l1_storage`], a successful read leaves [`Self::get_anchor`] unchanged,
-    /// allowing the validated child checkpoint to become the transaction anchor afterward.
-    pub(crate) fn read_l1_storage_unanchored(
-        &self,
-        account: Address,
-        slot: B256,
-        block_number: u64,
-    ) -> Result<B256, L1StateError> {
-        if let Some(current) = self.get_anchor() {
-            return Err(L1StateError::PreAdvanceTempoConflict { current });
-        }
-        self.provider.read_l1_storage(account, slot, block_number)
-    }
-
     /// Reads L1 storage after selecting or validating `block_number` as this transaction's anchor.
     pub fn read_l1_storage(
         &self,
@@ -203,12 +166,6 @@ pub enum L1StateError {
         /// Requested child Tempo block number.
         to: u64,
     },
-    /// A pre-advancement L1 read was attempted after an anchor had already been selected.
-    #[error("cannot perform a pre-advance Tempo L1 read after selecting anchor {current}")]
-    PreAdvanceTempoConflict {
-        /// Anchor already selected for this transaction.
-        current: u64,
-    },
 }
 
 impl L1StateError {
@@ -238,26 +195,6 @@ mod tests {
         let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         assert!(l1.advance_anchor(10, 11).is_err());
-    }
-
-    #[test]
-    fn l1_state_unanchored_read_does_not_select_an_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
-        l1.read_l1_storage_unanchored(Address::ZERO, B256::ZERO, 10)
-            .unwrap();
-        assert_eq!(l1.get_anchor(), None);
-        l1.advance_anchor(10, 11).unwrap();
-        assert_eq!(l1.get_anchor(), Some(11));
-    }
-
-    #[test]
-    fn l1_state_rejects_unanchored_read_after_anchor_selection() {
-        let l1 = L1State::new(MockL1Reader::default());
-        read(&l1, 10).unwrap();
-        assert!(matches!(
-            l1.read_l1_storage_unanchored(Address::ZERO, B256::ZERO, 10),
-            Err(L1StateError::PreAdvanceTempoConflict { current: 10 })
-        ));
     }
 
     #[test]

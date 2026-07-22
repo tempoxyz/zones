@@ -6,12 +6,12 @@ use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
-    storage::{ContractStorage, StorageCtx},
+    storage::{ContractStorage, StorageCtx, StorageKey},
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
 };
 use tempo_primitives::TempoHeader;
-use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
+use zone_primitives::constants::{PORTAL_IS_SEQUENCER_SLOT, ZONE_OUTBOX_ADDRESS};
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
@@ -19,6 +19,7 @@ use crate::test_utils::{
 };
 
 const GAS: u64 = 30_000_000;
+const PORTAL: Address = address!("0x4242424242424242424242424242424242424242");
 const SEQUENCER: Address = address!("0x00000000000000000000000000000000000000a1");
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a2");
 const BOB: Address = address!("0x00000000000000000000000000000000000000b0");
@@ -62,13 +63,11 @@ impl Harness {
             })?;
         }
 
-        let portal = l1.portal_address();
-        let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-        l1.set_u256(portal, membership_slot, 0, U256::ONE);
-        let l1_state = L1State::new(l1.clone());
+        l1.seed_active_sequencer(PORTAL, 1, SEQUENCER);
+        let l1_state = L1State::new(l1.clone(), PORTAL);
         let env = test_env(&ctx);
-        let precompile = ZoneInbox::create(l1_state.clone(), &env);
-        let outbox_precompile = crate::create_outbox_precompile(portal, l1_state.clone(), &env);
+        let precompile = ZoneInbox::create(PORTAL, l1_state.clone(), &env);
+        let outbox_precompile = crate::create_outbox_precompile(PORTAL, l1_state.clone(), &env);
         Ok(Self {
             ctx,
             l1,
@@ -92,7 +91,7 @@ impl Harness {
 
     fn set_queue_hash(&self, hash: B256) {
         self.l1.set_u256(
-            self.l1.portal_address(),
+            PORTAL,
             U256::from_be_bytes(PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.0),
             1,
             U256::from_be_bytes(hash.0),
@@ -194,7 +193,7 @@ impl Harness {
 }
 
 #[test]
-fn advance_checks_parent_sequencer_and_reads_queue_at_child_anchor() -> eyre::Result<()> {
+fn advance_checks_sequencer_and_queue_at_child_anchor() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness.set_queue_hash(B256::ZERO);
 
@@ -206,12 +205,8 @@ fn advance_checks_parent_sequencer_and_reads_queue_at_child_anchor() -> eyre::Re
     assert_eq!(harness.l1_state.get_anchor(), Some(1));
     let requests = harness.l1.storage_requests();
     let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-    assert!(requests.contains(&(harness.l1.portal_address(), membership_slot.into(), 0)));
-    assert!(requests.contains(&(
-        harness.l1.portal_address(),
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
-        1
-    )));
+    assert!(requests.contains(&(PORTAL, membership_slot.into(), 1)));
+    assert!(requests.contains(&(PORTAL, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, 1)));
     Ok(())
 }
 
@@ -226,11 +221,12 @@ fn zero_system_caller_skips_sequencer_read() -> eyre::Result<()> {
     )?;
 
     let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-    assert!(!harness.l1.storage_requests().contains(&(
-        harness.l1.portal_address(),
-        membership_slot.into(),
-        0
-    )));
+    assert!(
+        !harness
+            .l1
+            .storage_requests()
+            .contains(&(PORTAL, membership_slot.into(), 1))
+    );
     Ok(())
 }
 
@@ -272,7 +268,7 @@ fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()>
 }
 
 #[test]
-fn advance_rejects_a_preselected_anchor_before_sequencer_read() -> eyre::Result<()> {
+fn advance_rejects_a_preselected_anchor_before_child_selection() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness
         .l1_state
@@ -290,7 +286,7 @@ fn advance_rejects_a_preselected_anchor_before_sequencer_read() -> eyre::Result<
 }
 
 #[test]
-fn wrong_sequencer_reverts_before_checkpoint_advancement() -> eyre::Result<()> {
+fn wrong_sequencer_reverts_after_checking_child_anchor() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let output = harness.call(
         ALICE,
@@ -299,7 +295,7 @@ fn wrong_sequencer_reverts_before_checkpoint_advancement() -> eyre::Result<()> {
 
     assert!(output.is_revert());
     assert_eq!(output.bytes, ZoneInboxAbi::OnlySequencer {}.abi_encode());
-    assert_eq!(harness.l1_state.get_anchor(), None);
+    assert_eq!(harness.l1_state.get_anchor(), Some(1));
     assert_eq!(harness.l1.storage_requests().len(), 1);
     Ok(())
 }
@@ -502,7 +498,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
-    let portal = harness.l1.portal_address();
+    let portal = PORTAL;
     let info = crate::ecies::hkdf_info(&portal, &fixture.key_index, &fixture.eph_pub_x);
     let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
     let plaintext = build_plaintext(&fixture.to, &fixture.memo);
@@ -578,7 +574,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
-    let portal = harness.l1.portal_address();
+    let portal = PORTAL;
     let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
@@ -739,7 +735,7 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = Deposit {
         token,
-        sender: harness.l1.portal_address(),
+        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 555,
         bouncebackRecipient: Address::ZERO,
@@ -781,7 +777,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = Deposit {
         token: PATH_USD_ADDRESS,
-        sender: harness.l1.portal_address(),
+        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 321,
         bouncebackRecipient: Address::ZERO,

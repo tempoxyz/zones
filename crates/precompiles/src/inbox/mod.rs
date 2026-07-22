@@ -2,8 +2,8 @@
 //!
 //! The Inbox advances the Zone's finalized Tempo checkpoint and consumes the canonical L1 deposit
 //! queue. The implementation shares one execution-local [`L1State`] with `TempoState` and the
-//! Zone EVM database adapter: sequencer admission is checked at the parent checkpoint, then
-//! `finalizeTempo` selects the child anchor used by every deposit, policy, and portal read.
+//! Zone EVM database adapter: `finalizeTempo` selects the child anchor used by sequencer
+//! admission and every subsequent deposit, policy, and portal read.
 //!
 //! Runtime execution processes a contiguous prefix of the portal deposit queue and reads its
 //! canonical head at the selected child anchor. The batch proof, not this precompile, proves that
@@ -23,7 +23,7 @@ use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     EncodePrecompileResult, charge_input_cost, dispatch,
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, StorageCtx, StorageKey},
+    storage::{Handler, Mapping, StorageCtx},
     tip20::{ITIP20, TIP20Token},
     view,
 };
@@ -33,8 +33,8 @@ use tempo_zone_contracts::{
     QueuedDeposit, ZoneInbox as ZoneInboxAbi, ZoneInboxError, ZoneInboxEvent,
 };
 use zone_primitives::constants::{
-    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, PORTAL_IS_SEQUENCER_SLOT,
-    TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS,
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, TEMPO_STATE_ADDRESS,
+    ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS,
 };
 
 use crate::{
@@ -64,7 +64,11 @@ impl ZoneInbox {
     }
 
     /// Create the direct-call-only native Inbox precompile.
-    pub fn create<P>(l1: L1State<P>, env: &crate::ZonePrecompileEnv) -> DynPrecompile
+    pub fn create<P>(
+        portal_address: Address,
+        l1: L1State<P>,
+        env: &crate::ZonePrecompileEnv,
+    ) -> DynPrecompile
     where
         P: L1StorageReader,
     {
@@ -72,7 +76,7 @@ impl ZoneInbox {
             "ZoneInbox",
             env,
             crate::execution::NoCallRules,
-            move |data, caller| Self::new().call_with_l1_state(&l1, data, caller),
+            move |data, caller| Self::new().call_with_l1_state(&l1, portal_address, data, caller),
         )
     }
 
@@ -80,6 +84,7 @@ impl ZoneInbox {
     pub(crate) fn call_with_l1_state<P>(
         &mut self,
         l1: &L1State<P>,
+        portal_address: Address,
         calldata: &[u8],
         msg_sender: Address,
     ) -> PrecompileResult
@@ -100,7 +105,7 @@ impl ZoneInbox {
                     processedDepositNumber(call) => {
                         view(call, |_| self.processed_deposit_number.read())
                     },
-                    tempoPortal(call) => view(call, |_| Ok(l1.portal_address())),
+                    tempoPortal(call) => view(call, |_| Ok(portal_address)),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     config(call) => view(call, |_| Ok(ZONE_CONFIG_ADDRESS)),
                     refunds(call) => view(call, |call| {
@@ -113,7 +118,7 @@ impl ZoneInbox {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
-                            self.advance_tempo(l1, msg_sender, call)
+                            self.advance_tempo(l1, portal_address, msg_sender, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },
@@ -125,6 +130,7 @@ impl ZoneInbox {
     fn advance_tempo<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
+        portal: Address,
         caller: Address,
         call: ZoneInboxAbi::advanceTempoCall,
     ) -> ZoneResult<()> {
@@ -132,29 +138,19 @@ impl ZoneInbox {
             .map_err(|_| TempoPrecompileError::under_overflow())?;
         let deposits = decode_deposits(call.deposits)?;
 
-        let portal = l1.portal_address();
         let mut tempo_state = TempoState::new();
-        let previous_block_number = tempo_state.tempo_block_number()?;
 
-        if !caller.is_zero() {
-            let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-            let is_sequencer = l1.read_l1_storage_unanchored(
-                portal,
-                membership_slot.into(),
-                previous_block_number,
-            )?;
+        // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
+        tempo_state.finalize_checkpoint(l1, call.header)?;
+        let tempo_block_number = tempo_state.tempo_block_number()?;
 
-            if is_sequencer.is_zero() {
-                return Err(ZoneInboxError::only_sequencer().into());
-            }
+        if !caller.is_zero() && !l1.is_active_sequencer(caller, tempo_block_number)? {
+            return Err(ZoneInboxError::only_sequencer().into());
         }
 
-        // Step 1: Advance Tempo state (validates chain continuity internally)
-        tempo_state.finalize_checkpoint(l1, call.header)?;
         self.enable_tokens(call.enabledTokens)?;
 
         // Step 2: Process deposits and build hash chain
-        let tempo_block_number = tempo_state.tempo_block_number()?;
         let tempo_block_hash = tempo_state.tempo_block_hash()?;
         let mut current_hash = self.processed_deposit_queue_hash.read()?;
         let mut decryptions = call.decryptions.into_iter();
