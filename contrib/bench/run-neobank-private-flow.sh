@@ -244,5 +244,13 @@ send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
 stage_start private_flow
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
-    --failure-policy continue --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT"
+    --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT"
 stage_end private_flow
+
+jq -e --argjson expected "$ZONES_BENCH_COUNT" '
+    .started == $expected and
+    .completed == $expected and
+    .failed == 0 and
+    .timed_out == 0
+' "$ZONES_BENCH_REPORT" >/dev/null ||
+    die "private flow did not complete every requested journey successfully"

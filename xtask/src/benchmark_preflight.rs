@@ -2150,6 +2150,10 @@ mod tests {
             zone["templates"]["gateway_deposit"]["call"]["args"][4],
             2_000_000
         );
+        assert_eq!(
+            zone["templates"]["gateway_redeem"]["fee_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
         assert_eq!(zone["templates"]["gateway_redeem"]["call"]["args"][7], "0x");
         assert_eq!(zone["templates"]["offramp"]["call"]["args"][4], 0);
 
@@ -2162,6 +2166,16 @@ mod tests {
             step["use"] == "wait-encrypted-zone-deposit"
                 && step["with"]["deposit_hash"]["var"] == "earn_deposit.args.zoneDepositHash"
         }));
+
+        let swapped: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("swapped-lifecycle-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let redeem = &swapped["scenario"]["steps"][2];
+        assert_eq!(
+            redeem["with"]["fee_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
         for (flow, token, action) in [
             (
                 0_u64,
