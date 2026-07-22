@@ -74,7 +74,6 @@ pub fn create_outbox_precompile<P>(l1: L1State<P>, env: &ZonePrecompileEnv) -> D
 where
     P: L1StorageReader,
 {
-    let portal_address = l1.portal_address();
     execution::create_precompile(
         "ZoneOutbox",
         env,
@@ -82,14 +81,7 @@ where
         move |data, caller| {
             let (tx_hash, fee_payer) =
                 tx_context::current_transaction().unwrap_or((Default::default(), caller));
-            ZoneOutbox::new().call_with_transaction(
-                &l1,
-                portal_address,
-                data,
-                caller,
-                tx_hash,
-                fee_payer,
-            )
+            ZoneOutbox::new().call_with_transaction(&l1, data, caller, tx_hash, fee_payer)
         },
     )
 }
