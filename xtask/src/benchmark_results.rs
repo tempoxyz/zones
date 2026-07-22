@@ -91,6 +91,8 @@ struct ScenarioReport {
     steps: Vec<StepReport>,
     total_scenario_latency: Latency,
     #[serde(default)]
+    receipt_metrics: Vec<ReceiptMetricReport>,
+    #[serde(default)]
     failures: Vec<FailureReport>,
 }
 
@@ -311,6 +313,8 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
     }
     writeln!(output)?;
 
+    write_receipt_metrics(&mut output, &report.receipt_metrics)?;
+
     if !report.failures.is_empty() {
         writeln!(output, "## Failure classifications\n")?;
         writeln!(output, "| Step | Classification | Count |")?;
@@ -493,6 +497,27 @@ struct PhaseReport {
     tps: f64,
     success_rate: f64,
     latency: Option<PhaseLatency>,
+    #[serde(default)]
+    receipt_metrics: Vec<ReceiptMetricReport>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ReceiptMetricReport {
+    #[serde(default)]
+    labels: BTreeMap<String, String>,
+    gas_used: QuantityDistribution,
+    effective_gas_price: QuantityDistribution,
+    fee_paid: QuantityDistribution,
+}
+
+#[derive(Debug, Deserialize)]
+struct QuantityDistribution {
+    count: u64,
+    min: Option<f64>,
+    mean: Option<f64>,
+    p50: Option<f64>,
+    p95: Option<f64>,
+    p99: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -570,6 +595,8 @@ fn render_phase_results(report: &PhaseReport) -> Result<String> {
         )?;
     }
 
+    write_receipt_metrics(&mut output, &report.receipt_metrics)?;
+
     writeln!(
         output,
         "> Rates use the complete measured window, including ramp-up and drain. Latency ends when the RPC returns; setup transactions are excluded from the measured phase report. RPC-accepted and failed counts can overlap when an accepted transaction later reverts or its receipt wait fails."
@@ -642,6 +669,80 @@ fn write_latency_row(output: &mut String, latency: &Latency) -> Result<()> {
         format_millis(latency.max_ms),
     )?;
     Ok(())
+}
+
+fn write_receipt_metrics(output: &mut String, reports: &[ReceiptMetricReport]) -> Result<()> {
+    if reports.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(output, "## Receipt gas metrics\n")?;
+    writeln!(
+        output,
+        "| Input / labels | Metric | Count | Min | Mean | P50 | P95 | P99 |"
+    )?;
+    writeln!(
+        output,
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+    )?;
+
+    for report in reports {
+        let labels = format_receipt_labels(&report.labels);
+        for (name, unit, distribution) in [
+            ("gas_used", "gas", &report.gas_used),
+            ("effective_gas_price", "wei", &report.effective_gas_price),
+            ("fee_paid", "wei", &report.fee_paid),
+        ] {
+            validate_quantity_distribution(name, distribution)?;
+            writeln!(
+                output,
+                "| {} | {} | {} | {} | {} | {} | {} | {} |",
+                labels,
+                code(name),
+                distribution.count,
+                format_quantity(distribution.min, unit),
+                format_quantity(distribution.mean, unit),
+                format_quantity(distribution.p50, unit),
+                format_quantity(distribution.p95, unit),
+                format_quantity(distribution.p99, unit),
+            )?;
+        }
+    }
+    writeln!(output)?;
+    Ok(())
+}
+
+fn validate_quantity_distribution(name: &str, distribution: &QuantityDistribution) -> Result<()> {
+    for (field, value) in [
+        ("min", distribution.min),
+        ("mean", distribution.mean),
+        ("p50", distribution.p50),
+        ("p95", distribution.p95),
+        ("p99", distribution.p99),
+    ] {
+        if let Some(value) = value {
+            validate_nonnegative_finite(&format!("receipt {name} {field}"), value)?;
+        }
+    }
+    Ok(())
+}
+
+fn format_receipt_labels(labels: &BTreeMap<String, String>) -> String {
+    if labels.is_empty() {
+        return "—".to_owned();
+    }
+
+    code(
+        &labels
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(", "),
+    )
+}
+
+fn format_quantity(value: Option<f64>, unit: &str) -> String {
+    value.map_or_else(|| "—".to_owned(), |value| format!("{value:.3} {unit}"))
 }
 
 fn format_seconds(value: f64) -> String {
@@ -740,6 +841,90 @@ scenario:
         assert!(output.contains("`withdrawal` | `zone` | 99 | 1 | 4.950"));
         assert!(output.contains("`deposit_processed` | `zone` | `wait_log`"));
         assert!(output.contains("4.100 s"));
+        assert!(!output.contains("Receipt gas metrics"));
+    }
+
+    #[test]
+    fn renders_receipt_metrics_for_multiple_labeled_scenario_inputs() {
+        let mut report: serde_json::Value = serde_json::from_str(REPORT).unwrap();
+        report["receipt_metrics"] = serde_json::json!([
+            {
+                "labels": {
+                    "step": "activity",
+                    "input": "erc20|transfer",
+                    "run_id": "run`1"
+                },
+                "gas_used": {
+                    "count": 100,
+                    "min": 21000.0,
+                    "mean": 22000.0,
+                    "p50": 21500.0,
+                    "p95": 24000.0,
+                    "p99": 25000.0
+                },
+                "effective_gas_price": {
+                    "count": 100,
+                    "min": 2.0,
+                    "mean": 3.0,
+                    "p50": 3.0,
+                    "p95": 4.0,
+                    "p99": 5.0
+                },
+                "fee_paid": {
+                    "count": 100,
+                    "min": 42000.0,
+                    "mean": 66000.0,
+                    "p50": 64500.0,
+                    "p95": 96000.0,
+                    "p99": 125000.0
+                }
+            },
+            {
+                "labels": {"input": "withdrawal", "step": "withdrawal"},
+                "gas_used": {
+                    "count": 1,
+                    "min": 99000.0,
+                    "mean": 99000.0,
+                    "p50": 99000.0,
+                    "p95": 99000.0,
+                    "p99": 99000.0
+                },
+                "effective_gas_price": {
+                    "count": 0,
+                    "min": null,
+                    "mean": null,
+                    "p50": null,
+                    "p95": null,
+                    "p99": null
+                },
+                "fee_paid": {
+                    "count": 0,
+                    "min": null,
+                    "mean": null,
+                    "p50": null,
+                    "p95": null,
+                    "p99": null
+                }
+            }
+        ]);
+
+        let output =
+            render_results(&serde_json::to_string(&report).unwrap(), Some(SCENARIO)).unwrap();
+
+        assert!(output.contains("## Receipt gas metrics"));
+        assert!(output.contains(
+            "`input=erc20&#124;transfer, run_id=run&#96;1, step=activity` | `gas_used` | 100 | 21000.000 gas | 22000.000 gas | 21500.000 gas | 24000.000 gas | 25000.000 gas"
+        ));
+        assert!(output.contains(
+            "`input=erc20&#124;transfer, run_id=run&#96;1, step=activity` | `fee_paid` | 100 | 42000.000 wei | 66000.000 wei | 64500.000 wei | 96000.000 wei | 125000.000 wei"
+        ));
+        assert!(output.contains(
+            "`input=withdrawal, step=withdrawal` | `effective_gas_price` | 0 | — | — | — | — | —"
+        ));
+        assert!(
+            output.find("step=activity").unwrap() < output.find("step=withdrawal").unwrap(),
+            "receipt metric groups should preserve report order"
+        );
     }
 
     #[test]
@@ -817,6 +1002,32 @@ scenario:
         assert!(output.contains("Attempted transactions | **10.000 TPS**"));
         assert!(output.contains("RPC-accepted transactions | **9.900 TPS**"));
         assert!(output.contains("| 100 | 99 | 100 | 99.000% | 10.000 s |"));
+        assert!(!output.contains("Receipt gas metrics"));
+    }
+
+    #[test]
+    fn renders_receipt_metrics_from_a_phase_report() {
+        let report = r#"{
+          "sent": 1,
+          "success": 1,
+          "failed": 0,
+          "elapsed_secs": 1.0,
+          "tps": 1.0,
+          "success_rate": 100.0,
+          "latency": null,
+          "receipt_metrics": [{
+            "labels": {"input": "transfer"},
+            "gas_used": {"count": 1, "min": 21000.0, "mean": 21000.0, "p50": 21000.0, "p95": 21000.0, "p99": 21000.0},
+            "effective_gas_price": {"count": 1, "min": 7.0, "mean": 7.0, "p50": 7.0, "p95": 7.0, "p99": 7.0},
+            "fee_paid": {"count": 1, "min": 147000.0, "mean": 147000.0, "p50": 147000.0, "p95": 147000.0, "p99": 147000.0}
+          }]
+        }"#;
+
+        let output = render_results(report, None).unwrap();
+
+        assert!(output.contains(
+            "`input=transfer` | `effective_gas_price` | 1 | 7.000 wei | 7.000 wei | 7.000 wei | 7.000 wei | 7.000 wei"
+        ));
     }
 
     #[test]

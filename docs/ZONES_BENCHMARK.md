@@ -335,7 +335,7 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='67b89aa95399855456458f0b38f7de9c5b3f3a57'
+export TXGEN_REV='bf1b954aaf181edae392fe691515683d18768b3b'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
@@ -557,7 +557,8 @@ using each step's configured chain to calculate aggregate, per-chain, and
 per-submit user throughput. It does not need the benchmark mnemonic or RPC
 access. For an independent phase report, omit `--scenario`; the page then shows
 attempted and RPC-accepted transaction TPS plus RPC response latency when it
-was collected.
+was collected. Both report types include receipt-derived gas usage, effective
+gas price, and paid-fee distributions for each labeled transaction input.
 
 ## Run one phase
 
@@ -668,7 +669,7 @@ job:
    putting the phrase in workflow arguments or artifacts;
 2. restores private writable copies of the two isolated Schelk virgin volumes;
 3. checks out the exact Tempo revision and txgen commit
-   `67b89aa95399855456458f0b38f7de9c5b3f3a57`, then builds Tempo and Zone
+   `bf1b954aaf181edae392fe691515683d18768b3b`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
@@ -765,8 +766,10 @@ not scrape the node metric endpoints and has no ClickHouse benchmark reporter.
 The workflow combines that report with the rendered scenario to publish a
 scenario-native results page. It reports completed journeys per second,
 aggregate and per-chain successful submit-step TPS, completed-journey latency,
-and latency for every measured submit and wait step. The generated Markdown is
-also included in the run artifact.
+latency for every measured submit and wait step, and receipt gas metrics grouped
+by chain, input template, and scenario step. These gas figures come from outer
+transaction receipts; they do not trace or split internal-call gas. The
+generated Markdown is also included in the run artifact.
 
 These rates cover the complete measured window, including ramp-up and drain;
 they are not a saturation or single-chain capacity claim. Aggregate user TPS
