@@ -5,9 +5,11 @@
 //! portion. This avoids pulling in Tempo-specific concepts the zone doesn't
 //! use (interrupts, subblocks, DKG extra-data).
 
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_consensus::Transaction;
+use alloy_primitives::{Address, B256, Bytes, TxKind};
 use alloy_rpc_types_engine::{PayloadAttributes as EthPayloadAttributes, PayloadId};
 use alloy_rpc_types_eth::Withdrawal;
+use alloy_sol_types::SolCall;
 use reth_node_api::{
     InvalidPayloadAttributesError, NewPayloadError, PayloadTypes, PayloadValidator,
 };
@@ -16,7 +18,8 @@ use reth_primitives_traits::{AlloyBlockHeader, SealedBlock};
 use serde::{Deserialize, Serialize};
 use tempo_node::engine::TempoEngineValidator;
 use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
-use tempo_primitives::{Block, TempoHeader};
+use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
 use zone_l1::PreparedL1Block;
 
 /// Zone RPC payload attributes — the type that flows through FCU.
@@ -122,7 +125,28 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
             block_access_list: _,
             validator_set: _,
         } = payload;
-        Ok(block.into_sealed_block())
+        let block = block.into_sealed_block();
+        let mut transactions = block.body().transactions.iter();
+
+        let Some(first) = transactions.next() else {
+            return Err(invalid_payload(
+                "zone block is missing its required advanceTempo transaction",
+            ));
+        };
+
+        if !is_advance_tempo(first) {
+            return Err(invalid_payload(
+                "advanceTempo must be the first transaction in every zone block",
+            ));
+        }
+
+        if transactions.any(is_advance_tempo) {
+            return Err(invalid_payload(
+                "advanceTempo must appear exactly once in every zone block",
+            ));
+        }
+
+        Ok(block)
     }
 
     fn validate_payload_attributes_against_header(
@@ -135,4 +159,14 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
         }
         Ok(())
     }
+}
+
+fn is_advance_tempo(tx: &TempoTxEnvelope) -> bool {
+    tx.is_system_tx()
+        && tx.kind() == TxKind::Call(ZONE_INBOX_ADDRESS)
+        && tx.input().get(..4) == Some(ZoneInbox::advanceTempoCall::SELECTOR.as_slice())
+}
+
+fn invalid_payload(message: &'static str) -> NewPayloadError {
+    NewPayloadError::other(reth_errors::RethError::msg(message))
 }
