@@ -68,11 +68,11 @@ pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
     B256::new(bytes)
 };
 
-/// ZonePortal storage slot 5: `currentDepositQueueHash` (bytes32).
-pub const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(5);
+/// ZonePortal storage slot 3: `currentDepositQueueHash` (bytes32).
+pub const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(3);
 
-/// ZonePortal storage slot 7: `_encryptionKeys` dynamic array.
-pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(7);
+/// ZonePortal storage slot 5: `_encryptionKeys` dynamic array.
+pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
