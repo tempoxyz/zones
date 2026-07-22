@@ -37,11 +37,11 @@ load_benchmark_mnemonic
 
 for name in L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
     L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
-    ZONES_BENCH_GATEWAY ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_SEED
+    ZONES_BENCH_GATEWAY ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_VAULT ZONES_BENCH_ENGINE ZONES_BENCH_SEED
 do need "$name"; done
 
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
-ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-200}"
+ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
 ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
 ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-1000}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-20}"
@@ -60,7 +60,7 @@ ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
-ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-third-party-recipient}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-slippage-bounce}"
 case "$ZONES_BENCH_NEOBANK_PRESET" in
     direct-lifecycle)
         scenario_file=direct-lifecycle-scenario.yml
@@ -76,6 +76,12 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
     full-journey)
         scenario_file=private-flow-scenario.yml
+        base_token_label=dlusd
+        expected_base_token="$ZONES_BENCH_DLUSD"
+        leases_per_journey=1
+        ;;
+    slippage-bounce)
+        scenario_file=slippage-bounce-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
@@ -107,7 +113,7 @@ stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_B
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
-for command in "$txgen_bin" "$bench_bin" cast grep jq sed; do command -v "$command" >/dev/null || die "missing $command"; done
+for command in "$txgen_bin" "$bench_bin" awk cast grep jq sed; do command -v "$command" >/dev/null || die "missing $command"; done
 if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark-preflight); else preflight=(cargo run --profile release -p tempo-xtask -- benchmark-preflight); fi
 
 mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_RENDERED_SCENARIO")"
@@ -272,11 +278,35 @@ stage_end auth_token_map
 send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
 send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
 
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
+    stage_start slippage_precondition
+    bounce_earn_supply="$(cast call "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)' \
+        --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
+    bounce_vault_balance="$(cast call "$ZONES_BENCH_VAULT" 'balanceOf(address)(uint256)' \
+        "$ZONES_BENCH_ENGINE" --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
+    [[ "$bounce_earn_supply" =~ ^[0-9]+$ && "$bounce_vault_balance" =~ ^[0-9]+$ ]] ||
+        die "could not read slippage-bounce L1 preconditions"
+    stage_end slippage_precondition
+fi
+
 stage_start private_flow
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT"
 stage_end private_flow
+
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
+    stage_start slippage_postcondition
+    final_earn_supply="$(cast call "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)' \
+        --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
+    final_vault_balance="$(cast call "$ZONES_BENCH_VAULT" 'balanceOf(address)(uint256)' \
+        "$ZONES_BENCH_ENGINE" --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
+    [[ "$final_earn_supply" == "$bounce_earn_supply" ]] ||
+        die "slippage bounce changed EarnToken total supply"
+    [[ "$final_vault_balance" == "$bounce_vault_balance" ]] ||
+        die "slippage bounce changed the engine vault balance"
+    stage_end slippage_postcondition
+fi
 
 jq -e --argjson expected "$ZONES_BENCH_COUNT" '
     .started == $expected and

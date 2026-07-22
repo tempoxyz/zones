@@ -42,5 +42,15 @@
       {"name":"amount","type":"uint128","indexed":false},
       {"name":"callbackSuccess","type":"bool","indexed":false}
     ]
+  },
+  {
+    "type":"event", "name":"WithdrawalBounceBack", "anonymous":false,
+    "inputs":[
+      {"name":"newCurrentDepositQueueHash","type":"bytes32","indexed":true},
+      {"name":"fallbackNonce","type":"uint64","indexed":true},
+      {"name":"token","type":"address","indexed":false},
+      {"name":"amount","type":"uint128","indexed":false},
+      {"name":"depositNumber","type":"uint64","indexed":false}
+    ]
   }
 ]

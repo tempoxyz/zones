@@ -346,3 +346,129 @@ fragments:
           token: { param: output_token }
           amount: { var: callback.args.outputAmount }
           memo: { param: action_id }
+
+  earn-deposit-expect-bounce:
+    parameters:
+      sender: account_ref
+      sender_address: address
+      recipient: address
+      input_token: address
+      fee_token: address
+      amount: u256
+      action_id: value
+      fallback_recipient: address
+      refund_recipient: address
+    outputs:
+      request: submit
+      request_receipt: receipt
+      requested: log
+      withdrawal_processed: log
+      bounceback_enqueued: log
+      bounceback_processed: log
+    steps:
+      - checkpoint: { chain: l1 }
+        save: l1_before
+      - checkpoint: { chain: zone }
+        save: zone_before
+      - invoke:
+          chain: l1
+          action: prepare_encrypted_deposit
+          with:
+            recipient: { param: recipient }
+            zoneId: __ZONE_ID__
+            portalAddress: "__PORTAL__"
+            memo: { param: action_id }
+        save: encryption
+      - submit:
+          chain: zone
+          template: gateway_deposit
+          with:
+            from: { param: sender }
+            fee_token: { param: fee_token }
+            call:
+              args:
+                - { param: input_token }
+                - "__GATEWAY__"
+                - { param: amount }
+                - { param: action_id }
+                - __CALLBACK_GAS_LIMIT__
+                - { param: fallback_recipient }
+                - abi_encode:
+                    types:
+                      - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                    values:
+                      - flow: 0
+                        outputToken: "__EARN_TOKEN__"
+                        keyIndex: { var: encryption.keyIndex }
+                        encrypted: { var: encryption.encrypted }
+                        minVaultAssets: "340282366920938463463374607431768211455"
+                        minVaultShares: { param: amount }
+                        minOutputAmount: 0
+                        actionId: { param: action_id }
+                        refundRecipient: { param: refund_recipient }
+                - "0x"
+        save: request
+      - wait_receipt:
+          chain: zone
+          transaction_hash: { var: request.tx_hash }
+          sender: { var: request.sender }
+        timeout: 45s
+        save: request_receipt
+      - wait_log:
+          chain: zone
+          from_block: { var: zone_before.block_number }
+          transaction_hash: { var: request.tx_hash }
+          sender: { var: request.sender }
+          address: "__OUTBOX__"
+          abi: ZoneOutbox
+          event: WithdrawalRequested
+          where:
+            sender: { param: sender_address }
+            token: { param: input_token }
+            to: "__GATEWAY__"
+            amount: { param: amount }
+            memo: { param: action_id }
+            gasLimit: __CALLBACK_GAS_LIMIT__
+          max_block_range: 1000
+        timeout: 45s
+        save: requested
+      - wait_log:
+          chain: l1
+          from_block: { var: l1_before.block_number }
+          address: "__PORTAL__"
+          abi: ZonePortal
+          event: WithdrawalProcessed
+          where:
+            to: "__GATEWAY__"
+            senderTag:
+              keccak256_packed:
+                types: [address, bytes32]
+                values: [{ param: sender_address }, { var: request.tx_hash }]
+            token: { param: input_token }
+            amount: { param: amount }
+            callbackSuccess: false
+          max_block_range: 1000
+        save: withdrawal_processed
+      - wait_log:
+          chain: l1
+          transaction_hash: { var: withdrawal_processed.transaction_hash }
+          address: "__PORTAL__"
+          abi: ZonePortal
+          event: WithdrawalBounceBack
+          where:
+            fallbackNonce: { var: requested.args.fallbackNonce }
+            token: { param: input_token }
+            amount: { param: amount }
+        save: bounceback_enqueued
+      - wait_log:
+          chain: zone
+          from_block: { var: zone_before.block_number }
+          address: "__INBOX__"
+          abi: ZoneInbox
+          event: WithdrawalBounceBackProcessed
+          where:
+            fallbackRecipient: { param: fallback_recipient }
+            token: { param: input_token }
+            amount: { param: amount }
+          max_block_range: 1000
+        save: bounceback_processed

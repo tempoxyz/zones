@@ -405,7 +405,7 @@ provision_up() {
     stop_stale_listener 8546 "$ZONE_BIN" "Zone"
 
     local account_start="${ZONES_BENCH_ACCOUNT_START:-16}"
-    local accounts="${ZONES_BENCH_ACCOUNTS:-200}"
+    local accounts="${ZONES_BENCH_ACCOUNTS:-100}"
     local account_capacity="${ZONES_BENCH_ACCOUNT_CAPACITY:-10000}"
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
@@ -423,7 +423,7 @@ provision_up() {
     esac
     if [[ "$profile" == "neobank" ]]; then
         case "$neobank_preset" in
-            direct-lifecycle|third-party-recipient|full-journey|swapped-lifecycle) ;;
+            direct-lifecycle|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle) ;;
             *) die "unsupported neobank preset for provisioning: $neobank_preset" ;;
         esac
     fi
@@ -611,7 +611,7 @@ provision_up() {
     if [[ "$profile" == "neobank" ]]; then
         case "$neobank_preset" in
             direct-lifecycle|third-party-recipient) zone_token="$PATH_USD" ;;
-            full-journey|swapped-lifecycle) zone_token="$DLUSD" ;;
+            full-journey|slippage-bounce|swapped-lifecycle) zone_token="$DLUSD" ;;
         esac
     fi
 
@@ -740,6 +740,8 @@ provision_up() {
             ZONES_BENCH_GATEWAY "$(jq -er '.gateway' "$fixture_metadata")"
             ZONES_BENCH_BRIDGE_WALLET "$(jq -er '.bridgeWallet' "$fixture_metadata")"
             ZONES_BENCH_DIRECT_SWAP "$(jq -er '.directSwap' "$fixture_metadata")"
+            ZONES_BENCH_VAULT "$(jq -er '.vault' "$fixture_metadata")"
+            ZONES_BENCH_ENGINE "$(jq -er '.engine' "$fixture_metadata")"
             ZONES_BENCH_VAULT_ADAPTER "$(jq -er '.vaultAdapter' "$fixture_metadata")"
             ZONES_BENCH_FIXTURE_METADATA "$fixture_metadata"
         )

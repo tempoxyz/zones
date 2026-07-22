@@ -25,8 +25,9 @@ the Zone specs; benchmark provisioning never fetches or clones external source.
 Provision the existing two-validator L1 plus authenticated private Zone RPC.
 The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile creates
 EarnToken through the native TIP-20 factory and selects the initial Zone token
-for the requested preset: DLUSD for the full and swapped lifecycle flows, or
-pathUSD for the direct and third-party-recipient lifecycle flows. It deploys
+for the requested preset: DLUSD for the full, swapped, and slippage-bounce
+lifecycle flows, or pathUSD for the direct and third-party-recipient lifecycle
+flows. It deploys
 the copied Earn proxy stack outside the measured interval and enables EarnToken
 on the portal. The stable asset not selected by the preset remains L1-only. The
 profile does not replace these assets with ordinary ERC-20 test contracts.
@@ -59,7 +60,11 @@ EarnToken shares emitted by that deposit back to pathUSD.
 users: account A enters with pathUSD and sends the encrypted EarnToken return
 to account B; B redeems the exact emitted shares and sends the encrypted
 pathUSD return to A. It also measures a separate encrypted pathUSD entry for B
-as the Zone fee buffer before B submits the redemption. All four scenarios
+as the Zone fee buffer before B submits the redemption.
+`slippage-bounce-scenario.yml` enters with DLUSD, submits a gateway deposit
+whose callback requires an impossible minimum vault-asset amount, observes the
+failed callback and L1 bounce-back in the same receipt, and waits for the exact
+terminal Zone bounce-back event. All five scenarios
 compose shared, receipt-correlated boundaries from `scenario-fragments.yml`.
 `l1-onramp.yml` and `zone-flow.yml` contain the underlying transaction templates
 and remain separate from the generic roundtrip assets.
@@ -99,9 +104,10 @@ contrib/bench/run-neobank-private-flow.sh
 
 Set `ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle` before provisioning for the
 swapped stablecoin lifecycle, `third-party-recipient` for the two-user direct
-lifecycle, or `full-journey` for the five-boundary journey. The selected preset
-is recorded in the workflow summary and run metadata while the rendered
-scenario remains at the stable results-renderer path.
+lifecycle, `slippage-bounce` for the failed-callback return path, or
+`full-journey` for the five-boundary journey. The selected preset is recorded
+in the workflow summary and run metadata while the rendered scenario remains
+at the stable results-renderer path.
 
 To provision and run the direct path independently, use the same preset for
 both commands so provisioning selects pathUSD as the enabled Zone stable asset:
@@ -136,6 +142,31 @@ A maximum concurrency of 100 therefore requires at least 200 benchmark
 accounts. Both users' pathUSD entries, the A-to-B encrypted EarnToken return,
 and the B-to-A encrypted pathUSD return are inside the measured boundary;
 fixture deployment, approvals, and funding remain setup traffic.
+
+To run the slippage-bounce path independently, provision DLUSD plus EarnToken
+and keep the same preset selected for the scenario runner:
+
+```bash
+forge build --root specs/ref-impls
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/slippage-bounce-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=slippage-bounce
+export ZONES_BENCH_ACCOUNTS=100
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
+contrib/bench/run-neobank-private-flow.sh
+```
+
+The measured success condition is the expected failure route: the request must
+receive a successful Zone receipt, emit the exact `WithdrawalRequested`, reach
+an L1 `WithdrawalProcessed` with `callbackSuccess=false`, emit a
+`WithdrawalBounceBack` with the request's fallback nonce in that same L1
+receipt, and finally emit `WithdrawalBounceBackProcessed` for the leased
+recipient, token, and amount. EarnToken total supply and the engine's vault
+balance must be unchanged across the measured run. The canonical terminal Zone
+event does not expose the queue hash or fallback nonce, so its strongest
+available correlation is the exact L1 receipt and fallback nonce followed by
+the leased recipient/token/amount matcher from the pre-request Zone block.
 
 That runner should provision the existing topology, deploy and configure the
 fixtures outside measurement, create the private-RPC authorization map in a

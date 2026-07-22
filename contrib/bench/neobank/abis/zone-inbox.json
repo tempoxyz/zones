@@ -9,5 +9,13 @@
       {"name":"amount","type":"uint128","indexed":false},
       {"name":"memo","type":"bytes32","indexed":false}
     ]
+  },
+  {
+    "type":"event", "name":"WithdrawalBounceBackProcessed", "anonymous":false,
+    "inputs":[
+      {"name":"fallbackRecipient","type":"address","indexed":true},
+      {"name":"token","type":"address","indexed":false},
+      {"name":"amount","type":"uint128","indexed":false}
+    ]
   }
 ]

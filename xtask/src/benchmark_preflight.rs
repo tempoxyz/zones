@@ -2147,6 +2147,7 @@ mod tests {
             "../neobank/swapped-lifecycle-scenario.yml",
             "../neobank/direct-lifecycle-scenario.yml",
             "../neobank/third-party-recipient-scenario.yml",
+            "../neobank/slippage-bounce-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2329,6 +2330,19 @@ mod tests {
             );
         }
 
+        let bounce: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("slippage-bounce-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let bounce_steps = bounce["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(bounce_steps.len(), 2);
+        assert_eq!(bounce_steps[0]["use"], "encrypted-zone-entry");
+        assert_eq!(bounce_steps[1]["use"], "earn-deposit-expect-bounce");
+        assert_eq!(
+            bounce_steps[1]["with"]["fallback_recipient"]["var"],
+            "account.address"
+        );
+
         let fragments: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("scenario-fragments.yml")).unwrap(),
         )
@@ -2365,6 +2379,31 @@ mod tests {
             assert!(requested["wait_log"]["transaction_hash"].is_mapping());
             assert_eq!(requested["timeout"], "45s");
         }
+        let bounce_fragment = &fragments["fragments"]["earn-deposit-expect-bounce"];
+        let bounce_callback = &bounce_fragment["steps"][3]["submit"]["with"]["call"]["args"][6]["abi_encode"]
+            ["values"][0];
+        assert_eq!(bounce_callback["flow"], 0);
+        assert_eq!(
+            bounce_callback["minVaultAssets"],
+            "340282366920938463463374607431768211455"
+        );
+        assert_eq!(bounce_callback["minVaultShares"]["param"], "amount");
+        assert_eq!(
+            bounce_fragment["steps"][6]["wait_log"]["where"]["callbackSuccess"],
+            false
+        );
+        assert_eq!(
+            bounce_fragment["steps"][7]["wait_log"]["transaction_hash"]["var"],
+            "withdrawal_processed.transaction_hash"
+        );
+        assert_eq!(
+            bounce_fragment["steps"][7]["wait_log"]["where"]["fallbackNonce"]["var"],
+            "requested.args.fallbackNonce"
+        );
+        assert_eq!(
+            bounce_fragment["steps"][8]["wait_log"]["event"],
+            "WithdrawalBounceBackProcessed"
+        );
         for (flow, token, action) in [
             (
                 0_u64,
@@ -2772,6 +2811,7 @@ mod tests {
             "../neobank/swapped-lifecycle-scenario.yml",
             "../neobank/direct-lifecycle-scenario.yml",
             "../neobank/third-party-recipient-scenario.yml",
+            "../neobank/slippage-bounce-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2801,6 +2841,7 @@ mod tests {
             ("swapped-lifecycle-scenario.yml", 23),
             ("direct-lifecycle-scenario.yml", 23),
             ("third-party-recipient-scenario.yml", 28),
+            ("slippage-bounce-scenario.yml", 14),
         ] {
             let rendered_path = output.join(format!("{scenario}.rendered.yml"));
             let validation = Command::new(txgen)
