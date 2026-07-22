@@ -48,9 +48,3 @@ struct FeePreview {
     uint8 allocationCount;
     FeeAllocation[5] allocations;
 }
-
-struct ContributionPreview {
-    uint256 assumedAssetsCredited;
-    uint256 netHolderAssets;
-    FeePreview fees;
-}
