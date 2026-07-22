@@ -75,7 +75,7 @@ impl<P> L1State<P> {
     }
 
     /// Returns the ZonePortal configured for this execution-local L1 state.
-    pub(crate) const fn portal_address(&self) -> Address {
+    pub(crate) const fn portal(&self) -> Address {
         self.portal_address
     }
 

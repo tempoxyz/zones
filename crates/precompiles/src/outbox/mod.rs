@@ -56,9 +56,7 @@ impl ZoneOutbox {
         slot: B256,
     ) -> ZoneResult<U256> {
         let anchor = TempoState::new().tempo_block_number.read()?;
-        Ok(l1
-            .read_l1_storage(l1.portal_address(), slot, anchor)?
-            .into())
+        Ok(l1.read_l1_storage(l1.portal(), slot, anchor)?.into())
     }
 
     fn ensure_sequencer<P: L1StorageReader>(

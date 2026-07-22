@@ -68,7 +68,7 @@ impl ZoneInbox {
     where
         P: L1StorageReader,
     {
-        let portal_address = l1.portal_address();
+        let portal_address = l1.portal();
         crate::execution::create_precompile(
             "ZoneInbox",
             env,
