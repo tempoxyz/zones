@@ -108,7 +108,8 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
     };
 
     use crate::utils::{
-        PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip20_policy_id, seed_raw_tip403_policy,
+        PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
+        seed_raw_tip403_token_policy,
     };
 
     reth_tracing::init_test_tracing();
@@ -178,7 +179,7 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
                 ],
             )],
         )?;
-        seed_raw_tip20_policy_id(
+        seed_raw_tip403_token_policy(
             &mut node.l1_state_cache().write(),
             POLICY_L1_BLOCK,
             PATH_USD_ADDRESS,
