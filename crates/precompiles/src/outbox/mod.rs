@@ -59,10 +59,7 @@ impl ZoneOutbox {
         portal_address: Address,
         slot: B256,
     ) -> ZoneResult<U256> {
-        let anchor = StorageCtx::default().sload(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)?;
-        let anchor = u64::try_from(anchor).map_err(|_| {
-            TempoPrecompileError::Fatal("Tempo block number does not fit in u64".into())
-        })?;
+        let anchor = TempoState::new().tempo_block_number.read()?;;
         Ok(l1.read_l1_storage(portal_address, slot, anchor)?.into())
     }
 
