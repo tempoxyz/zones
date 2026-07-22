@@ -39,7 +39,7 @@ jobs:
           shared-key: test-build
           cache-workspace-crates: true
           cache-on-failure: true
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: nextest@0.9.124
       - name: Install Foundry
@@ -102,7 +102,7 @@ jobs:
       - name: Prepare nextest install directory
         run: mkdir -p "$HOME/.cargo/bin"
 
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+      - uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: nextest@0.9.124
 
