@@ -19,7 +19,7 @@ use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox, approve_self,
     local_dev_zone_account, start_local_zone_with_fixture,
 };
 
@@ -56,6 +56,14 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     // Seed the current anchor before estimation/pool validation. The next empty block inherits it.
     fixture.seed_no_receive_policy(bob)?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    approve_self(
+        &mut fixture,
+        &zone,
+        &provider,
+        PATH_USD_ADDRESS,
+        dev_address,
+    )
+    .await?;
 
     let native_balance = provider.get_balance(dev_address).await?;
     assert_eq!(
@@ -64,14 +72,14 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     );
 
     let estimated_gas = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .estimate_gas()
         .await?;
     assert!(estimated_gas > 0, "transfer gas estimate should be nonzero");
 
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .send()
         .await?;
@@ -240,9 +248,17 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
         .connect_http(zone.http_url().clone());
     fixture.seed_no_receive_policy(bob)?;
     let tip20_alice = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
+    approve_self(
+        &mut fixture,
+        &zone,
+        &alice_provider,
+        PATH_USD_ADDRESS,
+        alice,
+    )
+    .await?;
 
     let pending = tip20_alice
-        .transfer(bob, U256::from(alice_to_bob))
+        .transferFrom(alice, bob, U256::from(alice_to_bob))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -269,9 +285,10 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
         .connect_http(zone.http_url().clone());
     fixture.seed_no_receive_policy(charlie)?;
     let tip20_bob = ITIP20::new(PATH_USD_ADDRESS, &bob_provider);
+    approve_self(&mut fixture, &zone, &bob_provider, PATH_USD_ADDRESS, bob).await?;
 
     let pending = tip20_bob
-        .transfer(charlie, U256::from(bob_to_charlie))
+        .transferFrom(bob, charlie, U256::from(bob_to_charlie))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -353,9 +370,17 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     // Transfer to Bob. Seed its receive-policy baseline before pool validation.
     fixture.seed_no_receive_policy(bob)?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    approve_self(
+        &mut fixture,
+        &zone,
+        &provider,
+        PATH_USD_ADDRESS,
+        dev_address,
+    )
+    .await?;
 
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -420,9 +445,17 @@ async fn test_transfer_with_memo() -> eyre::Result<()> {
     // Transfer with memo. Seed its receive-policy baseline before pool validation.
     fixture.seed_no_receive_policy(bob)?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    approve_self(
+        &mut fixture,
+        &zone,
+        &provider,
+        PATH_USD_ADDRESS,
+        dev_address,
+    )
+    .await?;
 
     let pending = tip20
-        .transferWithMemo(bob, U256::from(transfer_amount), memo)
+        .transferFromWithMemo(dev_address, bob, U256::from(transfer_amount), memo)
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()

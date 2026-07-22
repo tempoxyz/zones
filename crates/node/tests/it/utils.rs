@@ -168,6 +168,29 @@ where
     Ok(())
 }
 
+pub(crate) async fn approve_self<P>(
+    fixture: &mut L1Fixture,
+    zone: &ZoneTestNode,
+    provider: P,
+    token: Address,
+    owner: Address,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone,
+{
+    let token = ITIP20::new(token, provider);
+    let pending = token
+        .approve(owner, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let receipt = pending.get_receipt().await?;
+    assert!(receipt.status(), "self-approval should succeed");
+    Ok(())
+}
+
 fn enabled_deposits_active_token_config() -> B256 {
     let mut value = [0u8; 32];
     value[30] = 1; // TokenConfig.depositsActive

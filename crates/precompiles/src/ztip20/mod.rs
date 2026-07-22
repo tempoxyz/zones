@@ -148,7 +148,7 @@ mod tests {
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::{SolCall, SolError, SolInterface};
-    use revm::precompile::PrecompileResult;
+    use revm::precompile::{PrecompileError, PrecompileResult};
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
@@ -528,7 +528,7 @@ mod tests {
     }
 
     #[test]
-    fn uninitialized_token_rejects_before_policy_read() -> eyre::Result<()> {
+    fn call_rules_reject_transfer_before_upstream_dispatch() -> eyre::Result<()> {
         let token = address!("20C0000000000000000000000000000000000999");
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let to = address!("0x00000000000000000000000000000000000000a3");
@@ -558,10 +558,7 @@ mod tests {
         )?;
 
         assert!(result.is_revert());
-        assert_eq!(
-            result.bytes,
-            Bytes::from(TIP20Error::uninitialized().selector().to_vec())
-        );
+        assert_eq!(result.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
     }
@@ -586,7 +583,7 @@ mod tests {
             false,
         )?;
         assert!(transfer.is_revert());
-        assert_eq!(transfer.bytes, Bytes::new());
+        assert_eq!(transfer.bytes, Bytes::from(Unauthorized {}.abi_encode()));
         assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
 
         Ok(())
@@ -807,8 +804,9 @@ mod tests {
         );
 
         let transfer = harness.call(
-            harness.alice,
-            ITIP20::transferCall {
+            harness.spender,
+            ITIP20::transferFromCall {
+                from: harness.alice,
                 to: harness.bob,
                 amount: U256::from(7_654u64),
             }
