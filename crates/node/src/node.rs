@@ -899,7 +899,7 @@ where
             ctx.chain_spec(),
             tempo_chain_spec,
             l1_provider,
-            self.l1_state_provider_config.portal_address,
+            portal_address,
         );
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 

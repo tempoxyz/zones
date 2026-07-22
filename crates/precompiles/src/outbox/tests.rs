@@ -69,7 +69,7 @@ impl Harness {
         }
 
         let env = test_env(&ctx);
-        let precompile = create_outbox_precompile(PORTAL, L1State::new(l1.clone()), &env);
+        let precompile = create_outbox_precompile(PORTAL, L1State::new(l1.clone(), PORTAL), &env);
 
         Ok(Self {
             ctx,
