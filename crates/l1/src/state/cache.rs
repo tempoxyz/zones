@@ -1,4 +1,4 @@
-//! Bounded block-versioned cache of Tempo L1 contract storage slots.
+//! Block-versioned in-memory cache of Tempo L1 contract storage slots.
 //!
 //! The zone's `TempoState` precompile reads Tempo L1 storage at a **specific L1 block height**
 //! (the `tempoBlockNumber` the zone committed to via `TempoState.finalizeTempo()` on Zone L2).
@@ -8,10 +8,9 @@
 //! ## Storage model
 //!
 //! Each `(contract_address, slot_key)` pair maps to a [`BTreeMap<u64, B256>`] of
-//! `block_number → value`. Slot histories live in a weighted LRU whose capacity is measured in
-//! versions, with an additional per-slot version limit so LRU eviction cannot discard an
-//! arbitrarily large history at once. A lookup for block N may inherit the most recent earlier
-//! value only when verified receipt coverage and mutation barriers prove that it remained current.
+//! `block_number → value`. Slot histories are bounded by both a weighted LRU and a per-slot limit.
+//! A lookup for block N may inherit the most recent earlier value only when verified receipt
+//! coverage and mutation barriers prove that it remained current.
 //!
 //! ## Write path
 //!
@@ -19,12 +18,6 @@
 //!   receipts.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
-//!
-//! ## Capacity handling
-//!
-//! Slot histories are evicted least-recently-used when their combined version count exceeds the
-//! configured capacity. Mutation barriers have a separate bound; reaching it resets the value and
-//! barrier caches at the current finalized block rather than retaining an unbounded history.
 
 use alloy_primitives::{Address, B256};
 use derive_more::Deref;
@@ -54,7 +47,7 @@ pub struct L1StateCache {
 }
 
 impl L1StateCache {
-    /// Create a new cache tracking the given contract addresses.
+    /// Create an empty cache.
     pub fn new() -> Self {
         Self {
             inner: Arc::new(RwLock::new(L1StateCacheInner::new())),
@@ -70,19 +63,17 @@ impl L1StateCache {
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
 /// Inherited values are valid only when the subscriber has processed every intervening L1 block
-/// and no log from the owning contract indicates a possible mutation. The non-advancing floor
-/// excludes historical reads from before the subscriber's contiguous observation range.
-///
-/// The coverage end tracks the latest finalized L1 block whose receipts the
-/// [`L1Subscriber`](crate::l1::L1Subscriber) has processed.
+/// and no log from the owning contract indicates a possible mutation. The coverage range starts
+/// at the current floor and ends at the latest finalized block whose receipts were processed.
 #[derive(Debug)]
 pub struct L1StateCacheInner {
     /// Bounded per-slot value histories, promoted as a unit on access.
     slots: LruMap<(Address, B256), BTreeMap<u64, B256>, ByVersionCount>,
-    /// Per-address mutation barriers. A value at V cannot serve a read at N when a barrier exists
-    /// in `(V, N]`.
+    /// Per-address block heights that prevent reuse across possible mutations.
     invalidations: HashMap<Address, BTreeSet<u64>>,
+    /// Total number of retained mutation barriers.
     invalidation_count: usize,
+    /// Maximum number of mutation barriers retained before resetting.
     max_invalidations: usize,
     /// Contiguous receipt coverage: earliest usable value height through latest processed block.
     coverage: RangeInclusive<u64>,
@@ -95,7 +86,7 @@ impl Default for L1StateCacheInner {
 }
 
 impl L1StateCacheInner {
-    /// Create a new cache tracking the given contract addresses.
+    /// Create an empty cache.
     pub fn new() -> Self {
         Self::with_limits(DEFAULT_VERSION_CAPACITY, DEFAULT_INVALIDATION_CAPACITY)
     }
@@ -147,7 +138,7 @@ impl L1StateCacheInner {
 
     /// Sets a storage slot value in the forward cache at the given block number.
     ///
-    /// Values below the initial canonical floor are deliberately not admitted, so historical
+    /// Values below the current coverage floor are deliberately not admitted, so historical
     /// reads cannot later be inherited by canonical execution.
     pub fn set(&mut self, address: Address, slot: B256, block_number: u64, value: B256) {
         if block_number < *self.coverage.start() {
@@ -218,7 +209,7 @@ impl L1StateCacheInner {
         self.coverage = *self.coverage.start()..=anchor;
     }
 
-    /// Returns the current anchor block.
+    /// Returns the end of contiguous receipt coverage.
     pub fn anchor(&self) -> u64 {
         *self.coverage.end()
     }
