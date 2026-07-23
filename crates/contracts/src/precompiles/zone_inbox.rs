@@ -1,15 +1,15 @@
-//! `ZoneInbox` — Zone L2 system contract (0x1c00...0001).
+//! `IZoneInbox` — Zone L2 system contract interface (0x1c00...0001).
 
-pub use ZoneInbox::{
-    ChaumPedersenProof, DecryptionData, Deposit, DepositType, EnabledToken, QueuedDeposit,
-    ZoneInboxErrors as ZoneInboxError, ZoneInboxEvents as ZoneInboxEvent,
+pub use IZoneInbox::{
+    ChaumPedersenProof, DecryptionData, Deposit, DepositType, EnabledToken,
+    IZoneInboxErrors as ZoneInboxError, IZoneInboxEvents as ZoneInboxEvent, QueuedDeposit,
 };
 
 use alloy_primitives::{Address, B256};
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
-    contract ZoneInbox {
+    contract IZoneInbox {
         // -- Shared types --
 
         struct Deposit {

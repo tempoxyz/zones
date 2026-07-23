@@ -102,8 +102,8 @@ impl Harness {
         &self,
         deposits: Vec<QueuedDeposit>,
         decryptions: Vec<DecryptionData>,
-    ) -> ZoneInboxAbi::advanceTempoCall {
-        ZoneInboxAbi::advanceTempoCall {
+    ) -> IZoneInbox::advanceTempoCall {
+        IZoneInbox::advanceTempoCall {
             header: encode_header(&self.child_header()),
             deposits,
             decryptions,

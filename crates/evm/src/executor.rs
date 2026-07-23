@@ -21,7 +21,7 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, TempoTxEnv, evm::TempoContext};
+use tempo_revm::{TempoStateAccess, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader, tx_context};
@@ -115,7 +115,8 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
-        match (self.has_advanced_tempo, is_advance_tempo(recovered.tx())) {
+        let is_advance_tempo = is_advance_tempo(recovered.tx());
+        match (self.has_advanced_tempo, is_advance_tempo) {
             (false, false) => {
                 return Err(BlockValidationError::msg(
                     "advanceTempo must be the first transaction in a zone block",
@@ -188,10 +189,10 @@ where
 }
 
 fn is_advance_tempo(tx: &TempoTxEnvelope) -> bool {
-    let is_advance_tempo = tx.is_system_tx()
+    tx.is_system_tx()
         && tx.calls().any(|(kind, input)| {
             kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
-        });
+        })
 }
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ use tracing::{error, info, instrument, warn};
 use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
-    abi::{self, IZoneOutbox, NO_QUEUE_INDEX, TempoState, ZoneInbox, ZonePortal},
+    abi::{self, IZoneInbox, IZoneOutbox, NO_QUEUE_INDEX, TempoState, ZonePortal},
     rpc::rpc_connection_config,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_finalized_batch,
@@ -101,7 +101,7 @@ pub struct ZoneMonitor {
     /// `BatchFinalized` events.
     outbox: IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// ZoneInbox contract on **Zone L2** — queried for the processed deposit queue hash.
-    inbox: ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    inbox: IZoneInbox::IZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// TempoState predeploy on **Zone L2** — provides the latest Tempo L1 block number
     /// as seen by the zone.
     tempo_state: TempoState::TempoStateInstance<DynProvider<TempoNetwork>, TempoNetwork>,
@@ -186,7 +186,7 @@ impl ZoneMonitor {
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let outbox = IZoneOutbox::new(config.outbox_address, provider.clone());
-        let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
+        let inbox = IZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
         let batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
@@ -806,7 +806,7 @@ impl ZoneMonitor {
     }
 
     async fn read_processed_deposit_hash_at_block(
-        inbox: &ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+        inbox: &IZoneInbox::IZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
         zone_block_number: u64,
         fallback: B256,
     ) -> B256 {
@@ -833,7 +833,7 @@ impl ZoneMonitor {
     }
 
     async fn read_processed_deposit_number_at_block(
-        inbox: &ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+        inbox: &IZoneInbox::IZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
         zone_block_number: u64,
     ) -> u64 {
         if zone_block_number == 0 {
@@ -1007,7 +1007,7 @@ mod tests {
             metrics: crate::metrics::ZoneMonitorMetrics::default(),
             provider: zone_provider.clone(),
             outbox: IZoneOutbox::new(Address::repeat_byte(0x22), zone_provider.clone()),
-            inbox: ZoneInbox::new(Address::repeat_byte(0x33), zone_provider.clone()),
+            inbox: IZoneInbox::new(Address::repeat_byte(0x33), zone_provider.clone()),
             tempo_state: TempoState::new(Address::repeat_byte(0x44), zone_provider),
             withdrawal_store: SharedWithdrawalStore::new(),
             batch_submitter: BatchSubmitter::new(portal_address, l1_provider),

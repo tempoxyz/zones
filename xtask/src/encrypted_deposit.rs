@@ -13,7 +13,7 @@ use alloy::{
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{EncryptedDepositPayload, ZoneInbox, ZonePortal};
+use tempo_zone_contracts::{EncryptedDepositPayload, IZoneInbox, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
@@ -153,17 +153,17 @@ impl EncryptedDeposit {
 
         let processed_filter = Filter::new()
             .address(ZONE_INBOX_ADDRESS)
-            .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
+            .event_signature(IZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
             .from_block(from_block);
         let failed_filter = Filter::new()
             .address(ZONE_INBOX_ADDRESS)
-            .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
+            .event_signature(IZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
             .from_block(from_block);
 
         loop {
             let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
             for log in &logs {
-                if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
+                if let Ok(event) = IZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
                     && event.data.sender == sender
                     && event.data.to == to
                     && event.data.token == self.token
@@ -182,7 +182,7 @@ impl EncryptedDeposit {
 
             let logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
             for log in &logs {
-                if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
+                if let Ok(event) = IZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
                     && event.data.sender == sender
                     && event.data.token == self.token
                     && event.data.amount == self.amount

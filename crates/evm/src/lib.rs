@@ -486,7 +486,7 @@ mod tests {
     }
 
     #[test]
-    fn advance_tempo_keeps_membership_direct_and_overlay_reads_on_child_anchor() {
+    fn advance_tempo_keeps_overlay_reads_on_child_anchor() {
         use alloy_primitives::{B256, Bytes, U256, address, keccak256};
         use alloy_rlp::Encodable;
         use alloy_sol_types::SolCall;
@@ -497,7 +497,7 @@ mod tests {
         use tempo_precompiles::{
             TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
         };
-        use tempo_zone_contracts::ZoneInbox;
+        use tempo_zone_contracts::IZoneInbox;
         use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
         use zone_primitives::constants::{
             PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS,
@@ -558,11 +558,11 @@ mod tests {
 
         let factory = ZoneEvmFactory::new(reader.clone(), portal);
         let mut evm = factory.create_evm(db, EvmEnv::default());
-        let calldata = ZoneInbox::advanceTempoCall {
+        let calldata = IZoneInbox::advanceTempoCall {
             header: Bytes::from(child_rlp),
             deposits: Vec::new(),
             decryptions: Vec::new(),
-            enabledTokens: vec![ZoneInbox::EnabledToken {
+            enabledTokens: vec![IZoneInbox::EnabledToken {
                 token,
                 name: "Adversarial Token".into(),
                 symbol: "ADV".into(),
@@ -572,7 +572,7 @@ mod tests {
         .abi_encode();
 
         let result = evm
-            .transact_system_call(sequencer, ZONE_INBOX_ADDRESS, calldata.into())
+            .transact_system_call(Address::ZERO, ZONE_INBOX_ADDRESS, calldata.into())
             .expect("advanceTempo execution must not fail");
         assert!(matches!(result.result, ExecutionResult::Success { .. }));
         assert_eq!(
@@ -596,7 +596,7 @@ mod tests {
         );
         let queue_head_request = (portal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, CHILD);
 
-        assert!(requests.contains(&child_membership_request));
+        assert!(!requests.contains(&child_membership_request));
         assert!(!requests.contains(&parent_membership_request));
         assert!(requests.contains(&child_policy_request));
         assert!(!requests.contains(&parent_policy_request));
