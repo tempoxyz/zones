@@ -25,7 +25,6 @@ alloy::sol! {
     }
 
     #[sol(rpc)]
-    #[sol(rpc)]
     contract FixtureVaultAdapter {
         struct FixedFeeRecipient {
             address account;
@@ -389,8 +388,14 @@ impl DeployNeobankFixtures {
             "BridgeStableSwapAdapter",
         )
         .await?;
+        let reserve_capacity = Uint::<256, 4>::from_limbs([
+            self.liquidity as u64,
+            (self.liquidity >> 64) as u64,
+            0,
+            0,
+        ]);
         let receipt = controller_contract
-            .mintBridgeEcosystem(self.dlusd, deployer_address, self.liquidity.into())
+            .mintBridgeEcosystem(self.dlusd, deployer_address, reserve_capacity)
             .fee_token(self.pathusd)
             .send()
             .await
