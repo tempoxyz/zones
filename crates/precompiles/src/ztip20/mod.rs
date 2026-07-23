@@ -19,7 +19,7 @@ use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     execution::{CallCheck, CallRuleError, CallRules},
-    storage::{L1State, L1StorageReader},
+    storage::{Handler, L1State, L1StorageReader},
 };
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
@@ -118,9 +118,8 @@ impl<P: L1StorageReader> TIP20Rules<P> {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        self.l1
-            .portal()
-            .is_sequencer(caller)
+        self.l1.portal().is_sequencer[caller]
+            .read()
             .map_err(CallRuleError::Tempo)
     }
 }
@@ -191,7 +190,7 @@ mod tests {
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                    l1.portal().set_sequencer(sequencer, true)?;
+                    l1.portal().is_sequencer[sequencer].write(true)?;
                     TIP20Setup::path_usd(admin)
                         .with_issuer(admin)
                         .with_issuer(issuer)
@@ -267,7 +266,9 @@ mod tests {
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || {
-            rules.l1.portal().set_sequencer(sequencer, true).unwrap();
+            rules.l1.portal().is_sequencer[sequencer]
+                .write(true)
+                .unwrap();
 
             let balance = ITIP20::balanceOfCall { account: owner };
             assert_allowed(&rules, balance.clone(), owner);
@@ -315,8 +316,8 @@ mod tests {
             let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || {
                 let mut portal = harness.l1.portal();
-                portal.set_sequencer(harness.sequencer, false)?;
-                portal.set_sequencer(next_sequencer, true)
+                portal.is_sequencer[harness.sequencer].write(false)?;
+                portal.is_sequencer[next_sequencer].write(true)
             })?;
         }
 

@@ -41,8 +41,11 @@ impl Harness {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
                 let mut portal = l1.portal();
-                portal.set_sequencer(SEQUENCER, true)?;
-                portal.set_token_config(token, true, true)?;
+                portal.is_sequencer[SEQUENCER].write(true)?;
+                let mut token_config = portal.token_configs[token].read()?;
+                token_config.enabled = true;
+                token_config.deposits_active = true;
+                portal.token_configs[token].write(token_config)?;
 
                 ZoneOutbox::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
@@ -165,9 +168,9 @@ impl Harness {
     fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            self.l1
-                .portal()
-                .set_enforcement_modes(access_enforced, gateway_enforced)?;
+            let mut portal = self.l1.portal();
+            portal.is_access_enforced.write(access_enforced)?;
+            portal.is_gateway_enforced.write(gateway_enforced)?;
             Ok(())
         })
     }
@@ -175,7 +178,7 @@ impl Harness {
     fn set_role(&mut self, account: Address, role: ZonePortal::Role) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            self.l1.portal().set_role(account, role as u8)?;
+            self.l1.portal().role[account].write(role as u8)?;
             Ok(())
         })
     }
@@ -183,9 +186,11 @@ impl Harness {
     fn set_token_enabled(&mut self, enabled: bool) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            self.l1
-                .portal()
-                .set_token_config(self.token, enabled, true)?;
+            let mut portal = self.l1.portal();
+            let mut token_config = portal.token_configs[self.token].read()?;
+            token_config.enabled = enabled;
+            token_config.deposits_active = true;
+            portal.token_configs[self.token].write(token_config)?;
             Ok(())
         })
     }

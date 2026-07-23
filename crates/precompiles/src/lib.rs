@@ -46,7 +46,6 @@ pub mod dispatch {
 
 mod execution;
 pub use execution::ZonePrecompileEnv;
-mod portal;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
