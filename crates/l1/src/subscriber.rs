@@ -3,6 +3,228 @@ use std::collections::HashSet;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
+use std::collections::BTreeMap;
+
+/// Maximum number of authenticated L1 blocks a follower may retain ahead of its imported Tempo
+/// checkpoint (approximately one hour at Tempo's 500ms block time).
+pub const MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
+
+#[derive(Debug, Default)]
+struct L1BlockTrackerState {
+    observed: BTreeMap<u64, L1BlockObservation>,
+    latest: Option<NumHash>,
+    pruned_through: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct L1BlockObservation {
+    hash: B256,
+    portal_events: L1PortalEvents,
+}
+
+/// L1 blocks whose headers and receipts have been independently validated and
+/// whose derived state has been applied to the local caches.
+///
+/// Followers use this to gate zone-block import on the exact L1 anchor embedded
+/// in `advanceTempo`. This tracker deliberately assumes observed L1 blocks do
+/// not reorg: conflicting or non-contiguous observations are errors.
+#[derive(Debug, Clone)]
+pub struct L1BlockTracker {
+    state: Arc<parking_lot::RwLock<L1BlockTrackerState>>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+impl Default for L1BlockTracker {
+    fn default() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(());
+        Self {
+            state: Default::default(),
+            changed,
+        }
+    }
+}
+
+impl L1BlockTracker {
+    /// Initialize the last L1 height already represented by canonical local zone state.
+    pub fn initialize_consumed_through(&self, number: u64) {
+        let mut state = self.state.write();
+        state.pruned_through = Some(state.pruned_through.map_or(number, |old| old.max(number)));
+        drop(state);
+        self.changed.send_replace(());
+    }
+
+    /// Return the independently observed hash at `number`, if it is retained.
+    pub fn observed_hash(&self, number: u64) -> Option<B256> {
+        self.state
+            .read()
+            .observed
+            .get(&number)
+            .map(|observation| observation.hash)
+    }
+
+    /// Return the highest independently observed L1 anchor.
+    pub fn latest(&self) -> Option<NumHash> {
+        self.state.read().latest
+    }
+
+    /// Return whether `number` fits inside the bounded follower lookahead window.
+    pub fn has_capacity_for(&self, number: u64) -> bool {
+        self.state.read().pruned_through.is_none_or(|consumed| {
+            number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+        })
+    }
+
+    /// Wait until canonical follower import advances enough to retain `number`.
+    pub async fn wait_for_capacity(&self, number: u64) -> eyre::Result<()> {
+        let mut changed = self.changed.subscribe();
+        while !self.has_capacity_for(number) {
+            changed
+                .changed()
+                .await
+                .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
+        }
+        Ok(())
+    }
+
+    /// Return the next L1 height the observer needs to retain.
+    pub fn next_observation_number(&self) -> Option<u64> {
+        let state = self.state.read();
+        state
+            .latest
+            .map(|latest| latest.number.saturating_add(1))
+            .or_else(|| {
+                state
+                    .pruned_through
+                    .map(|consumed| consumed.saturating_add(1))
+            })
+    }
+
+    /// Wait until the exact L1 block has been validated and applied locally.
+    pub async fn wait_for(&self, block: NumHash) -> eyre::Result<()> {
+        self.wait_for_portal_events(block).await.map(|_| ())
+    }
+
+    /// Wait for an exact L1 block and return its receipt-authenticated portal events.
+    pub async fn wait_for_portal_events(&self, block: NumHash) -> eyre::Result<L1PortalEvents> {
+        let mut changed = self.changed.subscribe();
+        loop {
+            {
+                let state = self.state.read();
+                match state.observed.get(&block.number) {
+                    Some(observation) if observation.hash == block.hash => {
+                        return Ok(observation.portal_events.clone());
+                    }
+                    Some(observation) => {
+                        eyre::bail!(
+                            "observed different L1 hash at block {}: expected {}, got {}",
+                            block.number,
+                            block.hash,
+                            observation.hash
+                        )
+                    }
+                    None if state
+                        .pruned_through
+                        .is_some_and(|height| height >= block.number) =>
+                    {
+                        eyre::bail!(
+                            "L1 block {} was already consumed and pruned from the tracker",
+                            block.number
+                        )
+                    }
+                    None if state
+                        .latest
+                        .is_some_and(|latest| latest.number >= block.number) =>
+                    {
+                        eyre::bail!(
+                            "L1 block {} is missing below the latest observed height {}",
+                            block.number,
+                            state.latest.expect("checked above").number
+                        )
+                    }
+                    None => {}
+                }
+            }
+            changed
+                .changed()
+                .await
+                .map_err(|_| eyre::eyre!("L1 block tracker closed"))?;
+        }
+    }
+
+    /// Record an independently validated and applied L1 anchor.
+    pub fn record(&self, block: NumHash) -> eyre::Result<()> {
+        self.record_with_portal_events(block, L1PortalEvents::default())
+    }
+
+    /// Record an L1 anchor together with portal events decoded from its verified receipts.
+    pub fn record_with_portal_events(
+        &self,
+        block: NumHash,
+        portal_events: L1PortalEvents,
+    ) -> eyre::Result<()> {
+        let mut state = self.state.write();
+        if let Some(observation) = state.observed.get(&block.number) {
+            eyre::ensure!(
+                observation.hash == block.hash,
+                "conflicting L1 hash at observed height {}: existing {}, new {}",
+                block.number,
+                observation.hash,
+                block.hash
+            );
+            return Ok(());
+        }
+        if state.latest == Some(block) {
+            // The exact latest observation may already have been pruned on a
+            // leader after it was handed to the deposit queue.
+            return Ok(());
+        }
+        let consumed = *state
+            .pruned_through
+            .get_or_insert_with(|| block.number.saturating_sub(1));
+        eyre::ensure!(
+            block.number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS),
+            "L1 observation {} exceeds follower lookahead through {}",
+            block.number,
+            consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+        );
+        if let Some(latest) = state.latest {
+            eyre::ensure!(
+                block.number == latest.number.saturating_add(1),
+                "non-contiguous L1 observation: latest {}, new {}",
+                latest.number,
+                block.number
+            );
+        } else {
+            eyre::ensure!(
+                block.number == consumed.saturating_add(1),
+                "non-contiguous first L1 observation: consumed through {}, new {}",
+                consumed,
+                block.number
+            );
+        }
+        state.observed.insert(
+            block.number,
+            L1BlockObservation {
+                hash: block.hash,
+                portal_events,
+            },
+        );
+        state.latest = Some(block);
+        drop(state);
+        self.changed.send_replace(());
+        Ok(())
+    }
+
+    /// Drop observations through `number` after canonical follower import.
+    pub fn prune_through(&self, number: u64) {
+        let mut state = self.state.write();
+        state.observed.retain(|height, _| *height > number);
+        state.pruned_through = Some(state.pruned_through.map_or(number, |old| old.max(number)));
+        drop(state);
+        self.changed.send_replace(());
+    }
+}
+
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
@@ -34,6 +256,8 @@ pub struct L1SubscriberConfig {
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// finalized block.
     pub l1_state_cache: crate::state::cache::L1StateCache,
+    /// Validated and applied L1 anchors shared with follower block import.
+    pub block_tracker: L1BlockTracker,
     /// Maximum number of concurrent header and receipt fetches while syncing a
     /// finalized L1 range.
     pub l1_fetch_concurrency: usize,
@@ -64,7 +288,8 @@ where
 pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
-    pub(crate) deposit_queue: DepositQueue,
+    /// Leader-only sink. Followers observe L1 without retaining deposits.
+    pub(crate) deposit_queue: Option<DepositQueue>,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
@@ -83,6 +308,33 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
+        Self::spawn_inner(
+            config,
+            local_state_provider,
+            Some(deposit_queue),
+            task_executor,
+        );
+    }
+
+    /// Spawn L1 observation without the leader-only deposit sink.
+    pub fn spawn_observer<P>(
+        config: L1SubscriberConfig,
+        local_state_provider: P,
+        task_executor: reth_tasks::Runtime,
+    ) where
+        P: StateProviderFactory + Clone + Send + Sync + 'static,
+    {
+        Self::spawn_inner(config, local_state_provider, None, task_executor);
+    }
+
+    fn spawn_inner<P>(
+        config: L1SubscriberConfig,
+        local_state_provider: P,
+        deposit_queue: Option<DepositQueue>,
+        task_executor: reth_tasks::Runtime,
+    ) where
+        P: StateProviderFactory + Clone + Send + Sync + 'static,
+    {
         let subscriber = Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
@@ -93,7 +345,7 @@ impl L1Subscriber {
         };
 
         task_executor.spawn_critical_task(
-            "l1-deposit-subscriber",
+            "l1-block-subscriber",
             Box::pin(async move {
                 loop {
                     if let Err(e) = subscriber.run().await {
@@ -207,18 +459,27 @@ impl L1Subscriber {
         let resolved = self.resolve_start_block().await?;
         let queued = self
             .deposit_queue
-            .last_enqueued()
+            .as_ref()
+            .and_then(DepositQueue::last_enqueued)
+            .map(|last| last.number.saturating_add(1));
+        let observed = self
+            .config
+            .block_tracker
+            .latest()
             .map(|last| last.number.saturating_add(1));
 
-        match (resolved, queued) {
-            (Some(resolved), Some(queued)) => Ok(resolved.max(queued)),
-            (Some(resolved), None) => Ok(resolved),
-            (None, Some(queued)) => Ok(queued),
-            (None, None) => Ok(self
+        let next = resolved.into_iter().chain(queued).chain(observed).max();
+        let next = match next {
+            Some(next) => next,
+            None => self
                 .finalized_block_number(l1_provider)
                 .await?
-                .saturating_add(1)),
-        }
+                .saturating_add(1),
+        };
+        self.config
+            .block_tracker
+            .initialize_consumed_through(next.saturating_sub(1));
+        Ok(next)
     }
 
     /// Return the block number referenced by the L1 `finalized` tag.
@@ -311,12 +572,15 @@ impl L1Subscriber {
 
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
+        let block_tracker = self.config.block_tracker.clone();
 
         let mut fetched = stream::iter(from..=to)
             .map(move |block_number| {
                 let provider = l1_provider;
                 let subscriber_metrics = subscriber_metrics.clone();
+                let block_tracker = block_tracker.clone();
                 async move {
+                    block_tracker.wait_for_capacity(block_number).await?;
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
                     let header_resp = async {
@@ -359,7 +623,7 @@ impl L1Subscriber {
             })
             .buffered(concurrency);
 
-        let mut enqueued = 0u64;
+        let mut processed = 0u64;
         let backfill_start = std::time::Instant::now();
 
         while let Some((header, receipts)) = fetched.try_next().await? {
@@ -370,15 +634,24 @@ impl L1Subscriber {
 
             let sealed = SealedHeader::seal_slow(header);
             self.update_l1_state_anchor(block_number, &invalidated);
-            self.deposit_queue.enqueue_sealed(sealed, events);
-            enqueued += 1;
-            self.subscriber_metrics.blocks_enqueued.increment(1);
+            let anchor = sealed.num_hash();
+            self.config
+                .block_tracker
+                .record_with_portal_events(anchor, events.clone())?;
+            if let Some(deposit_queue) = &self.deposit_queue {
+                deposit_queue.enqueue_sealed(sealed, events);
+                self.subscriber_metrics.blocks_enqueued.increment(1);
+                // Leaders do not gate imports on this tracker. Retain only its
+                // monotonic cursor and let the deposit queue own pending data.
+                self.config.block_tracker.prune_through(anchor.number);
+            }
+            processed += 1;
 
-            if enqueued.is_multiple_of(100) {
+            if processed.is_multiple_of(100) {
                 let elapsed = backfill_start.elapsed();
-                let blocks_per_sec = enqueued as f64 / elapsed.as_secs_f64().max(0.001);
+                let blocks_per_sec = processed as f64 / elapsed.as_secs_f64().max(0.001);
                 info!(
-                    enqueued,
+                    processed,
                     current_block = block_number,
                     target = to,
                     remaining = to - block_number,

@@ -34,43 +34,9 @@ impl L1BlockDeposits {
 
         for deposit in &self.events.deposits {
             match deposit {
-                L1Deposit::Regular(d) => {
-                    let deposit = abi::Deposit {
-                        token: d.token,
-                        sender: d.sender,
-                        to: d.to,
-                        amount: d.amount,
-                        tempoRefundRecipient: d.tempo_refund_recipient,
-                        memo: d.memo,
-                    };
-                    queued_deposits.push(abi::QueuedDeposit {
-                        depositType: abi::DepositType::Regular,
-                        depositData: Bytes::from(deposit.abi_encode()),
-                        rejected: false,
-                    });
-                }
+                L1Deposit::Regular(_) => queued_deposits.push(deposit.to_abi_queued_deposit()),
                 L1Deposit::Encrypted(d) => {
-                    let queued = abi::QueuedDeposit {
-                        depositType: abi::DepositType::Encrypted,
-                        depositData: Bytes::from(
-                            abi::EncryptedDeposit {
-                                token: d.token,
-                                sender: d.sender,
-                                amount: d.amount,
-                                tempoRefundRecipient: d.tempo_refund_recipient,
-                                keyIndex: d.key_index,
-                                encrypted: abi::EncryptedDepositPayload {
-                                    ephemeralPubkeyX: d.ephemeral_pubkey_x,
-                                    ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
-                                    ciphertext: d.ciphertext.clone().into(),
-                                    nonce: d.nonce.into(),
-                                    tag: d.tag.into(),
-                                },
-                            }
-                            .abi_encode(),
-                        ),
-                        rejected: false,
-                    };
+                    let queued = deposit.to_abi_queued_deposit();
 
                     // Attempt full ECIES decryption.
                     let dec = ecies::decrypt_deposit(

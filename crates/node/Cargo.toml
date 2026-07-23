@@ -58,7 +58,6 @@ reth-transaction-pool.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-eips.workspace = true
-alloy-evm.workspace = true
 alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
@@ -93,6 +92,7 @@ alloy = { workspace = true, features = [
   "rpc-types",
 ] }
 alloy-contract.workspace = true
+alloy-evm.workspace = true
 alloy-signer.workspace = true
 base64.workspace = true
 const-hex.workspace = true
