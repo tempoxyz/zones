@@ -405,7 +405,7 @@ stage_end bootstrap
 # sponsor state. Setup approvals themselves are deliberately non-expiring.
 stage_start post_bootstrap_preflight
 preflight_phase bootstrap ""
-jq -e '.deposit_fee == 0 and .bounceback_fee == 0 and .withdrawal_fee == 0' \
+jq -e '.depositFee == 0 and .bouncebackFee == 0 and .withdrawalFee == 0' \
     "$ZONES_BENCH_OUTPUT/preflight.json" >/dev/null ||
     die "neobank benchmark requires zero deposit, bounceback, and withdrawal fees"
 stage_end post_bootstrap_preflight
@@ -557,7 +557,7 @@ PY
 
     stage_start private_withdrawal_preflight
     preflight_phase withdrawal funded true
-    jq -e '.deposit_fee == 0 and .bounceback_fee == 0 and .withdrawal_fee == 0' \
+    jq -e '.depositFee == 0 and .bouncebackFee == 0 and .withdrawalFee == 0' \
         "$ZONES_BENCH_OUTPUT/preflight.json" >/dev/null ||
         die "neobank benchmark requires zero deposit, bounceback, and withdrawal fees"
     stage_end private_withdrawal_preflight
