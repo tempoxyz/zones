@@ -35,6 +35,13 @@ pub use withdrawals::{
 
 use crate::rpc::rpc_connection_config;
 
+/// Conservative Tempo L1 fee cap for sequencer transactions.
+///
+/// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
+/// explicitly avoids an `eth_feeHistory` request while remaining valid across those regimes.
+pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
+    tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128;
+
 /// Configuration for all zone sequencer background tasks.
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerConfig {

@@ -602,6 +602,8 @@ impl WithdrawalProcessor {
                     .processWithdrawals(batch_withdrawals, remaining_queue)
                     .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY)
                     .nonce(nonce)
+                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                    .max_priority_fee_per_gas(0)
                     .gas(batch.gas_limit);
 
                 let pending = tokio::time::timeout(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT, call.send())
