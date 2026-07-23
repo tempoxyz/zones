@@ -7,7 +7,7 @@ use revm::precompile::PrecompileResult;
 use tempo_precompiles::{storage::StorageCtx, test_util::TIP20Setup};
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::{
-    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_ROLE_SLOT, PORTAL_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT,
     TEMPO_STATE_ADDRESS,
 };
 
@@ -22,6 +22,7 @@ use crate::{
 
 const GAS: u64 = 10_000_000;
 const ANCHOR: u64 = 42;
+const DEFAULT_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
 const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
@@ -58,9 +59,9 @@ impl Harness {
         );
         l1.insert(
             PORTAL,
-            PORTAL_TEMPO_GAS_RATE_SLOT.into(),
+            PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
             ANCHOR,
-            U256::ZERO,
+            U256::from(DEFAULT_MAX_TEMPO_GAS_RATE),
         );
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -169,14 +170,14 @@ impl Harness {
         self.call(ALICE, call.abi_encode())
     }
 
-    fn set_gas_rate(&self, rate: u128) -> eyre::Result<()> {
-        self.l1.insert(
-            PORTAL,
-            PORTAL_TEMPO_GAS_RATE_SLOT.into(),
-            ANCHOR,
-            U256::from(rate),
-        );
-        Ok(())
+    fn set_gas_rate(&mut self, rate: u128) -> PrecompileResult {
+        self.call(
+            SEQUENCER,
+            ZoneOutboxAbi::setTempoGasRateCall {
+                _tempoGasRate: rate,
+            }
+            .abi_encode(),
+        )
     }
 
     fn set_max_withdrawals(&mut self, max: u32) -> PrecompileResult {
@@ -187,6 +188,15 @@ impl Harness {
             }
             .abi_encode(),
         )
+    }
+
+    fn set_max_tempo_gas_rate(&self, max: u128) {
+        self.l1.insert(
+            PORTAL,
+            PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
+            ANCHOR,
+            U256::from(max),
+        );
     }
 
     fn set_modes(&self, access_enforced: bool, gateway_enforced: bool) {
@@ -284,9 +294,14 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
     assert_eq!(
         harness.l1.storage_requests(),
         vec![
+            (
+                PORTAL,
+                keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
+                ANCHOR
+            ),
+            (PORTAL, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ANCHOR),
             (PORTAL, portal_token_config_slot(harness.token), ANCHOR),
             (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
-            (PORTAL, PORTAL_TEMPO_GAS_RATE_SLOT, ANCHOR),
         ]
     );
     Ok(())
@@ -534,6 +549,33 @@ fn fee_rate_and_gas_limit_validation_match_reference() -> eyre::Result<()> {
         ),
         ZoneOutboxError::gas_limit_too_high(),
     );
+    assert_revert(
+        harness.set_gas_rate(DEFAULT_MAX_TEMPO_GAS_RATE + 1),
+        ZoneOutboxError::gas_fee_rate_too_high(),
+    );
+    harness.set_max_tempo_gas_rate(5);
+    assert_revert(
+        harness.set_gas_rate(6),
+        ZoneOutboxError::gas_fee_rate_too_high(),
+    );
+    harness.set_gas_rate(5)?;
+    harness.set_max_tempo_gas_rate(0);
+    assert_revert(
+        harness.set_gas_rate(1),
+        ZoneOutboxError::gas_fee_rate_too_high(),
+    );
+    harness.set_gas_rate(0)?;
+    Ok(())
+}
+
+#[test]
+fn setting_tempo_gas_rate_requires_a_sequencer() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let result = harness.call(
+        ALICE,
+        ZoneOutboxAbi::setTempoGasRateCall { _tempoGasRate: 1 }.abi_encode(),
+    );
+    assert_revert(result, ZoneOutboxError::only_sequencer());
     Ok(())
 }
 

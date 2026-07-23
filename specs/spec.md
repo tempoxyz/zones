@@ -210,12 +210,13 @@ The following table lists every privileged action and the role authorized to inv
 | `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
 | `setSequencerSet(sequencers, threshold)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setMaxTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer with a threshold certificate** |
 | `processWithdrawals(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setTempoGasRate(rate)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `setMaxWithdrawalsPerBlock(limit)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | `finalizeWithdrawalBatch(...)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** or zone system caller (`address(0)`) |
 | Block production / `beneficiary` | zone | **sequencer** |
@@ -223,7 +224,7 @@ The following table lists every privileged action and the role authorized to inv
 Rationale notes:
 
 - **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
-- **Gas rates and bounce-back gas are admin-controlled** because they determine fees charged to users.
+- **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
 - **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key.
 - **Zone-side system calls** to `ZoneOutbox` may use `msg.sender == address(0)` so the block builder can inject protocol system transactions. Ordinary user transactions must come from the registered sequencer address for these calls.
 - **Withdrawal processing is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
@@ -299,7 +300,7 @@ Each zone has five system contracts deployed at genesis at fixed addresses:
 | [`TempoState`](#itempostate) | `0x1c00...0000` | Stores the finalized Tempo checkpoint and provides storage read access to Tempo contracts. |
 | [`ZoneInbox`](#izoneinbox) | `0x1c00...0001` | Advances the zone's view of Tempo and processes incoming deposits. Sole mint authority. |
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
-| [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads sequencer membership, token configuration, enforcement modes, roles, and `tempoGasRate` from Tempo via `TempoState`. |
+| [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
 `ZoneConfig` reads the sequencer address, token registry, both enforcement modes, and account roles from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
@@ -331,14 +332,15 @@ The portal maintains a `TokenConfig` per token with an `enabled` flag and a conf
 
 ### Gas Rate Configuration
 
-The admin configures both gas rates and bounce-back gas on the Tempo portal. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
+The admin configures Tempo-side deposit and bounce-back fees, while sequencers configure the zone-side withdrawal rate. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
 
 | Rate | Set via | Used for |
 |------|---------|----------|
 | `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
-| `tempoGasRate` | `ZonePortal.setTempoGasRate()` | Withdrawal fee reserve: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
+| `maxTempoGasRate` | `ZonePortal.setMaxTempoGasRate()` | Admin ceiling for the sequencer-controlled withdrawal gas rate |
+| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fee reserve: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
-Both rates live on `ZonePortal`. `zoneGasRate` is read directly at deposit time. The zone-side `ZoneOutbox` reads `tempoGasRate` from finalized Tempo state at withdrawal-request time. Each fee is fixed when the corresponding request is accepted, so in-flight rate changes never retroactively raise the fee for already-queued work.
+`zoneGasRate` and `maxTempoGasRate` live on `ZonePortal` on Tempo. `tempoGasRate` lives on the zone-side `ZoneOutbox`; the sequencer may update it only to a value less than or equal to the finalized portal maximum. The outbox reads `tempoGasRate` at withdrawal-request time. Deposit and withdrawal fees are snapshotted onto their queued entries, so in-flight rate changes never retroactively raise the fee on already-queued items.
 
 Deposit bounce-backs do not use `tempoGasRate`. Their fee is derived from the admin-configured `bouncebackGas`, Tempo `block.basefee`, and `TEMPO_BASE_FEE_SCALE (1e12)`. All rates are denominated in token units per gas unit and fees are paid in the same token being deposited or withdrawn. Tempo-side deposit and bounce-back fees are paid to the portal admin; the protocol does not distribute them among sequencers.
 
@@ -650,7 +652,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 
 `WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional Tempo callback gas. `gasLimit` must be at most `MAX_WITHDRAWAL_GAS_LIMIT` (10,000,000), which keeps the outer `processWithdrawals` transaction below the Tempo L1 block gas limit after portal overhead is added. For simple withdrawals with no callback, use `gasLimit = 0`. The fee is charged in the same token being withdrawn and burned with the withdrawal amount on the zone. It is not included in the cross-chain `Withdrawal` data and the portal does not transfer it from escrow. On success, `amount` goes to the recipient. Failed plain transfers and callbacks re-deposit `amount` using `fallbackNonce`.
 
-`tempoGasRate` lives on `ZonePortal` (see [Gas Rate Configuration](#gas-rate-configuration)). The outbox reads it from finalized Tempo state and charges the resulting fee when the withdrawal request is accepted.
+`tempoGasRate` lives on the zone-side `ZoneOutbox` (see [Gas Rate Configuration](#gas-rate-configuration)). The outbox reads it at request time and snapshots it onto the queued withdrawal.
 
 ### Withdrawal Batching
 
@@ -1740,7 +1742,7 @@ interface IZonePortal {
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
-    event TempoGasRateUpdated(uint128 tempoGasRate);
+    event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
@@ -1853,8 +1855,8 @@ interface IZonePortal {
 
     function setZoneGasRate(uint128 _zoneGasRate) external;
     function zoneGasRate() external view returns (uint128);
-    function setTempoGasRate(uint128 _tempoGasRate) external;
-    function tempoGasRate() external view returns (uint128);
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external;
+    function maxTempoGasRate() external view returns (uint128);
 
     // Encryption keys
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
@@ -2007,11 +2009,13 @@ interface IZoneOutbox {
         uint128 amount, uint128 fee, bytes32 memo, uint64 gasLimit,
         uint64 fallbackNonce, bytes data, bytes revealTo
     );
+    event TempoGasRateUpdated(uint128 tempoGasRate);
     event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
     error InvalidFallbackRecipient();
     error CallbackDataTooLarge();
+    error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error TransferFailed();
     error OnlySequencer();
@@ -2032,10 +2036,11 @@ interface IZoneOutbox {
     function pendingWithdrawalsCount() external view returns (uint256);
     function maxWithdrawalsPerBlock() external view returns (uint32);
 
+    function setTempoGasRate(uint128 _tempoGasRate) external;
     function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
     /// @notice Compute the withdrawal fee for the current Tempo gas rate. Reads
-    ///         portal `tempoGasRate` through ZoneConfig; requestWithdrawal charges the
-    ///         resulting fee when it accepts the request.
+    ///         zone-side `tempoGasRate` and snapshots it onto the queued withdrawal
+    ///         at request time.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     function requestWithdrawal(
@@ -2072,11 +2077,12 @@ interface IZoneConfig {
     function isGatewayOpen() external view returns (bool);
     function isAllowedAccount(address account) external view returns (bool);
     function isZoneGateway(address gateway) external view returns (bool);
+    function maxTempoGasRate() external view returns (uint128);
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 }
 ```
 
-Reads sequencer membership, the token registry, enforcement modes, account membership, gateway membership, and the encryption key from the portal on Tempo via `TempoState` storage reads.
+Reads sequencer membership, the token registry, enforcement modes, account membership, gateway membership, the withdrawal gas-rate ceiling, and the encryption key from the portal on Tempo via `TempoState` storage reads.
 
 ### TIP-403 Registry
 

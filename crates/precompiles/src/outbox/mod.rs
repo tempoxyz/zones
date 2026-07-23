@@ -20,7 +20,7 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT,
-    PORTAL_ROLE_SLOT, PORTAL_TEMPO_GAS_RATE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -34,6 +34,7 @@ const WITHDRAWAL_BASE_GAS: u64 = 50_000;
 
 #[contract(addr = ZONE_OUTBOX_ADDRESS)]
 pub struct ZoneOutbox {
+    tempo_gas_rate: u128,
     next_withdrawal_index: u64,
     withdrawal_queue_hash: B256,
     withdrawal_batch_index: u64,
@@ -117,29 +118,15 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn tempo_gas_rate<P: L1StorageReader>(&self, l1: &L1State<P>) -> ZoneResult<u128> {
-        Ok(self
-            .read_portal_slot(l1, PORTAL_TEMPO_GAS_RATE_SLOT)?
-            .to::<u128>())
-    }
-
-    fn calculate_fee_unchecked<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        gas_limit: u64,
-    ) -> ZoneResult<u128> {
+    fn calculate_fee_unchecked(&self, gas_limit: u64) -> TempoResult<u128> {
         let gas = u128::from(WITHDRAWAL_BASE_GAS) + u128::from(gas_limit);
-        gas.checked_mul(self.tempo_gas_rate(l1)?)
-            .ok_or_else(|| TempoPrecompileError::under_overflow().into())
+        gas.checked_mul(self.tempo_gas_rate.read()?)
+            .ok_or_else(TempoPrecompileError::under_overflow)
     }
 
-    fn calculate_withdrawal_fee<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        gas_limit: u64,
-    ) -> ZoneResult<u128> {
+    fn calculate_withdrawal_fee(&self, gas_limit: u64) -> ZoneResult<u128> {
         validate_gas_limit(gas_limit)?;
-        self.calculate_fee_unchecked(l1, gas_limit)
+        self.calculate_fee_unchecked(gas_limit).map_err(Into::into)
     }
 
     fn enforce_withdrawal_block_cap(&mut self) -> ZoneResult<()> {
@@ -211,7 +198,9 @@ impl ZoneOutbox {
             return Err(ZoneOutboxError::invalid_reveal_to().into());
         }
 
-        let fee = self.calculate_fee_unchecked(l1, call.gasLimit)?;
+        let fee = self.calculate_fee_unchecked(call.gasLimit)?;
+        // FIXME: Transfer the fee to the sequencer's fee recipient instead of burning it, and
+        // require that fee recipient to be an allowed account.
         if caller == fee_payer {
             let total = call
                 .amount
@@ -336,6 +325,24 @@ impl ZoneOutbox {
             next_batch_index,
         ))?;
         Ok(withdrawal_queue_hash)
+    }
+
+    fn set_tempo_gas_rate<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        call: IZoneOutbox::setTempoGasRateCall,
+    ) -> ZoneResult<()> {
+        self.ensure_sequencer(l1, caller)?;
+        let max_tempo_gas_rate = self
+            .read_portal_slot(l1, PORTAL_MAX_TEMPO_GAS_RATE_SLOT)?
+            .to::<u128>();
+        if call._tempoGasRate > max_tempo_gas_rate {
+            return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
+        }
+        self.tempo_gas_rate.write(call._tempoGasRate)?;
+        self.emit_event(ZoneOutboxEvent::tempo_gas_rate_updated(call._tempoGasRate))?;
+        Ok(())
     }
 
     fn set_max_withdrawals_per_block<P: L1StorageReader>(

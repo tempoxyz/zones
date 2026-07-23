@@ -23,9 +23,9 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_ENFORCEMENT_MODES_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_ROLE_SLOT,
-    PORTAL_TEMPO_GAS_RATE_SLOT,
     Role,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
@@ -858,9 +858,6 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setZoneGasRate(1);
-
-        vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setTempoGasRate(1);
 
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setBouncebackGas(1);
@@ -3988,7 +3985,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 19: isSequencer mapping
     ///        slot 20: role mapping
     ///        slot 21: account/gateway enforcement booleans [packed]
-    ///        slot 22: tempoGasRate (uint128)
+    ///        slot 22: maxTempoGasRate (uint128)
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -4095,11 +4092,11 @@ contract ZonePortalTest is BaseTest {
         bytes32 modeSlot = vm.load(address(portal), PORTAL_ENFORCEMENT_MODES_SLOT);
         assertEq(uint16(uint256(modeSlot)), 0x0101, "slot 21: enforcement modes mismatch");
 
-        uint128 testTempoGasRate = 44;
-        _setTempoGasRate(testTempoGasRate);
-        bytes32 tempoGasRateSlot = vm.load(address(portal), PORTAL_TEMPO_GAS_RATE_SLOT);
+        bytes32 maxTempoGasRateSlot = vm.load(address(portal), PORTAL_MAX_TEMPO_GAS_RATE_SLOT);
         assertEq(
-            uint128(uint256(tempoGasRateSlot)), testTempoGasRate, "slot 22: tempoGasRate mismatch"
+            uint128(uint256(maxTempoGasRateSlot)),
+            portal.maxTempoGasRate(),
+            "slot 22: maxTempoGasRate mismatch"
         );
     }
 
@@ -4277,29 +4274,32 @@ contract ZonePortalTest is BaseTest {
         portal.setZoneGasRate(1);
     }
 
-    /// @notice Admin updates the Tempo gas rate stored on the portal.
-    function test_setTempoGasRate_updatesRateAndEmits() public {
-        uint128 newRate = 42;
-
-        vm.expectEmit(false, false, false, true, address(portal));
-        emit IZonePortal.TempoGasRateUpdated(newRate);
-        _setTempoGasRate(newRate);
-
-        assertEq(portal.tempoGasRate(), newRate);
+    function test_maxTempoGasRate_defaultsToProtocolMaximum() public view {
+        assertEq(portal.maxTempoGasRate(), portal.MAX_GAS_FEE_RATE());
     }
 
-    function test_setTempoGasRate_revertsWhenTooHigh() public {
+    function test_setMaxTempoGasRate_updatesMaximumAndEmits() public {
+        uint128 newMaximum = 42;
+
+        vm.expectEmit(false, false, false, true, address(portal));
+        emit IZonePortal.MaxTempoGasRateUpdated(newMaximum);
+        _setMaxTempoGasRate(newMaximum);
+
+        assertEq(portal.maxTempoGasRate(), newMaximum);
+    }
+
+    function test_setMaxTempoGasRate_revertsWhenTooHigh() public {
         uint128 tooHigh = portal.MAX_GAS_FEE_RATE() + 1;
 
         vm.prank(admin);
         vm.expectRevert(IZonePortal.GasFeeRateTooHigh.selector);
-        portal.setTempoGasRate(tooHigh);
+        portal.setMaxTempoGasRate(tooHigh);
     }
 
-    function test_setTempoGasRate_revertsIfNotAdmin() public {
+    function test_setMaxTempoGasRate_revertsIfNotAdmin() public {
         vm.prank(sequencer);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setTempoGasRate(1);
+        portal.setMaxTempoGasRate(1);
     }
 
     /// @notice Admin updates the gas amount used for bounce-back fees.
@@ -4559,9 +4559,9 @@ contract ZonePortalTest is BaseTest {
         portal.setZoneGasRate(rate);
     }
 
-    function _setTempoGasRate(uint128 rate) internal {
+    function _setMaxTempoGasRate(uint128 rate) internal {
         vm.prank(admin);
-        portal.setTempoGasRate(rate);
+        portal.setMaxTempoGasRate(rate);
     }
 
     function _setBouncebackGas(uint64 gasAmount) internal {

@@ -43,6 +43,7 @@ crate::sol! {
         );
 
         event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
+        event TempoGasRateUpdated(uint128 tempoGasRate);
         event MaxWithdrawalsPerBlockUpdated(uint32 maxWithdrawalsPerBlock);
 
         // -- Errors --
@@ -55,6 +56,7 @@ crate::sol! {
         error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
         error InvalidFallbackRecipient();
         error CallbackDataTooLarge();
+        error GasFeeRateTooHigh();
         error TransferFailed();
         error InvalidBlockNumber();
         error TooManyWithdrawalsThisBlock();
@@ -83,6 +85,7 @@ crate::sol! {
 
         // -- State-changing functions --
 
+        function setTempoGasRate(uint128 _tempoGasRate) external;
         function setMaxWithdrawalsPerBlock(uint32 _maxWithdrawalsPerBlock) external;
         function requestWithdrawal(
             address token,

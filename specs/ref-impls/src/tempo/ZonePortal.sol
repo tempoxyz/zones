@@ -160,13 +160,12 @@ contract ZonePortal is IZonePortal {
     bool internal _isAccessEnforced;
     bool internal _isGatewayEnforced;
 
-    /// @dev Reserve the remainder of slot 21 so the cross-domain fee rate has a dedicated slot.
+    /// @dev Reserve the remainder of slot 21 so the cross-domain fee cap has a dedicated slot.
     uint240 private _enforcementModesPadding;
 
-    /// @notice Tempo gas rate (zone token units per gas unit on Tempo).
-    /// @dev The zone-side outbox reads this value from finalized Tempo state.
-    ///      Withdrawal fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate.
-    uint128 public tempoGasRate;
+    /// @notice Maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
+    /// @dev Defaults to MAX_GAS_FEE_RATE and is read from finalized Tempo state by ZoneConfig.
+    uint128 public maxTempoGasRate;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -199,6 +198,7 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         _isAccessEnforced = accessEnforced;
         _isGatewayEnforced = gatewayEnforced;
+        maxTempoGasRate = MAX_GAS_FEE_RATE;
         rpcUrl = _rpcUrl;
         emit EnforcementModesUpdated(accessEnforced, gatewayEnforced);
 
@@ -327,14 +327,11 @@ contract ZonePortal is IZonePortal {
         emit ZoneGasRateUpdated(_zoneGasRate);
     }
 
-    /// @notice Set Tempo gas rate. Only callable by admin.
-    /// @dev The zone-side outbox reads the finalized value and charges the resulting fee when a
-    ///      withdrawal is requested.
-    /// @param _tempoGasRate Zone token units per gas unit on Tempo
-    function setTempoGasRate(uint128 _tempoGasRate) external onlyAdmin {
-        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
-        tempoGasRate = _tempoGasRate;
-        emit TempoGasRateUpdated(_tempoGasRate);
+    /// @notice Set the maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external onlyAdmin {
+        if (_maxTempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        maxTempoGasRate = _maxTempoGasRate;
+        emit MaxTempoGasRateUpdated(_maxTempoGasRate);
     }
 
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.

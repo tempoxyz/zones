@@ -54,6 +54,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Zone configuration (reads sequencer from L1)
     IZoneConfig public immutable config;
 
+    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
+    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
+    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    uint128 public tempoGasRate;
+
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
@@ -93,6 +98,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     error InvalidFallbackRecipient();
     error CallbackDataTooLarge();
+    error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
     error InvalidBlockNumber();
@@ -117,9 +123,17 @@ contract ZoneOutbox is IZoneOutbox {
                             FEE CONFIGURATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Read the Tempo gas rate from finalized portal state.
-    function tempoGasRate() public view returns (uint128) {
-        return config.tempoGasRate();
+    /// @notice Set Tempo gas rate. Only callable by sequencer.
+    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
+    ///      If actual Tempo gas is higher, sequencer covers the difference.
+    ///      If actual Tempo gas is lower, sequencer keeps the surplus.
+    ///      The portal admin bounds this rate through maxTempoGasRate.
+    /// @param _tempoGasRate Zone token units per gas unit on Tempo
+    function setTempoGasRate(uint128 _tempoGasRate) external {
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
+        if (_tempoGasRate > config.maxTempoGasRate()) revert GasFeeRateTooHigh();
+        tempoGasRate = _tempoGasRate;
+        emit TempoGasRateUpdated(_tempoGasRate);
     }
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
@@ -280,8 +294,9 @@ contract ZoneOutbox is IZoneOutbox {
             revert TransferFailed();
         }
 
-        // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
-        // Amount goes to recipient, fee goes to sequencer
+        // FIXME: Transfer the fee to the sequencer's fee recipient instead of burning it, and
+        // require that fee recipient to be an allowed account.
+        // Burn the tokens (they'll be released on Tempo when withdrawal is processed).
         zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
@@ -485,7 +500,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param gasLimit L1 callback gas limit included in the fee
     /// @return fee The total fee in zone token units
     function _calculateWithdrawalFee(uint64 gasLimit) internal view returns (uint128) {
-        return uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate();
+        return uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
     }
 
     function _validateRevealTo(bytes memory revealTo) internal view {

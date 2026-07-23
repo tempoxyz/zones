@@ -3,12 +3,11 @@ pragma solidity ^0.8.13;
 
 import {
     IZoneConfig,
-    IZonePortal,
     PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_ROLE_SLOT,
-    PORTAL_TEMPO_GAS_RATE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT
 } from "../../src/interfaces/IZone.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
@@ -43,7 +42,7 @@ contract ZoneConfigTest is BaseTest {
 
         _syncSequencer(sequencer);
         _syncPortalSlot(PORTAL_ACCESS_MODE_SLOT);
-        _syncPortalSlot(PORTAL_TEMPO_GAS_RATE_SLOT);
+        _syncPortalSlot(PORTAL_MAX_TEMPO_GAS_RATE_SLOT);
         _syncTokenConfig(address(pathUSD));
         _syncAllowedAccount(alice);
         _syncZoneGateway(address(zoneGateway));
@@ -116,13 +115,13 @@ contract ZoneConfigTest is BaseTest {
         assertFalse(config.isEnabledToken(address(token1)));
     }
 
-    function test_tempoGasRate_returnsPortalRate() public {
+    function test_maxTempoGasRate_returnsPortalMaximum() public {
         uint128 rate = 42;
         vm.prank(admin);
-        portal.setTempoGasRate(rate);
-        _syncPortalSlot(PORTAL_TEMPO_GAS_RATE_SLOT);
+        portal.setMaxTempoGasRate(rate);
+        _syncPortalSlot(PORTAL_MAX_TEMPO_GAS_RATE_SLOT);
 
-        assertEq(config.tempoGasRate(), rate);
+        assertEq(config.maxTempoGasRate(), rate);
     }
 
     function test_closedLoopMembershipAndGatewayAreIndependent() public view {

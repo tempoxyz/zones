@@ -142,7 +142,7 @@ crate::sol! {
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
         event ZoneGasRateUpdated(uint128 zoneGasRate);
-        event TempoGasRateUpdated(uint128 tempoGasRate);
+        event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
         event BouncebackGasUpdated(uint64 bouncebackGas);
 
         event AdminTransferStarted(
@@ -236,7 +236,7 @@ crate::sol! {
         function resumeDeposits(address token) external;
 
         function setZoneGasRate(uint128 newZoneGasRate) external;
-        function setTempoGasRate(uint128 newTempoGasRate) external;
+        function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
         function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
@@ -267,7 +267,7 @@ crate::sol! {
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
-        function tempoGasRate() external view returns (uint128);
+        function maxTempoGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);

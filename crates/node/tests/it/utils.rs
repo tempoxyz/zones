@@ -55,7 +55,8 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ZONE_FACTORY_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -3999,6 +4000,7 @@ impl L1Fixture {
             keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
+        let max_tempo_gas_rate = B256::from(U256::from(1_000_000_000_000_000_000_u128));
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -4027,6 +4029,14 @@ impl L1Fixture {
             // Synthetic fixtures use open account and gateway modes so their tests do not need
             // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
             cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            // Permit the protocol-wide maximum in synthetic fixtures. Production values are
+            // imported from the finalized ZonePortal storage slot.
+            cache.set(
+                portal_address,
+                PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+                block,
+                max_tempo_gas_rate,
+            );
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy

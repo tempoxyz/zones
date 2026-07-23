@@ -8,6 +8,6 @@ crate::sol! {
         function isAllowedAccount(address account) external view returns (bool);
         function isZoneGateway(address gateway) external view returns (bool);
         function isEnabledToken(address token) external view returns (bool);
-        function tempoGasRate() external view returns (uint128);
+        function maxTempoGasRate() external view returns (uint128);
     }
 }

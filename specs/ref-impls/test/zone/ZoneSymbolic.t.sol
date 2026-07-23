@@ -51,11 +51,11 @@ contract ZonePortalSymbolic is ZonePortalTest {
         } catch { }
     }
 
-    /// @notice The portal-owned Tempo gas rate is subject to the same cap as zoneGasRate.
-    function check_tempoGasRateAlwaysWithinCap(uint128 rate) external {
+    /// @notice The admin-configured sequencer ceiling never exceeds the protocol maximum.
+    function check_maxTempoGasRateAlwaysWithinProtocolCap(uint128 rate) external {
         vm.prank(admin);
-        try portal.setTempoGasRate(rate) {
-            assertLe(uint256(portal.tempoGasRate()), uint256(portal.MAX_GAS_FEE_RATE()));
+        try portal.setMaxTempoGasRate(rate) {
+            assertLe(uint256(portal.maxTempoGasRate()), uint256(portal.MAX_GAS_FEE_RATE()));
         } catch { }
     }
 
@@ -195,7 +195,7 @@ contract ZoneOutboxSymbolic is ZoneOutboxTest {
     ///         overflows uint128, so `calculateWithdrawalFee` cannot revert. Verifies the
     ///         overflow-safety invariant the contract documents, explored over all 2^64 gas
     ///         limits.
-    /// @dev The rate is pinned to its maximum (MAX_GAS_FEE_RATE) because the fee is monotonic in
+    /// @dev The rate is pinned to its admin-configured maximum because the fee is monotonic in
     ///      the rate, so the cap is the worst case for overflow: proving no overflow here proves
     ///      it for every rate <= cap. Pinning the rate also keeps the multiplication linear
     ///      (constant * symbolic); leaving both operands symbolic hits the engine's nonlinear
@@ -203,11 +203,21 @@ contract ZoneOutboxSymbolic is ZoneOutboxTest {
     function check_withdrawalFeeNeverOverflows(uint64 gasLimit) external {
         vm.assume(gasLimit <= outbox.MAX_WITHDRAWAL_GAS_LIMIT());
 
-        uint128 cap = MAX_GAS_FEE_RATE;
-        _setTempoGasRate(cap);
+        uint128 cap = config.maxTempoGasRate();
+        vm.prank(sequencer);
+        outbox.setTempoGasRate(cap);
 
         uint128 fee = outbox.calculateWithdrawalFee(gasLimit);
         assertLe(uint256(fee), uint256(type(uint128).max));
+    }
+
+    /// @notice The stored Tempo gas rate never exceeds the portal-admin ceiling whenever
+    ///         `setTempoGasRate` succeeds, for any input.
+    function check_tempoGasRateAlwaysWithinCap(uint128 rate) external {
+        vm.prank(sequencer);
+        try outbox.setTempoGasRate(rate) {
+            assertLe(uint256(outbox.tempoGasRate()), uint256(config.maxTempoGasRate()));
+        } catch { }
     }
 
     /// @notice `calculateWithdrawalFee` rejects any gas limit above MAX_WITHDRAWAL_GAS_LIMIT,

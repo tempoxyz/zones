@@ -32,7 +32,7 @@ impl ZoneOutbox {
         dispatch!(calldata, |call| match call {
             IZoneOutbox::IZoneOutboxCalls {
                 config(_) => metadata::<IZoneOutbox::configCall>(|| Ok(ZONE_CONFIG_ADDRESS)),
-                tempoGasRate(_) => typed_metadata::<IZoneOutbox::tempoGasRateCall, _>(|| self.tempo_gas_rate(l1)),
+                tempoGasRate(_) => metadata::<IZoneOutbox::tempoGasRateCall>(|| self.tempo_gas_rate.read()),
                 maxWithdrawalsPerBlock(_) => metadata::<IZoneOutbox::maxWithdrawalsPerBlockCall>(|| self.max_withdrawals_per_block.read()),
                 lastBatch(_) => metadata::<IZoneOutbox::lastBatchCall>(|| self.last_batch()),
                 lastFinalizedTimestamp(_) => metadata::<IZoneOutbox::lastFinalizedTimestampCall>(|| self.last_finalized_timestamp.read()),
@@ -44,12 +44,13 @@ impl ZoneOutbox {
                 getPendingWithdrawals(_) => typed_metadata::<IZoneOutbox::getPendingWithdrawalsCall, _>(|| {
                     self.get_pending_withdrawals(l1, msg_sender)
                 }),
-                calculateWithdrawalFee(call) => view(call, |call| self.calculate_withdrawal_fee(l1, call.gasLimit)),
+                calculateWithdrawalFee(call) => view(call, |call| self.calculate_withdrawal_fee(call.gasLimit)),
                 MAX_CALLBACK_DATA_SIZE(_) => metadata::<IZoneOutbox::MAX_CALLBACK_DATA_SIZECall>(|| Ok(U256::from(MAX_CALLBACK_DATA_SIZE))),
                 MAX_WITHDRAWAL_GAS_LIMIT(_) => metadata::<IZoneOutbox::MAX_WITHDRAWAL_GAS_LIMITCall>(|| Ok(MAX_WITHDRAWAL_GAS_LIMIT)),
                 WITHDRAWAL_BASE_GAS(_) => metadata::<IZoneOutbox::WITHDRAWAL_BASE_GASCall>(|| Ok(WITHDRAWAL_BASE_GAS)),
                 REVEAL_TO_KEY_LENGTH(_) => metadata::<IZoneOutbox::REVEAL_TO_KEY_LENGTHCall>(|| Ok(U256::from(COMPRESSED_PUBLIC_KEY_SIZE))),
                 AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH(_) => metadata::<IZoneOutbox::AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTHCall>(|| Ok(U256::from(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE))),
+                setTempoGasRate(call) => mutate_void(call, msg_sender, |sender, call| self.set_tempo_gas_rate(l1, sender, call)),
                 setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(l1, sender, call)),
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| {
                     self.request_withdrawal(l1, sender, fee_payer, tx_hash, call)
