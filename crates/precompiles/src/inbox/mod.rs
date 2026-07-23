@@ -200,10 +200,6 @@ impl ZoneInbox {
         current_hash: B256,
         deposit: Deposit,
     ) -> ZoneResult<()> {
-        if deposit.tempoRefundRecipient.is_zero() {
-            return self.process_withdrawal_bounce_back(outbox, deposit);
-        }
-
         if self.try_mint(deposit.token, deposit.to, deposit.amount)? {
             self.emit_event(deposit.processed_event(current_hash))?;
         } else {
@@ -257,30 +253,6 @@ impl ZoneInbox {
             },
         )?;
         self.emit_event(deposit.failed_event(current_hash))?;
-        Ok(())
-    }
-
-    fn process_withdrawal_bounce_back(
-        &mut self,
-        outbox: &mut ZoneOutbox,
-        deposit: Deposit,
-    ) -> ZoneResult<()> {
-        let fallback_nonce = u64::from_be_bytes(
-            deposit.to.as_slice()[12..]
-                .try_into()
-                .expect("address suffix is eight bytes"),
-        );
-        let recipient = outbox.consume_fallback_recipient(ZONE_INBOX_ADDRESS, fallback_nonce)?;
-        if self.try_mint(deposit.token, recipient, deposit.amount)? {
-            self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
-        } else {
-            let previous = self.refunds[deposit.token][recipient].read()?;
-            let Some(refund) = previous.checked_add(deposit.amount) else {
-                return Err(TempoPrecompileError::under_overflow().into());
-            };
-            self.refunds[deposit.token][recipient].write(refund)?;
-            self.emit_event(deposit.withdrawal_bounce_back_pending_event(recipient))?;
-        }
         Ok(())
     }
 
