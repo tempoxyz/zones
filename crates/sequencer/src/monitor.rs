@@ -40,8 +40,8 @@ use crate::{
     attestation::AttestationStore,
     rpc::rpc_connection_config,
     settlement::{
-        BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_finalized_batch,
-        fetch_finalized_batch_boundaries, log_query_ranges,
+        BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog, ZoneBlockSnapshot,
+        fetch_finalized_batch, fetch_finalized_batch_boundaries, log_query_ranges,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -445,20 +445,21 @@ impl ZoneMonitor {
             boundary_count = boundaries.len(),
             from,
             to,
-            first_boundary = boundaries[0],
-            last_boundary = boundaries[boundaries.len() - 1],
+            first_boundary = boundaries[0].block_number,
+            last_boundary = boundaries[boundaries.len() - 1].block_number,
             "Submitting finalized zone batches"
         );
 
         for (idx, boundary) in boundaries.into_iter().enumerate() {
-            if boundary <= self.last_submitted_zone_block {
+            let boundary_block = boundary.block_number;
+            if boundary_block <= self.last_submitted_zone_block {
                 continue;
             }
             let range_start = self.last_submitted_zone_block + 1;
             info!(
                 batch = idx + 1,
                 zone_from = range_start,
-                zone_to = boundary,
+                zone_to = boundary_block,
                 "Submitting finalized zone batch"
             );
             let before_submit = self.last_submitted_zone_block;
@@ -466,7 +467,7 @@ impl ZoneMonitor {
             if self.last_submitted_zone_block <= before_submit {
                 warn!(
                     before_submit,
-                    boundary,
+                    boundary = boundary_block,
                     current_last_submitted = self.last_submitted_zone_block,
                     "Batch submission did not advance local state; stopping boundary walk"
                 );
@@ -478,8 +479,14 @@ impl ZoneMonitor {
     }
 
     /// Process one boundary-aligned finalized batch.
-    async fn process_finalized_batch(&mut self, from: u64, to: u64) -> Result<()> {
-        let finalized_batch = fetch_finalized_batch(&self.outbox, &self.provider, from, to).await?;
+    async fn process_finalized_batch(
+        &mut self,
+        from: u64,
+        boundary: FinalizedBatchLog,
+    ) -> Result<()> {
+        let to = boundary.block_number;
+        let finalized_batch =
+            fetch_finalized_batch(&self.outbox, &self.provider, from, &boundary).await?;
         let end_state = self.fetch_block_snapshot(to).await?;
 
         let expected_l2_index = self
@@ -516,6 +523,7 @@ impl ZoneMonitor {
             prev_deposit_number: self.prev_processed_deposit_number,
             next_deposit_number: end_state.processed_deposit_number,
             withdrawal_queue_hash: finalized_batch.finalized_hash,
+            withdrawal_batch_index: expected_l2_index,
         };
 
         self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals)
@@ -1230,6 +1238,7 @@ mod tests {
             prev_deposit_number: 0,
             next_deposit_number: 0,
             withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 8,
         };
 
         monitor

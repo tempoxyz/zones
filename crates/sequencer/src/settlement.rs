@@ -151,6 +151,8 @@ pub struct BatchData {
     pub next_deposit_number: u64,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
+    /// L2 withdrawal batch index validated against the portal before submission.
+    pub withdrawal_batch_index: u64,
 }
 
 struct SettlementAttestationInput<'a> {
@@ -372,6 +374,7 @@ impl BatchSubmitter {
         prev_block_hash = %batch.prev_block_hash,
         next_block_hash = %batch.next_block_hash,
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
+        withdrawal_batch_index = batch.withdrawal_batch_index,
     ))]
     pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
         if !batch.withdrawal_queue_hash.is_zero() {
@@ -559,13 +562,6 @@ impl BatchSubmitter {
             "local sequencer signer {} is not active in the portal sequencer set",
             signer.address()
         );
-        let withdrawal_batch_index = self
-            .portal
-            .withdrawalBatchIndex()
-            .call()
-            .await?
-            .checked_add(1)
-            .ok_or_else(|| eyre::eyre!("portal withdrawal batch index overflow"))?;
         let verifier = self.portal.verifier().call().await?;
         let chain_id = self.l1_provider.get_chain_id().await?;
 
@@ -579,7 +575,7 @@ impl BatchSubmitter {
             zoneId: zone_id,
             sequencerSetVersion: sequencer_set_version,
             zoneHeight: U256::from(batch.zone_height),
-            withdrawalBatchIndex: U256::from(withdrawal_batch_index),
+            withdrawalBatchIndex: U256::from(batch.withdrawal_batch_index),
             verifier,
             tempoBlockNumber: batch.tempo_block_number,
             anchorBlockNumber: anchor_block_number,
@@ -1196,8 +1192,8 @@ struct RequestedWithdrawalLog {
 }
 
 #[derive(Debug, Clone)]
-struct FinalizedBatchLog {
-    block_number: u64,
+pub(crate) struct FinalizedBatchLog {
+    pub(crate) block_number: u64,
     tx_index: u64,
     log_index: u64,
     tx_hash: B256,
@@ -1213,74 +1209,38 @@ pub(crate) async fn fetch_finalized_batch_boundaries(
     outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
-) -> Result<Vec<u64>> {
+) -> Result<Vec<FinalizedBatchLog>> {
     if from > to {
         return Ok(Vec::new());
     }
 
-    let mut boundaries: Vec<_> = outbox
-        .BatchFinalized_filter()
-        .from_block(from)
-        .to_block(to)
-        .chunked()
-        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
-        .concurrent(2)
-        .query()
-        .await?
-        .into_iter()
-        .map(|(_, log)| log.block_number.unwrap_or(0))
-        .collect();
-
-    boundaries.sort_unstable();
-    boundaries.dedup();
+    let boundaries = fetch_finalized_batch_logs(outbox, from, to).await?;
+    if let Some(duplicate) = boundaries
+        .windows(2)
+        .find(|pair| pair[0].block_number == pair[1].block_number)
+    {
+        return Err(eyre::eyre!(
+            "zone block {} contains more than one BatchFinalized event",
+            duplicate[0].block_number
+        ));
+    }
     Ok(boundaries)
 }
 
 /// Fetch one finalized L2 withdrawal batch for a range ending at `to`.
 ///
-/// The submitted hash and index come from the batch's `BatchFinalized` event.
-/// Withdrawal structs are reconstructed from `WithdrawalRequested` logs since
-/// the immediately preceding batch boundary so the off-chain processor can
-/// service the portal queue.
+/// The submitted hash and index come from the supplied `BatchFinalized` event.
+/// Withdrawal structs are reconstructed from `WithdrawalRequested` logs in the
+/// supplied boundary-aligned range so the off-chain processor can service the
+/// portal queue.
 pub(crate) async fn fetch_finalized_batch(
     outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
-    to: u64,
+    target: &FinalizedBatchLog,
 ) -> Result<FinalizedBatch> {
-    let mut finalized_batches = fetch_finalized_batch_logs(outbox, from, to).await?;
-
-    if finalized_batches.is_empty() {
-        return Err(eyre::eyre!(
-            "range {from}..={to} does not contain a BatchFinalized boundary"
-        ));
-    }
-
-    finalized_batches.sort_by_key(|batch| (batch.block_number, batch.tx_index, batch.log_index));
-    let target_position = finalized_batches
-        .iter()
-        .rposition(|batch| batch.block_number == to)
-        .ok_or_else(|| {
-            eyre::eyre!("range {from}..={to} does not end on a BatchFinalized boundary")
-        })?;
-
-    if finalized_batches
-        .iter()
-        .filter(|batch| batch.block_number == to)
-        .count()
-        != 1
-    {
-        return Err(eyre::eyre!(
-            "zone block {to} contains more than one BatchFinalized event"
-        ));
-    }
-
-    let target = finalized_batches[target_position].clone();
-    let previous_boundary = finalized_batches[..target_position]
-        .last()
-        .map(|batch| batch.block_number)
-        .unwrap_or(from.saturating_sub(1));
-    let request_from = previous_boundary.saturating_add(1);
+    let to = target.block_number;
+    let request_from = from;
 
     let requests = if request_from <= to {
         fetch_requested_withdrawal_logs(outbox, request_from, to).await?
@@ -1349,7 +1309,12 @@ pub(crate) async fn fetch_slot_withdrawals(
     from: u64,
     to: u64,
 ) -> Result<Vec<abi::Withdrawal>> {
-    Ok(fetch_finalized_batch(outbox, zone_provider, from, to)
+    let boundaries = fetch_finalized_batch_boundaries(outbox, to, to).await?;
+    let target = boundaries
+        .into_iter()
+        .next()
+        .ok_or_else(|| eyre::eyre!("zone block {to} does not contain a BatchFinalized boundary"))?;
+    Ok(fetch_finalized_batch(outbox, zone_provider, from, &target)
         .await?
         .withdrawals)
 }
