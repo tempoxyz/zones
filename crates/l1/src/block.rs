@@ -7,8 +7,6 @@ pub struct L1BlockDeposits {
     pub header: SealedHeader<TempoHeader>,
     /// Portal events extracted from this block.
     pub events: L1PortalEvents,
-    /// TIP-403 policy events extracted from this block's receipts.
-    pub policy_events: Vec<PolicyEvent>,
     /// Deposit queue hash chain value before this block's deposits.
     pub queue_hash_before: B256,
     /// Deposit queue hash chain value after this block's deposits.
@@ -18,15 +16,13 @@ pub struct L1BlockDeposits {
 impl L1BlockDeposits {
     /// Prepare all deposits for the payload builder.
     ///
-    /// Decrypts encrypted deposits, checks TIP-403 policy authorization,
-    /// and ABI-encodes everything into the types the `advanceTempo` call expects.
-    /// The resulting [`PreparedL1Block`] is ready to be passed through payload
-    /// attributes to the builder.
+    /// Decrypts encrypted deposits and ABI-encodes into the types the `advanceTempo` call expects.
+    /// Mint-recipient policy is enforced by upstream TIP-20 after the L1 state is anchored.
+    /// The resulting [`PreparedL1Block`] is ready to be passed via payload attributes to the builder.
     pub async fn prepare(
         self,
         sequencer_key: &k256::SecretKey,
         portal_address: Address,
-        policy_provider: &crate::state::PolicyProvider,
     ) -> eyre::Result<PreparedL1Block> {
         use crate::precompiles::ecies;
 
@@ -44,7 +40,7 @@ impl L1BlockDeposits {
                         sender: d.sender,
                         to: d.to,
                         amount: d.amount,
-                        bouncebackRecipient: d.bounceback_recipient,
+                        tempoRefundRecipient: d.tempo_refund_recipient,
                         memo: d.memo,
                     };
                     queued_deposits.push(abi::QueuedDeposit {
@@ -54,14 +50,14 @@ impl L1BlockDeposits {
                     });
                 }
                 L1Deposit::Encrypted(d) => {
-                    let mut queued = abi::QueuedDeposit {
+                    let queued = abi::QueuedDeposit {
                         depositType: abi::DepositType::Encrypted,
                         depositData: Bytes::from(
                             abi::EncryptedDeposit {
                                 token: d.token,
                                 sender: d.sender,
                                 amount: d.amount,
-                                bouncebackRecipient: d.bounceback_recipient,
+                                tempoRefundRecipient: d.tempo_refund_recipient,
                                 keyIndex: d.key_index,
                                 encrypted: abi::EncryptedDepositPayload {
                                     ephemeralPubkeyX: d.ephemeral_pubkey_x,
@@ -96,41 +92,8 @@ impl L1BlockDeposits {
                             recipient = %dec.to,
                             token = %d.token,
                             amount = %d.amount,
-                            "Decrypted encrypted deposit, checking policy"
+                            "Decrypted encrypted deposit"
                         );
-
-                        // Check TIP-403 policy via the provider (cache-first, RPC fallback).
-                        // Errors are propagated so the engine retries rather than allowing
-                        // unauthorized deposits through.
-                        let authorized = policy_provider
-                            .is_authorized_async(
-                                d.token,
-                                dec.to,
-                                l1_block_number,
-                                crate::state::AuthRole::MintRecipient,
-                            )
-                            .await?;
-
-                        if authorized {
-                            debug!(
-                                target: "zone::engine",
-                                recipient = %dec.to,
-                                token = %d.token,
-                                "Policy authorized encrypted deposit recipient"
-                            );
-                        } else {
-                            warn!(
-                                target: "zone::engine",
-                                sender = %d.sender,
-                                recipient = %dec.to,
-                                token = %d.token,
-                                amount = %d.amount,
-                                "Encrypted deposit recipient unauthorized; queuing deposit bounce-back"
-                            );
-                            queued.rejected = true;
-                            queued_deposits.push(queued);
-                            continue;
-                        }
 
                         let decryption = abi::DecryptionData {
                             sharedSecret: dec.proof.shared_secret,
@@ -221,9 +184,8 @@ impl L1BlockDeposits {
 
 /// An L1 block with deposits fully prepared for the payload builder.
 ///
-/// All ECIES decryption, TIP-403 policy checks, and ABI encoding have been
-/// performed. The builder only needs to RLP-encode the header and assemble
-/// the `advanceTempo` calldata.
+/// All ECIES decryption and ABI encoding have been performed.
+/// The builder only needs to RLP-encode the header and assemble the `advanceTempo` calldata.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreparedL1Block {
     /// The sealed L1 block header.
@@ -231,7 +193,7 @@ pub struct PreparedL1Block {
     /// ABI-encoded queued deposits (regular + encrypted).
     #[serde(skip)]
     pub queued_deposits: Vec<abi::QueuedDeposit>,
-    /// Decryption data for non-rejected encrypted deposits, in order.
+    /// Decryption data for encrypted deposits accepted for on-chain verification, in order.
     #[serde(skip)]
     pub decryptions: Vec<abi::DecryptionData>,
     /// Tokens newly enabled for bridging in this block.

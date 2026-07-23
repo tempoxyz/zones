@@ -397,7 +397,6 @@ mod tests {
         stub!(zone_get_authorization_token_info, _c: crate::auth::AuthContext);
         stub!(zone_get_zone_info, _c: crate::auth::AuthContext);
         stub!(zone_get_encryption_key, _c: crate::auth::AuthContext);
-        stub!(zone_get_deposit_status, _a: u64, _c: crate::auth::AuthContext);
     }
 
     fn test_config() -> PrivateRpcConfig {

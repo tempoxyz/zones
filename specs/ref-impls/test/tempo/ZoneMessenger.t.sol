@@ -3,7 +3,11 @@ pragma solidity ^0.8.13;
 
 import {
     IWithdrawalReceiver,
+    IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
+    Role,
+    ZONE_FACTORY_ADDRESS,
+    ZONE_MESSENGER_ADDRESS,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
@@ -20,8 +24,8 @@ contract MockZoneFactoryForMessenger {
         _zones[zoneId].portal = portal;
     }
 
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
-        return _zones[zoneId];
+    function zones(uint32 id) external view returns (ZoneInfo memory) {
+        return _zones[id];
     }
 
 }
@@ -92,16 +96,22 @@ contract ZoneMessengerTest is BaseTest {
 
     function setUp() public override {
         super.setUp();
-        messengerFactory = new MockZoneFactoryForMessenger();
+        vm.etch(ZONE_FACTORY_ADDRESS, type(MockZoneFactoryForMessenger).runtimeCode);
+        messengerFactory = MockZoneFactoryForMessenger(ZONE_FACTORY_ADDRESS);
         messengerFactory.setPortal(ZONE_ID, portal);
         messengerFactory.setPortal(OTHER_ZONE_ID, otherPortal);
 
-        messenger = new ZoneMessenger(address(messengerFactory));
+        vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
+        messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
+        vm.mockCall(
+            portal, abi.encodeWithSelector(IZonePortal.isGatewayOpen.selector), abi.encode(false)
+        );
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         zoneToken.setMinter(address(this), true);
     }
 
     function _mockTransfer(address target, uint128 amount, bool result) internal {
+        _allowGateway(target);
         vm.mockCall(
             token,
             abi.encodeWithSelector(ITIP20.transfer.selector, target, amount),
@@ -109,7 +119,19 @@ contract ZoneMessengerTest is BaseTest {
         );
     }
 
-    function test_zoneFactoryImmutable() public view {
+    function _allowGateway(address target) internal {
+        vm.mockCall(
+            portal,
+            abi.encodeWithSelector(IZonePortal.role.selector, target),
+            abi.encode(Role.CallbackGateway)
+        );
+    }
+
+    function _callback() internal pure returns (bytes memory) {
+        return hex"010203";
+    }
+
+    function test_zoneFactoryConstant() public view {
         assertEq(address(messenger.zoneFactory()), address(messengerFactory));
     }
 
@@ -130,7 +152,9 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         vm.expectRevert(ZoneMessenger.TransferFailed.selector);
-        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, "");
+        messenger.relayMessage(
+            ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, _callback()
+        );
     }
 
     function test_relayMessage_revertsCallbackRejectedForWrongSelector() public {
@@ -139,7 +163,9 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         vm.expectRevert(ZoneMessenger.CallbackRejected.selector);
-        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, "");
+        messenger.relayMessage(
+            ZONE_ID, token, bytes32("sender"), address(receiver), 1, 50_000, _callback()
+        );
     }
 
     function test_relayMessage_revertsForEoaTarget() public {
@@ -147,14 +173,15 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         vm.expectRevert();
-        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), alice, 1, 50_000, "");
+        messenger.relayMessage(ZONE_ID, token, bytes32("sender"), alice, 1, 50_000, _callback());
     }
 
-    function test_relayMessage_success() public {
+    function test_relayMessage_successWithFlattenedFactoryGetter() public {
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         bytes32 senderTag = keccak256("sender");
-        bytes memory data = hex"1234";
+        bytes memory data = _callback();
         zoneToken.mint(address(messenger), 123);
+        _allowGateway(address(receiver));
 
         vm.prank(portal);
         messenger.relayMessage(
@@ -170,11 +197,13 @@ contract ZoneMessengerTest is BaseTest {
         assertEq(receiver.lastData(), data);
     }
 
-    function testFuzz_relayMessage_success(uint128 amount, bytes calldata data) public {
+    function testFuzz_relayMessage_success(uint128 amount, bool redeem) public {
         amount = uint128(bound(amount, 0, 1_000_000_000e6));
+        bytes memory data = abi.encode(redeem);
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
         bytes32 senderTag = keccak256(abi.encode(amount, data));
         zoneToken.mint(address(messenger), amount);
+        _allowGateway(address(receiver));
 
         vm.prank(portal);
         messenger.relayMessage(
@@ -188,6 +217,48 @@ contract ZoneMessengerTest is BaseTest {
         );
 
         assertEq(zoneToken.balanceOf(address(receiver)), amount);
+    }
+
+    function test_relayMessage_forwardsOpaqueData() public {
+        AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
+        bytes memory data = abi.encode(uint256(2));
+        zoneToken.mint(address(messenger), 1);
+        _allowGateway(address(receiver));
+
+        vm.prank(portal);
+        messenger.relayMessage(
+            ZONE_ID,
+            address(zoneToken),
+            bytes32("sender"),
+            address(receiver),
+            1,
+            CALLBACK_GAS_LIMIT,
+            data
+        );
+
+        assertEq(zoneToken.balanceOf(address(receiver)), 1);
+        assertEq(receiver.lastData(), data);
+    }
+
+    function test_relayMessage_revertsForUnregisteredGateway() public {
+        AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
+        vm.mockCall(
+            portal,
+            abi.encodeWithSelector(IZonePortal.role.selector, address(receiver)),
+            abi.encode(Role.None)
+        );
+
+        vm.prank(portal);
+        vm.expectRevert(ZoneMessenger.InvalidCallbackTarget.selector);
+        messenger.relayMessage(
+            ZONE_ID,
+            address(zoneToken),
+            bytes32("sender"),
+            address(receiver),
+            1,
+            50_000,
+            _callback()
+        );
     }
 
 }

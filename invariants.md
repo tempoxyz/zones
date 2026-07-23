@@ -19,7 +19,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-CHAIN-ID-UNIQUE` | Each live zone uses the chain ID derived from its zone ID, and no two live zones share a chain ID | 🟡 | Cross-zone replay protection fails; signed transactions may be valid on more than one zone |
 | `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
-| `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash`, `genesisTempoBlockNumber`, and emitted zone creation parameters match the zone genesis file | 🔴 | The zone may prove batches from a different genesis state than the portal expects |
+| `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash` starts at zero, and the first proof transitions only to the canonical genesis block derived from `zoneId` | 🔴 | The zone may bootstrap from an attacker-chosen genesis state |
+| `TEMPO-ZONE-FIRST-TEMPO-ANCHOR` | When `TempoState.tempoBlockHash` is zero, the first imported Tempo block proves the portal's `sequencer` slot is non-zero at that block | 🔴 | The zone may anchor to Tempo state from before its portal existed |
 | `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
 ### Access Control and Configuration
@@ -27,10 +28,9 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-ADMIN-NONZERO` | Portal `admin != address(0)` for every zone | 🟡 | Token governance can become permanently unavailable |
-| `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can call `enableToken`, `pauseDeposits`, and `resumeDeposits` | 🟡 | A sequencer or user can enable malicious assets or reopen paused deposits |
-| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set gas rates, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
-| `TEMPO-ZONE-SEQUENCER-TWO-STEP` | Sequencer changes only complete when `pendingSequencer` accepts, and acceptance clears `pendingSequencer` | 🟡 | Sequencer control can be accidentally or maliciously transferred |
-| `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `tempoGasRate` never exceed `MAX_GAS_FEE_RATE` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
+| `TEMPO-ZONE-ADMIN-ONLY-GOVERNANCE` | Only `admin` can govern tokens and access modes or set `zoneGasRate`, `maxTempoGasRate`, and `bouncebackGas` | 🟡 | A sequencer or user can enable malicious assets, reopen paused deposits, alter access policy, or exceed governance fee bounds |
+| `TEMPO-ZONE-SEQUENCER-ONLY-OPS` | Only the registered sequencer can set `tempoGasRate`, set encryption keys, set RPC URL, submit batches, and process withdrawals | 🟡 | Unauthorized operators can censor, misprice, settle, or drain queued work |
+| `TEMPO-ZONE-GAS-RATE-BOUNDED` | `zoneGasRate` and `maxTempoGasRate` never exceed `MAX_GAS_FEE_RATE`, and `tempoGasRate` never exceeds the finalized `maxTempoGasRate` | 🟢 | Deposit or withdrawal fee math may overflow or become economically unusable |
 
 ### Token Registry and Supply
 
@@ -48,9 +48,9 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-DEPOSIT-ENABLED-ACTIVE` | User deposits only enter the queue when the token is enabled and deposits are active | 🟡 | Users can deposit unsupported or paused assets that the zone may not process |
-| `TEMPO-ZONE-DEPOSIT-FEE-SNAPSHOT` | Deposit queue entries store `amount - FIXED_DEPOSIT_GAS * zoneGasRate`, and the fee is paid to the sequencer at enqueue time | 🟢 | Fee changes can retroactively change user value or underpay processing costs |
+| `TEMPO-ZONE-DEPOSIT-FEE-SNAPSHOT` | Deposit queue entries store `amount - FIXED_DEPOSIT_GAS * zoneGasRate`, and the fee is paid to the admin at enqueue time | 🟢 | Fee changes can retroactively change user value or underpay processing costs |
 | `TEMPO-ZONE-DEPOSIT-MIN-AMOUNT` | `deposit` and `depositEncrypted` revert (`DepositTooSmall`) unless `amount >= depositFee + currentBouncebackFee` | 🔴 | Dust deposits can enter the queue that cannot fund their own Tempo-side refund, stranding funds |
-| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-NONZERO` | Every user-initiated deposit has a non-zero, TIP-403-authorized `bouncebackRecipient` | 🔴 | Failed deposits can permanently block or strand funds without a refund target |
+| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-NONZERO` | Every user-initiated deposit has a non-zero, TIP-403-authorized `tempoRefundRecipient` | 🔴 | Failed deposits can permanently block or strand funds without a refund target |
 | `TEMPO-ZONE-DEPOSIT-QUEUE-HASH` | Portal deposit queue hash updates as `keccak256(abi.encode(depositType, depositData, previousHash))` for every regular or encrypted deposit | 🔴 | The zone may process a different deposit sequence than the portal accepted |
 | `TEMPO-ZONE-DEPOSIT-NUMBER-MONOTONIC` | `depositCount` and `processedDepositNumber` are monotonic and match the number of queue entries enqueued or proven processed | 🟢 | User deposit status can be wrong and deposits may be skipped or double-counted |
 | `TEMPO-ZONE-DEPOSIT-PROCESSED-PREFIX` | The inbox processes only a prefix of the portal queue, oldest first, and never skips, reorders, or duplicates deposits | 🔴 | Users receive wrong mints/refunds or deposits become unprovable |
@@ -73,8 +73,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-WITHDRAWAL-TOKEN-ENABLED` | Withdrawals can only be requested for enabled tokens | 🔴 | Users can burn unsupported assets with no corresponding portal escrow |
-| `TEMPO-ZONE-WITHDRAWAL-FALLBACK-NONZERO` | Every user withdrawal has a non-zero `fallbackRecipient` | 🔴 | Failed Tempo-side withdrawals cannot return funds to the zone |
-| `TEMPO-ZONE-WITHDRAWAL-FEE-SNAPSHOT` | Withdrawal fee equals `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate` at request time and is burned with the amount | 🟢 | Fee changes retroactively alter user economics or underfund processing |
+| `TEMPO-ZONE-WITHDRAWAL-FALLBACK-NONZERO` | Every user withdrawal has a non-zero `zoneFallbackRecipient` | 🔴 | Failed Tempo-side withdrawals cannot return funds to the zone |
+| `TEMPO-ZONE-WITHDRAWAL-FEE-SNAPSHOT` | Withdrawal fee equals `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate` at request time, with the rate bounded by the finalized admin maximum, and is burned with the amount | 🟢 | Fee changes retroactively alter user economics or underfund processing |
 | `TEMPO-ZONE-WITHDRAWAL-BURN-BEFORE-QUEUE` | `requestWithdrawal` burns `amount + fee` before appending the pending withdrawal | 🔴 | Portal can release funds without removing zone supply |
 | `TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS` | `gasLimit <= MAX_WITHDRAWAL_GAS_LIMIT`, callback data is bounded, and over-limit legacy withdrawals bounce back after dequeue | 🟡 | A withdrawal can exceed block gas limits or permanently block the FIFO queue |
 | `TEMPO-ZONE-SENDER-TAG-BINDING` | `senderTag == keccak256(abi.encodePacked(sender, txHash))`, where `txHash` is the current withdrawal request transaction hash | 🟡 | Authenticated withdrawals can reveal or misattribute the sender |
@@ -86,10 +86,10 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-WITHDRAWAL-POP-ONCE` | Each processed withdrawal is popped exactly once, whether transfer/callback succeeds or bounces back | 🔴 | Failed withdrawals can block the queue or successful withdrawals can be replayed |
 | `TEMPO-ZONE-WITHDRAWAL-FAIL-BOUNCEBACK` | Any failed user-facing transfer or callback enqueues exactly one withdrawal bounce-back deposit for `amount`, excluding fee | 🔴 | Failed withdrawals can lose funds or duplicate refunds |
 | `TEMPO-ZONE-WITHDRAWAL-FEE-LOCAL` | User withdrawal data does not include the fee, and `processWithdrawals` never pays a user withdrawal fee from portal escrow | 🔴 | A compromised sequencer can encode or redeem arbitrary fees from protected escrow |
-| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-CAP` | Deposit bounce-back fee is computed from the configured `bouncebackGas` at processing time and capped at the bounced amount | 🟢 | Refund accounting can underflow or overpay the sequencer |
-| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-NONBLOCKING` | A failed deposit-bounce-back fee transfer never reverts `processWithdrawal`; processing completes and the sequencer keeps the fee only when its transfer succeeds | 🟡 | A fee-transfer failure can stall the withdrawal queue or block exits |
+| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-CAP` | Deposit bounce-back fee is computed from the configured `bouncebackGas` at processing time and capped at the bounced amount | 🟢 | Refund accounting can underflow or overpay the admin |
+| `TEMPO-ZONE-DEPOSIT-BOUNCEBACK-FEE-NONBLOCKING` | A failed deposit-bounce-back fee transfer never reverts `processWithdrawal`; processing completes and the admin keeps the fee only when its transfer succeeds | 🟡 | A fee-transfer failure can stall the withdrawal queue or block exits |
 | `TEMPO-ZONE-BOUNCEBACK-FUNDS-PRESERVED` | When a bounce-back's final transfer/mint reverts, funds are credited to `_refunds[token][recipient]` (portal-side for deposit bounce-backs, `ZoneInbox`-side for withdrawal bounce-backs) and `claimRefund` zeroes the balance before paying | 🔴 | Funds whose bounce-back fails can be lost, double-claimed, or stuck |
-| `TEMPO-ZONE-BOUNCEBACK-TERMINAL` | Internal bounce-backs are the only entries with `bouncebackRecipient == address(0)`, the `rejected` flag has no effect on them, and a failed bounce-back routes to the refund registry instead of re-bouncing | 🔴 | A bounce-back can re-bounce indefinitely, looping the deposit/withdrawal queues or stalling processing |
+| `TEMPO-ZONE-BOUNCEBACK-TERMINAL` | Internal bounce-backs are the only entries with `tempoRefundRecipient == address(0)`, the `rejected` flag has no effect on them, and a failed bounce-back routes to the refund registry instead of re-bouncing | 🔴 | A bounce-back can re-bounce indefinitely, looping the deposit/withdrawal queues or stalling processing |
 
 ### Batch Submission and Proofs
 
@@ -99,7 +99,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-BATCH-NEXT-HASH` | Accepted proof output commits to the full next zone block hash, including state, transactions, receipts, number, timestamp, beneficiary, and protocol version | 🔴 | Proof can validate a different state transition than the portal records |
 | `TEMPO-ZONE-BATCH-DEPOSIT-TRANSITION` | Deposit transition starts from the inbox's previous processed hash/number and ends at the post-batch processed hash/number | 🔴 | Deposits can be skipped, replayed, or falsely marked processed |
 | `TEMPO-ZONE-BATCH-WITHDRAWAL-COMMITMENT` | Submitted `withdrawalQueueHash` equals `ZoneOutbox.lastBatch.withdrawalQueueHash` from the proven post-state | 🔴 | Portal can enqueue withdrawals that the zone never finalized |
-| `TEMPO-ZONE-BATCH-ANCHOR-BLOCK` | Anchor block number/hash passed to the verifier matches either the direct Tempo binding or a valid ancestry chain to a recent Tempo block; when non-zero, `recentTempoBlockNumber > tempoBlockNumber`, and both are `>= genesisTempoBlockNumber` | 🔴 | Proof can rely on a stale or forged Tempo view |
+| `TEMPO-ZONE-BATCH-ANCHOR-BLOCK` | Anchor block number/hash passed to the verifier matches either the direct Tempo binding or a valid ancestry chain to a recent Tempo block; when non-zero, `recentTempoBlockNumber > tempoBlockNumber` | 🔴 | Proof can rely on a stale or forged Tempo view |
 | `TEMPO-ZONE-BATCH-SEQUENCER-BENEFICIARY` | Every proven zone block has `beneficiary == portal.sequencer` | 🟡 | A non-sequencer can produce blocks or collect block-level authority |
 | `TEMPO-ZONE-BATCH-FINALIZE-LAST` | Intermediate blocks do not finalize withdrawals; the final block executes `finalizeWithdrawalBatch` last | 🔴 | Withdrawals can be omitted from the committed state or finalized before later user transactions |
 | `TEMPO-ZONE-PROOF-MISSING-READS` | Any zone-state or Tempo-state read missing from the witness causes proof failure; missing reads never default silently | 🔴 | Prover can omit non-zero state and prove an invalid transition |

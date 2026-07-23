@@ -1,6 +1,8 @@
 //! Demo Flow 3: Cross-Zone Transfer
 
-use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer};
+use crate::utils::{
+    L1TestNode, WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode, spawn_sequencer,
+};
 use alloy::primitives::U256;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::ZONE_TOKEN_ADDRESS;
@@ -11,7 +13,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Cross-zone transfer via SwapAndDepositRouter:
 ///
 /// 1. Start L1 dev node.
-/// 2. Deploy ZoneFactory, create zone_a and zone_b, deploy SwapAndDepositRouter.
+/// 2. Create open zone_a and zone_b through the native factory, then deploy SwapAndDepositRouter.
 /// 3. Start both zone nodes connected to L1.
 /// 4. Alice deposits pathUSD into zone_a.
 /// 5. Spawn sequencers for both zones.
@@ -27,7 +29,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///   |  ✓ Alice -= 500                  ✓ Bob += 500
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory + SwapAndDepositRouter artifacts.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cross_zone_send() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -45,9 +47,24 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
     let refund_burner = l1.signer_at(5).address();
 
     // --- Step 2: Deploy L1 infrastructure ---
-    let (portal_a, portal_b, router) = l1
-        .deploy_two_zones_with_sequencers(seq_a_signer.clone(), seq_b_signer.clone())
+    let factory = l1.native_zone_factory().await?;
+    let portal_a = l1
+        .create_zone_with_admin_sequencer_and_config(
+            factory,
+            l1.dev_address(),
+            seq_a_signer.address(),
+            ZoneCreationConfig::open(),
+        )
         .await?;
+    let portal_b = l1
+        .create_zone_with_admin_sequencer_and_config(
+            factory,
+            l1.dev_address(),
+            seq_b_signer.address(),
+            ZoneCreationConfig::open(),
+        )
+        .await?;
+    let router = l1.deploy_router(factory).await?;
 
     // --- Step 3: Start both zone nodes ---
     let zone_a = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_a).await?;
@@ -55,6 +72,10 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
 
     zone_a.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
     zone_b.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+    zone_a.assert_access_enforced(false).await?;
+    zone_b.assert_access_enforced(false).await?;
+    zone_a.assert_gateway_open(true).await?;
+    zone_b.assert_gateway_open(true).await?;
 
     // --- Step 4: Alice deposits into zone_a ---
     let mut alice = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
@@ -87,6 +108,16 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
         refund_burner, // Tempo refund target if Zone B later bounces the deposit
     );
     alice.withdraw_with(args).await?;
+    let callback_succeeded = l1
+        .wait_for_withdrawal_processed_status(
+            portal_a,
+            router,
+            PATH_USD_ADDRESS,
+            cross_amount,
+            std::time::Duration::from_secs(60),
+        )
+        .await?;
+    eyre::ensure!(callback_succeeded, "cross-zone router callback failed");
 
     // --- Step 7: Verify Bob received deposit on zone_b ---
     let cross_timeout = std::time::Duration::from_secs(60);

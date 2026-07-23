@@ -9,10 +9,7 @@
 
 use alloc::vec::Vec;
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Payload},
-};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInPlace};
 mod dispatch;
 
 use alloy_evm::precompiles::DynPrecompile;
@@ -76,19 +73,10 @@ pub fn decrypt_aes_gcm(
     let cipher = Aes256Gcm::new(key.into());
     let gcm_nonce = Nonce::from_slice(nonce);
 
-    // AES-GCM expects ciphertext || tag concatenated
-    let mut ct_with_tag = Vec::with_capacity(ciphertext.len() + 16);
-    ct_with_tag.extend_from_slice(ciphertext);
-    ct_with_tag.extend_from_slice(tag);
+    let mut plaintext = ciphertext.to_vec();
 
-    match cipher.decrypt(
-        gcm_nonce,
-        Payload {
-            msg: &ct_with_tag,
-            aad,
-        },
-    ) {
-        Ok(plaintext) => (plaintext, true),
+    match cipher.decrypt_in_place_detached(gcm_nonce, aad, &mut plaintext, Tag::from_slice(tag)) {
+        Ok(()) => (plaintext, true),
         Err(_) => (Vec::new(), false),
     }
 }
@@ -97,6 +85,7 @@ pub fn decrypt_aes_gcm(
 mod tests {
     use super::*;
     use crate::test_utils::{test_context, test_env, test_storage_provider};
+    use aes_gcm::aead::{Aead, Payload};
     use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
     use revm::precompile::PrecompileOutput;

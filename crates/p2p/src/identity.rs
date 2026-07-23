@@ -69,6 +69,10 @@ impl Secp256k1Identity {
     pub(crate) fn address(&self) -> Address {
         self.0.address()
     }
+
+    pub(crate) fn signer(&self) -> PrivateKeySigner {
+        self.0.clone()
+    }
 }
 
 /// Errors produced while loading a Commonware Ed25519 identity.

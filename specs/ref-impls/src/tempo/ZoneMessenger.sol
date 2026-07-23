@@ -5,6 +5,9 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
+    IZonePortal,
+    Role,
+    ZONE_FACTORY_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -13,18 +16,15 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 /// @notice Shared withdrawal callback sender for all zones created by one ZoneFactory.
 contract ZoneMessenger is IZoneMessenger {
 
-    IZoneFactory public immutable zoneFactory;
+    IZoneFactory public constant zoneFactory = IZoneFactory(ZONE_FACTORY_ADDRESS);
 
     uint256 internal _relayReentrancyStatus;
 
     error UnauthorizedPortal();
     error TransferFailed();
     error CallbackRejected();
+    error InvalidCallbackTarget();
     error ReentrantRelay();
-
-    constructor(address _zoneFactory) {
-        zoneFactory = IZoneFactory(_zoneFactory);
-    }
 
     modifier nonReentrantRelay() {
         if (_relayReentrancyStatus != 0) revert ReentrantRelay();
@@ -47,6 +47,13 @@ contract ZoneMessenger is IZoneMessenger {
     {
         ZoneInfo memory zone = zoneFactory.zones(zoneId);
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
+
+        if (
+            !IZonePortal(msg.sender).isGatewayOpen()
+                && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
+        ) {
+            revert InvalidCallbackTarget();
+        }
 
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();

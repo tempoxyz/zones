@@ -12,8 +12,11 @@ use revm::context::{
     DBErrorMarker,
     result::{EVMError, ResultAndState},
 };
-use tempo_evm::{TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, evm::TempoEvm};
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, ValidationContext};
+use tempo_evm::{
+    TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, TempoPoolValidationResult,
+    evm::TempoEvm,
+};
+use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::L1StorageReader;
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
@@ -94,16 +97,18 @@ where
     L1: L1StorageReader,
     I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>,
 {
+    fn configure_for_pool(&mut self) {
+        self.inner.configure_for_pool();
+    }
+
     fn validate_pool_transaction(
         &mut self,
         tx: TempoTxEnv,
-    ) -> Result<ValidationContext, ZoneEvmError<DB::Error>> {
-        let result = self
-            .inner
-            .validate_pool_transaction(tx)
-            .map_err(map_adapter_error);
+    ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
+        let (result, tx) = self.inner.validate_pool_transaction(tx);
+        let result = result.map_err(map_adapter_error);
         self.clear_l1_overlay_state();
-        result
+        (result, tx)
     }
 }
 
@@ -199,7 +204,7 @@ mod tests {
     use zone_precompiles::test_utils::MockL1Reader;
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
-        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default());
+        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default(), Address::ZERO);
         ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
     }
 

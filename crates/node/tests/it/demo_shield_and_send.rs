@@ -8,7 +8,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Shield + in-zone send:
 ///
 /// 1. Start L1 dev node.
-/// 2. Deploy ZoneFactory, create a zone.
+/// 2. Create a zone through the native ZoneFactory.
 /// 3. Start zone node connected to L1.
 /// 4. Alice deposits 1 pathUSD into the zone (shield).
 /// 5. Alice transfers 0.5 pathUSD to Bob within the zone (L2 transfer).
@@ -23,7 +23,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///   |                            |  ✓ Bob has 0.5
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_shield_and_send() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

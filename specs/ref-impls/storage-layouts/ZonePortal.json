@@ -1,196 +1,252 @@
 {
   "storage": [
     {
-      "astId": 4986,
+      "astId": 5268,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "sequencer",
+      "label": "admin",
       "offset": 0,
       "slot": "0",
       "type": "t_address"
     },
     {
-      "astId": 4989,
-      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "admin",
-      "offset": 0,
-      "slot": "1",
-      "type": "t_address"
-    },
-    {
-      "astId": 4992,
-      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "pendingSequencer",
-      "offset": 0,
-      "slot": "2",
-      "type": "t_address"
-    },
-    {
-      "astId": 4995,
+      "astId": 5271,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "zoneGasRate",
       "offset": 0,
-      "slot": "3",
+      "slot": "1",
       "type": "t_uint128"
     },
     {
-      "astId": 4997,
+      "astId": 5273,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "withdrawalBatchIndex",
       "offset": 16,
-      "slot": "3",
+      "slot": "1",
       "type": "t_uint64"
     },
     {
-      "astId": 4999,
+      "astId": 5275,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "blockHash",
       "offset": 0,
-      "slot": "4",
+      "slot": "2",
       "type": "t_bytes32"
     },
     {
-      "astId": 5002,
+      "astId": 5278,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "currentDepositQueueHash",
       "offset": 0,
-      "slot": "5",
+      "slot": "3",
       "type": "t_bytes32"
     },
     {
-      "astId": 5005,
+      "astId": 5281,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "depositCount",
       "offset": 0,
-      "slot": "6",
+      "slot": "4",
       "type": "t_uint64"
     },
     {
-      "astId": 5008,
+      "astId": 5284,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "lastProcessedDepositNumber",
       "offset": 8,
-      "slot": "6",
+      "slot": "4",
       "type": "t_uint64"
     },
     {
-      "astId": 5011,
+      "astId": 5287,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "lastSyncedTempoBlockNumber",
       "offset": 16,
-      "slot": "6",
+      "slot": "4",
       "type": "t_uint64"
     },
     {
-      "astId": 5014,
+      "astId": 5290,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "bouncebackGas",
       "offset": 24,
-      "slot": "6",
+      "slot": "4",
       "type": "t_uint64"
     },
     {
-      "astId": 5019,
+      "astId": 5295,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "_encryptionKeys",
       "offset": 0,
-      "slot": "7",
-      "type": "t_array(t_struct(EncryptionKeyEntry)2600_storage)dyn_storage"
+      "slot": "5",
+      "type": "t_array(t_struct(EncryptionKeyEntry)2627_storage)dyn_storage"
     },
     {
-      "astId": 5025,
+      "astId": 5301,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "_tokenConfigs",
       "offset": 0,
-      "slot": "8",
-      "type": "t_mapping(t_address,t_struct(TokenConfig)3005_storage)"
+      "slot": "6",
+      "type": "t_mapping(t_address,t_struct(TokenConfig)3101_storage)"
     },
     {
-      "astId": 5029,
+      "astId": 5305,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "_enabledTokens",
       "offset": 0,
-      "slot": "9",
+      "slot": "7",
       "type": "t_array(t_address)dyn_storage"
     },
     {
-      "astId": 5036,
+      "astId": 5312,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "refunds",
       "offset": 0,
-      "slot": "10",
+      "slot": "8",
       "type": "t_mapping(t_address,t_mapping(t_address,t_uint128))"
     },
     {
-      "astId": 5040,
+      "astId": 5316,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "_withdrawalQueue",
       "offset": 0,
-      "slot": "11",
-      "type": "t_struct(WithdrawalQueue)4682_storage"
+      "slot": "9",
+      "type": "t_struct(WithdrawalQueue)4942_storage"
     },
     {
-      "astId": 5043,
+      "astId": 5319,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "rpcUrl",
       "offset": 0,
-      "slot": "14",
+      "slot": "12",
       "type": "t_string_storage"
     },
     {
-      "astId": 5046,
+      "astId": 5322,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "pendingAdmin",
       "offset": 0,
+      "slot": "13",
+      "type": "t_address"
+    },
+    {
+      "astId": 5325,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "_withdrawalReentrancyStatus",
+      "offset": 0,
+      "slot": "14",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 5328,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "zoneId",
+      "offset": 0,
+      "slot": "15",
+      "type": "t_uint32"
+    },
+    {
+      "astId": 5331,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "messenger",
+      "offset": 4,
       "slot": "15",
       "type": "t_address"
     },
     {
-      "astId": 5049,
-      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "_withdrawalReentrancyStatus",
-      "offset": 0,
-      "slot": "16",
-      "type": "t_uint256"
-    },
-    {
-      "astId": 5052,
-      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "zoneId",
-      "offset": 0,
-      "slot": "17",
-      "type": "t_uint32"
-    },
-    {
-      "astId": 5054,
-      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "messenger",
-      "offset": 4,
-      "slot": "17",
-      "type": "t_address"
-    },
-    {
-      "astId": 5056,
+      "astId": 5333,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
       "label": "verifier",
       "offset": 0,
-      "slot": "18",
+      "slot": "16",
       "type": "t_address"
     },
     {
-      "astId": 5058,
+      "astId": 5335,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "genesisTempoBlockNumber",
+      "label": "_initialized",
       "offset": 20,
-      "slot": "18",
+      "slot": "16",
+      "type": "t_bool"
+    },
+    {
+      "astId": 5338,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "sequencerSetVersion",
+      "offset": 21,
+      "slot": "16",
       "type": "t_uint64"
     },
     {
-      "astId": 5060,
+      "astId": 5340,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "_initialized",
-      "offset": 28,
+      "label": "sequencerThreshold",
+      "offset": 29,
+      "slot": "16",
+      "type": "t_uint8"
+    },
+    {
+      "astId": 5342,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "zoneHeight",
+      "offset": 0,
+      "slot": "17",
+      "type": "t_uint256"
+    },
+    {
+      "astId": 5345,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "_sequencers",
+      "offset": 0,
       "slot": "18",
+      "type": "t_array(t_address)dyn_storage"
+    },
+    {
+      "astId": 5349,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "isSequencer",
+      "offset": 0,
+      "slot": "19",
+      "type": "t_mapping(t_address,t_bool)"
+    },
+    {
+      "astId": 5354,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "role",
+      "offset": 0,
+      "slot": "20",
+      "type": "t_mapping(t_address,t_enum(Role)2497)"
+    },
+    {
+      "astId": 5357,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "_isAccessEnforced",
+      "offset": 0,
+      "slot": "21",
       "type": "t_bool"
+    },
+    {
+      "astId": 5359,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "_isGatewayEnforced",
+      "offset": 1,
+      "slot": "21",
+      "type": "t_bool"
+    },
+    {
+      "astId": 5362,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "_enforcementModesPadding",
+      "offset": 2,
+      "slot": "21",
+      "type": "t_uint240"
+    },
+    {
+      "astId": 5365,
+      "contract": "src/tempo/ZonePortal.sol:ZonePortal",
+      "label": "maxTempoGasRate",
+      "offset": 0,
+      "slot": "22",
+      "type": "t_uint128"
     }
   ],
   "types": {
@@ -205,11 +261,11 @@
       "numberOfBytes": "32",
       "base": "t_address"
     },
-    "t_array(t_struct(EncryptionKeyEntry)2600_storage)dyn_storage": {
+    "t_array(t_struct(EncryptionKeyEntry)2627_storage)dyn_storage": {
       "encoding": "dynamic_array",
       "label": "struct EncryptionKeyEntry[]",
       "numberOfBytes": "32",
-      "base": "t_struct(EncryptionKeyEntry)2600_storage"
+      "base": "t_struct(EncryptionKeyEntry)2627_storage"
     },
     "t_bool": {
       "encoding": "inplace",
@@ -221,6 +277,25 @@
       "label": "bytes32",
       "numberOfBytes": "32"
     },
+    "t_enum(Role)2497": {
+      "encoding": "inplace",
+      "label": "enum Role",
+      "numberOfBytes": "1"
+    },
+    "t_mapping(t_address,t_bool)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => bool)",
+      "numberOfBytes": "32",
+      "value": "t_bool"
+    },
+    "t_mapping(t_address,t_enum(Role)2497)": {
+      "encoding": "mapping",
+      "key": "t_address",
+      "label": "mapping(address => enum Role)",
+      "numberOfBytes": "32",
+      "value": "t_enum(Role)2497"
+    },
     "t_mapping(t_address,t_mapping(t_address,t_uint128))": {
       "encoding": "mapping",
       "key": "t_address",
@@ -228,12 +303,12 @@
       "numberOfBytes": "32",
       "value": "t_mapping(t_address,t_uint128)"
     },
-    "t_mapping(t_address,t_struct(TokenConfig)3005_storage)": {
+    "t_mapping(t_address,t_struct(TokenConfig)3101_storage)": {
       "encoding": "mapping",
       "key": "t_address",
       "label": "mapping(address => struct TokenConfig)",
       "numberOfBytes": "32",
-      "value": "t_struct(TokenConfig)3005_storage"
+      "value": "t_struct(TokenConfig)3101_storage"
     },
     "t_mapping(t_address,t_uint128)": {
       "encoding": "mapping",
@@ -254,13 +329,13 @@
       "label": "string",
       "numberOfBytes": "32"
     },
-    "t_struct(EncryptionKeyEntry)2600_storage": {
+    "t_struct(EncryptionKeyEntry)2627_storage": {
       "encoding": "inplace",
       "label": "struct EncryptionKeyEntry",
       "numberOfBytes": "64",
       "members": [
         {
-          "astId": 2595,
+          "astId": 2622,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "x",
           "offset": 0,
@@ -268,7 +343,7 @@
           "type": "t_bytes32"
         },
         {
-          "astId": 2597,
+          "astId": 2624,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "yParity",
           "offset": 0,
@@ -276,7 +351,7 @@
           "type": "t_uint8"
         },
         {
-          "astId": 2599,
+          "astId": 2626,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "activationBlock",
           "offset": 1,
@@ -285,13 +360,13 @@
         }
       ]
     },
-    "t_struct(TokenConfig)3005_storage": {
+    "t_struct(TokenConfig)3101_storage": {
       "encoding": "inplace",
       "label": "struct TokenConfig",
       "numberOfBytes": "32",
       "members": [
         {
-          "astId": 3002,
+          "astId": 3098,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "enabled",
           "offset": 0,
@@ -299,7 +374,7 @@
           "type": "t_bool"
         },
         {
-          "astId": 3004,
+          "astId": 3100,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "depositsActive",
           "offset": 1,
@@ -308,13 +383,13 @@
         }
       ]
     },
-    "t_struct(WithdrawalQueue)4682_storage": {
+    "t_struct(WithdrawalQueue)4942_storage": {
       "encoding": "inplace",
       "label": "struct WithdrawalQueue",
       "numberOfBytes": "96",
       "members": [
         {
-          "astId": 4675,
+          "astId": 4935,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "head",
           "offset": 0,
@@ -322,7 +397,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 4677,
+          "astId": 4937,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "tail",
           "offset": 0,
@@ -330,7 +405,7 @@
           "type": "t_uint256"
         },
         {
-          "astId": 4681,
+          "astId": 4941,
           "contract": "src/tempo/ZonePortal.sol:ZonePortal",
           "label": "slots",
           "offset": 0,
@@ -343,6 +418,11 @@
       "encoding": "inplace",
       "label": "uint128",
       "numberOfBytes": "16"
+    },
+    "t_uint240": {
+      "encoding": "inplace",
+      "label": "uint240",
+      "numberOfBytes": "30"
     },
     "t_uint256": {
       "encoding": "inplace",

@@ -36,11 +36,6 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev The L1 processor adds fixed overhead around this value.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
-    /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
-    /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
-    ///      Any practical fee rate would be orders of magnitude lower.
-    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
-
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     /// @dev Covers processWithdrawals overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
@@ -95,7 +90,7 @@ contract ZoneOutbox is IZoneOutbox {
     uint64 public lastFallbackNonce;
 
     /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
-    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
+    mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -132,10 +127,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
     ///      If actual Tempo gas is higher, sequencer covers the difference.
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
+    ///      The portal admin bounds this rate through maxTempoGasRate.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
+        if (_tempoGasRate > config.maxTempoGasRate()) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }
@@ -144,7 +140,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
     function setMaxWithdrawalsPerBlock(uint32 maxWithdrawals) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         maxWithdrawalsPerBlock = maxWithdrawals;
         emit MaxWithdrawalsPerBlockUpdated(maxWithdrawals);
     }
@@ -174,7 +170,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     function requestWithdrawal(
         address token,
@@ -182,12 +178,12 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, "");
+        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, "");
     }
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -201,7 +197,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function requestWithdrawal(
@@ -210,13 +206,13 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo);
+        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo);
     }
 
     /// @notice Shared implementation for withdrawal requests with optional sender reveal
@@ -228,7 +224,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function _requestWithdrawal(
@@ -237,14 +233,14 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory data,
         bytes memory revealTo
     )
         internal
     {
         // Always require a valid fallback recipient
-        if (fallbackRecipient == address(0)) {
+        if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
 
@@ -252,11 +248,21 @@ contract ZoneOutbox is IZoneOutbox {
             revert IZonePortal.TokenNotEnabled();
         }
 
-        _validateGasLimit(gasLimit);
-
-        // Limit callback data size to prevent storage bloat and hash computation abuse
+        // Bound callback data before queueing.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        if (gasLimit == 0) {
+            if (!config.isGatewayOpen() && config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
+            if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
+        } else {
+            _validateGasLimit(gasLimit);
+            if (!config.isGatewayOpen() && !config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
         }
 
         _validateRevealTo(revealTo);
@@ -288,13 +294,12 @@ contract ZoneOutbox is IZoneOutbox {
             revert TransferFailed();
         }
 
-        // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
-        // Amount goes to recipient, fee goes to sequencer
+        // Burn the tokens (they'll be released on Tempo when withdrawal is processed).
         zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
         uint64 fallbackNonce = ++lastFallbackNonce;
-        _fallbackRecipients[fallbackNonce] = fallbackRecipient;
+        _zoneFallbackRecipients[fallbackNonce] = zoneFallbackRecipient;
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -323,7 +328,7 @@ contract ZoneOutbox is IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
     {
@@ -334,7 +339,7 @@ contract ZoneOutbox is IZoneOutbox {
                 token: token,
                 sender: address(0),
                 txHash: bytes32(0),
-                to: bouncebackRecipient,
+                to: tempoRefundRecipient,
                 amount: amount,
                 memo: bytes32(0),
                 gasLimit: 0,
@@ -346,18 +351,21 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint64 index = nextWithdrawalIndex++;
         emit WithdrawalRequested(
-            index, address(0), token, bouncebackRecipient, amount, 0, bytes32(0), 0, 0, "", ""
+            index, address(0), token, tempoRefundRecipient, amount, 0, bytes32(0), 0, 0, "", ""
         );
     }
 
     /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
     /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
     ///      in zone state. Only ZoneInbox may consume a mapping entry.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient)
+    {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
-        recipient = _fallbackRecipients[fallbackNonce];
-        if (recipient == address(0)) revert InvalidFallbackRecipient();
-        delete _fallbackRecipients[fallbackNonce];
+        zoneFallbackRecipient = _zoneFallbackRecipients[fallbackNonce];
+        if (zoneFallbackRecipient == address(0)) revert InvalidFallbackRecipient();
+        delete _zoneFallbackRecipients[fallbackNonce];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -393,7 +401,7 @@ contract ZoneOutbox is IZoneOutbox {
         internal
         returns (bytes32 withdrawalQueueHash)
     {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
         uint256 pending = _pendingWithdrawals.length;
@@ -452,11 +460,13 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         return _pendingWithdrawals.length;
     }
 
     /// @notice Pending withdrawals in FIFO order.
     function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
+        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
         uint256 count = _pendingWithdrawals.length;
         pending = new PendingWithdrawal[](count);
         for (uint256 i = 0; i < count;) {

@@ -51,7 +51,7 @@ use tempo_primitives::TempoHeader;
 use tracing::{error, warn};
 
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
+use zone_l1::{DepositQueue, L1BlockDeposits, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Engine that drives L2 block production from L1 events.
@@ -84,9 +84,6 @@ pub struct ZoneEngine {
     sequencer_key: k256::SecretKey,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
-    /// Cache-first, RPC-fallback TIP-403 policy provider for authorization checks
-    /// on encrypted deposit recipients during preparation.
-    policy_provider: PolicyProvider,
 }
 
 impl ZoneEngine {
@@ -99,7 +96,6 @@ impl ZoneEngine {
         fee_recipient: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
-        policy_provider: PolicyProvider,
     ) -> Self {
         Self {
             chain_spec,
@@ -110,7 +106,6 @@ impl ZoneEngine {
             fee_recipient,
             sequencer_key,
             portal_address,
-            policy_provider,
         }
     }
 
@@ -159,7 +154,7 @@ impl ZoneEngine {
         let res = self.to_engine.fork_choice_updated(state, None).await?;
 
         if !res.is_valid() {
-            eyre::bail!("Invalid fork choice update {state:?}: {res:?}")
+            eyre::bail!("Invalid fork choice update {state:?}: {res:?}");
         }
 
         Ok(())
@@ -171,7 +166,7 @@ impl ZoneEngine {
     /// them, with no timer delays between blocks.
     ///
     /// Reorg safety is handled upstream by the L1 subscriber, which only
-    /// enqueues blocks once they are confirmed by a successor.
+    /// enqueues blocks exposed by L1's `finalized` tag.
     async fn advance_all_available(&mut self) {
         while let Some(l1_block) = self.deposit_queue.peek() {
             if let Err(e) = self.advance(l1_block).await {
@@ -182,17 +177,12 @@ impl ZoneEngine {
         }
     }
 
-    /// Decrypt encrypted deposits, check TIP-403 policy authorization, and
-    /// ABI-encode everything into a [`PreparedL1Block`] ready for the payload
-    /// builder. Errors (e.g. policy RPC failures) are propagated so the engine
-    /// retries rather than allowing unauthorized deposits through.
+    /// Decrypt encrypted deposits and ABI-encode them into a [`PreparedL1Block`] ready for
+    /// the payload builder. Mint-recipient policy is enforced during upstream TIP-20 execution
+    /// against the finalized L1 anchor.
     async fn prepare_l1_block(&self, l1_block: L1BlockDeposits) -> eyre::Result<PreparedL1Block> {
         l1_block
-            .prepare(
-                &self.sequencer_key,
-                self.portal_address,
-                &self.policy_provider,
-            )
+            .prepare(&self.sequencer_key, self.portal_address)
             .await
     }
 
@@ -241,7 +231,7 @@ impl ZoneEngine {
             .await?;
 
         if res.is_invalid() {
-            eyre::bail!("Invalid payload status")
+            eyre::bail!("Invalid payload status");
         }
 
         let payload_id = res.payload_id.ok_or_eyre("No payload id")?;
@@ -251,7 +241,7 @@ impl ZoneEngine {
             .resolve_kind(payload_id, PayloadKind::WaitForPending)
             .await
         else {
-            eyre::bail!("No payload")
+            eyre::bail!("No payload");
         };
 
         let header = payload.block().sealed_header().clone();
@@ -260,7 +250,7 @@ impl ZoneEngine {
         let res = self.to_engine.new_payload(payload).await?;
 
         if !res.is_valid() {
-            eyre::bail!("Invalid payload for block {block_number}")
+            eyre::bail!("Invalid payload for block {block_number}");
         }
 
         // newPayload succeeded — confirm the L1 block in the queue so it is
@@ -270,12 +260,6 @@ impl ZoneEngine {
         if self.deposit_queue.confirm(l1_num_hash).is_none() {
             warn!(target: "zone::engine", ?l1_num_hash, "L1 block was purged from queue during build");
         }
-
-        // GC stale versioned entries from the policy cache. Only the engine
-        // drives this — the subscriber must not advance past blocks the engine
-        // hasn't processed yet, otherwise policy lookups for in-flight blocks
-        // could return wrong results.
-        self.policy_provider.cache().advance(l1_num_hash.number);
 
         self.last_header = header;
 

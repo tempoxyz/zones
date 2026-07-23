@@ -19,11 +19,9 @@ graph TD
     L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
     DQ["DepositQueue"]
     Cache["L1StateCache"]
-    PolicyCache["PolicyCache<br/><i>encrypted deposits only</i>"]
 
     Engine["ZoneEngine"]
     Builder["PayloadBuilder<br/><i>advanceTempo + pool txs</i>"]
-    PolicyPrefetch["PolicyResolutionTask<br/><i>legacy cache pre-warm</i>"]
 
     Monitor["ZoneMonitor"]
     Batch["BatchSubmitter"]
@@ -32,10 +30,8 @@ graph TD
 
     L1 --> L1Sub
     L1Sub --> DQ
-    L1Sub --> PolicyCache
     L1Sub --> Cache
-    PolicyCache --> Builder
-    PolicyPrefetch --> PolicyCache
+    Cache --> Builder
     DQ --> Engine
     Engine --> Builder
     Builder --> Monitor
@@ -119,7 +115,7 @@ header chain linking back to the target block.
 3. At batch finalization, withdrawals are hashed into a chain and submitted to
    L1 as part of the batch proof.
 4. The `WithdrawalProcessor` polls the L1 portal queue and calls
-   `processWithdrawals` for each pending withdrawal.
+   gas-bounded `processWithdrawals` batches through an ordered, bounded in-flight queue.
 
 ## TIP-403 Policy Enforcement
 
@@ -129,19 +125,17 @@ using Tempo's upstream policy implementation over anchored raw L1 state:
 1. **L1StateProvider** — resolves storage slots at an explicit L1 block through
    the block-versioned `L1StateCache`, falling back to an exact-block L1 RPC
    read and caching the result.
-2. **AnchoredZoneDb** — composes ordinary zone EVM storage with the raw L1
+2. **L1OverlayDB** — composes ordinary zone EVM storage with the raw L1
    reader at the exact finalized block recorded in `TempoState`. TIP-403
    registry state and each token's L1-owned transfer-policy field come from L1;
    balances and all other TIP-20 state remain zone-local. Mirrored reads retain
    normal EVM gas, warming, and storage accounting, while persistent writes to
    L1-owned slots are rejected.
 3. **Tempo TIP-20 and TIP-403 precompiles** — execute the upstream business
-   logic against that composed storage view, replacing the zone's duplicated
-   policy dispatch. Missing or invalid anchored state fails closed, and zone
+   logic against that composed storage view, without a separate zone policy
+   path. Missing or invalid anchored state fails closed, and zone
    privacy, bridge authorization, admission, and fixed-gas rules remain in the
    surrounding execution layer.
-
-> NOTE: encrypted-deposit checks temporarily retain the legacy `PolicyProvider` and `PolicyCache`; they will move to the same anchored raw-state path before that pipeline is removed. Encrypted deposits that fail policy checks are included with a zeroed-out amount so the deposit hash chain still matches L1.
 
 ## Demo: Token Creation with Transfer Policy
 

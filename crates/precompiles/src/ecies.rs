@@ -12,6 +12,7 @@ use k256::{
     AffinePoint, ProjectivePoint, Scalar,
     elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
 };
+use tempo_zone_contracts::Withdrawal;
 
 use crate::{
     aes_gcm::decrypt_aes_gcm,
@@ -24,8 +25,23 @@ pub const ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE: usize = 64;
 /// Plaintext size for authenticated-withdrawal sender reveals: 20 bytes (sender) + 32 bytes (tx hash).
 pub const AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE: usize = 52;
 
+/// Encoded size of a compressed secp256k1 public key.
+pub const COMPRESSED_PUBLIC_KEY_SIZE: usize = 33;
+
 /// Total encoded size of `encryptedSender`.
-pub const AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE: usize = 33 + 12 + 52 + 16;
+pub const AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE: usize =
+    COMPRESSED_PUBLIC_KEY_SIZE + 12 + AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE + 16;
+
+/// Decode a SEC1-compressed secp256k1 public key.
+pub(crate) fn decode_compressed_public_key(encoded: &[u8]) -> Option<AffinePoint> {
+    let encoded: &[u8; COMPRESSED_PUBLIC_KEY_SIZE] = encoded.try_into().ok()?;
+    let parity = encoded[0];
+    if !matches!(parity, 0x02 | 0x03) {
+        return None;
+    }
+    let x: &[u8; 32] = encoded[1..].try_into().ok()?;
+    recover_point(x, parity)
+}
 
 const AUTH_WITHDRAWAL_EPHEMERAL_DOMAIN: &[u8] = b"tempo-zone-authenticated-withdrawal-ephemeral-v1";
 const AUTH_WITHDRAWAL_NONCE_DOMAIN: &[u8] = b"tempo-zone-authenticated-withdrawal-nonce-v1";
@@ -229,16 +245,7 @@ fn encrypt_authenticated_withdrawal_with_material(
     eph_scalar: &Scalar,
     nonce_bytes: [u8; 12],
 ) -> Option<Vec<u8>> {
-    if reveal_to.len() != 33 {
-        return None;
-    }
-    let parity = reveal_to[0];
-    if parity != 0x02 && parity != 0x03 {
-        return None;
-    }
-
-    let reveal_to_x = B256::from_slice(&reveal_to[1..]);
-    let reveal_pub = recover_point(&reveal_to_x.0, parity)?;
+    let reveal_pub = decode_compressed_public_key(reveal_to)?;
 
     let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * *eph_scalar);
     let eph_encoded = eph_pub.to_encoded_point(true);
@@ -575,10 +582,7 @@ pub fn build_authenticated_withdrawal_plaintext(
     sender: &Address,
     tx_hash: &B256,
 ) -> [u8; AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE] {
-    let mut buf = [0u8; AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE];
-    buf[..20].copy_from_slice(sender.as_slice());
-    buf[20..].copy_from_slice(tx_hash.as_slice());
-    buf
+    Withdrawal::authenticated_sender_plaintext(*sender, *tx_hash)
 }
 
 /// Build the 84-byte HKDF info parameter: `[portal(20) | key_index(32) | eph_pub_x(32)]`.

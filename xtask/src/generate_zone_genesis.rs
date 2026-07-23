@@ -33,14 +33,16 @@ use tempo_precompiles::{
     nonce::NonceManager,
     stablecoin_dex::StablecoinDEX,
     storage::{StorageActions, StorageCtx},
-    tip_fee_manager::TipFeeManager,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
 };
 use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
-use zone_precompiles::{TempoState as NativeTempoState, ZoneTokenFactory};
+use zone_precompiles::{
+    TempoState as NativeTempoState, ZoneFeeManager, ZoneOutbox as NativeZoneOutbox,
+    ZoneTokenFactory,
+};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -65,6 +67,10 @@ pub(crate) struct GenerateZoneGenesis {
 
     #[arg(long)]
     pub(crate) tempo_portal: Address,
+
+    /// Canonical fee token used when a zone transaction omits `fee_token`.
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
+    pub(crate) default_fee_token: Address,
 
     /// RLP-encoded Tempo genesis header. Defaults to `TempoHeader::default()`.
     #[arg(long)]
@@ -92,10 +98,6 @@ pub(crate) struct GenerateZoneGenesis {
     /// controls whether it remains in the final genesis state.
     #[arg(long)]
     pub(crate) with_create2_factory: bool,
-
-    /// Bundle ZoneFactory creation bytecode as dev-only top-level metadata.
-    #[arg(long)]
-    pub(crate) with_zone_factory_bytecode: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -140,7 +142,7 @@ impl GenerateZoneGenesis {
         initialize_tip403_registry(&mut evm)?;
         initialize_tip20_factory(&mut evm)?;
         create_path_usd_token(&mut evm, self.admin)?;
-        initialize_fee_manager(&mut evm)?;
+        initialize_fee_manager(&mut evm, self.default_fee_token)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
         initialize_account_keychain(&mut evm)?;
@@ -148,6 +150,7 @@ impl GenerateZoneGenesis {
         let mut nonce = 0u64;
 
         initialize_tempo_state(&mut evm, &header_rlp)?;
+        initialize_zone_outbox(&mut evm)?;
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
@@ -171,19 +174,6 @@ impl GenerateZoneGenesis {
             &zone_inbox_args,
             ZONE_INBOX_ADDRESS,
             "ZoneInbox",
-            self.chain_id,
-            nonce,
-        )?;
-        nonce += 1;
-
-        let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
-        let zone_outbox_args = (ZONE_CONFIG_ADDRESS,).abi_encode_params();
-        deploy_contract(
-            &mut evm,
-            &zone_outbox_bytecode,
-            &zone_outbox_args,
-            ZONE_OUTBOX_ADDRESS,
-            "ZoneOutbox",
             self.chain_id,
             nonce,
         )?;
@@ -312,18 +302,8 @@ impl GenerateZoneGenesis {
         genesis.alloc = genesis_alloc;
         genesis.config = chain_config;
 
-        let mut genesis_json =
+        let genesis_json =
             serde_json::to_value(&genesis).wrap_err("failed encoding genesis as JSON")?;
-        if self.with_zone_factory_bytecode {
-            let factory_bytecode = load_artifact(&self.specs_out, "ZoneFactory")?;
-            genesis_json
-                .as_object_mut()
-                .ok_or_else(|| eyre!("encoded genesis is not a JSON object"))?
-                .insert(
-                    "zoneFactoryBytecode".to_owned(),
-                    serde_json::Value::String(format!("0x{}", const_hex::encode(factory_bytecode))),
-                );
-        }
         let mut json = serde_json::to_string_pretty(&genesis_json)
             .wrap_err("failed encoding genesis as JSON")?;
         json.push('\n');
@@ -480,6 +460,21 @@ fn initialize_tempo_state(
     Ok(())
 }
 
+/// Initialize the native ZoneOutbox account marker and storage.
+fn initialize_zone_outbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || NativeZoneOutbox::new().initialize(),
+    )?;
+    println!("Initialized native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
+    Ok(())
+}
+
 /// Initialize the TIP403Registry precompile (required for fee token transfer checks).
 fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
@@ -558,8 +553,11 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
     Ok(())
 }
 
-/// Initialize the TipFeeManager precompile.
-fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+/// Initialize the Zone fee manager precompile.
+fn initialize_fee_manager(
+    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
+    default_fee_token: Address,
+) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -568,13 +566,13 @@ fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<
         &ctx.tx,
         StorageActions::disabled(),
         || {
-            let mut fee_manager = TipFeeManager::new();
+            let mut fee_manager = ZoneFeeManager::new();
             fee_manager
-                .initialize()
+                .initialize(default_fee_token)
                 .expect("Could not init fee manager");
         },
     );
-    println!("Initialized TipFeeManager");
+    println!("Initialized ZoneFeeManager with default fee token {default_fee_token}");
     Ok(())
 }
 

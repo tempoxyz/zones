@@ -30,7 +30,7 @@ alloy_sol_types::sol! {
 #[contract(addr = TEMPO_STATE_ADDRESS)]
 pub struct TempoState {
     tempo_block_hash: B256,
-    tempo_block_number: u64,
+    pub(crate) tempo_block_number: u64,
 }
 
 /// Storage slot containing the finalized Tempo block number in Zone state.
@@ -261,7 +261,7 @@ mod tests {
             StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             drop(storage);
 
-            let l1 = L1State::new(reader);
+            let l1 = L1State::new(reader, Address::ZERO);
             let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
             Ok(Self {
                 ctx,

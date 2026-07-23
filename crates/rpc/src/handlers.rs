@@ -3,9 +3,7 @@
 //! Each handler calls the underlying EthApi via the [`ZoneRpcApi`] trait,
 //! which performs typed privacy redactions internally before serialization.
 
-use std::str::FromStr;
-
-use alloy_primitives::{Address, B256, Bytes, U64, keccak256};
+use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
 use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
@@ -185,10 +183,6 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `zone_getEncryptionKey()` — returns the active encryption key at the
     /// current Tempo L1 head.
     fn zone_get_encryption_key(&self, auth: AuthContext) -> BoxFut<'_>;
-
-    /// `zone_getDepositStatus(tempoBlockNumber)` — returns per-caller deposit
-    /// processing state for a Tempo L1 block.
-    fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_>;
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -349,7 +343,6 @@ pub async fn dispatch(
             "zone_getEncryptionKey",
             api.zone_get_encryption_key(auth.clone()).await,
         ),
-        "zone_getDepositStatus" => handle_zone_get_deposit_status(id, raw, auth, api).await,
         _ => {
             // Method is whitelisted but not yet implemented via direct API
             JsonRpcResponse::error(
@@ -742,36 +735,6 @@ async fn handle_uninstall_filter(
     )
 }
 
-/// Handle `zone_getDepositStatus(tempoBlockNumber)`.
-async fn handle_zone_get_deposit_status(
-    id: Value,
-    raw: &str,
-    auth: &AuthContext,
-    api: &dyn ZoneRpcApi,
-) -> JsonRpcResponse {
-    let (tempo_block_number,) =
-        match parse_params::<(String,)>(raw, &id, "expected [tempoBlockNumber]") {
-            Ok((tempo_block_number,)) => (tempo_block_number,),
-            Err(resp) => return resp,
-        };
-    let tempo_block_number = match U64::from_str(&tempo_block_number) {
-        Ok(tempo_block_number) => tempo_block_number.to(),
-        Err(_) => {
-            return JsonRpcResponse::error(
-                id,
-                JsonRpcError::invalid_params("expected [tempoBlockNumber]"),
-            );
-        }
-    };
-
-    api_result(
-        id,
-        "zone_getDepositStatus",
-        api.zone_get_deposit_status(tempo_block_number, auth.clone())
-            .await,
-    )
-}
-
 /// Zones do not have a real pending block, so treat `pending` as `latest`.
 fn normalize_block_number(number: BlockNumberOrTag) -> BlockNumberOrTag {
     if number.is_pending() {
@@ -783,25 +746,14 @@ fn normalize_block_number(number: BlockNumberOrTag) -> BlockNumberOrTag {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
     use alloy_primitives::Address;
     use serde_json::json;
 
     use super::*;
     use crate::types::to_raw;
 
-    struct MockZoneRpcApi {
-        last_tempo_block_number: AtomicU64,
-    }
-
-    impl Default for MockZoneRpcApi {
-        fn default() -> Self {
-            Self {
-                last_tempo_block_number: AtomicU64::new(0),
-            }
-        }
-    }
+    #[derive(Default)]
+    struct MockZoneRpcApi;
 
     macro_rules! stub {
         ($method:ident $(, $arg:ident : $ty:ty)*) => {
@@ -862,30 +814,14 @@ mod tests {
                 to_raw(&json!({
                     "zoneId": "0x1",
                     "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
-                    "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
+                    "sequencers": [format!("{:#x}", Address::repeat_byte(0x22))],
                     "chainId": "0x2a",
+                    "tempoBlockNumber": "0x7",
                 }))
             })
         }
 
         stub!(zone_get_encryption_key, _auth: AuthContext);
-
-        fn zone_get_deposit_status(
-            &self,
-            tempo_block_number: u64,
-            _auth: AuthContext,
-        ) -> BoxFut<'_> {
-            self.last_tempo_block_number
-                .store(tempo_block_number, Ordering::Relaxed);
-            Box::pin(async move {
-                to_raw(&json!({
-                    "tempoBlockNumber": alloy_primitives::U64::from(tempo_block_number),
-                    "zoneProcessedThrough": alloy_primitives::U64::from(tempo_block_number),
-                    "processed": true,
-                    "deposits": [],
-                }))
-            })
-        }
     }
 
     fn auth() -> AuthContext {
@@ -968,33 +904,11 @@ mod tests {
             format!("{:#x}", Address::repeat_byte(0x11))
         );
         assert_eq!(
-            body["sequencer"],
+            body["sequencers"][0],
             format!("{:#x}", Address::repeat_byte(0x22))
         );
         assert_eq!(body["chainId"], "0x2a");
-    }
-
-    #[tokio::test]
-    async fn dispatches_zone_get_deposit_status_for_hex_quantity() {
-        let api = MockZoneRpcApi::default();
-
-        let resp = dispatch(
-            &request("zone_getDepositStatus", json!(["0x2a"])),
-            &auth(),
-            &api,
-        )
-        .await;
-        assert!(resp.error.is_none());
-        assert_eq!(api.last_tempo_block_number.load(Ordering::Relaxed), 42);
-    }
-
-    #[tokio::test]
-    async fn rejects_numeric_zone_get_deposit_status_param() {
-        let api = MockZoneRpcApi::default();
-
-        let resp = dispatch(&request("zone_getDepositStatus", json!([7])), &auth(), &api).await;
-        assert!(resp.result.is_none());
-        assert_eq!(resp.error.as_ref().unwrap().code, -32602);
+        assert_eq!(body["tempoBlockNumber"], "0x7");
     }
 
     #[tokio::test]

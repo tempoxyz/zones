@@ -6,7 +6,7 @@
 //! ancestry path instead of the simpler direct-mode case.
 
 use crate::utils::{
-    L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_anchor_config,
+    L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_config,
 };
 use alloy::providers::Provider;
 use alloy_sol_types::SolCall;
@@ -122,8 +122,8 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     // --- Step 2: Deploy zone portal ---
     let portal_address = l1.deploy_zone().await?;
 
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
-    let genesis_block = portal.genesisTempoBlockNumber().call().await?;
     let target_block = genesis_block + EXTENDED_GAP_BLOCKS;
 
     tracing::info!(
@@ -154,9 +154,13 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     }
 
     // --- Step 4: Start zone node connected to L1, anchored at the portal genesis ---
-    let zone =
-        ZoneTestNode::start_from_l1_portal_genesis(l1.http_url(), l1.ws_url(), portal_address)
-            .await?;
+    let zone = ZoneTestNode::start_from_l1_genesis_block(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        genesis_block,
+    )
+    .await?;
 
     // --- Step 5: Wait for the zone to replay to the first out-of-window boundary ---
     let first_step_tempo = genesis_block + EIP2935_EFFECTIVE_WINDOW;
@@ -228,8 +232,8 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
     .await?;
 
     let portal_address = l1.deploy_zone().await?;
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
-    let genesis_block = portal.genesisTempoBlockNumber().call().await?;
     let target_block = genesis_block + SHORT_EXTENDED_GAP_BLOCKS;
 
     poll_until(
@@ -250,9 +254,13 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
     )
     .await?;
 
-    let zone =
-        ZoneTestNode::start_from_l1_portal_genesis(l1.http_url(), l1.ws_url(), portal_address)
-            .await?;
+    let zone = ZoneTestNode::start_from_l1_genesis_block(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        genesis_block,
+    )
+    .await?;
 
     let first_step_tempo = genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW;
     zone.wait_for_tempo_block_number(first_step_tempo, SHORT_STEPPING_TIMEOUT)
@@ -265,12 +273,13 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
         l1_tip.saturating_sub(first_step_tempo),
     );
 
-    let seq = spawn_sequencer_with_anchor_config(
+    let seq = spawn_sequencer_with_config(
         &l1,
         &zone,
         portal_address,
         l1.dev_signer(),
         anchor_config,
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await;
 
@@ -320,8 +329,8 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
     .await?;
 
     let portal_address = l1.deploy_zone().await?;
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
-    let genesis_block = portal.genesisTempoBlockNumber().call().await?;
     let target_block = genesis_block + SHORT_MULTI_BOUNDARY_GAP_BLOCKS;
 
     // Mine enough L1 blocks that catching up requires several ancestry batches.
@@ -343,9 +352,13 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
     )
     .await?;
 
-    let zone =
-        ZoneTestNode::start_from_l1_portal_genesis(l1.http_url(), l1.ws_url(), portal_address)
-            .await?;
+    let zone = ZoneTestNode::start_from_l1_genesis_block(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        genesis_block,
+    )
+    .await?;
 
     // Let the zone replay far enough to have multiple valid split boundaries.
     let multi_step_tempo =
@@ -367,12 +380,13 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
     );
 
     // Start the sequencer only after the backlog has accumulated.
-    let seq = spawn_sequencer_with_anchor_config(
+    let seq = spawn_sequencer_with_config(
         &l1,
         &zone,
         portal_address,
         l1.dev_signer(),
         anchor_config,
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await;
 
@@ -460,8 +474,8 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
     .await?;
 
     let portal_address = l1.deploy_zone().await?;
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
-    let genesis_block = portal.genesisTempoBlockNumber().call().await?;
     let target_block = genesis_block + SHORT_EXTENDED_GAP_BLOCKS;
 
     poll_until(
@@ -482,9 +496,13 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
     )
     .await?;
 
-    let zone =
-        ZoneTestNode::start_from_l1_portal_genesis(l1.http_url(), l1.ws_url(), portal_address)
-            .await?;
+    let zone = ZoneTestNode::start_from_l1_genesis_block(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        genesis_block,
+    )
+    .await?;
 
     let first_step_tempo = genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW;
     zone.wait_for_tempo_block_number(first_step_tempo, SHORT_STEPPING_TIMEOUT)
@@ -497,12 +515,13 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
         l1_tip.saturating_sub(first_step_tempo),
     );
 
-    let seq = spawn_sequencer_with_anchor_config(
+    let seq = spawn_sequencer_with_config(
         &l1,
         &zone,
         portal_address,
         l1.dev_signer(),
         anchor_config,
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await;
 

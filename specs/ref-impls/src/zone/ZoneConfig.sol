@@ -4,17 +4,21 @@ pragma solidity ^0.8.13;
 import {
     ITempoState,
     IZoneConfig,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_PENDING_SEQUENCER_SLOT,
-    PORTAL_SEQUENCER_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT
+    PORTAL_GATEWAY_MODE_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT,
+    Role
 } from "../interfaces/IZone.sol";
 
 /// @title ZoneConfig
 /// @notice Central zone metadata and L1 state references
 /// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
 ///      Provides single source of truth for zone configuration.
-///      Reads sequencer from L1 ZonePortal, eliminating duplicate sequencer management.
+///      Reads the sequencer set from L1 ZonePortal, eliminating duplicate sequencer management.
 contract ZoneConfig is IZoneConfig {
 
     /*//////////////////////////////////////////////////////////////
@@ -44,30 +48,12 @@ contract ZoneConfig is IZoneConfig {
                           L1 STATE ACCESSORS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Get current sequencer by reading from L1 ZonePortal
-    /// @dev Reads portal's sequencer slot from finalized Tempo state.
-    ///      L1 ZonePortal is the single source of truth for sequencer.
-    ///      Sequencer changes on L1 become visible after Tempo block finalization.
-    /// @return Current sequencer address
-    function sequencer() external view returns (address) {
-        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_SEQUENCER_SLOT);
-        return address(uint160(uint256(value)));
-    }
-
-    /// @notice Get pending sequencer by reading from L1 ZonePortal
-    /// @dev Reads portal's pendingSequencer slot from finalized Tempo state.
-    /// @return Pending sequencer address (0 if none)
-    function pendingSequencer() external view returns (address) {
-        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_PENDING_SEQUENCER_SLOT);
-        return address(uint160(uint256(value)));
-    }
-
     /// @notice Get sequencer's current encryption public key by reading from L1 ZonePortal
-    /// @dev Reads the last entry from the _encryptionKeys dynamic array (slot 6).
+    /// @dev Reads the last entry from the _encryptionKeys dynamic array (slot 5).
     ///      Each EncryptionKeyEntry occupies 2 storage slots:
     ///        slot base + (index * 2):     x (bytes32)
     ///        slot base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
-    ///      where base = keccak256(abi.encode(6))
+    ///      where base = keccak256(abi.encode(5))
     /// @return x X-coordinate of sequencer's secp256k1 public key
     /// @return yParity Y-coordinate parity (0x02 or 0x03)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity) {
@@ -95,11 +81,11 @@ contract ZoneConfig is IZoneConfig {
                               MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Modifier to restrict access to current sequencer
-    /// @dev Reads sequencer from L1 via ZonePortal for each check.
+    /// @notice Modifier to restrict access to active sequencers.
+    /// @dev Reads sequencer membership from L1 via ZonePortal for each check.
     ///      L1 is the single source of truth.
     modifier onlySequencer() {
-        if (msg.sender != this.sequencer()) revert NotSequencer();
+        if (!this.isSequencer(msg.sender)) revert NotSequencer();
         _;
     }
 
@@ -107,11 +93,12 @@ contract ZoneConfig is IZoneConfig {
                           CONVENIENCE FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Check if an address is the current sequencer
+    /// @notice Check if an address belongs to the active sequencer set.
     /// @param account Address to check
-    /// @return True if account is the current sequencer
+    /// @return True if account belongs to the active sequencer set.
     function isSequencer(address account) external view returns (bool) {
-        return account == this.sequencer();
+        bytes32 membershipSlot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
+        return uint256(tempoState.readTempoStorageSlot(tempoPortal, membershipSlot)) != 0;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -127,6 +114,40 @@ contract ZoneConfig is IZoneConfig {
         bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, configSlot);
         // TokenConfig.enabled is the first bool in the struct (lowest byte)
         return uint8(uint256(value) & 0xff) != 0;
+    }
+
+    /// @notice Read the maximum sequencer-configurable Tempo gas rate from the portal.
+    function maxTempoGasRate() external view returns (uint128) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_MAX_TEMPO_GAS_RATE_SLOT);
+        return uint128(uint256(value));
+    }
+
+    /// @notice Read account allowlist enforcement from the dedicated packed mode slot.
+    function isAccessEnforced() public view returns (bool) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_ACCESS_MODE_SLOT);
+        return uint8(uint256(value)) != 0;
+    }
+
+    /// @notice Read whether callback gateway enforcement is disabled.
+    function isGatewayOpen() public view returns (bool) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_GATEWAY_MODE_SLOT);
+        return uint8(uint256(value) >> 8) == 0;
+    }
+
+    /// @notice Check whether an account is authorized under the portal's access mode.
+    function isAllowedAccount(address account) external view returns (bool) {
+        if (!isAccessEnforced()) return true;
+        bytes32 accountSlot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        return
+            uint256(tempoState.readTempoStorageSlot(tempoPortal, accountSlot))
+                == uint256(Role.Account);
+    }
+
+    /// @notice Check whether an address is a registered callback-only ZoneGateway.
+    function isZoneGateway(address gateway) external view returns (bool) {
+        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
+        return uint256(tempoState.readTempoStorageSlot(tempoPortal, gatewaySlot))
+            == uint256(Role.CallbackGateway);
     }
 
 }

@@ -14,7 +14,7 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
 use zone_primitives::constants::{
-    PORTAL_ADMIN_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, zone_chain_id,
+    PORTAL_ADMIN_SLOT, PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, zone_chain_id,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -246,17 +246,6 @@ fn genesis_predeploy_code(addr: Address) -> Vec<u8> {
     const_hex::decode(code.strip_prefix("0x").unwrap_or(code)).expect("decode genesis bytecode")
 }
 
-fn genesis_zone_factory_bytecode() -> Vec<u8> {
-    let genesis: serde_json::Value =
-        serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
-            .expect("zone genesis template should parse");
-    let bytecode = genesis["zoneFactoryBytecode"]
-        .as_str()
-        .expect("zone-dev-genesis.json should contain zoneFactoryBytecode");
-    const_hex::decode(bytecode.strip_prefix("0x").unwrap_or(bytecode))
-        .expect("decode ZoneFactory bytecode")
-}
-
 struct BytecodeView<'a> {
     raw: &'a [u8],
     compared: &'a [u8],
@@ -323,14 +312,14 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
     // can differ across build environments while the executable bytecode matches.
     let mut evm = setup_zone_evm_with_contracts_for_portal(1337, Address::ZERO);
 
-    // TempoState is a native precompile. The genesis generator intentionally uses
-    // the non-empty native-account marker instead of deploying its Solidity shim.
+    // TempoState and ZoneOutbox are native precompiles. The genesis generator intentionally uses
+    // the non-empty native-account marker instead of deploying their Solidity reference shims.
     assert_eq!(genesis_predeploy_code(TEMPO_STATE_ADDRESS), [0xef]);
+    assert_eq!(genesis_predeploy_code(ZONE_OUTBOX_ADDRESS), [0xef]);
 
     for (name, addr) in [
         ("ZoneConfig", ZONE_CONFIG_ADDRESS),
         ("ZoneInbox", ZONE_INBOX_ADDRESS),
-        ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
     ] {
         let expected = evm
             .db_mut()
@@ -376,22 +365,6 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
             );
         }
     }
-}
-
-#[test]
-fn zone_test_genesis_factory_bytecode_matches_foundry_artifact() {
-    // The generator copies this creation bytecode directly from the Foundry artifact.
-    // Keep the checked-in dev factory in lockstep with changes to ZoneFactory or any
-    // contract whose creation code it embeds, including ZonePortal.
-    let actual = genesis_zone_factory_bytecode();
-    let expected = load_artifact("ZoneFactory");
-
-    assert_eq!(
-        bytecode_hash(&actual),
-        bytecode_hash(&expected),
-        "ZoneFactory bytecode in zone-dev-genesis.json is stale; refresh it with \
-         `just regen-zone-dev-genesis`"
-    );
 }
 
 /// Build a minimal valid RLP-encoded TempoHeader.
@@ -595,15 +568,15 @@ fn advance_tempo_repro() {
 /// Pins the Rust portal storage-slot constants to the ZonePortal storage layout.
 #[test]
 fn zone_portal_storage_slot_constants_match_solidity() {
-    assert_eq!(PORTAL_SEQUENCER_SLOT, B256::ZERO, "sequencer is slot 0");
+    assert_eq!(PORTAL_ADMIN_SLOT, B256::ZERO, "admin is slot 0");
     assert_eq!(
-        PORTAL_ADMIN_SLOT,
-        B256::from(U256::from(1)),
-        "admin is slot 1"
+        PORTAL_IS_SEQUENCER_SLOT,
+        B256::from(U256::from(19)),
+        "isSequencer is slot 19"
     );
     assert_eq!(
-        PORTAL_PENDING_SEQUENCER_SLOT,
-        B256::from(U256::from(2)),
-        "pendingSequencer is slot 2"
+        PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+        B256::from(U256::from(22)),
+        "maxTempoGasRate is slot 22"
     );
 }

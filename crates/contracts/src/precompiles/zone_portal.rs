@@ -2,17 +2,23 @@
 
 pub use ZonePortal::{
     BlockTransition, DepositQueueTransition, EncryptedDeposit, EncryptedDepositPayload, Withdrawal,
+    ZonePortalErrors as ZonePortalError,
 };
 
-use crate::ZoneOutbox;
+use crate::IZoneOutbox;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
-use zone_primitives::constants::EMPTY_SENTINEL;
+use zone_primitives::constants::{EMPTY_SENTINEL, PORTAL_TOKEN_CONFIGS_SLOT};
 
 crate::sol! {
-    #[derive(Debug)]
+    #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
     contract ZonePortal {
         // -- Shared types --
+        enum Role {
+            None,
+            Account,
+            CallbackGateway
+        }
 
         struct Withdrawal {
             address token;
@@ -40,7 +46,7 @@ crate::sol! {
             address token;
             address sender;
             uint128 amount;
-            address bouncebackRecipient;
+            address tempoRefundRecipient;
             uint256 keyIndex;
             EncryptedDepositPayload encrypted;
         }
@@ -67,7 +73,7 @@ crate::sol! {
             uint128 netAmount,
             uint128 fee,
             bytes32 memo,
-            address bouncebackRecipient,
+            address tempoRefundRecipient,
             uint64 depositNumber
         );
 
@@ -83,7 +89,7 @@ crate::sol! {
             bytes ciphertext,
             bytes12 nonce,
             bytes16 tag,
-            address bouncebackRecipient,
+            address tempoRefundRecipient,
             uint64 depositNumber
         );
 
@@ -120,14 +126,14 @@ crate::sol! {
         );
 
         event DepositBounceBack(
-            address indexed bouncebackRecipient,
+            address indexed tempoRefundRecipient,
             address token,
             uint128 amount,
             uint128 bouncebackFee
         );
 
         event DepositBounceBackPending(
-            address indexed bouncebackRecipient,
+            address indexed tempoRefundRecipient,
             address token,
             uint128 amount,
             uint128 bouncebackFee
@@ -135,17 +141,9 @@ crate::sol! {
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
+        event ZoneGasRateUpdated(uint128 zoneGasRate);
+        event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
         event BouncebackGasUpdated(uint64 bouncebackGas);
-
-        event SequencerTransferStarted(
-            address indexed currentSequencer,
-            address indexed pendingSequencer
-        );
-
-        event SequencerTransferred(
-            address indexed previousSequencer,
-            address indexed newSequencer
-        );
 
         event AdminTransferStarted(
             address indexed currentAdmin,
@@ -157,23 +155,42 @@ crate::sol! {
             address indexed newAdmin
         );
 
+        event RoleUpdated(address indexed account, Role prev, Role next);
+        event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
+
         // -- Errors --
 
         error NotSequencer();
         error NotAdmin();
-        error NotPendingSequencer();
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
         error PolicyForbids();
         error InvalidBouncebackRecipient();
+        error TokenNotEnabled();
+        error InvalidCallbackTarget();
+        error AccountNotAllowed(address account);
 
         // -- View functions --
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
-        function sequencer() external view returns (address);
+        function messenger() external view returns (address);
+        function isAccessEnforced() external view returns (bool);
+        function setAccessMode(bool enforced) external;
+        function isGatewayOpen() external view returns (bool);
+        function setGatewayMode(bool enforced) external;
+        function role(address account) external view returns (Role);
+        function setRole(address account, Role role) external;
+        function setAllowedAccount(address account, bool allowed) external;
+        function setGateway(address account, bool allowed) external;
         function verifier() external view returns (address);
+        function sequencerSetVersion() external view returns (uint64);
+        function sequencerThreshold() external view returns (uint8);
+        function zoneHeight() external view returns (uint256);
+        function isSequencer(address account) external view returns (bool);
+        function sequencerCount() external view returns (uint256);
+        function sequencerAt(uint256 index) external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
@@ -182,7 +199,6 @@ crate::sol! {
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
         function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
-        function genesisTempoBlockNumber() external view returns (uint64);
         function calculateDepositFee() external view returns (uint128 fee);
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
@@ -196,7 +212,7 @@ crate::sol! {
             address to,
             uint128 amount,
             bytes32 memo,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         )
             external
             returns (bytes32 newCurrentDepositQueueHash);
@@ -210,15 +226,17 @@ crate::sol! {
             DepositQueueTransition calldata depositQueueTransition,
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
-            bytes calldata proof
+            bytes calldata proof,
+            uint256 nextZoneHeight,
+            bytes[] calldata signatures
         ) external;
 
         function enableToken(address token) external;
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
 
-        function transferSequencer(address newSequencer) external;
-        function acceptSequencer() external;
+        function setZoneGasRate(uint128 newZoneGasRate) external;
+        function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
         function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
@@ -232,7 +250,7 @@ crate::sol! {
             uint128 amount,
             uint256 keyIndex,
             EncryptedDepositPayload calldata encrypted,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
         function setSequencerEncryptionKey(
@@ -249,8 +267,8 @@ crate::sol! {
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
+        function maxTempoGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);
-        function pendingSequencer() external view returns (address);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
 
@@ -339,12 +357,14 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
-            Self::NotPendingSequencer(_) => f.write_str("NotPendingSequencer"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
+            Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
+            Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
+            Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
         }
     }
 }
@@ -365,7 +385,7 @@ impl Withdrawal {
 
     /// Reconstruct the public L1-facing withdrawal from a zone-side withdrawal request event.
     pub fn from_requested_event(
-        event: &ZoneOutbox::WithdrawalRequested,
+        event: &IZoneOutbox::WithdrawalRequested,
         tx_hash: B256,
         encrypted_sender: Bytes,
     ) -> Self {
@@ -388,6 +408,11 @@ impl Withdrawal {
         }
     }
 
+    /// Hash this withdrawal as one link in a withdrawal queue.
+    pub fn hash_with_tail(&self, tail: B256) -> B256 {
+        keccak256((self.clone(), tail).abi_encode_params())
+    }
+
     /// Compute the withdrawal queue hash for a slice of withdrawals.
     ///
     /// The hash chain has the oldest withdrawal at the outermost layer for efficient FIFO removal:
@@ -404,9 +429,14 @@ impl Withdrawal {
         }
 
         let mut hash = EMPTY_SENTINEL;
-        for w in withdrawals.iter().rev() {
-            hash = keccak256((w.clone(), hash).abi_encode_params());
+        for withdrawal in withdrawals.iter().rev() {
+            hash = withdrawal.hash_with_tail(hash);
         }
         hash
     }
+}
+
+/// Return the storage slot for `token` in the portal token-config mapping.
+pub fn portal_token_config_slot(token: Address) -> B256 {
+    keccak256((token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode())
 }

@@ -15,6 +15,7 @@ remappings = [
 
 # optimizer and invariants
 via-ir = true
+dynamic_test_linking = false
 optimizer = true
 invariant = { runs = 10, depth = 50, fail_on_revert = true, show_solidity = true }
 

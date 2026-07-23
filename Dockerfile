@@ -19,7 +19,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-
     cargo build --profile ${RUST_PROFILE} \
         --bin tempo-xtask
 
-# Solidity ref-impls compiled for deployable L1 artifacts (ZoneFactory).
+# Solidity ref-impls compiled for shared runtimes, routers, and zone genesis artifacts.
 # Requires the specs/ref-impls/lib submodules to be checked out.
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d AS solidity
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -47,8 +47,7 @@ COPY --from=builder /app/target/${RUST_PROFILE}/tempo-zone /usr/local/bin/tempo-
 ENTRYPOINT ["/usr/local/bin/tempo-zone"]
 
 # tempo-zone-xtask: zone provisioning tooling (create-zone, zone-info, deploy-router).
-# Ships the compiled ref-impls artifacts (used by create-zone via --specs-out and for
-# deploying a fresh ZoneFactory with `cast send --create`).
+# Ships the compiled ref-impls artifacts used by provisioning and router deployment.
 FROM base AS tempo-zone-xtask
 ARG RUST_PROFILE=profiling
 RUN apt-get update && apt-get install -y --no-install-recommends \

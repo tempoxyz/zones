@@ -8,9 +8,8 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, ZoneAccount, now_secs,
-    start_zone_with_private_rpc, start_zone_with_private_rpc_l1,
-    start_zone_with_private_rpc_l1_with_encryption,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, now_secs, start_zone_with_private_rpc,
+    start_zone_with_private_rpc_l1, start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
     primitives::{Address, B256, TxKind, U256, address, hex},
@@ -37,7 +36,7 @@ use tempo_primitives::{
     transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
 };
 use tempo_zone_contracts::{
-    EncryptedDepositPayload, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
+    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
@@ -147,7 +146,9 @@ async fn ws_next_json(ws: &mut PrivateRpcWs) -> eyre::Result<Value> {
 
     match msg? {
         Message::Text(text) => Ok(serde_json::from_str(&text)?),
-        other => eyre::bail!("expected text websocket message, got {other:?}"),
+        other => {
+            eyre::bail!("expected text websocket message, got {other:?}");
+        }
     }
 }
 
@@ -174,7 +175,9 @@ async fn ws_collect_messages_until_quiet(
             Err(_) => return Ok(messages),
             Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(messages),
             Ok(Some(Ok(Message::Text(text)))) => messages.push(serde_json::from_str(&text)?),
-            Ok(Some(Ok(other))) => eyre::bail!("unexpected websocket frame: {other:?}"),
+            Ok(Some(Ok(other))) => {
+                eyre::bail!("unexpected websocket frame: {other:?}");
+            }
             Ok(Some(Err(err))) => return Err(err.into()),
         }
     }
@@ -753,7 +756,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
 async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let ctx = start_zone_with_private_rpc().await?;
+    let ctx = start_zone_with_private_rpc_l1().await?;
 
     let owner_signer = PrivateKeySigner::random();
     let owner = owner_signer.address();
@@ -1183,7 +1186,7 @@ async fn test_ws_pending_transaction_subscriptions_are_disabled() -> eyre::Resul
 async fn test_zone_metadata_methods() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let ctx = start_zone_with_private_rpc().await?;
+    let ctx = start_zone_with_private_rpc_l1().await?;
     let user_signer = PrivateKeySigner::random();
 
     let auth_info = ctx
@@ -1209,6 +1212,8 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         zone_info["result"]["zoneId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.zone_id),
     );
+    assert_eq!(zone_info["result"]["isAccessEnforced"], true);
+    assert_eq!(zone_info["result"]["isGatewayOpen"], false);
     assert_eq!(
         zone_info["result"]["zoneTokens"]
             .as_array()
@@ -1221,6 +1226,14 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
     assert_eq!(
         zone_info["result"]["chainId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.chain_id),
+    );
+    let tempo_block_number = TempoState::new(TEMPO_STATE_ADDRESS, ctx.zone.provider())
+        .tempoBlockNumber()
+        .call()
+        .await?;
+    assert_eq!(
+        zone_info["result"]["tempoBlockNumber"],
+        format!("0x{tempo_block_number:x}"),
     );
 
     Ok(())
@@ -1305,242 +1318,6 @@ async fn test_zone_get_encryption_key_reads_latest_l1_key() -> eyre::Result<()> 
             "keyIndex": "0x1",
         })
     );
-
-    Ok(())
-}
-
-/// `zone_getDepositStatus` returns relevant regular deposits for both the sender
-/// and the plaintext recipient, and returns an empty list for unrelated callers.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_zone_get_deposit_status_regular_and_empty() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let ctx = start_zone_with_private_rpc_l1().await?;
-    let l1 = ctx.l1();
-    let portal_address = ctx.portal_address();
-
-    let depositor_signer = l1.user_signer();
-    let recipient_signer = l1.signer_at(2);
-    let recipient = recipient_signer.address();
-
-    let mut depositor =
-        ZoneAccount::with_signer(depositor_signer.clone(), l1, &ctx.zone, portal_address);
-    let deposit_amount: u128 = 1_000_000;
-    l1.fund_user(depositor.address(), deposit_amount).await?;
-
-    let (tempo_block_number, _) = depositor
-        .deposit_to_with_block(recipient, deposit_amount, DEFAULT_TIMEOUT, &ctx.zone)
-        .await?;
-
-    let sender_status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &depositor_signer)
-        .await?;
-    let sender_deposits = sender_status["result"]["deposits"]
-        .as_array()
-        .expect("sender deposits should be an array");
-    assert_eq!(sender_status["result"]["processed"], true);
-    assert_eq!(sender_deposits.len(), 1);
-    assert_eq!(sender_deposits[0]["kind"], "regular");
-    assert_eq!(sender_deposits[0]["status"], "processed");
-    assert_eq!(
-        sender_deposits[0]["sender"].as_str().unwrap(),
-        format!("{:#x}", depositor.address()),
-    );
-    assert_eq!(
-        sender_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{recipient:#x}"),
-    );
-    assert_eq!(sender_deposits[0]["amount"], "0xf4240");
-
-    let recipient_status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &recipient_signer)
-        .await?;
-    let recipient_deposits = recipient_status["result"]["deposits"]
-        .as_array()
-        .expect("recipient deposits should be an array");
-    assert_eq!(recipient_status["result"]["processed"], true);
-    assert_eq!(recipient_deposits.len(), 1);
-    assert_eq!(
-        recipient_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{recipient:#x}"),
-    );
-
-    let unrelated_signer = PrivateKeySigner::random();
-    let unrelated_status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &unrelated_signer)
-        .await?;
-    let unrelated_deposits = unrelated_status["result"]["deposits"]
-        .as_array()
-        .expect("unrelated deposits should be an array");
-    assert_eq!(unrelated_status["result"]["processed"], true);
-    assert!(unrelated_deposits.is_empty());
-
-    Ok(())
-}
-
-/// `zone_getDepositStatus` reveals encrypted deposits to the sender immediately,
-/// and to the recipient once the L2 processed event has revealed the recipient.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let ctx = start_zone_with_private_rpc_l1_with_encryption().await?;
-    let l1 = ctx.l1();
-    let portal_address = ctx.portal_address();
-
-    let depositor_signer = l1.user_signer();
-    let recipient_signer = l1.signer_at(2);
-    let recipient = recipient_signer.address();
-
-    let mut depositor =
-        ZoneAccount::with_signer(depositor_signer.clone(), l1, &ctx.zone, portal_address);
-    let deposit_amount: u128 = 1_000_000;
-    let memo = B256::from([0x11; 32]);
-    l1.fund_user(depositor.address(), deposit_amount).await?;
-
-    let (tempo_block_number, _) = depositor
-        .deposit_encrypted_with_block(deposit_amount, recipient, memo, DEFAULT_TIMEOUT, &ctx.zone)
-        .await?;
-
-    let sender_status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &depositor_signer)
-        .await?;
-    let sender_deposits = sender_status["result"]["deposits"]
-        .as_array()
-        .expect("sender deposits should be an array");
-    assert_eq!(sender_status["result"]["processed"], true);
-    assert_eq!(sender_deposits.len(), 1);
-    assert_eq!(sender_deposits[0]["kind"], "encrypted");
-    assert_eq!(sender_deposits[0]["status"], "processed");
-    assert_eq!(
-        sender_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{recipient:#x}"),
-    );
-    assert_eq!(
-        sender_deposits[0]["memo"].as_str().unwrap(),
-        format!("{memo:#x}"),
-    );
-
-    let recipient_status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &recipient_signer)
-        .await?;
-    let recipient_deposits = recipient_status["result"]["deposits"]
-        .as_array()
-        .expect("recipient deposits should be an array");
-    assert_eq!(recipient_status["result"]["processed"], true);
-    assert_eq!(recipient_deposits.len(), 1);
-    assert_eq!(
-        recipient_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{recipient:#x}"),
-    );
-    assert_eq!(
-        recipient_deposits[0]["sender"].as_str().unwrap(),
-        format!("{:#x}", depositor.address()),
-    );
-
-    Ok(())
-}
-
-/// `zone_getDepositStatus` returns encrypted deposits to the bounceback
-/// recipient, even when that caller is neither the L1 sender nor the revealed
-/// zone recipient. This matches SwapAndDepositRouter deposits, where the L1
-/// sender is the router and the refund owner is carried separately.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_zone_get_deposit_status_encrypted_bounceback_recipient() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let ctx = start_zone_with_private_rpc_l1_with_encryption().await?;
-    let l1 = ctx.l1();
-    let portal_address = ctx.portal_address();
-
-    let depositor_signer = l1.user_signer();
-    let recipient = l1.signer_at(2).address();
-    let bounceback_signer = l1.signer_at(3);
-    let bounceback_recipient = bounceback_signer.address();
-
-    let depositor =
-        ZoneAccount::with_signer(depositor_signer.clone(), l1, &ctx.zone, portal_address);
-    let deposit_amount: u128 = 1_000_000;
-    let memo = B256::from([0x33; 32]);
-    l1.fund_user(depositor.address(), deposit_amount).await?;
-
-    ContractTip20::new(PATH_USD_ADDRESS, depositor.l1_provider())
-        .approve(portal_address, U256::MAX)
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-
-    let portal = ZonePortal::new(portal_address, depositor.l1_provider());
-    let key = portal.sequencerEncryptionKey().call().await?;
-    let key_count = portal.encryptionKeyCount().call().await?;
-    eyre::ensure!(key_count > U256::ZERO, "no encryption key registered");
-    let key_index = key_count - U256::from(1);
-
-    let encrypted = zone_precompiles::ecies::encrypt_deposit(
-        &key.x,
-        key.yParity,
-        recipient,
-        memo,
-        portal_address,
-        key_index,
-    )
-    .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
-
-    let balance_before = ctx.zone.balance_of(ZONE_TOKEN_ADDRESS, recipient).await?;
-    let receipt = portal
-        .depositEncrypted(
-            PATH_USD_ADDRESS,
-            deposit_amount,
-            key_index,
-            EncryptedDepositPayload {
-                ephemeralPubkeyX: encrypted.eph_pub_x,
-                ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
-                ciphertext: encrypted.ciphertext.into(),
-                nonce: alloy::primitives::FixedBytes(encrypted.nonce),
-                tag: alloy::primitives::FixedBytes(encrypted.tag),
-            },
-            bounceback_recipient,
-        )
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    eyre::ensure!(receipt.status(), "L1 depositEncrypted tx failed");
-
-    ctx.zone
-        .wait_for_balance(
-            ZONE_TOKEN_ADDRESS,
-            recipient,
-            balance_before + U256::from(deposit_amount),
-            DEFAULT_TIMEOUT,
-        )
-        .await?;
-
-    let tempo_block_number = receipt
-        .block_number
-        .ok_or_else(|| eyre::eyre!("depositEncrypted receipt missing block number"))?;
-    let status = ctx
-        .get_deposit_status_as_user(tempo_block_number, &bounceback_signer)
-        .await?;
-    let deposits = status["result"]["deposits"]
-        .as_array()
-        .expect("bounceback recipient deposits should be an array");
-
-    assert_eq!(status["result"]["processed"], true);
-    assert_eq!(deposits.len(), 1);
-    assert_eq!(deposits[0]["kind"], "encrypted");
-    assert_eq!(deposits[0]["status"], "processed");
-    assert_eq!(
-        deposits[0]["sender"].as_str().unwrap(),
-        format!("{:#x}", depositor.address()),
-    );
-    assert_eq!(
-        deposits[0]["recipient"].as_str().unwrap(),
-        format!("{recipient:#x}"),
-    );
-    assert_ne!(depositor.address(), bounceback_recipient);
-    assert_ne!(recipient, bounceback_recipient);
 
     Ok(())
 }

@@ -8,7 +8,7 @@
 //!
 //! 1. Direct-call-only rules reject delegate calls before storage access.
 //! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply pure [`CallRules`] admission checks using calldata and caller metadata.
+//! 3. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
 //! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Admission-rule rejections include calldata input gas, while early delegate-call rejection is
@@ -21,11 +21,14 @@ use core::cell::RefCell;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
-use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{
+    PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
+};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
     dispatch::selector_from_calldata,
+    error::TempoPrecompileError,
     storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
     storage_credits::NonCreditableSlots,
 };
@@ -59,12 +62,22 @@ pub(crate) enum CallCheck {
     Continue,
     /// Revert with ABI-encoded data. The execution wrapper MUST apply input gas and reservoir.
     Revert(Bytes),
+    /// Abort admission because a state read failed.
+    Error(CallRuleError),
 }
 
-/// Pure, selector and caller dependent, precompile call rules evaluated before storage setup.
+/// State-read failures raised while applying pre-execution rules.
+pub(crate) enum CallRuleError {
+    /// Error from Zone-local precompile storage, preserving halt/fatal behavior.
+    Tempo(TempoPrecompileError),
+    /// Fatal external-state error that must abort EVM execution.
+    Fatal(PrecompileError),
+}
+
+/// Selector and caller dependent precompile call rules evaluated after storage setup.
 ///
 /// Rules may enforce admission policy and duplicate cheap business checks as fail-fast preflight.
-/// All state access remains in the implementation and resolves through the EVM database adapter.
+/// State-dependent rules resolve reads through the installed storage context.
 pub(crate) trait CallRules: 'static {
     /// Return the fixed gas charge for this selector, if one applies.
     fn fixed_gas(&self, _selector: Option<[u8; 4]>) -> Option<u64> {
@@ -125,6 +138,10 @@ pub(crate) fn create_precompile(
                 let output = s.revert_output(output);
                 add_input_cost(s, data, Ok(output))
             }
+            CallCheck::Error(CallRuleError::Tempo(error)) => {
+                StorageCtx::default().error_result(error)
+            }
+            CallCheck::Error(CallRuleError::Fatal(error)) => Err(error),
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;

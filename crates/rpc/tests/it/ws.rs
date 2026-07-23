@@ -231,21 +231,6 @@ impl ZoneRpcApi for MockZoneRpcApi {
     fn zone_get_encryption_key(&self, _auth: zone_rpc::auth::AuthContext) -> BoxFut<'_> {
         Box::pin(async { Err(zone_rpc::types::JsonRpcError::internal("not implemented")) })
     }
-
-    fn zone_get_deposit_status(
-        &self,
-        tempo_block_number: u64,
-        _auth: zone_rpc::auth::AuthContext,
-    ) -> BoxFut<'_> {
-        Box::pin(async move {
-            zone_rpc::types::to_raw(&serde_json::json!({
-                "tempoBlockNumber": alloy_primitives::U64::from(tempo_block_number),
-                "zoneProcessedThrough": alloy_primitives::U64::from(tempo_block_number),
-                "processed": true,
-                "deposits": [],
-            }))
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,30 +456,6 @@ async fn ws_batch_request() {
     assert_eq!(arr[0]["result"], "0x42");
     assert_eq!(arr[1]["id"], 2);
     assert_eq!(arr[1]["result"], "0x1");
-}
-
-#[tokio::test]
-async fn ws_zone_method_roundtrip() {
-    let ctx = TestContext::start(MockZoneRpcApi::default()).await;
-    let mut ws = connect_with_header(&ctx).await;
-
-    ws.send(tungstenite::Message::Text(
-        serde_json::json!({
-            "jsonrpc":"2.0",
-            "method":"zone_getDepositStatus",
-            "params":["0x2a"],
-            "id":7
-        })
-        .to_string()
-        .into(),
-    ))
-    .await
-    .unwrap();
-
-    let resp = parse_response(ws.next().await.unwrap().unwrap());
-    assert_eq!(resp["id"], 7);
-    assert_eq!(resp["result"]["tempoBlockNumber"], "0x2a");
-    assert_eq!(resp["result"]["processed"], true);
 }
 
 #[tokio::test]

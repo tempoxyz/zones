@@ -13,18 +13,17 @@ use tempo_contracts::precompiles::{
     ITIP20,
     ITIP403Registry::{self, PolicyType},
 };
-use tempo_precompiles::{PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS, TIP403_REGISTRY_ADDRESS};
-use zone_l1::state::tip403::PolicyEvent;
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
+use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip20_policy_id,
-    seed_raw_tip403_policy, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
+    seed_raw_tip403_token_policy, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
 ///
-/// TIP-20 transfers use the default `transferPolicyId` of 1 (allow all),
-/// so they always succeed regardless of the policy cache state.
+/// TIP-20 transfers use the default anchored `transferPolicyId` of 1 (allow all).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -121,8 +120,8 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
     let anchor = zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
 
     const BLACKLIST_POLICY_ID: u64 = 42;
-    seed_raw_tip20_policy_id(
-        &mut zone.l1_state_cache().write(),
+    seed_raw_tip403_token_policy(
+        &mut zone.l1_state_cache().lock(),
         anchor,
         PATH_USD_ADDRESS,
         BLACKLIST_POLICY_ID,
@@ -133,7 +132,7 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
         &[PolicySeed::simple(
             BLACKLIST_POLICY_ID,
             PolicyType::BLACKLIST,
-            &[(alice, true), (TIP_FEE_MANAGER_ADDRESS, false)],
+            &[(alice, true), (ZONE_FEE_MANAGER_ADDRESS, false)],
         )],
     )?;
 
@@ -491,61 +490,6 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     // Policy 10 should exist
     let exists = registry.policyExists(10).call().await?;
     assert!(exists, "compound policy 10 should exist");
-
-    Ok(())
-}
-
-/// `TokenPolicyChanged` event updates the token→policy mapping in the cache.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_token_policy_change_via_events() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
-    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
-
-    let token = address!("0x0000000000000000000000000000000000BEEF01");
-
-    // Apply a token policy change event
-    {
-        let cache = zone.policy_cache();
-        cache.write().apply_events(
-            1,
-            &[PolicyEvent::TokenPolicyChanged {
-                token,
-                policy_id: 5,
-            }],
-        );
-    }
-
-    // Verify via cache read that the token policy was set
-    {
-        let cache = zone.policy_cache();
-        let r = cache.read();
-        let policy_id = r.get_token_policy(token, u64::MAX);
-        assert_eq!(policy_id, Some(5), "token should map to policy 5");
-    }
-
-    // Update the token's policy to 7
-    {
-        let cache = zone.policy_cache();
-        cache.write().apply_events(
-            2,
-            &[PolicyEvent::TokenPolicyChanged {
-                token,
-                policy_id: 7,
-            }],
-        );
-    }
-
-    // Verify the update took effect
-    {
-        let cache = zone.policy_cache();
-        let r = cache.read();
-        let policy_id = r.get_token_policy(token, u64::MAX);
-        assert_eq!(policy_id, Some(7), "token should now map to policy 7");
-    }
 
     Ok(())
 }

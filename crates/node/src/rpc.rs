@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use alloy_consensus::BlockHeader;
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -19,7 +20,7 @@ use alloy_rpc_types_eth::{
     FilterId, TransactionRequest,
     state::{EvmOverrides, StateOverride},
 };
-use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
+use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use futures::StreamExt;
 use reth_provider::CanonStateSubscriptions;
@@ -47,14 +48,13 @@ use tokio::{
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{
-    DepositType, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
+    TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneConfig, ZonePortal,
 };
 use zone_rpc::{
     auth::AuthContext,
     types::{
-        AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, DepositKind, DepositState,
-        DepositStatusEntry, DepositStatusResponse, JsonRpcError, ZoneInfoResponse, internal,
-        raw_null, raw_zero, to_raw,
+        AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError, ZoneInfoResponse,
+        internal, raw_null, raw_zero, to_raw,
     },
 };
 
@@ -244,58 +244,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
         }
     }
 
-    async fn portal_deposits_for_block(
-        &self,
-        tempo_block_number: u64,
-    ) -> Result<Vec<PortalDepositRecord>, JsonRpcError> {
-        if self.config.zone_portal.is_zero() {
-            return Err(JsonRpcError::internal("zone portal not configured"));
-        }
-
-        let filter = Filter::new()
-            .address(self.config.zone_portal)
-            .from_block(tempo_block_number)
-            .to_block(tempo_block_number)
-            .event_signature(vec![
-                ZonePortal::DepositMade::SIGNATURE_HASH,
-                ZonePortal::EncryptedDepositMade::SIGNATURE_HASH,
-            ]);
-
-        let logs = self.l1_provider.get_logs(&filter).await.map_err(internal)?;
-        let mut deposits = Vec::with_capacity(logs.len());
-
-        for log in logs {
-            match ZonePortal::ZonePortalEvents::decode_log(&log.inner)
-                .map_err(internal)?
-                .data
-            {
-                ZonePortal::ZonePortalEvents::DepositMade(event) => {
-                    deposits.push(PortalDepositRecord::Regular {
-                        deposit_hash: event.newCurrentDepositQueueHash,
-                        sender: event.sender,
-                        recipient: event.to,
-                        bounceback_recipient: event.bouncebackRecipient,
-                        token: event.token,
-                        amount: event.netAmount,
-                        memo: event.memo,
-                    });
-                }
-                ZonePortal::ZonePortalEvents::EncryptedDepositMade(event) => {
-                    deposits.push(PortalDepositRecord::Encrypted {
-                        deposit_hash: event.newCurrentDepositQueueHash,
-                        sender: event.sender,
-                        bounceback_recipient: event.bouncebackRecipient,
-                        token: event.token,
-                        amount: event.netAmount,
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        Ok(deposits)
-    }
-
     async fn zone_tokens(&self) -> Result<Vec<Address>, JsonRpcError> {
         if self.config.zone_portal.is_zero() {
             return Ok(vec![ZONE_TOKEN_ADDRESS]);
@@ -307,13 +255,42 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
-    async fn zone_sequencer(&self) -> Result<Address, JsonRpcError> {
+    async fn zone_sequencers(&self) -> Result<Vec<Address>, JsonRpcError> {
+        let portal = ZonePortal::new(self.config.zone_portal, &self.l1_provider);
+        let count = portal.sequencerCount().call().await.map_err(internal)?;
+        let count = count.to::<usize>();
+        let mut sequencers = Vec::with_capacity(count);
+        for index in 0..count {
+            sequencers.push(
+                portal
+                    .sequencerAt(U256::from(index))
+                    .call()
+                    .await
+                    .map_err(internal)?,
+            );
+        }
+        Ok(sequencers)
+    }
+
+    async fn zone_is_access_enforced(&self) -> Result<bool, JsonRpcError> {
         if self.config.zone_portal.is_zero() {
-            return Ok(Address::ZERO);
+            return Ok(false);
         }
 
-        ZonePortal::new(self.config.zone_portal, &self.l1_provider)
-            .sequencer()
+        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
+            .isAccessEnforced()
+            .call()
+            .await
+            .map_err(internal)
+    }
+
+    async fn zone_is_gateway_open(&self) -> Result<bool, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Ok(true);
+        }
+
+        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
+            .isGatewayOpen()
             .call()
             .await
             .map_err(internal)
@@ -326,74 +303,13 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     ) -> Result<(), JsonRpcError> {
         let caller = auth.caller;
         zone_rpc::policy::enforce_authorized(request, auth, async {
-            Ok(self.zone_sequencer().await? == caller)
+            ZonePortal::new(self.config.zone_portal, &self.l1_provider)
+                .isSequencer(caller)
+                .call()
+                .await
+                .map_err(internal)
         })
         .await
-    }
-
-    async fn terminal_event_for_deposit(
-        &self,
-        deposit_hash: B256,
-    ) -> Result<Option<TerminalDepositEvent>, JsonRpcError> {
-        let filter = Filter::new()
-            .address(ZONE_INBOX_ADDRESS)
-            .from_block(0)
-            .event_signature(vec![
-                ZoneInbox::DepositProcessed::SIGNATURE_HASH,
-                ZoneInbox::DepositFailed::SIGNATURE_HASH,
-                ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH,
-                ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH,
-                ZoneInbox::DepositRejected::SIGNATURE_HASH,
-            ])
-            .topic1(deposit_hash);
-
-        let logs = self
-            .zone_provider
-            .get_logs(&filter)
-            .await
-            .map_err(internal)?;
-        let Some(log) = logs.last() else {
-            return Ok(None);
-        };
-
-        let Some(signature) = log.topics().first().copied() else {
-            return Ok(None);
-        };
-
-        if signature == ZoneInbox::DepositProcessed::SIGNATURE_HASH {
-            ZoneInbox::DepositProcessed::decode_log(&log.inner).map_err(internal)?;
-            return Ok(Some(TerminalDepositEvent::RegularProcessed));
-        }
-
-        if signature == ZoneInbox::DepositFailed::SIGNATURE_HASH {
-            ZoneInbox::DepositFailed::decode_log(&log.inner).map_err(internal)?;
-            return Ok(Some(TerminalDepositEvent::RegularFailed));
-        }
-
-        if signature == ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH {
-            let event =
-                ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner).map_err(internal)?;
-            return Ok(Some(TerminalDepositEvent::EncryptedProcessed {
-                recipient: event.to,
-                memo: event.memo,
-            }));
-        }
-
-        if signature == ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH {
-            ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner).map_err(internal)?;
-            return Ok(Some(TerminalDepositEvent::EncryptedFailed));
-        }
-
-        if signature == ZoneInbox::DepositRejected::SIGNATURE_HASH {
-            let event = ZoneInbox::DepositRejected::decode_log(&log.inner).map_err(internal)?;
-            return match event.depositType {
-                DepositType::Regular => Ok(Some(TerminalDepositEvent::RegularRejected)),
-                DepositType::Encrypted => Ok(Some(TerminalDepositEvent::EncryptedRejected)),
-                _ => Ok(None),
-            };
-        }
-
-        Ok(None)
     }
 }
 
@@ -454,7 +370,13 @@ where
     }
 
     fn coinbase(&self) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&self.zone_sequencer().await?) })
+        Box::pin(async move {
+            let header = EthBlocks::rpc_block_header(&self.eth.api, BlockId::latest())
+                .await
+                .map_err(internal)?
+                .ok_or_else(|| JsonRpcError::internal("latest block not found"))?;
+            to_raw(&header.beneficiary())
+        })
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
@@ -900,12 +822,23 @@ where
     fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
-            let sequencer = self.zone_sequencer().await?;
+            let sequencers = self.zone_sequencers().await?;
+            let is_access_enforced = self.zone_is_access_enforced().await?;
+            let is_gateway_open = self.zone_is_gateway_open().await?;
+            let tempo_block_number = self
+                .tempo_state
+                .tempoBlockNumber()
+                .call()
+                .await
+                .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
+                is_access_enforced,
+                is_gateway_open,
                 zone_tokens,
-                sequencer,
+                sequencers,
                 chain_id: U64::from(self.config.chain_id),
+                tempo_block_number: U64::from(tempo_block_number),
             })
         })
     }
@@ -926,177 +859,6 @@ where
 
             to_raw(&key)
         })
-    }
-
-    fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move {
-            let zone_processed_through = self
-                .tempo_state
-                .tempoBlockNumber()
-                .call()
-                .await
-                .map_err(internal)?;
-            let portal_deposits = self.portal_deposits_for_block(tempo_block_number).await?;
-
-            let mut deposits = Vec::new();
-            for deposit in portal_deposits {
-                match deposit {
-                    PortalDepositRecord::Regular {
-                        deposit_hash,
-                        sender,
-                        recipient,
-                        bounceback_recipient,
-                        token,
-                        amount,
-                        memo,
-                    } => {
-                        if sender != auth.caller
-                            && recipient != auth.caller
-                            && bounceback_recipient != auth.caller
-                        {
-                            continue;
-                        }
-
-                        let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
-                        let status = regular_deposit_status(terminal)?;
-
-                        deposits.push(DepositStatusEntry {
-                            deposit_hash,
-                            kind: DepositKind::Regular,
-                            token,
-                            sender,
-                            recipient: Some(recipient),
-                            amount: U256::from(amount),
-                            memo: Some(memo),
-                            status,
-                        });
-                    }
-                    PortalDepositRecord::Encrypted {
-                        deposit_hash,
-                        sender,
-                        bounceback_recipient,
-                        token,
-                        amount,
-                    } => {
-                        let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
-
-                        let include = match (
-                            &terminal,
-                            sender == auth.caller || bounceback_recipient == auth.caller,
-                        ) {
-                            (_, true) => true,
-                            (
-                                Some(TerminalDepositEvent::EncryptedProcessed {
-                                    recipient, ..
-                                }),
-                                false,
-                            ) => *recipient == auth.caller,
-                            _ => false,
-                        };
-
-                        if !include {
-                            continue;
-                        }
-
-                        let (recipient, memo, status) = encrypted_deposit_details(terminal)?;
-
-                        deposits.push(DepositStatusEntry {
-                            deposit_hash,
-                            kind: DepositKind::Encrypted,
-                            token,
-                            sender,
-                            recipient,
-                            amount: U256::from(amount),
-                            memo,
-                            status,
-                        });
-                    }
-                }
-            }
-
-            let processed = zone_processed_through >= tempo_block_number
-                && deposits
-                    .iter()
-                    .all(|deposit| deposit.status != DepositState::Pending);
-
-            to_raw(&DepositStatusResponse {
-                tempo_block_number: U64::from(tempo_block_number),
-                zone_processed_through: U64::from(zone_processed_through),
-                processed,
-                deposits,
-            })
-        })
-    }
-}
-
-#[derive(Debug, Clone)]
-enum PortalDepositRecord {
-    Regular {
-        deposit_hash: B256,
-        sender: Address,
-        recipient: Address,
-        bounceback_recipient: Address,
-        token: Address,
-        amount: u128,
-        memo: B256,
-    },
-    Encrypted {
-        deposit_hash: B256,
-        sender: Address,
-        bounceback_recipient: Address,
-        token: Address,
-        amount: u128,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum TerminalDepositEvent {
-    RegularProcessed,
-    RegularFailed,
-    RegularRejected,
-    EncryptedProcessed { recipient: Address, memo: B256 },
-    EncryptedFailed,
-    EncryptedRejected,
-}
-
-fn regular_deposit_status(
-    terminal: Option<TerminalDepositEvent>,
-) -> Result<DepositState, JsonRpcError> {
-    match terminal {
-        Some(TerminalDepositEvent::RegularProcessed) => Ok(DepositState::Processed),
-        Some(TerminalDepositEvent::RegularFailed | TerminalDepositEvent::RegularRejected) => {
-            Ok(DepositState::Failed)
-        }
-        Some(TerminalDepositEvent::EncryptedProcessed { .. }) => Err(JsonRpcError::internal(
-            "encrypted deposit event matched regular deposit hash",
-        )),
-        Some(TerminalDepositEvent::EncryptedFailed | TerminalDepositEvent::EncryptedRejected) => {
-            Err(JsonRpcError::internal(
-                "encrypted deposit failure matched regular deposit hash",
-            ))
-        }
-        None => Ok(DepositState::Pending),
-    }
-}
-
-fn encrypted_deposit_details(
-    terminal: Option<TerminalDepositEvent>,
-) -> Result<(Option<Address>, Option<B256>, DepositState), JsonRpcError> {
-    match terminal {
-        Some(TerminalDepositEvent::EncryptedProcessed { recipient, memo }) => {
-            Ok((Some(recipient), Some(memo), DepositState::Processed))
-        }
-        Some(TerminalDepositEvent::EncryptedFailed | TerminalDepositEvent::EncryptedRejected) => {
-            Ok((None, None, DepositState::Failed))
-        }
-        Some(
-            TerminalDepositEvent::RegularProcessed
-            | TerminalDepositEvent::RegularFailed
-            | TerminalDepositEvent::RegularRejected,
-        ) => Err(JsonRpcError::internal(
-            "regular deposit event matched encrypted deposit hash",
-        )),
-        None => Ok((None, None, DepositState::Pending)),
     }
 }
 
@@ -1171,57 +933,6 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn regular_deposit_status_maps_terminal_events() {
-        assert_eq!(
-            regular_deposit_status(Some(TerminalDepositEvent::RegularProcessed)).unwrap(),
-            DepositState::Processed
-        );
-        assert_eq!(regular_deposit_status(None).unwrap(), DepositState::Pending);
-    }
-
-    #[test]
-    fn regular_deposit_status_rejects_encrypted_terminal_events() {
-        let err = regular_deposit_status(Some(TerminalDepositEvent::EncryptedFailed)).unwrap_err();
-        assert_eq!(
-            err.message,
-            "encrypted deposit failure matched regular deposit hash"
-        );
-    }
-
-    #[test]
-    fn encrypted_deposit_details_maps_terminal_events() {
-        let recipient = Address::repeat_byte(0x11);
-        let memo = B256::from([0x22; 32]);
-
-        assert_eq!(
-            encrypted_deposit_details(Some(TerminalDepositEvent::EncryptedProcessed {
-                recipient,
-                memo,
-            }))
-            .unwrap(),
-            (Some(recipient), Some(memo), DepositState::Processed)
-        );
-        assert_eq!(
-            encrypted_deposit_details(Some(TerminalDepositEvent::EncryptedFailed)).unwrap(),
-            (None, None, DepositState::Failed)
-        );
-        assert_eq!(
-            encrypted_deposit_details(None).unwrap(),
-            (None, None, DepositState::Pending)
-        );
-    }
-
-    #[test]
-    fn encrypted_deposit_details_rejects_regular_terminal_events() {
-        let err =
-            encrypted_deposit_details(Some(TerminalDepositEvent::RegularProcessed)).unwrap_err();
-        assert_eq!(
-            err.message,
-            "regular deposit event matched encrypted deposit hash"
-        );
-    }
 
     #[test]
     fn redact_fee_history_preserves_shape_and_public_values() {

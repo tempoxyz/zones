@@ -23,7 +23,7 @@ build binary extra_args="":
     {{cargo_build_binary}} build {{extra_args}} --bin {{binary}}
 
 [group('zone')]
-[doc('Regenerates the bundled zone dev genesis and ZoneFactory bytecode from the current Solidity artifacts')]
+[doc('Regenerates the bundled zone dev genesis from the current Solidity artifacts')]
 regen-zone-dev-genesis:
     #!/bin/bash
     set -euo pipefail
@@ -37,8 +37,7 @@ regen-zone-dev-genesis:
         --specs-out specs/ref-impls/out \
         --with-createx \
         --with-safe-deployer \
-        --with-create2-factory \
-        --with-zone-factory-bytecode
+        --with-create2-factory
     mv {{zone_dev_genesis_tmp}}/genesis.json crates/node/assets/zone-dev-genesis.json
     rm -rf {{zone_dev_genesis_tmp}}
 
@@ -134,8 +133,8 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, SEQUENCER_KEY, and ADMIN_KEY or ADMIN_ADDR env vars. Set ZONE_FACTORY to override the Moderato default.')]
-create-zone name token="":
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Enforcement defaults to false. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
+create-zone name token="" access_enforced="false" gateway_enforced="false":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -172,13 +171,37 @@ create-zone name token="":
     echo "Initial portal token: $ZONE_TOKEN_L1"
     echo "Admin: $ADMIN_ADDR"
     echo "Sequencer: $SEQUENCER_ADDR"
+    ACCESS_ENFORCED="{{access_enforced}}"
+    GATEWAY_ENFORCED="{{gateway_enforced}}"
+    CREATE_ARGS=()
+    if [[ "$ACCESS_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--access-mode)
+    elif [[ "$ACCESS_ENFORCED" != "false" ]]; then
+        echo "Error: access_enforced must be 'true' or 'false'" >&2
+        exit 1
+    fi
+    IFS=',' read -ra ALLOWED <<< "${ZONE_ALLOWED_ACCOUNTS:-}"
+    for account in "${ALLOWED[@]}"; do
+        [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
+    done
+    if [[ "$GATEWAY_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--gateway-mode)
+    elif [[ "$GATEWAY_ENFORCED" != "false" ]]; then
+        echo "Error: gateway_enforced must be 'true' or 'false'" >&2
+        exit 1
+    fi
+    IFS=',' read -ra GATEWAYS <<< "${ZONE_GATEWAYS:-}"
+    for gateway in "${GATEWAYS[@]}"; do
+        [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
+    done
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
         --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
-        --private-key "$PK"
+        --private-key "$PK" \
+        "${CREATE_ARGS[@]}"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
 
 [group('zone')]
@@ -732,8 +755,8 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end: generates admin and sequencer keys, funds them on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL. Set ADMIN_KEY or ADMIN_ADDR to choose the portal admin. Set ZONE_FACTORY to override the Moderato default.')]
-deploy-zone name token="":
+[doc('End-to-end zone deployment. Enforcement defaults to false. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
+deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     #!/bin/bash
     set -euo pipefail
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
@@ -797,13 +820,37 @@ deploy-zone name token="":
     # Step 4: Create zone on L1 and generate genesis
     echo "Step 4: Creating zone on L1 via ZoneFactory..."
     mkdir -p "$OUTPUT"
+    ACCESS_ENFORCED="{{access_enforced}}"
+    GATEWAY_ENFORCED="{{gateway_enforced}}"
+    CREATE_ARGS=()
+    if [[ "$ACCESS_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--access-mode)
+    elif [[ "$ACCESS_ENFORCED" != "false" ]]; then
+        echo "Error: access_enforced must be 'true' or 'false'" >&2
+        exit 1
+    fi
+    IFS=',' read -ra ALLOWED <<< "${ZONE_ALLOWED_ACCOUNTS:-}"
+    for account in "${ALLOWED[@]}"; do
+        [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
+    done
+    if [[ "$GATEWAY_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--gateway-mode)
+    elif [[ "$GATEWAY_ENFORCED" != "false" ]]; then
+        echo "Error: gateway_enforced must be 'true' or 'false'" >&2
+        exit 1
+    fi
+    IFS=',' read -ra GATEWAYS <<< "${ZONE_GATEWAYS:-}"
+    for gateway in "${GATEWAYS[@]}"; do
+        [[ -n "$gateway" ]] && CREATE_ARGS+=(--zone-gateway "$gateway")
+    done
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
         --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
-        --private-key "$SEQUENCER_KEY"
+        --private-key "$SEQUENCER_KEY" \
+        "${CREATE_ARGS[@]}"
     echo ""
 
     # Save generated keys into zone.json for later use.

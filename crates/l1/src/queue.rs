@@ -56,7 +56,6 @@ impl PendingDeposits {
         &mut self,
         header: SealedHeader<TempoHeader>,
         events: L1PortalEvents,
-        policy_events: Vec<PolicyEvent>,
     ) -> EnqueueOutcome {
         let block_number = header.number();
         let block_hash = header.hash();
@@ -117,7 +116,7 @@ impl PendingDeposits {
                 // of parent hash — the parent was reorged but the zone already
                 // committed to it. The builder will detect the hash mismatch.
             }
-            self.append(header, events, policy_events);
+            self.append(header, events);
             return EnqueueOutcome::Accepted;
         }
 
@@ -164,31 +163,23 @@ impl PendingDeposits {
             // If new_expected == block_number, fall through to accept (it'll be the anchor)
         }
 
-        self.append(header, events, policy_events);
+        self.append(header, events);
         EnqueueOutcome::Accepted
     }
 
     /// Enqueue a block during backfill. Accepts or skips duplicates.
     ///
     /// Panics on `NeedBackfill` — backfill blocks must be fetched sequentially.
-    pub(crate) fn enqueue(
-        &mut self,
-        header: TempoHeader,
-        events: L1PortalEvents,
-        policy_events: Vec<PolicyEvent>,
-    ) {
-        match self.try_enqueue(SealedHeader::seal_slow(header), events, policy_events) {
+    pub(crate) fn enqueue(&mut self, header: TempoHeader, events: L1PortalEvents) {
+        match self.try_enqueue(SealedHeader::seal_slow(header), events) {
             EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-            other => panic!("enqueue expected Accepted or Duplicate, got {other:?}"),
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                panic!("enqueue found a non-contiguous finalized range {from}..={to}")
+            }
         }
     }
 
-    fn append(
-        &mut self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-        policy_events: Vec<PolicyEvent>,
-    ) {
+    fn append(&mut self, header: SealedHeader<TempoHeader>, events: L1PortalEvents) {
         let queue_hash_before = self.enqueued_head_hash;
         for deposit in &events.deposits {
             self.enqueued_head_hash = deposit.hash_chain(self.enqueued_head_hash);
@@ -198,7 +189,6 @@ impl PendingDeposits {
         self.pending.push(L1BlockDeposits {
             header,
             events,
-            policy_events,
             queue_hash_before,
             queue_hash_after,
         });
@@ -356,46 +346,21 @@ impl DepositQueue {
         }
     }
 
-    /// Try to enqueue an L1 block. Returns the outcome — callers handle
-    /// `NeedBackfill` by fetching missing blocks and retrying.
-    pub(crate) fn try_enqueue(
-        &self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-        policy_events: Vec<PolicyEvent>,
-    ) -> EnqueueOutcome {
-        let mut queue = self.inner.lock();
-        let outcome = queue.try_enqueue(header, events, policy_events);
-        if matches!(outcome, EnqueueOutcome::Accepted) {
-            drop(queue);
-            self.notify.notify_one();
-        }
-        outcome
-    }
-
     /// Enqueue an L1 block with its deposits and notify waiters.
-    pub fn enqueue(
-        &self,
-        header: TempoHeader,
-        events: L1PortalEvents,
-        policy_events: Vec<PolicyEvent>,
-    ) {
-        self.inner.lock().enqueue(header, events, policy_events);
+    pub fn enqueue(&self, header: TempoHeader, events: L1PortalEvents) {
+        self.inner.lock().enqueue(header, events);
         self.notify.notify_one();
     }
 
     /// Like [`enqueue`](Self::enqueue) but accepts an already-sealed header,
     /// avoiding a redundant hash computation.
-    pub fn enqueue_sealed(
-        &self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-        policy_events: Vec<PolicyEvent>,
-    ) {
+    pub fn enqueue_sealed(&self, header: SealedHeader<TempoHeader>, events: L1PortalEvents) {
         let mut queue = self.inner.lock();
-        match queue.try_enqueue(header, events, policy_events) {
+        match queue.try_enqueue(header, events) {
             EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-            other => panic!("enqueue_sealed expected Accepted or Duplicate, got {other:?}"),
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                panic!("enqueue_sealed found a non-contiguous finalized range {from}..={to}")
+            }
         }
         drop(queue);
         self.notify.notify_one();

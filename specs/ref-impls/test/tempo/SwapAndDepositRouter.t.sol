@@ -6,6 +6,7 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
+    ZONE_MESSENGER_ADDRESS,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { SwapAndDepositRouter } from "../../src/tempo/SwapAndDepositRouter.sol";
@@ -50,14 +51,8 @@ contract MockZoneFactoryForRouter {
     mapping(address => bool) public portalMap;
     mapping(uint32 => ZoneInfo) internal _zones;
 
-    address public messenger;
-
     function setPortal(address portal, bool registered) external {
         portalMap[portal] = registered;
-    }
-
-    function setMessenger(address _messenger) external {
-        messenger = _messenger;
     }
 
     function setSourcePortal(uint32 zoneId, address portal) external {
@@ -69,13 +64,11 @@ contract MockZoneFactoryForRouter {
         return portalMap[portal];
     }
 
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
-        return _zones[zoneId];
+    function zones(uint32 id) external view returns (ZoneInfo memory) {
+        return _zones[id];
     }
 
 }
-
-contract MockZoneMessengerForRouter { }
 
 contract MockZonePortalForRouter {
 
@@ -105,14 +98,14 @@ contract MockZonePortalForRouter {
         address to,
         uint128 amount,
         bytes32 memo,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32)
     {
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastDepositRecipient = to;
-        lastDepositBouncebackRecipient = bouncebackRecipient;
+        lastDepositBouncebackRecipient = tempoRefundRecipient;
         lastDepositAmount = amount;
         lastDepositMemo = memo;
         depositCalled = true;
@@ -124,7 +117,7 @@ contract MockZonePortalForRouter {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32)
@@ -132,7 +125,7 @@ contract MockZonePortalForRouter {
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastEncryptedAmount = amount;
         lastEncryptedKeyIndex = keyIndex;
-        lastEncryptedBouncebackRecipient = bouncebackRecipient;
+        lastEncryptedBouncebackRecipient = tempoRefundRecipient;
         encryptedDepositCalled = true;
         return bytes32(0);
     }
@@ -144,7 +137,6 @@ contract SwapAndDepositRouterTest is BaseTest {
     SwapAndDepositRouter public router;
     MockStablecoinDEXForRouter public mockDEX;
     MockZoneFactoryForRouter public mockFactory;
-    MockZoneMessengerForRouter public mockMessenger;
     MockZonePortalForRouter public mockPortal;
     MockZonePortalForRouter public mockPortal2;
 
@@ -159,13 +151,11 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         mockDEX = new MockStablecoinDEXForRouter();
         mockFactory = new MockZoneFactoryForRouter();
-        mockMessenger = new MockZoneMessengerForRouter();
         mockPortal = new MockZonePortalForRouter();
         mockPortal2 = new MockZonePortalForRouter();
 
         router = new SwapAndDepositRouter(address(mockDEX), address(mockFactory));
 
-        mockFactory.setMessenger(address(mockMessenger));
         mockFactory.setSourcePortal(SOURCE_ZONE_ID, sourcePortal);
         mockFactory.setPortal(address(mockPortal), true);
         mockFactory.setPortal(address(mockPortal2), true);
@@ -191,7 +181,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         address tokenOut,
         address targetPortal,
         address recipient,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         bytes32 memo,
         uint128 minAmountOut
     )
@@ -200,7 +190,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         returns (bytes memory)
     {
         return abi.encode(
-            false, tokenOut, targetPortal, recipient, bouncebackRecipient, memo, minAmountOut
+            false, tokenOut, targetPortal, recipient, tempoRefundRecipient, memo, minAmountOut
         );
     }
 
@@ -209,7 +199,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         address targetPortal,
         uint256 keyIndex,
         EncryptedDepositPayload memory encrypted,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         uint128 minAmountOut
     )
         internal
@@ -217,7 +207,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         returns (bytes memory)
     {
         return abi.encode(
-            true, tokenOut, targetPortal, keyIndex, encrypted, bouncebackRecipient, minAmountOut
+            true, tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
         );
     }
 
@@ -248,7 +238,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         vm.expectRevert(SwapAndDepositRouter.InvalidSourcePortal.selector);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, address(0xBAD), senderTag, address(pathUSD), AMOUNT, data
@@ -261,7 +251,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(pathUSD), fakePortal, alice, refundBurner, bytes32("memo"), 0
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         vm.expectRevert(SwapAndDepositRouter.InvalidTargetPortal.selector);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
@@ -273,7 +263,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(token1), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         vm.expectRevert(SwapAndDepositRouter.InvalidToken.selector);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
@@ -285,7 +275,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("hello"), 0
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         bytes4 ret = router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
@@ -306,7 +296,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(token1), address(mockPortal2), alice, refundBurner, bytes32("swap"), 900e6
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         bytes4 ret = router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
@@ -324,7 +314,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         bytes memory data =
             _buildEncryptedData(address(pathUSD), address(mockPortal), 0, payload, refundBurner, 0);
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         bytes4 ret = router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
@@ -345,7 +335,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(token1), address(mockPortal2), 1, payload, refundBurner, 900e6
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         bytes4 ret = router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
@@ -364,7 +354,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             address(token1), address(mockPortal2), alice, refundBurner, bytes32("slip"), 900e6
         );
 
-        vm.prank(address(mockMessenger));
+        vm.prank(ZONE_MESSENGER_ADDRESS);
         vm.expectRevert(IStablecoinDEX.InsufficientOutput.selector);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
