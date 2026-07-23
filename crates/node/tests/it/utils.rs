@@ -112,6 +112,10 @@ pub(crate) const TEST_MNEMONIC: &str =
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 
+/// Test-only adapter that expands the pinned Tempo dev L1's legacy ZoneInfo response.
+pub(crate) const TEST_ZONE_FACTORY_ADAPTER_ADDRESS: Address =
+    address!("0x5Af3000000000000000000000000000000000000");
+
 pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynProvider, Address)> {
     let dev_signer = MnemonicBuilder::<English>::default()
         .phrase(TEST_MNEMONIC)
@@ -258,10 +262,16 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
             .with_code(Some(forge_deployed_bytecode("ZonePortal")?)),
     );
     genesis.alloc.insert(
+        TEST_ZONE_FACTORY_ADAPTER_ADDRESS,
+        GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(forge_deployed_bytecode("TestZoneFactoryAdapter")?)),
+    );
+    genesis.alloc.insert(
         ZONE_MESSENGER_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
+            .with_code(Some(forge_deployed_bytecode("TestZoneMessenger")?)),
     );
     Ok(())
 }
@@ -1561,27 +1571,13 @@ impl L1TestNode {
         config: ZoneCreationConfig,
     ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
-        use tempo_zone_contracts::{ZoneFactory, ZonePortal};
+        use tempo_zone_contracts::ZonePortal;
 
         let l1_provider = self.dev_provider();
-        let mut allowed_accounts = vec![admin, sequencer];
-        for index in 0..10 {
-            allowed_accounts.push(self.signer_at(index).address());
-        }
-        allowed_accounts.sort_unstable();
-        allowed_accounts.dedup();
-
-        // The pinned Tempo dev L1 exposes TIP-1091's legacy factory selector. The production
-        // binding also carries initial membership for upgraded networks, so use the legacy call
-        // here and apply the same membership immediately through the newly created portal.
         let create_zone = LegacyZoneFactory::createZoneCall {
             params: LegacyZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
-                accessMode: config.access_mode,
-                gatewayMode: config.gateway_mode,
-                allowedAccounts: config.allowed_accounts,
-                zoneGateways: config.zone_gateways,
                 sequencers: vec![sequencer],
                 threshold: 1,
                 rpcUrl: String::new(),
@@ -1602,7 +1598,7 @@ impl L1TestNode {
             .inner
             .logs()
             .iter()
-            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .find_map(|log| LegacyZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
             .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
 
         let portal_address = zone_created.portal;
@@ -1612,11 +1608,11 @@ impl L1TestNode {
             self.admin_provider()
         } else {
             return Err(eyre::eyre!(
-                "test helper cannot configure membership for unknown admin {admin}"
+                "test helper cannot configure portal for unknown admin {admin}"
             ));
         };
         let portal = ZonePortal::new(portal_address, &admin_provider);
-        for account in allowed_accounts {
+        for account in config.allowed_accounts {
             let receipt = portal
                 .setAllowedAccount(account, true)
                 .send()
@@ -1625,6 +1621,35 @@ impl L1TestNode {
                 .await?;
             eyre::ensure!(receipt.status(), "setting initial portal member failed");
         }
+        for gateway in config.zone_gateways {
+            let receipt = portal
+                .setGateway(gateway, true)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(receipt.status(), "setting initial portal gateway failed");
+        }
+        let receipt = portal
+            .setAccessMode(config.access_mode as u8)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(
+            receipt.status(),
+            "setting initial portal access mode failed"
+        );
+        let receipt = portal
+            .setGatewayMode(config.gateway_mode as u8)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(
+            receipt.status(),
+            "setting initial portal gateway mode failed"
+        );
 
         Ok(portal_address)
     }
@@ -1654,7 +1679,15 @@ impl L1TestNode {
 
         // Constructor: constructor(address _stablecoinDEX, address _zoneFactory)
         let mut deploy_bytes = forge_bytecode("SwapAndDepositRouter")?.to_vec();
-        deploy_bytes.extend_from_slice(&(dex_address, factory_address).abi_encode());
+        // The pinned Tempo dev L1 factory returns the legacy ZoneInfo tuple. Router reads against
+        // that factory go through the adapter installed in the test genesis; custom factories are
+        // still passed through unchanged.
+        let router_factory = if factory_address == ZONE_FACTORY_ADDRESS {
+            TEST_ZONE_FACTORY_ADAPTER_ADDRESS
+        } else {
+            factory_address
+        };
+        deploy_bytes.extend_from_slice(&(dex_address, router_factory).abi_encode());
         let bytecode = Bytes::from(deploy_bytes);
 
         let mut deploy_tx = TransactionRequest::default().input(bytecode.into());
@@ -2902,11 +2935,11 @@ impl ZoneAccount {
     /// Simulate a withdrawal request without submitting it to the transaction pool.
     /// Useful for asserting deterministic validation reverts.
     pub(crate) async fn simulate_withdraw_with(&self, args: WithdrawalArgs) -> eyre::Result<()> {
-        use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneOutbox};
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS};
 
         let to = args.to.unwrap_or(self.address);
         let zone_fallback_recipient = args.zone_fallback_recipient.unwrap_or(self.address);
-        ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
+        IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
             .requestWithdrawal(
                 ZONE_TOKEN_ADDRESS,
                 to,
