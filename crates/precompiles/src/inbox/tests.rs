@@ -4,6 +4,7 @@ use alloy_evm::EvmInternals;
 use alloy_primitives::{Bytes, address, keccak256};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
+use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     storage::{ContractStorage, StorageCtx},

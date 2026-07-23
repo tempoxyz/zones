@@ -68,7 +68,7 @@ impl ZoneOutbox {
         if caller == Address::ZERO {
             return Ok(());
         }
-        let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
+        let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT);
         if self.read_portal_slot(l1, membership_slot.into())? == U256::ZERO {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
