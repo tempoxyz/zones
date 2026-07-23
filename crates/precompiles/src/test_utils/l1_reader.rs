@@ -1,7 +1,6 @@
 //! Shared L1 reader fixtures for precompile and EVM integration tests.
 use crate::{L1StateError, L1StorageReader};
-use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_sol_types::SolValue;
+use alloy_primitives::{Address, B256, U256};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -66,26 +65,6 @@ impl MockL1Reader {
         self.storage_requests.lock().unwrap().clone()
     }
 
-    pub fn seed_active_sequencer(
-        &self,
-        portal_address: Address,
-        block_number: u64,
-        account: Address,
-    ) {
-        let slot = keccak256(
-            (
-                account,
-                zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT,
-            )
-                .abi_encode(),
-        );
-        self.set_u256(
-            portal_address,
-            U256::from_be_bytes(slot.0),
-            block_number,
-            U256::ONE,
-        );
-    }
     pub fn seed_simple_policy(
         &self,
         policy_id: u64,

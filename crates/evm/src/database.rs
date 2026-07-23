@@ -35,7 +35,7 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
     pub fn new(inner: DB, l1: L1, portal_address: Address) -> Self {
         Self {
             inner,
-            l1: L1State::new(l1, portal_address),
+            l1: L1State::new(l1),
             portal_address,
         }
     }
@@ -129,50 +129,41 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             .map_err(ZoneDbError::L1State)
     }
 
-    /// Rejects writes to L1-owned state.
+    fn sanitize_mirrored_account(
+        state: &mut AddressMap<Account>,
+        address: Address,
+    ) -> Result<(), ZoneDbError<DB::Error>> {
+        let Some(account) = state.get(&address) else {
+            return Ok(());
+        };
+        if account.info != account.original_info() {
+            return Err(ZoneDbError::L1Write {
+                address,
+                slot: U256::ZERO,
+            });
+        }
+        for (slot, value) in &account.storage {
+            if value.is_changed() {
+                return Err(ZoneDbError::L1Write {
+                    address,
+                    slot: *slot,
+                });
+            }
+        }
+
+        // A read-only overlay has identical original and present values, but committing the
+        // touched account could still persist an L1 value into Zone state.
+        state.remove(&address);
+        Ok(())
+    }
+
+    /// Rejects writes to L1-owned state and removes mirrored reads before commit.
     pub fn sanitize_state(
         &mut self,
         state: &mut AddressMap<Account>,
     ) -> Result<(), ZoneDbError<DB::Error>> {
-        if let Some(account) = state.get(&TIP403_REGISTRY_ADDRESS) {
-            if account.info != account.original_info() {
-                return Err(ZoneDbError::L1Write {
-                    address: TIP403_REGISTRY_ADDRESS,
-                    slot: U256::ZERO,
-                });
-            }
-            for (slot, value) in &account.storage {
-                if value.is_changed() {
-                    return Err(ZoneDbError::L1Write {
-                        address: TIP403_REGISTRY_ADDRESS,
-                        slot: *slot,
-                    });
-                }
-            }
-            // A read-only overlay has identical original and present values, so it is not changed
-            // above, but committing the touched account could still persist that L1 value locally.
-            // Since every registry slot is mirrored and writes were rejected, drop the transition.
-            state.remove(&TIP403_REGISTRY_ADDRESS);
-        }
-
-        if let Some(account) = state.get(&self.portal_address) {
-            if account.info != account.original_info() {
-                return Err(ZoneDbError::L1Write {
-                    address: self.portal_address,
-                    slot: U256::ZERO,
-                });
-            }
-            for (slot, value) in &account.storage {
-                if value.is_changed() {
-                    return Err(ZoneDbError::L1Write {
-                        address: self.portal_address,
-                        slot: *slot,
-                    });
-                }
-            }
-        }
-
-        Ok(())
+        Self::sanitize_mirrored_account(state, TIP403_REGISTRY_ADDRESS)?;
+        Self::sanitize_mirrored_account(state, self.portal_address)
     }
 }
 
@@ -190,15 +181,14 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
     }
 
     fn storage(&mut self, address: Address, slot: StorageKey) -> Result<StorageValue, Self::Error> {
-        if address != TIP403_REGISTRY_ADDRESS {
-            return self
-                .inner
+        if address == TIP403_REGISTRY_ADDRESS || address == self.portal_address {
+            let anchor = self.anchor()?;
+            self.l1_storage(address, slot, anchor)
+        } else {
+            self.inner
                 .storage(address, slot)
-                .map_err(ZoneDbError::Inner);
+                .map_err(ZoneDbError::Inner)
         }
-
-        let anchor = self.anchor()?;
-        self.l1_storage(address, slot, anchor)
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
@@ -242,18 +232,34 @@ mod tests {
     }
 
     #[test]
+    fn overlays_portal_at_selected_state_anchor() {
+        let anchor = 42;
+        let portal = Address::repeat_byte(0x22);
+        let slot = U256::from(7);
+        let l1 = TestL1::default();
+        l1.insert(portal, slot, anchor - 1, U256::from(98));
+        l1.insert(portal, slot, anchor, U256::from(99));
+        let mut db = L1OverlayDB::new(test_db(anchor), l1, portal);
+
+        assert_eq!(db.storage(portal, slot).unwrap(), U256::from(99));
+        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
+    }
+
+    #[test]
     fn l1_failures_and_read_before_advance_fail_closed() {
         let anchor = 42;
+        let portal = Address::repeat_byte(0x22);
         let slot = U256::from(7);
-        let mut failing =
-            L1OverlayDB::new(test_db(anchor), TestL1::failing_storage(), Address::ZERO);
-        assert!(matches!(
-            failing.storage(TIP403_REGISTRY_ADDRESS, slot),
-            Err(ZoneDbError::L1State(L1StateError::StorageUnavailable {
-                block_number: 42,
-                ..
-            }))
-        ));
+        for address in [TIP403_REGISTRY_ADDRESS, portal] {
+            let mut failing = L1OverlayDB::new(test_db(anchor), TestL1::failing_storage(), portal);
+            assert!(matches!(
+                failing.storage(address, slot),
+                Err(ZoneDbError::L1State(L1StateError::StorageUnavailable {
+                    block_number: 42,
+                    ..
+                }))
+            ));
+        }
 
         let reader = TestL1::default();
         reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
@@ -299,6 +305,39 @@ mod tests {
         let mut inner = db.into_inner();
         inner.commit(state);
         assert_eq!(inner.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), local);
+    }
+
+    #[test]
+    fn portal_overlay_is_removed_from_canonical_transition() {
+        let (anchor, slot) = (42, U256::from(7));
+        let portal = Address::repeat_byte(0x22);
+        let (local, l1_value) = (U256::from(5), U256::from(99));
+        let l1 = TestL1::default();
+        l1.insert(portal, slot, anchor, l1_value);
+        let mut inner = test_db(anchor);
+        inner.insert_account_storage(portal, slot, local).unwrap();
+        let mut db = L1OverlayDB::new(inner, l1, portal);
+        let observed = db.storage(portal, slot).unwrap();
+        assert_eq!(observed, l1_value);
+
+        let mut account = Account::default();
+        account.mark_touch();
+        account.storage.insert(
+            slot,
+            EvmStorageSlot {
+                original_value: observed,
+                present_value: observed,
+                ..Default::default()
+            },
+        );
+        let mut state = AddressMap::from_iter([(portal, account)]);
+
+        db.sanitize_state(&mut state).unwrap();
+        assert!(!state.contains_key(&portal));
+
+        let mut inner = db.into_inner();
+        inner.commit(state);
+        assert_eq!(inner.storage(portal, slot).unwrap(), local);
     }
 
     #[test]

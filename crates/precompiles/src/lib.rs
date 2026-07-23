@@ -46,6 +46,7 @@ pub mod dispatch {
 
 mod execution;
 pub use execution::ZonePrecompileEnv;
+mod portal;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip20_factory;
@@ -79,12 +80,9 @@ pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecomp
     )
 }
 
-/// Creates the native ZoneOutbox over ordinary Zone storage and direct finalized portal reads.
+/// Creates the native ZoneOutbox over ordinary Zone storage and the L1-mirrored portal account.
 #[cfg(feature = "std")]
-pub fn create_outbox_precompile<P>(l1: L1State<P>, env: &ZonePrecompileEnv) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_outbox_precompile(portal_address: Address, env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
         "ZoneOutbox",
         env,
@@ -92,7 +90,13 @@ where
         move |data, caller| {
             let (tx_hash, fee_payer) =
                 tx_context::current_transaction().unwrap_or((Default::default(), caller));
-            ZoneOutbox::new().call_with_transaction(&l1, data, caller, tx_hash, fee_payer)
+            ZoneOutbox::new().call_with_transaction(
+                portal_address,
+                data,
+                caller,
+                tx_hash,
+                fee_payer,
+            )
         },
     )
 }
@@ -108,18 +112,15 @@ pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
 }
 
 /// Creates upstream TIP-20 execution with zone rules and adapter-backed L1 policy reads.
-pub fn create_tip20_precompile<P>(
+pub fn create_tip20_precompile(
     address: Address,
     env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+    portal_address: Address,
+) -> DynPrecompile {
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules::new(l1),
+        ztip20::TIP20Rules::new(portal_address),
         move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
     )
 }

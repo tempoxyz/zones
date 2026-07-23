@@ -11,15 +11,15 @@ use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
 use crate::{
     dispatch::{metadata, mutate, mutate_void, view},
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, COMPRESSED_PUBLIC_KEY_SIZE},
-    storage::{L1State, L1StorageReader},
+    portal::PortalState,
 };
 
 use super::{MAX_CALLBACK_DATA_SIZE, MAX_GAS_FEE_RATE, WITHDRAWAL_BASE_GAS, ZoneOutbox};
 
 impl ZoneOutbox {
-    pub(crate) fn call_with_transaction<P: L1StorageReader>(
+    pub(crate) fn call_with_transaction(
         &mut self,
-        l1: &L1State<P>,
+        portal_address: Address,
         calldata: &[u8],
         msg_sender: Address,
         tx_hash: B256,
@@ -29,6 +29,7 @@ impl ZoneOutbox {
             return err;
         }
 
+        let portal = PortalState::new(portal_address);
         dispatch!(calldata, |call| match call {
             IZoneOutbox::IZoneOutboxCalls {
                 config(_) => metadata::<IZoneOutbox::configCall>(|| Ok(ZONE_CONFIG_ADDRESS)),
@@ -39,10 +40,10 @@ impl ZoneOutbox {
                 nextWithdrawalIndex(_) => metadata::<IZoneOutbox::nextWithdrawalIndexCall>(|| self.next_withdrawal_index.read()),
                 lastFallbackNonce(_) => metadata::<IZoneOutbox::lastFallbackNonceCall>(|| self.last_fallback_nonce.read()),
                 pendingWithdrawalsCount(_) => typed_metadata::<IZoneOutbox::pendingWithdrawalsCountCall, _>(|| {
-                    self.pending_withdrawals_count(l1, msg_sender)
+                    self.pending_withdrawals_count(&portal, msg_sender)
                 }),
                 getPendingWithdrawals(_) => typed_metadata::<IZoneOutbox::getPendingWithdrawalsCall, _>(|| {
-                    self.get_pending_withdrawals(l1, msg_sender)
+                    self.get_pending_withdrawals(&portal, msg_sender)
                 }),
                 calculateWithdrawalFee(call) => view(call, |call| self.calculate_withdrawal_fee(call.gasLimit)),
                 MAX_CALLBACK_DATA_SIZE(_) => metadata::<IZoneOutbox::MAX_CALLBACK_DATA_SIZECall>(|| Ok(U256::from(MAX_CALLBACK_DATA_SIZE))),
@@ -51,14 +52,14 @@ impl ZoneOutbox {
                 WITHDRAWAL_BASE_GAS(_) => metadata::<IZoneOutbox::WITHDRAWAL_BASE_GASCall>(|| Ok(WITHDRAWAL_BASE_GAS)),
                 REVEAL_TO_KEY_LENGTH(_) => metadata::<IZoneOutbox::REVEAL_TO_KEY_LENGTHCall>(|| Ok(U256::from(COMPRESSED_PUBLIC_KEY_SIZE))),
                 AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH(_) => metadata::<IZoneOutbox::AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTHCall>(|| Ok(U256::from(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE))),
-                setTempoGasRate(call) => mutate_void(call, msg_sender, |sender, call| self.set_tempo_gas_rate(l1, sender, call)),
-                setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(l1, sender, call)),
+                setTempoGasRate(call) => mutate_void(call, msg_sender, |sender, call| self.set_tempo_gas_rate(&portal, sender, call)),
+                setMaxWithdrawalsPerBlock(call) => mutate_void(call, msg_sender, |sender, call| self.set_max_withdrawals_per_block(&portal, sender, call)),
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| {
-                    self.request_withdrawal(l1, sender, fee_payer, tx_hash, call)
+                    self.request_withdrawal(&portal, sender, fee_payer, tx_hash, call)
                 }),
                 enqueueDepositBounceBack(call) => mutate_void(call, msg_sender, |sender, call| self.enqueue_deposit_bounce_back(sender, call)),
                 consumeFallbackRecipient(call) => mutate(call, msg_sender, |sender, call| self.consume_fallback_recipient(sender, call.fallbackNonce)),
-                finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(l1, sender, call)),
+                finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(&portal, sender, call)),
             }
         })
     }
