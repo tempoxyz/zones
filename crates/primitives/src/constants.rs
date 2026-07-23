@@ -52,6 +52,12 @@ pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C000000000000000000000
 pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
     address!("0x20Fc000000000000000000000000000000000000");
 
+/// Zone-native fee manager precompile address.
+///
+/// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.
+pub const ZONE_FEE_MANAGER_ADDRESS: Address =
+    address!("0xfeec000000000000000000000000000000000001");
+
 /// Default zone token address (pathUSD TIP-20).
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
@@ -62,11 +68,20 @@ pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
-pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 19;
-    B256::new(bytes)
-};
+pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
+
+/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
+/// `role` (mapping(address => Role)).
+pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
+
+/// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
+pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
+
+/// Alias used by consumers reading account allowlist enforcement.
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
+
+/// Alias used by consumers reading callback gateway enforcement.
+pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system

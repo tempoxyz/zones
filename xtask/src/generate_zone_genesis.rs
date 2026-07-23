@@ -33,7 +33,6 @@ use tempo_precompiles::{
     nonce::NonceManager,
     stablecoin_dex::StablecoinDEX,
     storage::{StorageActions, StorageCtx},
-    tip_fee_manager::TipFeeManager,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
@@ -41,7 +40,8 @@ use tempo_precompiles::{
 use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
 use zone_precompiles::{
-    TempoState as NativeTempoState, ZoneOutbox as NativeZoneOutbox, ZoneTokenFactory,
+    TempoState as NativeTempoState, ZoneFeeManager, ZoneOutbox as NativeZoneOutbox,
+    ZoneTokenFactory,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -67,6 +67,10 @@ pub(crate) struct GenerateZoneGenesis {
 
     #[arg(long)]
     pub(crate) tempo_portal: Address,
+
+    /// Canonical fee token used when a zone transaction omits `fee_token`.
+    #[arg(long, default_value_t = PATH_USD_ADDRESS)]
+    pub(crate) default_fee_token: Address,
 
     /// RLP-encoded Tempo genesis header. Defaults to `TempoHeader::default()`.
     #[arg(long)]
@@ -138,7 +142,7 @@ impl GenerateZoneGenesis {
         initialize_tip403_registry(&mut evm)?;
         initialize_tip20_factory(&mut evm)?;
         create_path_usd_token(&mut evm, self.admin)?;
-        initialize_fee_manager(&mut evm)?;
+        initialize_fee_manager(&mut evm, self.default_fee_token)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
         initialize_account_keychain(&mut evm)?;
@@ -549,8 +553,11 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
     Ok(())
 }
 
-/// Initialize the TipFeeManager precompile.
-fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+/// Initialize the Zone fee manager precompile.
+fn initialize_fee_manager(
+    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
+    default_fee_token: Address,
+) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -559,13 +566,13 @@ fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<
         &ctx.tx,
         StorageActions::disabled(),
         || {
-            let mut fee_manager = TipFeeManager::new();
+            let mut fee_manager = ZoneFeeManager::new();
             fee_manager
-                .initialize()
+                .initialize(default_fee_token)
                 .expect("Could not init fee manager");
         },
     );
-    println!("Initialized TipFeeManager");
+    println!("Initialized ZoneFeeManager with default fee token {default_fee_token}");
     Ok(())
 }
 

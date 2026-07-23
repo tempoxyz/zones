@@ -34,9 +34,25 @@ pub(crate) struct CreateZone {
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
-    /// Defaults to pathUSD (0x20C0000000000000000000000000000000000000).
     #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
     initial_token: Address,
+
+    /// Enable account allowlist enforcement. Membership is retained while disabled.
+    #[arg(long)]
+    access_mode: bool,
+
+    /// Enable callback gateway registration enforcement.
+    #[arg(long)]
+    gateway_mode: bool,
+
+    /// Callback-only ZoneGateway implementation. Repeat to support legacy and replacement gateways.
+    #[arg(long = "zone-gateway")]
+    zone_gateways: Vec<Address>,
+
+    /// Allowed plain-withdrawal/deposit account. Repeat for each member.
+    /// Zone gateways are configured separately and must not be included.
+    #[arg(long = "allowed-account")]
+    allowed_accounts: Vec<Address>,
 
     /// Sequencer address that will operate the zone.
     #[arg(long)]
@@ -110,6 +126,10 @@ impl CreateZone {
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 initialToken: self.initial_token,
+                accessMode: self.access_mode,
+                gatewayMode: self.gateway_mode,
+                allowedAccounts: self.allowed_accounts.clone(),
+                zoneGateways: self.zone_gateways.clone(),
                 admin: self.admin,
                 sequencers: vec![self.sequencer],
                 threshold: 1,
@@ -152,6 +172,7 @@ impl CreateZone {
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
             tempo_portal: portal,
+            default_fee_token: self.initial_token,
             tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
             sequencer: Some(self.sequencer),
@@ -169,6 +190,10 @@ impl CreateZone {
             "portal": format!("{portal}"),
             "messenger": format!("{ZONE_MESSENGER_ADDRESS}"),
             "initialToken": format!("{}", self.initial_token),
+            "accessMode": self.access_mode,
+            "gatewayMode": self.gateway_mode,
+            "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "allowedAccounts": self.allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "admin": format!("{}", self.admin),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": anchor_header.inner.number,
@@ -188,6 +213,8 @@ impl CreateZone {
         println!("  Portal: {portal}");
         println!("  Messenger: {ZONE_MESSENGER_ADDRESS}");
         println!("  Initial Token: {}", self.initial_token);
+        println!("  Access enforcement: {}", self.access_mode);
+        println!("  Gateway enforcement: {}", self.gateway_mode);
         println!("  Admin: {}", self.admin);
         println!("  Sequencer: {}", self.sequencer);
         println!("  ZoneFactory: {}", self.zone_factory);

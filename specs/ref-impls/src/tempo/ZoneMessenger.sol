@@ -5,6 +5,8 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
+    IZonePortal,
+    Role,
     ZONE_FACTORY_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
@@ -21,6 +23,7 @@ contract ZoneMessenger is IZoneMessenger {
     error UnauthorizedPortal();
     error TransferFailed();
     error CallbackRejected();
+    error InvalidCallbackTarget();
     error ReentrantRelay();
 
     modifier nonReentrantRelay() {
@@ -44,6 +47,13 @@ contract ZoneMessenger is IZoneMessenger {
     {
         ZoneInfo memory zone = zoneFactory.zones(zoneId);
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
+
+        if (
+            !IZonePortal(msg.sender).isGatewayOpen()
+                && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
+        ) {
+            revert InvalidCallbackTarget();
+        }
 
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();

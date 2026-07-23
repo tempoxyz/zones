@@ -150,6 +150,25 @@ export PRIVATE_KEY="$SEQUENCER_KEY"
 just create-zone my-zone
 ```
 
+The default is open account access and open callback targeting. No account or gateway
+addresses are required, and the admin and sequencer are not added implicitly.
+
+The two controls are independent and remain mutable after creation:
+
+| Control | Open (default) | Restricted mode |
+|---------|----------------|-----------------|
+| Account access | Does not enforce account membership | `closed` requires the `Account` role for deposits, refunds, and plain withdrawals; no assigned accounts denies all accounts |
+| Callback targets | Does not enforce callback roles | `enforced` requires callback targets to have the `CallbackGateway` role |
+
+Changing a mode does not clear the stored roles. To create and start a closed zone
+with enforced callback targets in one command:
+
+```bash
+export ZONE_ALLOWED_ACCOUNTS="0x<account>,0x<account>"
+export ZONE_GATEWAYS="0x<gateway>"
+just deploy-zone restricted-zone pathusd closed enforced
+```
+
 To choose the initial TIP-20 enabled on the portal, pass it as the second positional argument:
 
 ```bash
@@ -173,7 +192,9 @@ cargo run -p tempo-xtask -- create-zone \
   --private-key "$SEQUENCER_KEY"
 ```
 
-`create-zone` requires the admin address explicitly. Keep the matching `ADMIN_KEY` available for admin-only portal calls such as `enable-token`, `pause-deposits`, and `resume-deposits`.
+`create-zone` requires the admin address explicitly. Keep the matching `ADMIN_KEY`
+available for admin-only portal calls such as changing either mode or account roles,
+enabling tokens, and pausing or resuming deposits.
 
 ### 5. Start the Zone Node
 
@@ -265,7 +286,7 @@ The sequencer includes the withdrawal in the next batch submission to L1 and pro
 
 #### Router Swap + Deposit Demo (Same Zone)
 
-This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone via an encrypted deposit. The routed callback payload includes a public `bouncebackRecipient` for the downstream portal deposit; set `ROUTER_BOUNCEBACK_RECIPIENT` to a refund-specific burner or stealth address you control if you do not want a later refund to point at the encrypted zone recipient. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
+This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone via an encrypted deposit. The routed callback payload includes a public `tempoRefundRecipient` for the downstream portal deposit; set `ROUTER_BOUNCEBACK_RECIPIENT` to a refund-specific burner or stealth address you control if you do not want a later refund to point at the encrypted zone recipient. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
 
 Prerequisites:
 - A running zone with an active sequencer
@@ -536,7 +557,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | TIP-20 tokens | `0x20C0…` prefix | **Adapted** — upstream Tempo TIP-20 business logic runs over zone-local token state and exact-block L1 policy state, with zone privacy (caller-scoped reads), fixed gas for transfers, and bridge authorization for mint/burn. |
 | TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
 | TIP403Registry | `0x403C…0000` | **Adapted** — the upstream Tempo registry executes read-only against raw L1 storage at the exact finalized block recorded in `TempoState`. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert because policy state is managed on L1. |
-| TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
+| ZoneFeeManager | `0xfeec…0001` | **Replaced** — no user/validator preferences or FeeAMM routing. The explicit transaction token (or portal creation-time default) is escrowed directly, accrued by beneficiary/token, and readable or claimable only by that beneficiary. |
 | StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
 | NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
 | ValidatorConfig (legacy) | `0xCCCC…0000` | **Not registered** — zones do not run validators, so the precompile is not loaded. |
@@ -597,6 +618,8 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
 | `--zone.poll-interval-secs` | 1 | How often (seconds) the zone monitor polls for new L2 blocks |
 | `--withdrawal-poll-interval-secs` | 5 | How often (seconds) the withdrawal processor polls the L1 queue |
+| `--withdrawal-max-batch-gas` | 10000000 | Maximum planned gas for one `processWithdrawals` transaction (up to 20000000); an oversized FIFO head is still sent alone |
+| `--withdrawal-max-in-flight-batches` | 8 | Maximum ordered withdrawal transactions kept concurrently in flight |
 | `--http.port` | 8546 | HTTP JSON-RPC port |
 | `--private-rpc.port` | 8544 | Private RPC server port |
 | `--private-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
@@ -613,15 +636,19 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
 | `ROUTER_BOUNCEBACK_RECIPIENT` | No | Optional controlled burner/stealth address for `demo-swap-and-deposit` routed deposit refunds |
 | `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
+| `WITHDRAWAL_MAX_BATCH_GAS` | No | Override the per-transaction withdrawal gas budget (maximum 20000000) |
+| `WITHDRAWAL_MAX_IN_FLIGHT_BATCHES` | No | Override the maximum number of ordered withdrawal transactions in flight |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
+| `ZONE_ALLOWED_ACCOUNTS` | No | Comma-separated initial account membership |
+| `ZONE_GATEWAYS` | No | Comma-separated initial callback-target registrations |
 | `ZONE_FACTORY` | No | Optional ZoneFactory override; xtasks default to the current Moderato shared deployment |
 
 ## Justfile Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-zone <name> [<tip20>]` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
+| `just deploy-zone <name> [<tip20>] [open\|closed] [enforced\|open]` | One-shot: keygen → fund → create → genesis → start node |
+| `just create-zone <name> [<tip20>] [open\|closed] [enforced\|open]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |

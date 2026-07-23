@@ -18,6 +18,8 @@ crate::sol! {
         struct ZoneInfo {
             uint32 zoneId;
             address portal;
+            bool accessMode;
+            bool gatewayMode;
             address admin;
             address[] sequencers;
             uint8 threshold;
@@ -26,6 +28,10 @@ crate::sol! {
         }
         struct CreateZoneParams {
             address initialToken;
+            bool accessMode;
+            bool gatewayMode;
+            address[] allowedAccounts;
+            address[] zoneGateways;
             address admin;
             address[] sequencers;
             uint8 threshold;
@@ -39,6 +45,8 @@ crate::sol! {
             uint32 indexed zoneId,
             address indexed portal,
             address initialToken,
+            bool accessMode,
+            bool gatewayMode,
             address admin,
             address[] sequencers,
             uint8 threshold,

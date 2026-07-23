@@ -29,6 +29,14 @@ pub struct ProvisionConfig {
     pub factory: Option<Address>,
     /// Initial TIP-20 enabled on the portal.
     pub initial_token: Address,
+    /// Whether account access starts open.
+    pub is_access_open: bool,
+    /// Whether callback gateway registration enforcement starts enabled.
+    pub is_gateway_enforced: bool,
+    /// Initial callback-only ZoneGateway implementations.
+    pub zone_gateways: Vec<Address>,
+    /// Initial portal membership (required for closed mode, retained but unenforced in open mode).
+    pub allowed_accounts: Vec<Address>,
     /// Public zone RPC URL registered on the portal.
     pub rpc_url: String,
 }
@@ -63,6 +71,10 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         dev_key,
         factory,
         initial_token,
+        is_access_open,
+        is_gateway_enforced,
+        zone_gateways,
+        allowed_accounts,
         rpc_url,
     } = config;
     let dev_address = dev_key.address();
@@ -105,6 +117,10 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
+            accessMode: !is_access_open,
+            gatewayMode: is_gateway_enforced,
+            allowedAccounts: allowed_accounts,
+            zoneGateways: zone_gateways,
             admin: dev_address,
             sequencers: vec![dev_address],
             threshold: 1,
@@ -129,7 +145,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     register_encryption_key(&provider, portal, &dev_key).await?;
 
     let (mut genesis, anchor_block_number) =
-        crate::genesis::l1_anchored_genesis(&anchor_header, portal)?;
+        crate::genesis::l1_anchored_genesis(&anchor_header, portal, initial_token)?;
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {
@@ -261,6 +277,22 @@ mod command {
         #[arg(long = "dev.token", default_value_t = PATH_USD_ADDRESS)]
         initial_token: Address,
 
+        /// Enable account allowlist enforcement.
+        #[arg(long = "dev.access-mode")]
+        access_mode: bool,
+
+        /// Enable callback gateway registration enforcement.
+        #[arg(long = "dev.gateway-mode")]
+        gateway_mode: bool,
+
+        /// Callback-only ZoneGateway implementation. Repeat for legacy/replacement support.
+        #[arg(long = "dev.zone-gateway")]
+        zone_gateways: Vec<Address>,
+
+        /// Additional allowed portal account. Repeat for each account.
+        #[arg(long = "dev.allowed-account")]
+        allowed_accounts: Vec<Address>,
+
         /// Directory for genesis.json, zone.json, node data, and logs. Wiped on start.
         #[arg(long, default_value_os_t = default_datadir())]
         datadir: PathBuf,
@@ -305,6 +337,8 @@ mod command {
 
             prepare_datadir(&self.datadir)?;
 
+            let allowed_accounts = self.allowed_accounts.clone();
+
             // Provision on a scoped runtime; the node builds its own afterwards.
             let provisioned = {
                 let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -315,6 +349,10 @@ mod command {
                     dev_key: dev_key.clone(),
                     factory: self.factory_address,
                     initial_token: self.initial_token,
+                    is_access_open: !self.access_mode,
+                    is_gateway_enforced: self.gateway_mode,
+                    zone_gateways: self.zone_gateways.clone(),
+                    allowed_accounts: allowed_accounts.clone(),
                     rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),
                 }))?
             };
@@ -332,6 +370,10 @@ mod command {
                 "chainId": provisioned.chain_id,
                 "portal": format!("{}", provisioned.portal),
                 "initialToken": format!("{}", self.initial_token),
+                "accessMode": self.access_mode,
+                "gatewayMode": self.gateway_mode,
+                "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "admin": format!("{}", dev_key.address()),
                 "sequencer": format!("{}", dev_key.address()),
                 "sequencerKey": self.dev_key,

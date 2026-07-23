@@ -95,7 +95,7 @@ contract ZoneOutbox is IZoneOutbox {
     uint64 public lastFallbackNonce;
 
     /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
-    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
+    mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -174,7 +174,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     function requestWithdrawal(
         address token,
@@ -182,12 +182,12 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, "");
+        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, "");
     }
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -201,7 +201,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function requestWithdrawal(
@@ -210,13 +210,13 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo);
+        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo);
     }
 
     /// @notice Shared implementation for withdrawal requests with optional sender reveal
@@ -228,7 +228,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function _requestWithdrawal(
@@ -237,14 +237,14 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory data,
         bytes memory revealTo
     )
         internal
     {
         // Always require a valid fallback recipient
-        if (fallbackRecipient == address(0)) {
+        if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
 
@@ -252,11 +252,21 @@ contract ZoneOutbox is IZoneOutbox {
             revert IZonePortal.TokenNotEnabled();
         }
 
-        _validateGasLimit(gasLimit);
-
-        // Limit callback data size to prevent storage bloat and hash computation abuse
+        // Bound callback data before queueing.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        if (gasLimit == 0) {
+            if (!config.isGatewayOpen() && config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
+            if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
+        } else {
+            _validateGasLimit(gasLimit);
+            if (!config.isGatewayOpen() && !config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
         }
 
         _validateRevealTo(revealTo);
@@ -294,7 +304,7 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Store withdrawal in pending array
         uint64 fallbackNonce = ++lastFallbackNonce;
-        _fallbackRecipients[fallbackNonce] = fallbackRecipient;
+        _zoneFallbackRecipients[fallbackNonce] = zoneFallbackRecipient;
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -323,7 +333,7 @@ contract ZoneOutbox is IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
     {
@@ -334,7 +344,7 @@ contract ZoneOutbox is IZoneOutbox {
                 token: token,
                 sender: address(0),
                 txHash: bytes32(0),
-                to: bouncebackRecipient,
+                to: tempoRefundRecipient,
                 amount: amount,
                 memo: bytes32(0),
                 gasLimit: 0,
@@ -346,18 +356,21 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint64 index = nextWithdrawalIndex++;
         emit WithdrawalRequested(
-            index, address(0), token, bouncebackRecipient, amount, 0, bytes32(0), 0, 0, "", ""
+            index, address(0), token, tempoRefundRecipient, amount, 0, bytes32(0), 0, 0, "", ""
         );
     }
 
     /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
     /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
     ///      in zone state. Only ZoneInbox may consume a mapping entry.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient)
+    {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
-        recipient = _fallbackRecipients[fallbackNonce];
-        if (recipient == address(0)) revert InvalidFallbackRecipient();
-        delete _fallbackRecipients[fallbackNonce];
+        zoneFallbackRecipient = _zoneFallbackRecipients[fallbackNonce];
+        if (zoneFallbackRecipient == address(0)) revert InvalidFallbackRecipient();
+        delete _zoneFallbackRecipients[fallbackNonce];
     }
 
     /*//////////////////////////////////////////////////////////////

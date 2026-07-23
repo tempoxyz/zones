@@ -4,11 +4,11 @@
 use alloc::{rc::Rc, string::String};
 use core::{cell::Cell, fmt};
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, keccak256};
+use alloy_sol_types::SolValue;
 use revm::{context::result::AnyError, precompile::PrecompileError};
-use tempo_precompiles::tip20::tip20_slots;
-use tempo_primitives::TempoAddressExt;
 use thiserror::Error;
+use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
 
 pub(crate) use tempo_precompiles::storage::*;
 
@@ -50,14 +50,17 @@ pub struct L1State<P> {
     anchor: Rc<Cell<Option<u64>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
+    /// Zone portal whose L1 state defines the active sequencer set.
+    portal_address: Address,
 }
 
 impl<P> L1State<P> {
-    /// Creates execution-local L1 state backed by `provider`.
-    pub fn new(provider: P) -> Self {
+    /// Creates execution-local L1 state backed by `provider` for `portal_address`.
+    pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
             anchor: Rc::new(Cell::new(None)),
             provider,
+            portal_address,
         }
     }
 
@@ -69,6 +72,11 @@ impl<P> L1State<P> {
     /// Returns the anchor selected for the current transaction, if any.
     pub fn get_anchor(&self) -> Option<u64> {
         self.anchor.get()
+    }
+
+    /// Returns the ZonePortal configured for this execution-local L1 state.
+    pub(crate) const fn portal(&self) -> Address {
+        self.portal_address
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
@@ -109,12 +117,23 @@ impl<P: L1StorageReader> L1State<P> {
         self.set_anchor(block_number)?;
         self.provider.read_l1_storage(account, slot, block_number)
     }
+
+    /// Return whether `account` belongs to the active sequencer set at `block_number`.
+    pub fn is_active_sequencer(
+        &self,
+        account: Address,
+        block_number: u64,
+    ) -> Result<bool, L1StateError> {
+        let slot = keccak256((account, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        Ok(self.read_l1_storage(self.portal_address, slot, block_number)? != B256::ZERO)
+    }
 }
 
 impl<P> fmt::Debug for L1State<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("L1State")
             .field("anchor", &self.get_anchor())
+            .field("portal_address", &self.portal_address)
             .finish_non_exhaustive()
     }
 }
@@ -167,19 +186,6 @@ impl From<L1StateError> for PrecompileError {
     }
 }
 
-/// Returns whether this is the packed TIP-20 transfer-policy slot.
-pub fn is_tip20_policy_id_slot(address: Address, key: U256) -> bool {
-    address.is_tip20() && key == tip20_slots::TRANSFER_POLICY_ID
-}
-
-/// Replaces the L1-owned transfer-policy field while preserving Zone-local packed fields.
-pub fn merge_transfer_policy_id(local_slot: U256, l1_slot: U256) -> U256 {
-    let offset_bits = tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
-    let field_bits = core::mem::size_of::<u64>() * 8;
-    let field_mask = ((U256::ONE << field_bits) - U256::ONE) << offset_bits;
-    (local_slot & !field_mask) | (l1_slot & field_mask)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,14 +197,14 @@ mod tests {
 
     #[test]
     fn l1_state_rejects_advance_after_parent_read() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         assert!(l1.advance_anchor(10, 11).is_err());
     }
 
     #[test]
     fn l1_state_accepts_reads_at_advanced_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         l1.advance_anchor(10, 11).unwrap();
         read(&l1, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
@@ -206,7 +212,7 @@ mod tests {
 
     #[test]
     fn l1_state_clones_reject_reads_at_different_anchors() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         let clone = l1.clone();
         read(&l1, 10).unwrap();
         assert!(read(&clone, 11).is_err());
@@ -214,24 +220,41 @@ mod tests {
 
     #[test]
     fn l1_state_rejects_duplicate_advance() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         l1.advance_anchor(10, 11).unwrap();
         assert!(l1.advance_anchor(11, 12).is_err());
     }
 
     #[test]
     fn l1_state_rejects_non_contiguous_advance() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         assert!(l1.advance_anchor(10, 12).is_err());
         assert_eq!(l1.get_anchor(), None);
     }
 
     #[test]
     fn l1_state_reset_allows_a_new_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         l1.reset_anchor();
         l1.advance_anchor(10, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
+    }
+
+    #[test]
+    fn sequencer_membership_uses_requested_anchor() {
+        let portal = Address::repeat_byte(0x11);
+        let current = Address::repeat_byte(0x22);
+        let next = Address::repeat_byte(0x33);
+        let reader = MockL1Reader::default();
+        reader.seed_active_sequencer(portal, 7, current);
+        reader.seed_active_sequencer(portal, 8, next);
+        let l1 = L1State::new(reader, portal);
+
+        assert!(l1.is_active_sequencer(current, 7).unwrap());
+        assert!(!l1.is_active_sequencer(next, 7).unwrap());
+        l1.reset_anchor();
+        assert!(l1.is_active_sequencer(next, 8).unwrap());
+        assert!(!l1.is_active_sequencer(current, 8).unwrap());
     }
 }

@@ -5,6 +5,8 @@ import { IZonePortal, Withdrawal, ZONE_FACTORY_ADDRESS } from "../../src/interfa
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 contract MockPortalToken {
 
@@ -46,7 +48,7 @@ contract ZonePortalGasLimitTest is Test {
     MockPortalToken public token;
 
     address public admin = address(0x500);
-    address public fallbackRecipient = address(0x200);
+    address public zoneFallbackRecipient = address(0x200);
     address public recipient = address(0x300);
 
     function setUp() public {
@@ -54,8 +56,38 @@ contract ZonePortalGasLimitTest is Test {
         portal = new ZonePortal();
         address[] memory sequencers = new address[](1);
         sequencers[0] = address(this);
+
+        address[] memory tokens = new address[](1);
+        tokens[0] = address(token);
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(uint256(1))
+        );
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (address(token))),
+            abi.encode(true, uint64(1))
+        );
+
         vm.prank(ZONE_FACTORY_ADDRESS);
-        portal.initialize(1, address(token), address(0x400), admin, sequencers, 1, address(0), "");
+        address[] memory allowedAccounts = new address[](1);
+        allowedAccounts[0] = recipient;
+        address[] memory noGateways = new address[](0);
+        portal.initialize(
+            1,
+            address(token),
+            true,
+            true,
+            allowedAccounts,
+            noGateways,
+            address(0x400),
+            admin,
+            sequencers,
+            1,
+            address(0),
+            ""
+        );
     }
 
     function test_bouncebackGas_defaultsToZero() public view {
@@ -104,6 +136,32 @@ contract ZonePortalGasLimitTest is Test {
 
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertTrue(portal.currentDepositQueueHash() != bytes32(0));
+    }
+
+    function test_processWithdrawal_simpleTransferFailureBouncesBackWithinPlannerLimit() public {
+        token.mint(address(portal), 500e6);
+        token.setBlockedRecipient(recipient, true);
+
+        Withdrawal memory w = Withdrawal({
+            token: address(token),
+            senderTag: keccak256("sender"),
+            to: recipient,
+            amount: 500e6,
+            memo: bytes32(0),
+            gasLimit: 0,
+            fallbackNonce: 1,
+            callbackData: "",
+            encryptedSender: ""
+        });
+        _storeSingleWithdrawal(w);
+
+        (bool success,) = address(portal).call{ gas: 1_500_000 }(
+            abi.encodeCall(IZonePortal.processWithdrawals, (_singleWithdrawal(w), bytes32(0)))
+        );
+
+        assertTrue(success);
+        assertEq(portal.withdrawalQueueHead(), 1);
         assertTrue(portal.currentDepositQueueHash() != bytes32(0));
     }
 

@@ -8,6 +8,13 @@ address constant ZONE_PORTAL_IMPL_ADDRESS = 0x5AD1000000000000000000000000000000
 address constant ZONE_VERIFIER_ADDRESS = 0x5a56000000000000000000000000000000000000;
 address constant ZONE_MESSENGER_ADDRESS = 0x5A4d000000000000000000000000000000000000;
 
+/// @notice Mutually exclusive authorization role assigned to a Tempo account.
+enum Role {
+    None,
+    Account,
+    CallbackGateway
+}
+
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
@@ -28,6 +35,8 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
+    bool accessMode; // creation-time enforcement flag; query the portal for the current value
+    bool gatewayMode; // creation-time enforcement flag; query the portal for the current value
     address admin;
     address[] sequencers;
     uint8 threshold;
@@ -68,7 +77,7 @@ struct Deposit {
     address sender;
     address to;
     uint128 amount;
-    address bouncebackRecipient;
+    address tempoRefundRecipient;
     bytes32 memo;
 }
 
@@ -95,7 +104,7 @@ struct EncryptedDeposit {
     address token; // TIP-20 token being deposited (public, for escrow accounting)
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
-    address bouncebackRecipient; // Tempo recipient for a failed-deposit refund
+    address tempoRefundRecipient; // Tempo recipient for a failed-deposit refund
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -347,6 +356,8 @@ interface IZoneTxContext {
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
 //   slot 19: isSequencer (mapping(address => bool))
+//   slot 20: role (mapping(address => Role))
+//   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -359,6 +370,10 @@ bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
+bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
+bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
+bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
+bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -408,7 +423,11 @@ interface IZoneFactory {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     struct CreateZoneParams {
-        address initialToken; // first TIP-20 to enable (sequencer can enable more later)
+        address initialToken; // first TIP-20 to enable (admin can enable more later)
+        bool accessMode; // whether to initially enforce the account allowlist
+        bool gatewayMode; // whether to initially enforce callback gateway registration
+        address[] allowedAccounts; // initial account allowlist (retained while access is open)
+        address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
         address[] sequencers;
         uint8 threshold;
@@ -425,6 +444,8 @@ interface IZoneFactory {
         uint32 indexed zoneId,
         address indexed portal,
         address initialToken,
+        bool accessMode,
+        bool gatewayMode,
         address admin,
         address[] sequencers,
         uint8 threshold,
@@ -439,6 +460,9 @@ interface IZoneFactory {
     error InvalidZoneMessengerImplementation();
     error InvalidVerifierImplementation();
     error ImplementationUpdatesLocked();
+    error InvalidClosedLoopConfig();
+    error DuplicateAllowedAccount();
+    error DuplicateZoneGateway();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
@@ -502,7 +526,7 @@ interface IZonePortal {
         uint128 netAmount,
         uint128 fee,
         bytes32 memo,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         uint64 depositNumber
     );
 
@@ -555,16 +579,16 @@ interface IZonePortal {
         bytes ciphertext,
         bytes12 nonce,
         bytes16 tag,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         uint64 depositNumber
     );
 
     event DepositBounceBack(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
+        address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
     );
 
     event DepositBounceBackPending(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
+        address indexed tempoRefundRecipient, address token, uint128 amount, uint128 bouncebackFee
     );
 
     /// @notice Emitted when a recipient claims a previously-parked bounce-back refund.
@@ -596,9 +620,13 @@ interface IZonePortal {
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
+    /// @notice Emitted when the independently mutable enforcement flags are initialized or updated.
+    event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
+
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
+    error NotSelf();
     error AlreadyInitialized();
     error MustDelegateCall();
     error NotPendingAdmin();
@@ -606,7 +634,6 @@ interface IZonePortal {
     error InvalidTempoBlockNumber();
     error CallbackRejected();
     error TransferFailed();
-    error NotSelf();
     error ReentrantWithdrawal();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
@@ -620,15 +647,27 @@ interface IZonePortal {
     error TokenNotEnabled();
     error DepositsNotActive();
     error TokenAlreadyEnabled();
+    error TokenTransferPolicyNotSet();
     error InvalidBouncebackRecipient();
     error InvalidDepositTransition();
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
     error InvalidQuorumCertificate();
+    error InvalidCallbackTarget();
+    error CallbackDidNotReturnToZone();
+    error InvalidAllowedAccount();
+    error AccountNotAllowed(address account);
+
+    /// @notice Emitted when an account's portal role is initialized or updated.
+    event RoleUpdated(address indexed account, Role prev, Role next);
 
     function initialize(
         uint32 zoneId,
         address initialToken,
+        bool accessMode,
+        bool gatewayMode,
+        address[] calldata allowedAccounts,
+        address[] calldata zoneGateways,
         address messenger,
         address admin,
         address[] calldata sequencers,
@@ -649,7 +688,31 @@ interface IZonePortal {
 
     function zoneId() external view returns (uint32);
 
+    /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
+
+    /// @notice Whether account allowlist enforcement is enabled.
+    function isAccessEnforced() external view returns (bool);
+
+    /// @notice Change account allowlist enforcement. Only callable by the admin.
+    function setAccessMode(bool enforced) external;
+
+    /// @notice Whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() external view returns (bool);
+
+    /// @notice Change callback gateway enforcement. Only callable by the admin.
+    function setGatewayMode(bool enforced) external;
+
+    function role(address account) external view returns (Role);
+
+    /// @notice Assign an account's portal role. Only callable by the admin.
+    function setRole(address account, Role role) external;
+
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external;
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external;
 
     function admin() external view returns (address);
 
@@ -712,9 +775,8 @@ interface IZonePortal {
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
 
-    /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
+    /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
-    ///      Validates the token is a TIP-20.
     function enableToken(address token) external;
 
     /// @notice Pause deposits for a token. Only callable by admin.
@@ -814,7 +876,7 @@ interface IZonePortal {
         address to,
         uint128 amount,
         bytes32 memo,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -834,7 +896,7 @@ interface IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -1008,7 +1070,7 @@ interface IZoneInbox {
         address indexed to,
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     );
 
     event DepositRejected(
@@ -1017,15 +1079,15 @@ interface IZoneInbox {
         DepositType depositType,
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     );
 
     event WithdrawalBounceBackProcessed(
-        address indexed fallbackRecipient, address token, uint128 amount
+        address indexed zoneFallbackRecipient, address token, uint128 amount
     );
 
     event WithdrawalBounceBackPending(
-        address indexed fallbackRecipient, address token, uint128 amount
+        address indexed zoneFallbackRecipient, address token, uint128 amount
     );
 
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
@@ -1133,7 +1195,9 @@ interface IZoneOutbox {
     function lastFallbackNonce() external view returns (uint64);
 
     /// @notice Resolve and delete a fallback recipient. Only callable by ZoneInbox.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient);
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory);
@@ -1174,7 +1238,7 @@ interface IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
     )
@@ -1183,7 +1247,7 @@ interface IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external;
 
@@ -1227,5 +1291,18 @@ interface IZoneConfig {
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
+
+    /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
+    function isAccessEnforced() external view returns (bool);
+
+    /// @notice Read whether callback gateway registration enforcement is disabled on L1 ZonePortal.
+    function isGatewayOpen() external view returns (bool);
+
+    /// @notice Check whether an account is authorized under the zone's access policy.
+    /// @dev Returns true for every account when enforcement is disabled.
+    function isAllowedAccount(address account) external view returns (bool);
+
+    /// @notice Check whether an address is a registered callback-only ZoneGateway.
+    function isZoneGateway(address gateway) external view returns (bool);
 
 }
