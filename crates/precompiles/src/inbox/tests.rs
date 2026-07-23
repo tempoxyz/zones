@@ -163,6 +163,21 @@ impl Harness {
         )?)
     }
 
+    fn seed_fallback_recipient(&mut self, nonce: u64, recipient: Address) -> eyre::Result<()> {
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            ZoneOutbox::new().seed_fallback_recipient(nonce, recipient)?;
+            Ok(())
+        })
+    }
+
+    fn fallback_recipient(&mut self, nonce: u64) -> eyre::Result<Address> {
+        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            Ok(ZoneOutbox::new().fallback_recipient(nonce)?)
+        })
+    }
+
     fn assert_single_bounce_back(
         &mut self,
         token: Address,
@@ -689,5 +704,86 @@ fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
         assert_eq!(ZoneInbox::new().refunds[PATH_USD_ADDRESS][BOB].read()?, 0);
         Ok(())
     })?;
+    Ok(())
+}
+
+#[test]
+fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let nonce = 8u64;
+    harness.seed_fallback_recipient(nonce, BOB)?;
+    let token = address!("0x20c00000000000000000000000000000000000cc");
+    let mut encoded_nonce = [0u8; 20];
+    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
+    let deposit = Deposit {
+        token,
+        sender: PORTAL,
+        to: Address::from(encoded_nonce),
+        amount: 555,
+        tempoRefundRecipient: Address::ZERO,
+        memo: B256::ZERO,
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        Address::ZERO,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+        assert_eq!(ZoneInbox::new().refunds[token][BOB].read()?, 555);
+        Ok(())
+    })?;
+    drop(storage);
+    assert!(harness.pending_withdrawals()?.is_empty());
+    Ok(())
+}
+
+#[test]
+fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let nonce = 7u64;
+    harness.seed_fallback_recipient(nonce, BOB)?;
+    let mut encoded_nonce = [0u8; 20];
+    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
+    let deposit = Deposit {
+        token: PATH_USD_ADDRESS,
+        sender: PORTAL,
+        to: Address::from(encoded_nonce),
+        amount: 321,
+        tempoRefundRecipient: Address::ZERO,
+        memo: B256::ZERO,
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        Address::ZERO,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
+
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(321));
+    assert!(harness.pending_withdrawals()?.is_empty());
+    assert_eq!(harness.fallback_recipient(nonce)?, Address::ZERO);
     Ok(())
 }

@@ -280,6 +280,20 @@ impl ZoneOutbox {
         Ok(recipient)
     }
 
+    #[cfg(test)]
+    pub(crate) fn seed_fallback_recipient(
+        &mut self,
+        nonce: u64,
+        recipient: Address,
+    ) -> TempoResult<()> {
+        self.fallback_recipients[nonce].write(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fallback_recipient(&self, nonce: u64) -> TempoResult<Address> {
+        self.fallback_recipients[nonce].read()
+    }
+
     fn finalize_withdrawal_batch<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
