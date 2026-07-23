@@ -7,7 +7,7 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-private-withdrawal
+        default: roundtrip
         options:
           - neobank-encrypted-deposit
           - neobank-private-withdrawal
@@ -33,7 +33,7 @@ on:
         description: Target phase TPS, or journey starts per second for a scenario.
         type: string
         required: true
-        default: "30"
+        default: "20"
       max-concurrent:
         description: Maximum concurrent transactions, or leased journeys for roundtrip.
         type: string
@@ -97,7 +97,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_PHASE: neobank-private-withdrawal
+  ZONES_BENCH_DEFAULT_PHASE: roundtrip
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -163,7 +163,7 @@ jobs:
           INPUT_PHASE: ${{ inputs.phase }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '200' }}
           INPUT_COUNT: ${{ inputs.count || '1000' }}
-          INPUT_TPS: ${{ inputs.tps || '30' }}
+          INPUT_TPS: ${{ inputs.tps || '20' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '200' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
           INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
