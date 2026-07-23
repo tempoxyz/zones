@@ -2422,8 +2422,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            reward_funding["scenario"]["bindings"]["control"]["account"]["select"]["index"],
-            0
+            reward_funding["scenario"]["bindings"]["control"]["account"]["select"],
+            "lease"
         );
         let reward_funding_steps = reward_funding["scenario"]["steps"].as_sequence().unwrap();
         assert_eq!(reward_funding_steps.len(), 3);

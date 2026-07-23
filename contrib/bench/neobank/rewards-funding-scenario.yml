@@ -14,7 +14,7 @@ scenario:
 
   bindings:
     control:
-      account: { pool: control, select: { index: 0 } }
+      account: { pool: control, select: lease }
 
   steps:
     - submit:
