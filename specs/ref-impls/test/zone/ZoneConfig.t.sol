@@ -8,9 +8,7 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_ROLE_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT,
-    ZoneAccessMode,
-    ZoneGatewayMode
+    PORTAL_TOKEN_CONFIGS_SLOT
 } from "../../src/interfaces/IZone.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -117,8 +115,8 @@ contract ZoneConfigTest is BaseTest {
     }
 
     function test_closedLoopMembershipAndGatewayAreIndependent() public view {
-        assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Closed));
-        assertEq(uint8(config.gatewayMode()), uint8(ZoneGatewayMode.Enforced));
+        assertTrue(config.accessMode());
+        assertTrue(config.gatewayMode());
         assertTrue(config.isAllowedAccount(alice));
         assertFalse(config.isZoneGateway(alice));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
@@ -131,7 +129,7 @@ contract ZoneConfigTest is BaseTest {
         );
 
         address outsider = makeAddr("open mode outsider");
-        assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Open));
+        assertFalse(config.accessMode());
         assertTrue(config.isAllowedAccount(outsider));
         assertTrue(config.isAllowedAccount(address(zoneGateway)));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
@@ -143,8 +141,8 @@ contract ZoneConfigTest is BaseTest {
             address(portal), PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1))
         );
 
-        assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Closed));
-        assertEq(uint8(config.gatewayMode()), uint8(ZoneGatewayMode.Open));
+        assertTrue(config.accessMode());
+        assertFalse(config.gatewayMode());
         assertTrue(config.isZoneGateway(address(zoneGateway)));
     }
 

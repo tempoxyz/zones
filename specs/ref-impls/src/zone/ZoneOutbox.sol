@@ -12,8 +12,7 @@ import {
     PendingWithdrawal,
     Withdrawal,
     ZONE_INBOX,
-    ZONE_TX_CONTEXT,
-    ZoneGatewayMode
+    ZONE_TX_CONTEXT
 } from "../interfaces/IZone.sol";
 
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
@@ -259,13 +258,13 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         if (gasLimit == 0) {
-            if (config.gatewayMode() == ZoneGatewayMode.Enforced && config.isZoneGateway(to)) {
+            if (config.gatewayMode() && config.isZoneGateway(to)) {
                 revert IZonePortal.InvalidCallbackTarget();
             }
             if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
         } else {
             _validateGasLimit(gasLimit);
-            if (config.gatewayMode() == ZoneGatewayMode.Enforced && !config.isZoneGateway(to)) {
+            if (config.gatewayMode() && !config.isZoneGateway(to)) {
                 revert IZonePortal.InvalidCallbackTarget();
             }
         }

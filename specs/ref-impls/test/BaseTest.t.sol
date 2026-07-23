@@ -11,8 +11,6 @@ import {
     ZONE_MESSENGER_ADDRESS,
     ZONE_TX_CONTEXT,
     ZONE_VERIFIER_ADDRESS,
-    ZoneAccessMode,
-    ZoneGatewayMode,
     ZoneInfo
 } from "../src/interfaces/IZone.sol";
 import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
@@ -211,8 +209,8 @@ contract BaseTest is Test {
         portal.initialize(
             zoneId,
             initialToken,
-            ZoneAccessMode.Closed,
-            ZoneGatewayMode.Enforced,
+            true,
+            true,
             _closedLoopAccounts(),
             _zoneGateways(),
             ZONE_MESSENGER_ADDRESS,
@@ -230,8 +228,8 @@ contract BaseTest is Test {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(portal),
-                    accessMode: ZoneAccessMode.Closed,
-                    gatewayMode: ZoneGatewayMode.Enforced,
+                    accessMode: true,
+                    gatewayMode: true,
                     admin: portalAdmin,
                     sequencers: sequencers,
                     threshold: threshold,

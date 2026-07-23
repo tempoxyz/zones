@@ -154,7 +154,7 @@ crate::sol! {
         );
 
         event RoleUpdated(address indexed account, Role prev, Role next);
-        event EnforcementModesUpdated(uint8 accessMode, uint8 gatewayMode);
+        event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
         // -- Errors --
 
@@ -172,10 +172,10 @@ crate::sol! {
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
         function messenger() external view returns (address);
-        function accessMode() external view returns (uint8);
-        function setAccessMode(uint8 newMode) external;
-        function gatewayMode() external view returns (uint8);
-        function setGatewayMode(uint8 newMode) external;
+        function accessMode() external view returns (bool);
+        function setAccessMode(bool enforced) external;
+        function gatewayMode() external view returns (bool);
+        function setGatewayMode(bool enforced) external;
         function role(address account) external view returns (Role);
         function setRole(address account, Role role) external;
         function setAllowedAccount(address account, bool allowed) external;

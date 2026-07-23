@@ -8,7 +8,6 @@ import {
     Role,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
-    ZoneGatewayMode,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
@@ -105,9 +104,7 @@ contract ZoneMessengerTest is BaseTest {
         vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
         messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         vm.mockCall(
-            portal,
-            abi.encodeWithSelector(IZonePortal.gatewayMode.selector),
-            abi.encode(ZoneGatewayMode.Enforced)
+            portal, abi.encodeWithSelector(IZonePortal.gatewayMode.selector), abi.encode(true)
         );
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         zoneToken.setMinter(address(this), true);

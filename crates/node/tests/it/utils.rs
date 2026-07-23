@@ -487,7 +487,7 @@ impl ZoneTestNode {
     }
 
     /// Assert the current account mode exposed by the L2 ZoneConfig predeploy.
-    pub(crate) async fn assert_access_mode(&self, expected: u8) -> eyre::Result<()> {
+    pub(crate) async fn assert_access_mode(&self, expected: bool) -> eyre::Result<()> {
         use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
         let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
         let actual = config.accessMode().call().await?;
@@ -499,7 +499,7 @@ impl ZoneTestNode {
     }
 
     /// Assert the gateway mode exposed by the L2 ZoneConfig predeploy.
-    pub(crate) async fn assert_gateway_mode(&self, expected: u8) -> eyre::Result<()> {
+    pub(crate) async fn assert_gateway_mode(&self, expected: bool) -> eyre::Result<()> {
         use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
         let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
         let actual = config.gatewayMode().call().await?;
@@ -1056,8 +1056,8 @@ pub(crate) struct L1TestNode {
 /// Explicit account-access and callback-gateway configuration for a test zone.
 #[derive(Clone, Debug)]
 pub(crate) struct ZoneCreationConfig {
-    pub(crate) access_mode: tempo_zone_contracts::ZoneAccessMode,
-    pub(crate) gateway_mode: tempo_zone_contracts::ZoneGatewayMode,
+    pub(crate) access_mode: bool,
+    pub(crate) gateway_mode: bool,
     pub(crate) allowed_accounts: Vec<Address>,
     pub(crate) zone_gateways: Vec<Address>,
 }
@@ -1067,8 +1067,8 @@ impl ZoneCreationConfig {
         allowed_accounts.sort_unstable();
         allowed_accounts.dedup();
         Self {
-            access_mode: tempo_zone_contracts::ZoneAccessMode::Closed,
-            gateway_mode: tempo_zone_contracts::ZoneGatewayMode::Enforced,
+            access_mode: true,
+            gateway_mode: true,
             allowed_accounts,
             zone_gateways: Vec::new(),
         }
@@ -1076,8 +1076,8 @@ impl ZoneCreationConfig {
 
     pub(crate) fn open() -> Self {
         Self {
-            access_mode: tempo_zone_contracts::ZoneAccessMode::Open,
-            gateway_mode: tempo_zone_contracts::ZoneGatewayMode::Open,
+            access_mode: false,
+            gateway_mode: false,
             allowed_accounts: Vec::new(),
             zone_gateways: Vec::new(),
         }
@@ -1085,7 +1085,7 @@ impl ZoneCreationConfig {
 
     pub(crate) fn open_with_enforced_gateways() -> Self {
         Self {
-            gateway_mode: tempo_zone_contracts::ZoneGatewayMode::Enforced,
+            gateway_mode: true,
             ..Self::open()
         }
     }
@@ -1621,7 +1621,7 @@ impl L1TestNode {
             eyre::ensure!(receipt.status(), "setting initial portal gateway failed");
         }
         let receipt = portal
-            .setAccessMode(config.access_mode as u8)
+            .setAccessMode(config.access_mode)
             .send()
             .await?
             .get_receipt()
@@ -1631,7 +1631,7 @@ impl L1TestNode {
             "setting initial portal access mode failed"
         );
         let receipt = portal
-            .setGatewayMode(config.gateway_mode as u8)
+            .setGatewayMode(config.gateway_mode)
             .send()
             .await?
             .get_receipt()
@@ -1793,20 +1793,20 @@ impl L1TestNode {
     pub(crate) async fn set_access_mode_on_portal(
         &self,
         portal_address: Address,
-        mode: tempo_zone_contracts::ZoneAccessMode,
+        mode: bool,
     ) -> eyre::Result<u64> {
         use tempo_zone_contracts::ZonePortal;
         let provider = self.admin_provider();
         let portal = ZonePortal::new(portal_address, &provider);
         let receipt = portal
-            .setAccessMode(mode as u8)
+            .setAccessMode(mode)
             .send()
             .await?
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "setAccessMode failed");
         eyre::ensure!(
-            portal.accessMode().call().await? == mode as u8,
+            portal.accessMode().call().await? == mode,
             "L1 ZonePortal access mode did not update"
         );
         Ok(provider.get_block_number().await?)
@@ -1816,20 +1816,20 @@ impl L1TestNode {
     pub(crate) async fn set_gateway_mode_on_portal(
         &self,
         portal_address: Address,
-        mode: tempo_zone_contracts::ZoneGatewayMode,
+        mode: bool,
     ) -> eyre::Result<u64> {
         use tempo_zone_contracts::ZonePortal;
         let provider = self.admin_provider();
         let portal = ZonePortal::new(portal_address, &provider);
         let receipt = portal
-            .setGatewayMode(mode as u8)
+            .setGatewayMode(mode)
             .send()
             .await?
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "setGatewayMode failed");
         eyre::ensure!(
-            portal.gatewayMode().call().await? == mode as u8,
+            portal.gatewayMode().call().await? == mode,
             "L1 ZonePortal gateway mode did not update"
         );
         Ok(provider.get_block_number().await?)

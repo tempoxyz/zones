@@ -272,9 +272,9 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
         Ok(sequencers)
     }
 
-    async fn zone_access_mode(&self) -> Result<u8, JsonRpcError> {
+    async fn zone_access_mode(&self) -> Result<bool, JsonRpcError> {
         if self.config.zone_portal.is_zero() {
-            return Ok(0);
+            return Ok(false);
         }
 
         ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
@@ -284,9 +284,9 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
-    async fn zone_gateway_mode(&self) -> Result<u8, JsonRpcError> {
+    async fn zone_gateway_mode(&self) -> Result<bool, JsonRpcError> {
         if self.config.zone_portal.is_zero() {
-            return Ok(0);
+            return Ok(false);
         }
 
         ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
@@ -833,8 +833,8 @@ where
                 .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
-                access_mode: U64::from(access_mode),
-                gateway_mode: U64::from(gateway_mode),
+                access_mode,
+                gateway_mode,
                 zone_tokens,
                 sequencers,
                 chain_id: U64::from(self.config.chain_id),

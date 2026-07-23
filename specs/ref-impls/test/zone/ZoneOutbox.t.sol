@@ -11,9 +11,7 @@ import {
     PendingWithdrawal,
     Withdrawal,
     ZONE_INBOX,
-    ZONE_TX_CONTEXT,
-    ZoneAccessMode,
-    ZoneGatewayMode
+    ZONE_TX_CONTEXT
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -73,7 +71,7 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);
         tempoState.setMockZoneGateway(mockPortal, callbackTarget, true);
-        _setModes(ZoneAccessMode.Closed, ZoneGatewayMode.Enforced);
+        _setModes(true, true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         outbox = new ZoneOutbox(address(config));
 
@@ -92,10 +90,10 @@ contract ZoneOutboxTest is Test {
         return keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence)));
     }
 
-    function _setModes(ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode) internal {
+    function _setModes(bool accessMode, bool gatewayMode) internal {
         uint256 modes;
-        if (accessMode == ZoneAccessMode.Closed) modes |= 1;
-        if (gatewayMode == ZoneGatewayMode.Enforced) modes |= 1 << 8;
+        if (accessMode) modes |= 1;
+        if (gatewayMode) modes |= 1 << 8;
         tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(modes));
     }
 
@@ -335,7 +333,7 @@ contract ZoneOutboxTest is Test {
 
     function test_requestWithdrawal_openAccessStillEnforcesGatewayRegistration() public {
         address outsider = address(0x999);
-        _setModes(ZoneAccessMode.Open, ZoneGatewayMode.Enforced);
+        _setModes(false, true);
 
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 1000e6);
@@ -347,7 +345,7 @@ contract ZoneOutboxTest is Test {
 
     function test_requestWithdrawal_openGatewayStillEnforcesAccountAllowlist() public {
         address outsider = address(0x999);
-        _setModes(ZoneAccessMode.Closed, ZoneGatewayMode.Open);
+        _setModes(true, false);
         tempoState.setMockAccountAllowed(mockPortal, callbackTarget, true);
 
         vm.startPrank(alice);

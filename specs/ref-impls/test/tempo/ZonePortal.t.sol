@@ -30,9 +30,7 @@ import {
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS,
-    ZONE_VERIFIER_ADDRESS,
-    ZoneAccessMode,
-    ZoneGatewayMode
+    ZONE_VERIFIER_ADDRESS
 } from "../../src/interfaces/IZone.sol";
 import { getBlockHash } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
@@ -218,8 +216,8 @@ contract ZonePortalInitializationForwarder {
             .initialize(
                 id,
                 initialToken,
-                ZoneAccessMode.Closed,
-                ZoneGatewayMode.Enforced,
+                true,
+                true,
                 accounts,
                 gateways,
                 portalMessenger,
@@ -252,8 +250,8 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 1,
                 makeAddr("initial token"),
-                ZoneAccessMode.Closed,
-                ZoneGatewayMode.Enforced,
+                true,
+                true,
                 _emptyAddresses(),
                 _emptyAddresses(),
                 ZONE_MESSENGER_ADDRESS,
@@ -347,8 +345,8 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 1,
                 initialToken,
-                ZoneAccessMode.Closed,
-                ZoneGatewayMode.Enforced,
+                true,
+                true,
                 noAccounts,
                 noGateways,
                 portalMessenger,
@@ -364,7 +362,7 @@ contract ZonePortalProxyStorageTest is Test {
         address[] memory sequencers = new address[](1);
         sequencers[0] = makeAddr("sequencer 1");
         vm.expectEmit(false, false, false, true, proxy);
-        emit IZonePortal.EnforcementModesUpdated(ZoneAccessMode.Closed, ZoneGatewayMode.Enforced);
+        emit IZonePortal.EnforcementModesUpdated(true, true);
         vm.expectEmit(true, false, false, true, proxy);
         emit IZonePortal.SequencerSetUpdated(0, 1, sequencers);
         vm.expectEmit(true, false, false, true, proxy);
@@ -409,8 +407,8 @@ contract ZonePortalProxyStorageTest is Test {
         portal.initialize(
             1,
             initialToken,
-            ZoneAccessMode.Closed,
-            ZoneGatewayMode.Enforced,
+            true,
+            true,
             noAccounts,
             noGateways,
             makeAddr("messenger"),
@@ -1132,9 +1130,9 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
 
         vm.expectEmit(false, false, false, true);
-        emit IZonePortal.EnforcementModesUpdated(ZoneAccessMode.Open, ZoneGatewayMode.Enforced);
+        emit IZonePortal.EnforcementModesUpdated(false, true);
         vm.prank(admin);
-        portal.setAccessMode(ZoneAccessMode.Open);
+        portal.setAccessMode(false);
 
         vm.prank(admin);
         portal.setRole(stagedAccount, Role.Account);
@@ -1147,9 +1145,9 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         vm.prank(admin);
-        portal.setAccessMode(ZoneAccessMode.Closed);
+        portal.setAccessMode(true);
 
-        assertEq(uint8(portal.accessMode()), uint8(ZoneAccessMode.Closed));
+        assertTrue(portal.accessMode());
         assertEq(uint8(portal.role(stagedAccount)), uint8(Role.Account));
         vm.prank(outsider);
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
@@ -1169,9 +1167,9 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         vm.expectEmit(false, false, false, true);
-        emit IZonePortal.EnforcementModesUpdated(ZoneAccessMode.Closed, ZoneGatewayMode.Open);
+        emit IZonePortal.EnforcementModesUpdated(true, false);
         vm.prank(admin);
-        portal.setGatewayMode(ZoneGatewayMode.Open);
+        portal.setGatewayMode(false);
 
         assertEq(uint8(portal.role(gateway)), uint8(Role.CallbackGateway));
         vm.prank(gateway);
@@ -1182,9 +1180,9 @@ contract ZonePortalTest is BaseTest {
     function test_setModes_revertIfNotAdmin() public {
         vm.startPrank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setAccessMode(ZoneAccessMode.Open);
+        portal.setAccessMode(false);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setGatewayMode(ZoneGatewayMode.Open);
+        portal.setGatewayMode(false);
         vm.stopPrank();
     }
 
@@ -1975,8 +1973,8 @@ contract ZonePortalTest is BaseTest {
 
     function _openPortalModes() internal {
         vm.startPrank(admin);
-        portal.setAccessMode(ZoneAccessMode.Open);
-        portal.setGatewayMode(ZoneGatewayMode.Open);
+        portal.setAccessMode(false);
+        portal.setGatewayMode(false);
         vm.stopPrank();
     }
 

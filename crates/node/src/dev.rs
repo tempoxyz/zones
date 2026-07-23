@@ -14,7 +14,7 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolEvent;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
-use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneAccessMode, ZoneFactory, ZoneGatewayMode};
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
 use zone_primitives::constants::zone_chain_id;
 use zone_sequencer::register_encryption_key;
 
@@ -117,16 +117,8 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
-            accessMode: if is_access_enforced {
-                ZoneAccessMode::Closed
-            } else {
-                ZoneAccessMode::Open
-            },
-            gatewayMode: if is_gateway_enforced {
-                ZoneGatewayMode::Enforced
-            } else {
-                ZoneGatewayMode::Open
-            },
+            accessMode: is_access_enforced,
+            gatewayMode: is_gateway_enforced,
             allowedAccounts: allowed_accounts,
             zoneGateways: zone_gateways,
             admin: dev_address,
@@ -253,36 +245,6 @@ mod command {
     use crate::cli::ZoneCli;
     use tempo_contracts::precompiles::PATH_USD_ADDRESS;
 
-    #[derive(Clone, Copy, Debug, clap::ValueEnum)]
-    enum DevAccessMode {
-        Closed,
-        Open,
-    }
-
-    impl DevAccessMode {
-        const fn label(self) -> &'static str {
-            match self {
-                Self::Closed => "closed",
-                Self::Open => "open",
-            }
-        }
-    }
-
-    #[derive(Clone, Copy, Debug, clap::ValueEnum)]
-    enum DevGatewayMode {
-        Enforced,
-        Open,
-    }
-
-    impl DevGatewayMode {
-        const fn label(self) -> &'static str {
-            match self {
-                Self::Enforced => "enforced",
-                Self::Open => "open",
-            }
-        }
-    }
-
     /// Default dev private key (account #0 of the standard `test test ... junk` mnemonic).
     const DEFAULT_DEV_KEY: &str =
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
@@ -315,17 +277,13 @@ mod command {
         #[arg(long = "dev.token", default_value_t = PATH_USD_ADDRESS)]
         initial_token: Address,
 
-        /// Account allowlist enforcement mode.
-        #[arg(long = "dev.access-mode", value_enum, default_value_t = DevAccessMode::Open)]
-        access_mode: DevAccessMode,
+        /// Enable account allowlist enforcement.
+        #[arg(long = "dev.access-mode")]
+        access_mode: bool,
 
-        /// Callback gateway registration enforcement mode.
-        #[arg(
-            long = "dev.gateway-mode",
-            value_enum,
-            default_value_t = DevGatewayMode::Open
-        )]
-        gateway_mode: DevGatewayMode,
+        /// Enable callback gateway registration enforcement.
+        #[arg(long = "dev.gateway-mode")]
+        gateway_mode: bool,
 
         /// Callback-only ZoneGateway implementation. Repeat for legacy/replacement support.
         #[arg(long = "dev.zone-gateway")]
@@ -391,8 +349,8 @@ mod command {
                     dev_key: dev_key.clone(),
                     factory: self.factory_address,
                     initial_token: self.initial_token,
-                    is_access_enforced: matches!(self.access_mode, DevAccessMode::Closed),
-                    is_gateway_enforced: matches!(self.gateway_mode, DevGatewayMode::Enforced),
+                    is_access_enforced: self.access_mode,
+                    is_gateway_enforced: self.gateway_mode,
                     zone_gateways: self.zone_gateways.clone(),
                     allowed_accounts: allowed_accounts.clone(),
                     rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),
@@ -412,8 +370,8 @@ mod command {
                 "chainId": provisioned.chain_id,
                 "portal": format!("{}", provisioned.portal),
                 "initialToken": format!("{}", self.initial_token),
-                "accessMode": self.access_mode.label(),
-                "gatewayMode": self.gateway_mode.label(),
+                "accessMode": self.access_mode,
+                "gatewayMode": self.gateway_mode,
                 "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 "admin": format!("{}", dev_key.address()),

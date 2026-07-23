@@ -133,8 +133,8 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Defaults to open account access and open callback targets. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
-create-zone name token="" mode="open" gateway_mode="open":
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Enforcement defaults to false. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
+create-zone name token="" access_enforced="false" gateway_enforced="false":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -171,19 +171,23 @@ create-zone name token="" mode="open" gateway_mode="open":
     echo "Initial portal token: $ZONE_TOKEN_L1"
     echo "Admin: $ADMIN_ADDR"
     echo "Sequencer: $SEQUENCER_ADDR"
-    ACCESS_MODE="{{mode}}"
-    GATEWAY_MODE="{{gateway_mode}}"
-    CREATE_ARGS=(--access-mode "$ACCESS_MODE" --gateway-mode "$GATEWAY_MODE")
-    if [[ "$ACCESS_MODE" != "closed" && "$ACCESS_MODE" != "open" ]]; then
-        echo "Error: mode must be 'open' or 'closed'" >&2
+    ACCESS_ENFORCED="{{access_enforced}}"
+    GATEWAY_ENFORCED="{{gateway_enforced}}"
+    CREATE_ARGS=()
+    if [[ "$ACCESS_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--access-mode)
+    elif [[ "$ACCESS_ENFORCED" != "false" ]]; then
+        echo "Error: access_enforced must be 'true' or 'false'" >&2
         exit 1
     fi
     IFS=',' read -ra ALLOWED <<< "${ZONE_ALLOWED_ACCOUNTS:-}"
     for account in "${ALLOWED[@]}"; do
         [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
     done
-    if [[ "$GATEWAY_MODE" != "enforced" && "$GATEWAY_MODE" != "open" ]]; then
-        echo "Error: gateway_mode must be 'enforced' or 'open'" >&2
+    if [[ "$GATEWAY_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--gateway-mode)
+    elif [[ "$GATEWAY_ENFORCED" != "false" ]]; then
+        echo "Error: gateway_enforced must be 'true' or 'false'" >&2
         exit 1
     fi
     IFS=',' read -ra GATEWAYS <<< "${ZONE_GATEWAYS:-}"
@@ -751,8 +755,8 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end zone deployment. Defaults to open account access and open callback targets. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
-deploy-zone name token="" mode="open" gateway_mode="open":
+[doc('End-to-end zone deployment. Enforcement defaults to false. Initial membership and gateways are optional via ZONE_ALLOWED_ACCOUNTS and ZONE_GATEWAYS.')]
+deploy-zone name token="" access_enforced="false" gateway_enforced="false":
     #!/bin/bash
     set -euo pipefail
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
@@ -816,19 +820,23 @@ deploy-zone name token="" mode="open" gateway_mode="open":
     # Step 4: Create zone on L1 and generate genesis
     echo "Step 4: Creating zone on L1 via ZoneFactory..."
     mkdir -p "$OUTPUT"
-    ACCESS_MODE="{{mode}}"
-    GATEWAY_MODE="{{gateway_mode}}"
-    CREATE_ARGS=(--access-mode "$ACCESS_MODE" --gateway-mode "$GATEWAY_MODE")
-    if [[ "$ACCESS_MODE" != "closed" && "$ACCESS_MODE" != "open" ]]; then
-        echo "Error: mode must be 'open' or 'closed'" >&2
+    ACCESS_ENFORCED="{{access_enforced}}"
+    GATEWAY_ENFORCED="{{gateway_enforced}}"
+    CREATE_ARGS=()
+    if [[ "$ACCESS_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--access-mode)
+    elif [[ "$ACCESS_ENFORCED" != "false" ]]; then
+        echo "Error: access_enforced must be 'true' or 'false'" >&2
         exit 1
     fi
     IFS=',' read -ra ALLOWED <<< "${ZONE_ALLOWED_ACCOUNTS:-}"
     for account in "${ALLOWED[@]}"; do
         [[ -n "$account" ]] && CREATE_ARGS+=(--allowed-account "$account")
     done
-    if [[ "$GATEWAY_MODE" != "enforced" && "$GATEWAY_MODE" != "open" ]]; then
-        echo "Error: gateway_mode must be 'enforced' or 'open'" >&2
+    if [[ "$GATEWAY_ENFORCED" == "true" ]]; then
+        CREATE_ARGS+=(--gateway-mode)
+    elif [[ "$GATEWAY_ENFORCED" != "false" ]]; then
+        echo "Error: gateway_enforced must be 'true' or 'false'" >&2
         exit 1
     fi
     IFS=',' read -ra GATEWAYS <<< "${ZONE_GATEWAYS:-}"

@@ -28,8 +28,6 @@ import {
     ZONE_MESSENGER_ADDRESS,
     ZONE_OUTBOX,
     ZONE_VERIFIER_ADDRESS,
-    ZoneAccessMode,
-    ZoneGatewayMode,
     ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
@@ -193,8 +191,8 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
-            ZoneAccessMode.Closed,
-            ZoneGatewayMode.Enforced,
+            true,
+            true,
             bridgeAccounts,
             _zoneGateways(),
             address(messengerContract),
@@ -212,8 +210,8 @@ contract ZoneBridgeTest is BaseTest {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(l1Portal),
-                    accessMode: ZoneAccessMode.Closed,
-                    gatewayMode: ZoneGatewayMode.Enforced,
+                    accessMode: true,
+                    gatewayMode: true,
                     admin: admin,
                     sequencers: sequencers,
                     threshold: 1,

@@ -14,55 +14,11 @@ use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
-use tempo_zone_contracts::{
-    ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneAccessMode, ZoneFactory, ZoneGatewayMode,
-};
+use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory};
 use zone_primitives::constants::zone_chain_id;
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum ZoneAccessModeArg {
-    Closed,
-    Open,
-}
-
-impl ZoneAccessModeArg {
-    const fn contract_value(self) -> ZoneAccessMode {
-        match self {
-            Self::Closed => ZoneAccessMode::Closed,
-            Self::Open => ZoneAccessMode::Open,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Closed => "closed",
-            Self::Open => "open",
-        }
-    }
-}
-#[derive(Clone, Copy, Debug, clap::ValueEnum)]
-enum ZoneGatewayModeArg {
-    Enforced,
-    Open,
-}
-
-impl ZoneGatewayModeArg {
-    const fn contract_value(self) -> ZoneGatewayMode {
-        match self {
-            Self::Enforced => ZoneGatewayMode::Enforced,
-            Self::Open => ZoneGatewayMode::Open,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Enforced => "enforced",
-            Self::Open => "open",
-        }
-    }
-}
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
     /// Output directory where genesis.json will be written.
@@ -81,13 +37,13 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
     initial_token: Address,
 
-    /// Initial account allowlist enforcement mode. Membership is retained while open.
-    #[arg(long, value_enum, default_value_t = ZoneAccessModeArg::Open)]
-    access_mode: ZoneAccessModeArg,
+    /// Enable account allowlist enforcement. Membership is retained while disabled.
+    #[arg(long)]
+    access_mode: bool,
 
-    /// Initial callback gateway registration enforcement mode.
-    #[arg(long, value_enum, default_value_t = ZoneGatewayModeArg::Open)]
-    gateway_mode: ZoneGatewayModeArg,
+    /// Enable callback gateway registration enforcement.
+    #[arg(long)]
+    gateway_mode: bool,
 
     /// Callback-only ZoneGateway implementation. Repeat to support legacy and replacement gateways.
     #[arg(long = "zone-gateway")]
@@ -170,8 +126,8 @@ impl CreateZone {
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 initialToken: self.initial_token,
-                accessMode: self.access_mode.contract_value(),
-                gatewayMode: self.gateway_mode.contract_value(),
+                accessMode: self.access_mode,
+                gatewayMode: self.gateway_mode,
                 allowedAccounts: self.allowed_accounts.clone(),
                 zoneGateways: self.zone_gateways.clone(),
                 admin: self.admin,
@@ -234,8 +190,8 @@ impl CreateZone {
             "portal": format!("{portal}"),
             "messenger": format!("{ZONE_MESSENGER_ADDRESS}"),
             "initialToken": format!("{}", self.initial_token),
-            "accessMode": self.access_mode.label(),
-            "gatewayMode": self.gateway_mode.label(),
+            "accessMode": self.access_mode,
+            "gatewayMode": self.gateway_mode,
             "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "allowedAccounts": self.allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "admin": format!("{}", self.admin),
@@ -257,8 +213,8 @@ impl CreateZone {
         println!("  Portal: {portal}");
         println!("  Messenger: {ZONE_MESSENGER_ADDRESS}");
         println!("  Initial Token: {}", self.initial_token);
-        println!("  Access Mode: {}", self.access_mode.label());
-        println!("  Gateway Mode: {}", self.gateway_mode.label());
+        println!("  Access enforcement: {}", self.access_mode);
+        println!("  Gateway enforcement: {}", self.gateway_mode);
         println!("  Admin: {}", self.admin);
         println!("  Sequencer: {}", self.sequencer);
         println!("  ZoneFactory: {}", self.zone_factory);

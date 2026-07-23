@@ -5,7 +5,7 @@ use crate::utils::{
 };
 use alloy::primitives::U256;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::{ZONE_TOKEN_ADDRESS, ZoneAccessMode, ZoneGatewayMode};
+use tempo_zone_contracts::ZONE_TOKEN_ADDRESS;
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -73,18 +73,10 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
 
     zone_a.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
     zone_b.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-    zone_a
-        .assert_access_mode(ZoneAccessMode::Open as u8)
-        .await?;
-    zone_b
-        .assert_access_mode(ZoneAccessMode::Open as u8)
-        .await?;
-    zone_a
-        .assert_gateway_mode(ZoneGatewayMode::Open as u8)
-        .await?;
-    zone_b
-        .assert_gateway_mode(ZoneGatewayMode::Open as u8)
-        .await?;
+    zone_a.assert_access_mode(false).await?;
+    zone_b.assert_access_mode(false).await?;
+    zone_a.assert_gateway_mode(false).await?;
+    zone_b.assert_gateway_mode(false).await?;
 
     // --- Step 4: Alice deposits into zone_a ---
     let mut alice = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);

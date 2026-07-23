@@ -19,9 +19,7 @@ import {
     TokenConfig,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
-    ZONE_PORTAL_IMPL_ADDRESS,
-    ZoneAccessMode,
-    ZoneGatewayMode
+    ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
@@ -158,7 +156,7 @@ contract ZonePortal is IZonePortal {
     mapping(address => bool) public isSequencer;
     mapping(address => Role) public role;
 
-    /// @dev Solidity packs both mode booleans into slot 21. Zero is open/open.
+    /// @dev Solidity packs both enforcement booleans into slot 21.
     bool internal _isAccessEnforced;
     bool internal _isGatewayEnforced;
 
@@ -169,8 +167,8 @@ contract ZonePortal is IZonePortal {
     function initialize(
         uint32 _zoneId,
         address _initialToken,
-        ZoneAccessMode _accessMode,
-        ZoneGatewayMode _gatewayMode,
+        bool accessEnforced,
+        bool gatewayEnforced,
         address[] calldata _allowedAccounts,
         address[] calldata _zoneGateways,
         address _messenger,
@@ -191,10 +189,10 @@ contract ZonePortal is IZonePortal {
         messenger = _messenger;
         admin = _admin;
         verifier = _verifier;
-        _isAccessEnforced = _accessMode == ZoneAccessMode.Closed;
-        _isGatewayEnforced = _gatewayMode == ZoneGatewayMode.Enforced;
+        _isAccessEnforced = accessEnforced;
+        _isGatewayEnforced = gatewayEnforced;
         rpcUrl = _rpcUrl;
-        emit EnforcementModesUpdated(_accessMode, _gatewayMode);
+        emit EnforcementModesUpdated(accessEnforced, gatewayEnforced);
 
         _replaceSequencerSet(initialSequencers, _threshold, false);
 
@@ -354,25 +352,25 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Enable or disable account allowlist enforcement without discarding membership.
-    function setAccessMode(ZoneAccessMode newMode) external onlyAdmin {
-        _isAccessEnforced = newMode == ZoneAccessMode.Closed;
-        emit EnforcementModesUpdated(newMode, gatewayMode());
+    function setAccessMode(bool enforced) external onlyAdmin {
+        _isAccessEnforced = enforced;
+        emit EnforcementModesUpdated(enforced, _isGatewayEnforced);
     }
 
     /// @notice Enable or disable callback gateway registration enforcement.
-    function setGatewayMode(ZoneGatewayMode newMode) external onlyAdmin {
-        _isGatewayEnforced = newMode == ZoneGatewayMode.Enforced;
-        emit EnforcementModesUpdated(accessMode(), newMode);
+    function setGatewayMode(bool enforced) external onlyAdmin {
+        _isGatewayEnforced = enforced;
+        emit EnforcementModesUpdated(_isAccessEnforced, enforced);
     }
 
-    /// @notice Return whether account allowlist enforcement is closed or open.
-    function accessMode() public view returns (ZoneAccessMode) {
-        return _isAccessEnforced ? ZoneAccessMode.Closed : ZoneAccessMode.Open;
+    /// @notice Return whether account allowlist enforcement is enabled.
+    function accessMode() public view returns (bool) {
+        return _isAccessEnforced;
     }
 
-    /// @notice Return whether callback gateway registration is enforced or open.
-    function gatewayMode() public view returns (ZoneGatewayMode) {
-        return _isGatewayEnforced ? ZoneGatewayMode.Enforced : ZoneGatewayMode.Open;
+    /// @notice Return whether callback gateway registration enforcement is enabled.
+    function gatewayMode() public view returns (bool) {
+        return _isGatewayEnforced;
     }
 
     /// @notice Add or remove an account from closed-loop portal flows.
@@ -663,15 +661,15 @@ contract ZonePortal is IZonePortal {
     }
 
     function _requireAllowedDepositor(address account) internal view {
-        if (accessMode() == ZoneAccessMode.Open) return;
-        if (gatewayMode() == ZoneGatewayMode.Enforced && role[account] == Role.CallbackGateway) {
+        if (!_isAccessEnforced) return;
+        if (_isGatewayEnforced && role[account] == Role.CallbackGateway) {
             return;
         }
         if (role[account] != Role.Account) revert AccountNotAllowed(account);
     }
 
     function _isAllowed(address account) internal view returns (bool) {
-        return accessMode() == ZoneAccessMode.Open || role[account] == Role.Account;
+        return !_isAccessEnforced || role[account] == Role.Account;
     }
 
     function _validateDepositPolicy(
@@ -925,10 +923,9 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.gasLimit == 0) {
             // Re-check current roles without reverting so an in-flight withdrawal to a revoked
             // account or newly registered gateway bounces without blocking the FIFO.
-            success =
-                (gatewayMode() == ZoneGatewayMode.Open
-                        || role[withdrawal.to] != Role.CallbackGateway) && _isAllowed(withdrawal.to)
-                    && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
+            success = (!_isGatewayEnforced || role[withdrawal.to] != Role.CallbackGateway)
+                && _isAllowed(withdrawal.to)
+                && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
             // Isolate callback effects so failure can be caught without reverting the dequeue.
             try this.deliverWithdrawal(
@@ -966,7 +963,7 @@ contract ZonePortal is IZonePortal {
         external
         onlySelf
     {
-        if (gatewayMode() == ZoneGatewayMode.Enforced && role[target] != Role.CallbackGateway) {
+        if (_isGatewayEnforced && role[target] != Role.CallbackGateway) {
             revert InvalidCallbackTarget();
         }
         if (!ITIP20(token).transfer(messenger, amount)) {
@@ -983,10 +980,7 @@ contract ZonePortal is IZonePortal {
         // opaque, so an enforced gateway is trusted to constrain the operation and return the
         // intended result. Open access imposes no source-deposit invariant: callback value may go
         // to another zone or leave the zone system entirely.
-        if (
-            accessMode() == ZoneAccessMode.Closed
-                && currentDepositQueueHash == depositQueueHashBefore
-        ) {
+        if (_isAccessEnforced && currentDepositQueueHash == depositQueueHashBefore) {
             revert CallbackDidNotReturnToZone();
         }
     }

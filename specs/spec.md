@@ -98,7 +98,7 @@
 
 A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo through a proof-agnostic verification system.
 
-Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Each portal has two independent, admin-mutable modes: `ZoneAccessMode` controls account allowlist enforcement for deposits, refunds, and plain withdrawals, while `ZoneGatewayMode` controls callback target registration. Opening either mode disables only its corresponding checks without deleting the stored mapping.
+Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Each portal has two independent, admin-mutable boolean flags: `accessMode` controls account allowlist enforcement for deposits, refunds, and plain withdrawals, while `gatewayMode` controls callback target registration. Disabling either flag disables only its corresponding checks without deleting the stored mapping.
 
 This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the private RPC interface, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
 
@@ -118,8 +118,8 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
-| Allowed account | An address assigned the portal's `Account` role. The role is enforced while `ZoneAccessMode.Closed` and retained but inactive while `ZoneAccessMode.Open`. |
-| ZoneGateway | A Tempo callback contract assigned the portal's `CallbackGateway` role. The role is enforced while `ZoneGatewayMode.Enforced` and retained but inactive while `ZoneGatewayMode.Open`. |
+| Allowed account | An address assigned the portal's `Account` role. The role is enforced while `accessMode` is `true` and retained but inactive while it is `false`. |
+| ZoneGateway | A Tempo callback contract assigned the portal's `CallbackGateway` role. The role is enforced while `gatewayMode` is `true` and retained but inactive while it is `false`. |
 
 <br>
 
@@ -237,8 +237,8 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | Parameter | Description |
 |-----------|-------------|
 | `initialToken` | The first TIP-20 token to enable. The admin can enable additional tokens later. |
-| `accessMode` | Initial account enforcement mode: `Closed` requires the `Account` role; `Open` skips account membership checks. The admin may change it later. |
-| `gatewayMode` | Initial callback enforcement mode: `Enforced` requires the `CallbackGateway` role; `Open` accepts arbitrary callback targets. The admin may change it later. |
+| `accessMode` | Initial account enforcement flag: `true` requires the `Account` role; `false` skips account membership checks. The admin may change it later. |
+| `gatewayMode` | Initial callback enforcement flag: `true` requires the `CallbackGateway` role; `false` accepts arbitrary callback targets. The admin may change it later. |
 | `allowedAccounts` | Optional addresses initially assigned the `Account` role. An empty closed configuration denies all accounts until the admin assigns one; open mode may pre-stage roles for a later close. Members MUST NOT be the messenger. |
 | `zoneGateways` | Optional addresses initially assigned the `CallbackGateway` role. Gateways MUST NOT also be allowed accounts. Roles are retained while gateway mode is open. |
 | `admin` | The nonzero address that holds the admin role for the zone. |
@@ -1615,9 +1615,8 @@ address constant ZONE_MESSENGER_ADDRESS = 0x5A4d00000000000000000000000000000000
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address initialToken;
-    ZoneAccessMode accessMode;
-    ZoneGatewayMode gatewayMode;
+    bool accessMode;
+    bool gatewayMode;
     address admin;
     address[] sequencers;
     uint8 threshold;
@@ -1641,13 +1640,10 @@ enum Role {
 }
 
 interface IZoneFactory {
-    enum ZoneAccessMode { Closed, Open }
-    enum ZoneGatewayMode { Enforced, Open }
-
     struct CreateZoneParams {
         address initialToken;
-        ZoneAccessMode accessMode;
-        ZoneGatewayMode gatewayMode;
+        bool accessMode;
+        bool gatewayMode;
         address[] allowedAccounts;
         address[] zoneGateways;
         address admin;
@@ -1658,7 +1654,7 @@ interface IZoneFactory {
 
     event ZoneCreated(
         uint32 indexed zoneId, address indexed portal,
-        address initialToken, ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode,
+        address initialToken, bool accessMode, bool gatewayMode,
         address admin, address[] sequencers,
         uint8 threshold, address verifier
     );
@@ -1749,7 +1745,7 @@ interface IZonePortal {
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
     event RoleUpdated(address indexed account, Role prev, Role next);
-    event EnforcementModesUpdated(ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode);
+    event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
     error NotSequencer();
     error NotAdmin();
@@ -1790,10 +1786,10 @@ interface IZonePortal {
     function enabledTokenAt(uint256 index) external view returns (address);
 
     // Access and callback configuration
-    function accessMode() external view returns (ZoneAccessMode);
-    function setAccessMode(ZoneAccessMode newMode) external; // admin-only
-    function gatewayMode() external view returns (ZoneGatewayMode);
-    function setGatewayMode(ZoneGatewayMode newMode) external; // admin-only
+    function accessMode() external view returns (bool);
+    function setAccessMode(bool enforced) external; // admin-only
+    function gatewayMode() external view returns (bool);
+    function setGatewayMode(bool enforced) external; // admin-only
     function role(address account) external view returns (Role);
     function setRole(address account, Role role) external; // admin-only
 
@@ -2072,8 +2068,8 @@ Address: `0x1c00000000000000000000000000000000000003`
 interface IZoneConfig {
     function isSequencer(address account) external view returns (bool);
     function isEnabledToken(address token) external view returns (bool);
-    function accessMode() external view returns (ZoneAccessMode);
-    function gatewayMode() external view returns (ZoneGatewayMode);
+    function accessMode() external view returns (bool);
+    function gatewayMode() external view returns (bool);
     function isAllowedAccount(address account) external view returns (bool);
     function isZoneGateway(address gateway) external view returns (bool);
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
