@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
-import { IERC20Like } from "../interfaces/IERC20Like.sol";
+import { IERC20Like } from "../interfaces/external/IERC20Like.sol";
 
 /// @notice Minimal ERC4626-like vault used only by the Moderato live setup.
 /// @dev This support contract is intentionally small and is not a production vault implementation.
