@@ -14,7 +14,7 @@ mod dispatch;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
-use tempo_precompiles::Precompile as _;
+use tempo_precompiles::{Precompile as _, error::TempoPrecompileError, storage::StorageCtx};
 
 /// AES-256-GCM Decrypt precompile address on Zone L2.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
@@ -57,27 +57,36 @@ impl AesGcmDecrypt {
             |data, caller| Self.call(data, caller),
         )
     }
-}
 
-/// Decrypt AES-256-GCM ciphertext with tag verification.
-///
-/// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
-/// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
-pub fn decrypt_aes_gcm(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    ciphertext: &[u8],
-    aad: &[u8],
-    tag: &[u8; 16],
-) -> (Vec<u8>, bool) {
-    let cipher = Aes256Gcm::new(key.into());
-    let gcm_nonce = Nonce::from_slice(nonce);
+    /// Charge the native gas cost for AES-GCM authenticated input.
+    pub fn charge_gas(ciphertext_len: usize, aad_len: usize) -> tempo_precompiles::Result<()> {
+        let len = u64::try_from(ciphertext_len.saturating_add(aad_len)).unwrap_or(u64::MAX);
+        let gas = AES_GCM_BASE_GAS
+            .checked_add(AES_GCM_PER_BYTE_GAS.saturating_mul(len))
+            .ok_or_else(TempoPrecompileError::under_overflow)?;
+        StorageCtx::default().deduct_gas(gas)
+    }
 
-    let mut plaintext = ciphertext.to_vec();
+    /// Decrypt AES-256-GCM ciphertext with tag verification.
+    ///
+    /// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
+    /// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
+    pub fn decrypt(
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+    ) -> (Vec<u8>, bool) {
+        let cipher = Aes256Gcm::new(key.into());
+        let gcm_nonce = Nonce::from_slice(nonce);
+        let mut plaintext = ciphertext.to_vec();
 
-    match cipher.decrypt_in_place_detached(gcm_nonce, aad, &mut plaintext, Tag::from_slice(tag)) {
-        Ok(()) => (plaintext, true),
-        Err(_) => (Vec::new(), false),
+        match cipher.decrypt_in_place_detached(gcm_nonce, aad, &mut plaintext, Tag::from_slice(tag))
+        {
+            Ok(()) => (plaintext, true),
+            Err(_) => (Vec::new(), false),
+        }
     }
 }
 
@@ -157,7 +166,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &tag);
         assert!(valid);
         assert_eq!(decrypted, plaintext);
     }
@@ -175,7 +184,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let bad_tag = [0xFFu8; 16];
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &bad_tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &bad_tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -202,7 +211,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, aad, &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, aad, &tag);
         assert!(valid);
         assert_eq!(decrypted, plaintext);
     }
@@ -266,7 +275,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, b"wrong", &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, b"wrong", &tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -293,7 +302,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -313,7 +322,7 @@ mod tests {
 
         ct[0] ^= 0x01;
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, &ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, &ct, &[], &tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -331,7 +340,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &tag);
         assert!(valid);
         assert!(decrypted.is_empty());
     }

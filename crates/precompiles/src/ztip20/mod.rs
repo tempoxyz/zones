@@ -94,6 +94,11 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                     self.check_auth_with_sequencer(caller, &[call.account])
                 })
             }
+            ITIP20::globalRewardPerTokenCall::SELECTOR
+            | ITIP20::userRewardInfoCall::SELECTOR
+            | ITIP20::getPendingRewardsCall::SELECTOR => {
+                CallCheck::Revert(Unauthorized {}.abi_encode().into())
+            }
             _ => CallCheck::Continue,
         }
     }
@@ -316,6 +321,17 @@ mod tests {
             assert_allowed(&rules, role.clone(), sequencer);
             assert_unauthorized(&rules, role, outsider);
         });
+    }
+
+    #[test]
+    fn reward_reads_are_disallowed() {
+        let caller = Address::repeat_byte(0x11);
+        let account = Address::repeat_byte(0x22);
+        let rules = rules(Address::repeat_byte(0x33));
+
+        assert_unauthorized(&rules, ITIP20::globalRewardPerTokenCall {}, caller);
+        assert_unauthorized(&rules, ITIP20::userRewardInfoCall { account }, caller);
+        assert_unauthorized(&rules, ITIP20::getPendingRewardsCall { account }, caller);
     }
 
     #[test]
