@@ -619,7 +619,7 @@ where
             // Only a leader can propose settlement attestations
             task_executor.spawn_critical_task(
                 "zone-p2p-settlement-collection",
-                collect_leader_settlements(provider.clone(), commands.clone(), attestation.clone()),
+                collect_leader_settlements(provider, commands, attestation),
             );
         }
 
