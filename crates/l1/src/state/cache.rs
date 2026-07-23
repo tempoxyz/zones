@@ -21,7 +21,7 @@
 
 use alloy_primitives::{Address, B256};
 use derive_more::Deref;
-use parking_lot::RwLock;
+use parking_lot::Mutex;
 use schnellru::{Limiter, LruMap};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -43,14 +43,14 @@ const DEFAULT_INVALIDATION_CAPACITY: usize = 100_000;
 #[derive(Debug, Clone, Deref, Default)]
 pub struct L1StateCache {
     #[deref]
-    inner: Arc<RwLock<L1StateCacheInner>>,
+    inner: Arc<Mutex<L1StateCacheInner>>,
 }
 
 impl L1StateCache {
     /// Create an empty cache.
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(RwLock::new(L1StateCacheInner::new())),
+            inner: Arc::new(Mutex::new(L1StateCacheInner::new())),
         }
     }
 }

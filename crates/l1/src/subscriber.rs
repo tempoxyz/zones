@@ -494,7 +494,7 @@ impl L1Subscriber {
     ) {
         self.config
             .l1_state_cache
-            .write()
+            .lock()
             .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
 }

@@ -1897,7 +1897,7 @@ async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient
     assert!(l1.is_authorized(policy_id, rejected_recipient).await?);
     let policy_block = l1.provider().get_block_number().await?;
     seed_raw_tip403_token_policy(
-        &mut zone.l1_state_cache().write(),
+        &mut zone.l1_state_cache().lock(),
         policy_block,
         PATH_USD_ADDRESS,
         policy_id,

@@ -78,7 +78,7 @@ async fn l1_provider_caches_result() {
 
     assert_eq!(v1, v2, "cached and fresh values must match");
 
-    let cached = provider.cache().write().get(ZONE_PORTAL, B256::ZERO, block);
+    let cached = provider.cache().lock().get(ZONE_PORTAL, B256::ZERO, block);
     assert_eq!(cached, Some(v1), "value should be in cache after read");
     println!("Cache hit verified for slot 0 at block {block}: {v1}");
 }
@@ -109,7 +109,7 @@ async fn l1_provider_reads_multiple_slots() {
     }
 
     // Slot 0 should be non-zero (contains init data)
-    let v0 = provider.cache().write().get(ZONE_PORTAL, B256::ZERO, block);
+    let v0 = provider.cache().lock().get(ZONE_PORTAL, B256::ZERO, block);
     assert!(
         v0.is_some_and(|v| v != B256::ZERO),
         "slot 0 should be non-zero"

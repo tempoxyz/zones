@@ -427,17 +427,17 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     subscriber
         .config
         .l1_state_cache
-        .write()
+        .lock()
         .invalidate_and_set_anchor(9, []);
     subscriber
         .config
         .l1_state_cache
-        .write()
+        .lock()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
     subscriber
         .config
         .l1_state_cache
-        .write()
+        .lock()
         .set(stable_account, stable_slot, 10, stable_value);
 
     subscriber.update_l1_state_anchor(10, &HashSet::new());
@@ -445,13 +445,13 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
         subscriber
             .config
             .l1_state_cache
-            .write()
+            .lock()
             .get(TIP403_REGISTRY_ADDRESS, slot, 10),
         Some(value)
     );
 
     subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
-    let mut cache = subscriber.config.l1_state_cache.write();
+    let mut cache = subscriber.config.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
         Some(stable_value)
