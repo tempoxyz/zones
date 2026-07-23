@@ -7,7 +7,7 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-full-journey
+        default: neobank-encrypted-deposit
         options:
           - neobank-encrypted-deposit
           - neobank-private-withdrawal
@@ -23,7 +23,7 @@ on:
         description: Number of benchmark accounts.
         type: string
         required: true
-        default: "100"
+        default: "1000"
       count:
         description: Number of measured transactions, or complete journeys for a scenario.
         type: string
@@ -33,7 +33,7 @@ on:
         description: Target phase TPS, or journey starts per second for a scenario.
         type: string
         required: true
-        default: "20"
+        default: "40"
       max-concurrent:
         description: Maximum concurrent transactions, or leased journeys for roundtrip.
         type: string
@@ -97,7 +97,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_PHASE: neobank-full-journey
+  ZONES_BENCH_DEFAULT_PHASE: neobank-encrypted-deposit
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -162,8 +162,8 @@ jobs:
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
-          INPUT_COUNT: ${{ inputs.count || '100' }}
-          INPUT_TPS: ${{ inputs.tps || '20' }}
+          INPUT_COUNT: ${{ inputs.count || '1000' }}
+          INPUT_TPS: ${{ inputs.tps || '40' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
           INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
