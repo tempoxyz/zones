@@ -15,6 +15,7 @@ pub mod node;
 mod replication;
 pub mod rpc;
 mod settlement_attestation;
+mod tx_forwarding;
 
 pub use engine::ZoneEngine;
 pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};

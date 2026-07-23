@@ -493,6 +493,7 @@ async fn run_leader_backfill_server<P>(
                     P2pEvent::BlockReceived { .. }
                     | P2pEvent::BackfillBlockReceived { .. }
                     | P2pEvent::BackfillCompleted { .. }
+                    | P2pEvent::TransactionReceived { .. }
                     | P2pEvent::SettlementProposalReceived { .. } => {
                         // A leader never follows peer chain heads. Keeping this explicit ensures
                         // ZoneEngine remains the sole writer of the leader's canonical head.
@@ -668,6 +669,9 @@ async fn run_follower_block_sync<P>(
                             pending.first_key_value().map(|(&number, _)| number),
                         );
                         debug!(target: "zone::p2p", %peer, best, tip, backfill_needed = backfill.needed, "Completed block backfill response page");
+                    }
+                    P2pEvent::TransactionReceived { .. } => {
+                        debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
                     }
                     P2pEvent::SettlementSignatureReceived { .. } => {
                         debug!(target: "zone::p2p", "Ignoring leader-only attestation event on follower");

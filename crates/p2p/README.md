@@ -122,3 +122,14 @@ node buffers out-of-order arrivals, then re-executes and canonicalizes only the 
 its local head. Parent linkage, execution results, block hash, and forkchoice validation therefore
 remain mandatory during catch-up; authenticated transport alone never makes a returned block
 canonical.
+
+## Transaction forwarding
+
+Commonware carries blocks, catch-up traffic, and transactions on independent authenticated
+channels. A follower sends canonical EIP-2718 transaction bytes only to the configured leader,
+and the leader accepts transaction messages only from manifest members with the follower role.
+
+This permits public RPC to be exposed on followers while keeping the leader's RPC private. The
+leader decodes and validates every forwarded transaction again, and it alone selects and orders
+transactions for blocks; follower validation is not trusted. Followers periodically retry live
+pool transactions, recovering from listener overflow and temporary leader disconnections.
