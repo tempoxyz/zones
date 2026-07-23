@@ -62,6 +62,10 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
     pub(crate) fn reset_transaction_state(&mut self) {
         self.l1.reset_anchor();
     }
+
+    const fn l1_accounts(&self) -> [Address; 2] {
+        [TIP403_REGISTRY_ADDRESS, self.l1.portal_address()]
+    }
 }
 
 impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
@@ -70,34 +74,6 @@ impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
             .field("inner", &self.inner)
             .field("l1", &self.l1)
             .finish_non_exhaustive()
-    }
-}
-
-/// Database error produced by [`L1OverlayDB`].
-#[derive(Debug, Error)]
-pub enum ZoneDbError<E> {
-    /// Error from the caller-provided database.
-    #[error("inner database error: {0}")]
-    Inner(#[source] E),
-    /// The selected Zone state contains an invalid Tempo anchor.
-    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
-    AnchorOverflow(U256),
-    /// Execution-local Tempo L1 state could not be read or advanced consistently.
-    #[error(transparent)]
-    L1State(#[from] L1StateError),
-    /// A transaction attempted to persist mirrored Tempo-owned state.
-    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
-    L1Write { address: Address, slot: U256 },
-}
-
-impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
-
-impl<E: DBErrorMarker> ZoneDbError<E> {
-    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
-        match self {
-            Self::Inner(error) => EVMError::Database(error),
-            error => EVMError::CustomAny(AnyError::new(error)),
-        }
     }
 }
 
@@ -127,41 +103,35 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             .map_err(ZoneDbError::L1State)
     }
 
-    fn sanitize_mirrored_account(
-        state: &mut AddressMap<Account>,
-        address: Address,
-    ) -> Result<(), ZoneDbError<DB::Error>> {
-        let Some(account) = state.get(&address) else {
-            return Ok(());
-        };
-        if account.info != account.original_info() {
-            return Err(ZoneDbError::L1Write {
-                address,
-                slot: U256::ZERO,
-            });
-        }
-        for (slot, value) in &account.storage {
-            if value.is_changed() {
-                return Err(ZoneDbError::L1Write {
-                    address,
-                    slot: *slot,
-                });
-            }
-        }
-
-        // A read-only overlay has identical original and present values, but committing the
-        // touched account could still persist an L1 value into Zone state.
-        state.remove(&address);
-        Ok(())
-    }
-
     /// Rejects writes to L1-owned state and removes mirrored reads before commit.
     pub fn sanitize_state(
         &mut self,
         state: &mut AddressMap<Account>,
     ) -> Result<(), ZoneDbError<DB::Error>> {
-        Self::sanitize_mirrored_account(state, TIP403_REGISTRY_ADDRESS)?;
-        Self::sanitize_mirrored_account(state, self.l1.portal_address())
+        for address in self.l1_accounts() {
+            let Some(account) = state.get(&address) else {
+                continue;
+            };
+            if account.info != account.original_info() {
+                return Err(ZoneDbError::L1Write {
+                    address,
+                    slot: U256::ZERO,
+                });
+            }
+            for (slot, value) in &account.storage {
+                if value.is_changed() {
+                    return Err(ZoneDbError::L1Write {
+                        address,
+                        slot: *slot,
+                    });
+                }
+            }
+
+            // A read-only overlay has identical original and present values, but committing the
+            // touched account could still persist an L1 value into Zone state.
+            state.remove(&address);
+        }
+        Ok(())
     }
 }
 
@@ -179,7 +149,7 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
     }
 
     fn storage(&mut self, address: Address, slot: StorageKey) -> Result<StorageValue, Self::Error> {
-        if address == TIP403_REGISTRY_ADDRESS || address == self.l1.portal_address() {
+        if self.l1_accounts().contains(&address) {
             let anchor = self.anchor()?;
             self.l1_storage(address, slot, anchor)
         } else {
@@ -191,6 +161,34 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         self.inner.block_hash(number).map_err(ZoneDbError::Inner)
+    }
+}
+
+/// Database error produced by [`L1OverlayDB`].
+#[derive(Debug, Error)]
+pub enum ZoneDbError<E> {
+    /// Error from the caller-provided database.
+    #[error("inner database error: {0}")]
+    Inner(#[source] E),
+    /// The selected Zone state contains an invalid Tempo anchor.
+    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
+    AnchorOverflow(U256),
+    /// Execution-local Tempo L1 state could not be read or advanced consistently.
+    #[error(transparent)]
+    L1State(#[from] L1StateError),
+    /// A transaction attempted to persist mirrored Tempo-owned state.
+    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
+    L1Write { address: Address, slot: U256 },
+}
+
+impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
+
+impl<E: DBErrorMarker> ZoneDbError<E> {
+    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
+        match self {
+            Self::Inner(error) => EVMError::Database(error),
+            error => EVMError::CustomAny(AnyError::new(error)),
+        }
     }
 }
 
