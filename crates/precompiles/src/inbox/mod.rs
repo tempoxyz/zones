@@ -18,7 +18,7 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-use alloy_sol_types::SolValue;
+use alloy_sol_types::{SolCall, SolError, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     EncodePrecompileResult, charge_input_cost, dispatch,
@@ -29,8 +29,8 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
-    DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneOutbox,
-    QueuedDeposit, ZoneInbox as ZoneInboxAbi, ZoneInboxError, ZoneInboxEvent,
+    DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneInbox, IZoneOutbox,
+    QueuedDeposit, ZoneInboxError, ZoneInboxEvent,
 };
 use zone_primitives::constants::{
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, TEMPO_STATE_ADDRESS,
@@ -40,11 +40,28 @@ use zone_primitives::constants::{
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
     ecies::{ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, hkdf_info, hkdf_sha256},
+    execution::{CallCheck, CallRules},
     outbox::ZoneOutbox,
     storage::{L1State, L1StorageReader},
     tempo_state::TempoState,
     tip20_factory::{ZoneTokenFactory, enableTokenCall},
 };
+
+/// ABI selector for the block-opening `advanceTempo` system call.
+pub const ADVANCE_TEMPO_SELECTOR: [u8; 4] = IZoneInbox::advanceTempoCall::SELECTOR;
+
+/// Reject ordinary callers before dispatch can select an L1 anchor or perform any L1 read.
+struct InboxCallRules;
+
+impl CallRules for InboxCallRules {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        if !caller.is_zero() && data.starts_with(&ADVANCE_TEMPO_SELECTOR) {
+            return CallCheck::Revert(IZoneInbox::OnlySequencer {}.abi_encode().into());
+        }
+
+        CallCheck::Continue
+    }
+}
 
 /// Zone-side bridge Inbox state and deposit-processing logic.
 #[contract(addr = ZONE_INBOX_ADDRESS)]
@@ -72,7 +89,7 @@ impl ZoneInbox {
         crate::execution::create_precompile(
             "ZoneInbox",
             env,
-            crate::execution::NoCallRules,
+            InboxCallRules,
             move |data, caller| Self::new().call_with_l1_state(&l1, portal_address, data, caller),
         )
     }
@@ -95,7 +112,7 @@ impl ZoneInbox {
         dispatch!(
             calldata,
             |call| match call {
-                ZoneInboxAbi::ZoneInboxCalls {
+                IZoneInbox::IZoneInboxCalls {
                     processedDepositQueueHash(call) => {
                         view(call, |_| self.processed_deposit_queue_hash.read())
                     },
@@ -115,7 +132,7 @@ impl ZoneInbox {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
-                            self.advance_tempo(l1, portal_address, msg_sender, call)
+                            self.advance_tempo(l1, portal_address, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },
@@ -128,8 +145,7 @@ impl ZoneInbox {
         &mut self,
         l1: &L1State<P>,
         portal: Address,
-        caller: Address,
-        call: ZoneInboxAbi::advanceTempoCall,
+        call: IZoneInbox::advanceTempoCall,
     ) -> ZoneResult<()> {
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
@@ -140,10 +156,6 @@ impl ZoneInbox {
         // Step 1: Advance Tempo state and select the child anchor used by all L1-backed reads.
         tempo_state.finalize_checkpoint(l1, call.header)?;
         let tempo_block_number = tempo_state.tempo_block_number()?;
-
-        if !caller.is_zero() && !l1.is_active_sequencer(caller, tempo_block_number)? {
-            return Err(ZoneInboxError::only_sequencer().into());
-        }
 
         self.enable_tokens(call.enabledTokens)?;
 

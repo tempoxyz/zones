@@ -6,12 +6,12 @@ use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
-    storage::{ContractStorage, StorageCtx, StorageKey},
+    storage::{ContractStorage, StorageCtx},
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
 };
 use tempo_primitives::TempoHeader;
-use zone_primitives::constants::{PORTAL_IS_SEQUENCER_SLOT, ZONE_OUTBOX_ADDRESS};
+use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
     EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
@@ -193,25 +193,7 @@ impl Harness {
 }
 
 #[test]
-fn advance_checks_sequencer_and_queue_at_child_anchor() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    harness.set_queue_hash(B256::ZERO);
-
-    harness.call(
-        SEQUENCER,
-        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
-    )?;
-
-    assert_eq!(harness.l1_state.get_anchor(), Some(1));
-    let requests = harness.l1.storage_requests();
-    let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-    assert!(requests.contains(&(PORTAL, membership_slot.into(), 1)));
-    assert!(requests.contains(&(PORTAL, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, 1)));
-    Ok(())
-}
-
-#[test]
-fn zero_system_caller_skips_sequencer_read() -> eyre::Result<()> {
+fn system_advance_selects_child_anchor_and_reads_queue() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness.set_queue_hash(B256::ZERO);
 
@@ -220,13 +202,27 @@ fn zero_system_caller_skips_sequencer_read() -> eyre::Result<()> {
         harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
     )?;
 
-    let membership_slot = SEQUENCER.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-    assert!(
-        !harness
-            .l1
-            .storage_requests()
-            .contains(&(PORTAL, membership_slot.into(), 1))
-    );
+    assert_eq!(harness.l1_state.get_anchor(), Some(1));
+    assert!(harness.l1.storage_requests().contains(&(
+        PORTAL,
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        1,
+    )));
+    Ok(())
+}
+
+#[test]
+fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let output = harness.call(
+        SEQUENCER,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+
+    assert!(output.is_revert());
+    assert_eq!(output.bytes, IZoneInbox::OnlySequencer {}.abi_encode());
+    assert_eq!(harness.l1_state.get_anchor(), None);
+    assert!(harness.l1.storage_requests().is_empty());
     Ok(())
 }
 
@@ -237,7 +233,7 @@ fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()>
     let output = call_precompile(
         &mut harness.ctx,
         &harness.precompile,
-        SEQUENCER,
+        Address::ZERO,
         &calldata,
         GAS,
         true,
@@ -251,7 +247,7 @@ fn static_advance_and_delegate_call_revert_before_l1_reads() -> eyre::Result<()>
     let output = call_precompile(
         &mut harness.ctx,
         &harness.precompile,
-        SEQUENCER,
+        Address::ZERO,
         &calldata,
         GAS,
         false,
@@ -276,27 +272,12 @@ fn advance_rejects_a_preselected_anchor_before_child_selection() -> eyre::Result
     let request_count = harness.l1.storage_requests().len();
 
     let result = harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
     );
 
     assert!(result.is_err());
     assert_eq!(harness.l1.storage_requests().len(), request_count);
-    Ok(())
-}
-
-#[test]
-fn wrong_sequencer_reverts_after_checking_child_anchor() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let output = harness.call(
-        ALICE,
-        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
-    )?;
-
-    assert!(output.is_revert());
-    assert_eq!(output.bytes, ZoneInboxAbi::OnlySequencer {}.abi_encode());
-    assert_eq!(harness.l1_state.get_anchor(), Some(1));
-    assert_eq!(harness.l1.storage_requests().len(), 1);
     Ok(())
 }
 
@@ -340,7 +321,7 @@ fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
     harness.set_queue_hash(tempo_head);
 
     let output = harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {
@@ -387,7 +368,7 @@ fn regular_deposit_mints_and_updates_hash_and_number() -> eyre::Result<()> {
     };
 
     harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness.advance_call(vec![queued], Vec::new()).abi_encode(),
     )?;
 
@@ -430,7 +411,7 @@ fn failed_regular_mint_enqueues_one_bounce_back() -> eyre::Result<()> {
     harness.set_queue_hash(expected_hash);
 
     harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {
@@ -459,7 +440,7 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         currency: "USD".into(),
     });
 
-    harness.call(SEQUENCER, call.abi_encode())?;
+    harness.call(Address::ZERO, call.abi_encode())?;
 
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -475,7 +456,7 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
 fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let output = harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {
@@ -536,7 +517,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
     harness.set_queue_hash(expected_hash);
 
     harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {
@@ -605,7 +586,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     harness.set_queue_hash(expected_hash);
 
     harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {
@@ -651,7 +632,7 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
     let mut missing = Harness::new()?;
     missing.set_queue_hash(expected_hash);
     let output = missing.call_atomic(
-        SEQUENCER,
+        Address::ZERO,
         missing
             .advance_call(
                 vec![QueuedDeposit {
@@ -665,13 +646,13 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
     assert!(output.is_revert());
     assert_eq!(
         output.bytes,
-        ZoneInboxAbi::MissingDecryptionData {}.abi_encode()
+        IZoneInbox::MissingDecryptionData {}.abi_encode()
     );
 
     let mut extra = Harness::new()?;
     extra.set_queue_hash(B256::ZERO);
     let output = extra.call_atomic(
-        SEQUENCER,
+        Address::ZERO,
         extra
             .advance_call(
                 Vec::new(),
@@ -689,7 +670,7 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
     assert!(output.is_revert());
     assert_eq!(
         output.bytes,
-        ZoneInboxAbi::ExtraDecryptionData {}.abi_encode()
+        IZoneInbox::ExtraDecryptionData {}.abi_encode()
     );
     Ok(())
 }
@@ -707,13 +688,13 @@ fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
 
     let output = harness.call(
         BOB,
-        ZoneInboxAbi::claimRefundCall {
+        IZoneInbox::claimRefundCall {
             token: PATH_USD_ADDRESS,
         }
         .abi_encode(),
     )?;
     assert_eq!(
-        ZoneInboxAbi::claimRefundCall::abi_decode_returns(&output.bytes)?,
+        IZoneInbox::claimRefundCall::abi_decode_returns(&output.bytes)?,
         444
     );
     assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(444));
@@ -746,7 +727,7 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     harness.set_queue_hash(expected_hash);
 
     harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {
@@ -788,7 +769,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     harness.set_queue_hash(expected_hash);
 
     harness.call(
-        SEQUENCER,
+        Address::ZERO,
         harness
             .advance_call(
                 vec![QueuedDeposit {

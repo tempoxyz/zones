@@ -7,7 +7,10 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
+        ExecutableTx, GasOutput,
+    },
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
@@ -18,19 +21,22 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use tempo_revm::{TempoStateAccess, TempoTxEnv, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::{L1StorageReader, tx_context};
+use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader, tx_context};
+use zone_primitives::constants::ZONE_INBOX_ADDRESS;
 
 use crate::{L1OverlayDB, ZoneEvm};
 
 /// Simplified block executor for zone nodes.
 ///
-/// Wraps [`EthBlockExecutor`] without any subblock validation, gas-section tracking,
-/// or end-of-block metadata system transaction requirements.
+/// Enforces the single successful block-opening `advanceTempo` system transaction, then delegates
+/// ordinary execution to [`EthBlockExecutor`] without Tempo subblock validation, gas-section
+/// tracking, or end-of-block metadata requirements.
 pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateProvider> {
     inner: EthBlockExecutor<'a, ZoneEvm<DB, I, L1>, &'a ZoneChainSpec, TempoReceiptBuilder>,
+    has_advanced_tempo: bool,
 }
 
 impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
@@ -52,6 +58,7 @@ where
                 chain_spec,
                 TempoReceiptBuilder::default(),
             ),
+            has_advanced_tempo: false,
         }
     }
 
@@ -108,6 +115,25 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
+        match (self.has_advanced_tempo, is_advance_tempo(recovered.tx())) {
+            (false, false) => {
+                return Err(BlockValidationError::msg(
+                    "advanceTempo must be the first transaction in a zone block",
+                )
+                .into());
+            }
+            (true, true) => {
+                return Err(BlockValidationError::msg(
+                    "advanceTempo must only execute once per zone block",
+                )
+                .into());
+            }
+            _ => {
+                // Non-system calls to this selector take the `(true, false)` path after the opening
+                // transaction and execute normally; the Inbox rejects their caller with a revert.
+            }
+        }
+
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
         self.override_validator_token();
@@ -121,7 +147,15 @@ where
             .execute_transaction_without_commit((tx_env, recovered));
 
         self.evm_mut().clear_l1_overlay_state();
-        result
+        let result = result?;
+        if is_advance_tempo && !result.result.result.is_success() {
+            return Err(BlockValidationError::msg(
+                "block-opening advanceTempo transaction must succeed",
+            )
+            .into());
+        }
+        self.has_advanced_tempo |= is_advance_tempo;
+        Ok(result)
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
@@ -131,6 +165,12 @@ where
     fn finish(
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
+        if !self.has_advanced_tempo {
+            return Err(BlockValidationError::msg(
+                "zone block is missing its advanceTempo system transaction",
+            )
+            .into());
+        }
         self.inner.finish()
     }
 
@@ -145,6 +185,13 @@ where
     fn receipts(&self) -> &[Self::Receipt] {
         self.inner.receipts()
     }
+}
+
+fn is_advance_tempo(tx: &TempoTxEnvelope) -> bool {
+    let is_advance_tempo = tx.is_system_tx()
+        && tx.calls().any(|(kind, input)| {
+            kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
+        });
 }
 
 #[cfg(test)]
