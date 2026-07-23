@@ -22,7 +22,7 @@ use crate::{
 
 const GAS: u64 = 10_000_000;
 const ANCHOR: u64 = 42;
-const DEFAULT_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
+const TEST_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
 const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
@@ -61,7 +61,7 @@ impl Harness {
             PORTAL,
             PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
             ANCHOR,
-            U256::from(DEFAULT_MAX_TEMPO_GAS_RATE),
+            U256::from(TEST_MAX_TEMPO_GAS_RATE),
         );
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
@@ -550,7 +550,7 @@ fn fee_rate_and_gas_limit_validation_match_reference() -> eyre::Result<()> {
         ZoneOutboxError::gas_limit_too_high(),
     );
     assert_revert(
-        harness.set_gas_rate(DEFAULT_MAX_TEMPO_GAS_RATE + 1),
+        harness.set_gas_rate(TEST_MAX_TEMPO_GAS_RATE + 1),
         ZoneOutboxError::gas_fee_rate_too_high(),
     );
     harness.set_max_tempo_gas_rate(5);

@@ -164,7 +164,7 @@ contract ZonePortal is IZonePortal {
     uint240 private _enforcementModesPadding;
 
     /// @notice Maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
-    /// @dev Defaults to MAX_GAS_FEE_RATE and is read from finalized Tempo state by ZoneConfig.
+    /// @dev Defaults to zero and is read from finalized Tempo state by ZoneConfig.
     uint128 public maxTempoGasRate;
 
     /*//////////////////////////////////////////////////////////////
@@ -198,7 +198,6 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         _isAccessEnforced = accessEnforced;
         _isGatewayEnforced = gatewayEnforced;
-        maxTempoGasRate = MAX_GAS_FEE_RATE;
         rpcUrl = _rpcUrl;
         emit EnforcementModesUpdated(accessEnforced, gatewayEnforced);
 

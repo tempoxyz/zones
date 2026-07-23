@@ -4274,8 +4274,8 @@ contract ZonePortalTest is BaseTest {
         portal.setZoneGasRate(1);
     }
 
-    function test_maxTempoGasRate_defaultsToProtocolMaximum() public view {
-        assertEq(portal.maxTempoGasRate(), portal.MAX_GAS_FEE_RATE());
+    function test_maxTempoGasRate_defaultsToZero() public view {
+        assertEq(portal.maxTempoGasRate(), 0);
     }
 
     function test_setMaxTempoGasRate_updatesMaximumAndEmits() public {

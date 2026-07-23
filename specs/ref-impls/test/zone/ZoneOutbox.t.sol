@@ -35,7 +35,7 @@ contract ZeroTxContext {
 /// @notice Tests for ZoneOutbox finalizeWithdrawalBatch() functionality and withdrawal storage
 contract ZoneOutboxTest is Test {
 
-    uint128 internal constant DEFAULT_MAX_TEMPO_GAS_RATE = 1e18;
+    uint128 internal constant TEST_MAX_TEMPO_GAS_RATE = 1e18;
 
     ZoneConfig public config;
     ZoneOutbox public outbox;
@@ -68,7 +68,7 @@ contract ZoneOutboxTest is Test {
             bytes32(uint256(1))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
-        tempoState.setMockMaxTempoGasRate(mockPortal, DEFAULT_MAX_TEMPO_GAS_RATE);
+        tempoState.setMockMaxTempoGasRate(mockPortal, TEST_MAX_TEMPO_GAS_RATE);
         tempoState.setMockAccountAllowed(mockPortal, sequencer, true);
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
