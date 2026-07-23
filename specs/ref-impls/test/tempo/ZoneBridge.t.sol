@@ -212,7 +212,6 @@ contract ZoneBridgeTest is BaseTest {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(l1Portal),
-                    initialToken: address(pathUSD),
                     accessMode: ZoneAccessMode.Closed,
                     gatewayMode: ZoneGatewayMode.Enforced,
                     admin: admin,

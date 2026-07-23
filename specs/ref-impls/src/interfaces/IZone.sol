@@ -47,7 +47,6 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     ZoneAccessMode accessMode; // creation-time snapshot; query the portal for the current mode
     ZoneGatewayMode gatewayMode; // creation-time snapshot; query the portal for the current mode
     address admin;

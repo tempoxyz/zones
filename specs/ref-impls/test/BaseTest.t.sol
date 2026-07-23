@@ -230,7 +230,6 @@ contract BaseTest is Test {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(portal),
-                    initialToken: initialToken,
                     accessMode: ZoneAccessMode.Closed,
                     gatewayMode: ZoneGatewayMode.Enforced,
                     admin: portalAdmin,

@@ -26,7 +26,6 @@ crate::sol! {
         struct ZoneInfo {
             uint32 zoneId;
             address portal;
-            address initialToken;
             ZoneAccessMode accessMode;
             ZoneGatewayMode gatewayMode;
             address admin;
