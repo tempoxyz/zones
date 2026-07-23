@@ -361,6 +361,10 @@ impl EarnZoneFixture {
             (adapter, swapper, portal, messenger, owner).abi_encode(),
         )
         .await?;
+        let gateway_block = l1.set_zone_gateway_on_portal(portal, gateway, true).await?;
+        zone.wait_for_l2_tempo_finalized(gateway_block, E2E_TIMEOUT)
+            .await?;
+        zone.assert_zone_gateway(gateway, true).await?;
         let rewards =
             deploy_contract(&l1, "VaultRewards", (adapter, user_address).abi_encode()).await?;
 
@@ -750,6 +754,17 @@ impl EarnZoneFixture {
             )
             .await?;
 
+        let callback_success = self
+            .l1
+            .wait_for_withdrawal_processed_status(
+                self.portal,
+                self.gateway,
+                input_token,
+                AMOUNT,
+                E2E_TIMEOUT,
+            )
+            .await?;
+        eyre::ensure!(callback_success, "Earn deposit callback failed");
         let after = self
             .zone
             .wait_for_balance(
@@ -769,15 +784,6 @@ impl EarnZoneFixture {
             "Earn deposit",
         )
         .await?;
-        self.l1
-            .assert_withdrawal_processed_with_status(
-                self.portal,
-                self.gateway,
-                input_token,
-                AMOUNT,
-                true,
-            )
-            .await?;
         self.assert_gateway_event_privacy(
             input_token,
             AMOUNT,
@@ -1392,6 +1398,15 @@ async fn zone_access_policy_lifecycle() -> eyre::Result<()> {
     let outsider_signer = fixture.l1.signer_at(3);
     let outsider = outsider_signer.address();
     fixture.l1.fund_user(outsider, PUBLIC_USER_BALANCE).await?;
+    let account_block = fixture
+        .l1
+        .set_allowed_account_on_portal(fixture.portal, outsider, true)
+        .await?;
+    fixture
+        .zone
+        .wait_for_l2_tempo_finalized(account_block, E2E_TIMEOUT)
+        .await?;
+    fixture.zone.assert_allowed_account(outsider, true).await?;
     let mut outsider_account =
         ZoneAccount::with_signer(outsider_signer, &fixture.l1, &fixture.zone, fixture.portal);
     outsider_account
