@@ -411,7 +411,15 @@ pub(crate) async fn run_block_sync<P>(
     match role {
         Role::Leader => run_leader_backfill_server(provider, events, commands, attestation).await,
         Role::Follower => {
-            run_follower_block_sync(provider, engine, events, commands, l1_block_tracker, attestation).await
+            run_follower_block_sync(
+                provider,
+                engine,
+                events,
+                commands,
+                l1_block_tracker,
+                attestation,
+            )
+            .await
         }
     }
 }

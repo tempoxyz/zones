@@ -584,7 +584,15 @@ where
         }
         task_executor.spawn_critical_task(
             "zone-p2p-block-sync",
-            run_block_sync(role, provider, engine, events, commands, l1_block_tracker, attestation),
+            run_block_sync(
+                role,
+                provider,
+                engine,
+                events,
+                commands,
+                l1_block_tracker,
+                attestation,
+            ),
         );
 
         task_executor.spawn_critical_with_graceful_shutdown_signal(
