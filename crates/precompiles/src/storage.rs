@@ -6,7 +6,7 @@ use core::{cell::Cell, fmt};
 
 use alloy_primitives::{Address, B256};
 use revm::{context::result::AnyError, precompile::PrecompileError};
-use tempo_precompiles::zone_factory::ZonePortalStorage;
+use tempo_precompiles::zone_factory::ZonePortalStorage as ZonePortal;
 use thiserror::Error;
 
 pub(crate) use tempo_precompiles::storage::*;
@@ -81,8 +81,8 @@ impl<P> L1State<P> {
     /// Returns a typed view of the L1-mirrored ZonePortal.
     ///
     /// Reads use ordinary precompile handlers and therefore require an active [`StorageCtx`].
-    pub(crate) fn portal(&self) -> ZonePortalStorage {
-        ZonePortalStorage::new(self.portal_address)
+    pub(crate) fn portal(&self) -> ZonePortal {
+        ZonePortal::new(self.portal_address)
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {

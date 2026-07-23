@@ -175,7 +175,7 @@ impl Harness {
         })
     }
 
-    fn set_role(&mut self, account: Address, role: ZonePortal::Role) -> eyre::Result<()> {
+    fn set_role(&mut self, account: Address, role: IZonePortal::Role) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
             self.l1.portal().role[account].write(role as u8)?;
@@ -333,7 +333,7 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     );
     assert_eq!(closed_open.balance_of(ALICE)?, balance_before);
     assert!(closed_open.pending()?.is_empty());
-    closed_open.set_role(BOB, ZonePortal::Role::Account)?;
+    closed_open.set_role(BOB, IZonePortal::Role::Account)?;
     closed_open.request(1, BOB, B256::ZERO)?;
     closed_open.request_with_gas(1, FEE_PAYER, B256::ZERO, 1)?;
 
@@ -341,7 +341,7 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     // gateways require callback gas and callback targets must have the CallbackGateway role.
     let mut open_enforced = Harness::new()?;
     open_enforced.set_modes(false, true)?;
-    open_enforced.set_role(GATEWAY, ZonePortal::Role::CallbackGateway)?;
+    open_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway)?;
     open_enforced.request(1, BOB, B256::ZERO)?;
     let pending_before = open_enforced.pending()?.len();
     let balance_before = open_enforced.balance_of(ALICE)?;
@@ -360,8 +360,8 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     // Closed access, enforced gateway: plain and callback paths enforce their distinct roles.
     let mut closed_enforced = Harness::new()?;
     closed_enforced.set_modes(true, true)?;
-    closed_enforced.set_role(BOB, ZonePortal::Role::Account)?;
-    closed_enforced.set_role(GATEWAY, ZonePortal::Role::CallbackGateway)?;
+    closed_enforced.set_role(BOB, IZonePortal::Role::Account)?;
+    closed_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway)?;
     closed_enforced.request(1, BOB, B256::ZERO)?;
     closed_enforced.request_with_gas(1, GATEWAY, B256::ZERO, 1)?;
     let pending_before = closed_enforced.pending()?.len();
