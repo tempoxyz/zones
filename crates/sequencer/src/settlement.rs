@@ -469,52 +469,29 @@ impl BatchSubmitter {
             "Submitting batch to ZonePortal on L1"
         );
 
-        let pending = self
-            .portal
-            .submitBatch(
-                batch.tempo_block_number,
-                recent_tempo_block_number,
-                block_transition,
-                deposit_transition,
-                batch.withdrawal_queue_hash,
-                verifier_config,
-                Bytes::new(),
-                U256::from(batch.zone_height),
-                signatures,
-            )
-            .nonce_key(SUBMIT_BATCH_NONCE_KEY)
-            .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
-            .max_priority_fee_per_gas(0)
-            .send()
-            .await?;
+        let receipt = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            self.portal
+                .submitBatch(
+                    batch.tempo_block_number,
+                    recent_tempo_block_number,
+                    block_transition,
+                    deposit_transition,
+                    batch.withdrawal_queue_hash,
+                    verifier_config,
+                    Bytes::new(),
+                    U256::from(batch.zone_height),
+                    signatures,
+                )
+                .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                .max_priority_fee_per_gas(0)
+                .send_sync(),
+        )
+        .await
+        .map_err(|_| eyre::eyre!("submitBatch sync submission timed out after 30 seconds"))??;
 
-        let tx_hash = *pending.tx_hash();
-        info!(
-            %tx_hash,
-            timeout_secs = 30,
-            required_confirmations = 1,
-            "submitBatch tx accepted by RPC; waiting for confirmation"
-        );
-
-        let receipt_result = pending
-            .with_required_confirmations(1)
-            .with_timeout(Some(std::time::Duration::from_secs(30)))
-            .get_receipt()
-            .await;
-
-        let receipt = match receipt_result {
-            Ok(receipt) => receipt,
-            Err(err) => {
-                warn!(
-                    %tx_hash,
-                    timeout_secs = 30,
-                    error = %err,
-                    "submitBatch tx was broadcast but receipt not obtained"
-                );
-                return Err(err.into());
-            }
-        };
-
+        let tx_hash = receipt.transaction_hash();
         if !receipt.status() {
             return Err(eyre::eyre!(
                 "submitBatch tx {tx_hash} was included but reverted on L1"
