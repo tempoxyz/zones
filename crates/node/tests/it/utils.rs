@@ -1,5 +1,6 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
+use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -15,6 +16,7 @@ use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::{args::RpcServerArgs, exit::NodeExitFuture};
+use reth_primitives_traits::SealedHeader;
 use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
@@ -54,18 +56,20 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ZONE_FACTORY_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
-    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
+    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
+    L1PortalEvents, L1StateCache,
 };
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::PORTAL_ACCESS_MODE_SLOT;
+use zone_primitives::constants::{PORTAL_ACCESS_MODE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -156,11 +160,6 @@ where
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     Ok(())
-}
-
-fn portal_token_config_slot(token: Address) -> B256 {
-    let portal_token_configs_slot = B256::with_last_byte(6);
-    keccak256((token, portal_token_configs_slot).abi_encode())
 }
 
 fn enabled_deposits_active_token_config() -> B256 {
@@ -470,6 +469,7 @@ pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
     l1_state_cache: L1StateCache,
+    l1_block_tracker: L1BlockTracker,
     rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
     _tasks: Runtime,
@@ -550,6 +550,11 @@ impl ZoneTestNode {
     /// Returns a handle to the L1 state cache for seeding precompile data.
     pub(crate) fn l1_state_cache(&self) -> &L1StateCache {
         &self.l1_state_cache
+    }
+
+    /// Returns the L1 anchors observed by this node.
+    pub(crate) fn l1_block_tracker(&self) -> &L1BlockTracker {
+        &self.l1_block_tracker
     }
 
     /// Builds the real private RPC API backed by the node's EthHandlers.
@@ -986,6 +991,7 @@ impl ZoneTestNode {
 
         let deposit_queue = zone_node.deposit_queue();
         let l1_state_cache = zone_node.l1_state_cache();
+        let l1_block_tracker = zone_node.l1_block_tracker();
         if is_local_dummy_l1 {
             let mut cache = l1_state_cache.lock();
             seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
@@ -1044,6 +1050,7 @@ impl ZoneTestNode {
             deposit_queue,
             http_url,
             l1_state_cache,
+            l1_block_tracker,
             rpc_api_factory,
             node_handle: Box::new(node_handle),
             _tasks: tasks,
@@ -3028,6 +3035,7 @@ pub(crate) async fn spawn_sequencer_with_config(
         zone_poll_interval: Duration::from_millis(500),
         batch_interval_blocks: 1,
         batch_anchor_config,
+        attestation_store: None,
     };
 
     zone_sequencer::spawn_zone_sequencer(config, sequencer_signer).await
@@ -4007,8 +4015,11 @@ impl L1Fixture {
         let refunds_slot = B256::with_last_byte(8);
         let sequencer_membership_slot =
             keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
-        let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
+        let path_usd_config_slot: B256 = PATH_USD_ADDRESS
+            .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
+            .into();
         let enabled_token_config = enabled_deposits_active_token_config();
+        let max_tempo_gas_rate = B256::from(U256::from(1_000_000_000_000_000_000_u128));
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -4037,6 +4048,14 @@ impl L1Fixture {
             // Synthetic fixtures use open account and gateway modes so their tests do not need
             // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
             cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            // Permit the protocol-wide maximum in synthetic fixtures. Production values are
+            // imported from the finalized ZonePortal storage slot.
+            cache.set(
+                portal_address,
+                PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+                block,
+                max_tempo_gas_rate,
+            );
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
@@ -4205,9 +4224,11 @@ impl L1Fixture {
     }
 
     /// Inject an empty L1 block (no deposits) into the queue.
-    pub(crate) fn inject_empty_block(&mut self, queue: &DepositQueue) {
+    pub(crate) fn inject_empty_block(&mut self, queue: &DepositQueue) -> NumHash {
         let header = self.next_header();
+        let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
         queue.enqueue(header, L1PortalEvents::default());
+        anchor
     }
 
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
@@ -4218,12 +4239,18 @@ impl L1Fixture {
     }
 
     /// Inject an L1 block with the given deposits into the queue.
-    pub(crate) fn inject_deposits(&mut self, queue: &DepositQueue, deposits: Vec<Deposit>) {
+    pub(crate) fn inject_deposits(
+        &mut self,
+        queue: &DepositQueue,
+        deposits: Vec<Deposit>,
+    ) -> NumHash {
         let header = self.next_header();
         self.seed_regular_deposit_policy_state(header.inner.number, &deposits);
+        let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
         queue.enqueue(header, events);
+        anchor
     }
 
     /// Inject an L1 block with mixed regular and encrypted deposits.

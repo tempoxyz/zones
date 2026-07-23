@@ -51,8 +51,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
-    ///      This provides a stable pricing basis for deposits while allowing sequencer
-    ///      flexibility to adjust the zoneGasRate based on operational costs.
+    ///      This provides a stable pricing basis for deposits while allowing the admin
+    ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
@@ -159,6 +159,13 @@ contract ZonePortal is IZonePortal {
     /// @dev Solidity packs both enforcement booleans into slot 21.
     bool internal _isAccessEnforced;
     bool internal _isGatewayEnforced;
+
+    /// @dev Reserve the remainder of slot 21 so the cross-domain fee cap has a dedicated slot.
+    uint240 private _enforcementModesPadding;
+
+    /// @notice Maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
+    /// @dev Defaults to zero and is read from finalized Tempo state by ZoneConfig.
+    uint128 public maxTempoGasRate;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -310,17 +317,26 @@ contract ZonePortal is IZonePortal {
         return _sequencers[index];
     }
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
-    /// @dev Sequencers publish the operational rate; collected deposit fees are paid to the admin.
+    /// @notice Set zone gas rate. Only callable by admin.
+    /// @dev The admin publishes the operational rate and receives collected deposit fees.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
-    function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
+    function setZoneGasRate(uint128 _zoneGasRate) external onlyAdmin {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
     }
 
+    /// @notice Set the maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external onlyAdmin {
+        if (_maxTempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        maxTempoGasRate = _maxTempoGasRate;
+        emit MaxTempoGasRateUpdated(_maxTempoGasRate);
+    }
+
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
-    function setBouncebackGas(uint64 _bouncebackGas) external onlySequencer {
+    /// @dev Only the admin can change the amount because it determines the fee deducted from a
+    ///      failed deposit at processing time.
+    function setBouncebackGas(uint64 _bouncebackGas) external onlyAdmin {
         bouncebackGas = _bouncebackGas;
         emit BouncebackGasUpdated(_bouncebackGas);
     }
@@ -699,7 +715,6 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint128 fee, uint128 netAmount)
     {
-        // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
         fee = calculateDepositFee();
         uint128 bouncebackFee = calculateBouncebackFee();
         if (amount < fee + bouncebackFee) revert DepositTooSmall();
@@ -877,7 +892,6 @@ contract ZonePortal is IZonePortal {
     /// @dev Withdrawals must be supplied in queue order. `remainingQueue` is the queue suffix
     ///      after the last supplied withdrawal, or zero if the batch exhausts the current slot.
     ///      Plain-transfer and callback failures bounce back without blocking the FIFO.
-    // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
     function processWithdrawals(
         Withdrawal[] calldata withdrawals,
         bytes32 remainingQueue

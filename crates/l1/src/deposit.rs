@@ -105,6 +105,44 @@ pub enum L1Deposit {
 }
 
 impl L1Deposit {
+    /// Convert the L1 event payload into its canonical `advanceTempo` queue encoding.
+    pub fn to_abi_queued_deposit(&self) -> abi::QueuedDeposit {
+        match self {
+            Self::Regular(d) => abi::QueuedDeposit {
+                depositType: abi::DepositType::Regular,
+                depositData: abi::Deposit {
+                    token: d.token,
+                    sender: d.sender,
+                    to: d.to,
+                    amount: d.amount,
+                    tempoRefundRecipient: d.tempo_refund_recipient,
+                    memo: d.memo,
+                }
+                .abi_encode()
+                .into(),
+            },
+            Self::Encrypted(d) => abi::QueuedDeposit {
+                depositType: abi::DepositType::Encrypted,
+                depositData: AbiEncryptedDeposit {
+                    token: d.token,
+                    sender: d.sender,
+                    amount: d.amount,
+                    tempoRefundRecipient: d.tempo_refund_recipient,
+                    keyIndex: d.key_index,
+                    encrypted: AbiEncryptedDepositPayload {
+                        ephemeralPubkeyX: d.ephemeral_pubkey_x,
+                        ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
+                        ciphertext: d.ciphertext.clone().into(),
+                        nonce: d.nonce.into(),
+                        tag: d.tag.into(),
+                    },
+                }
+                .abi_encode()
+                .into(),
+            },
+        }
+    }
+
     /// Compute the next hash chain value: `keccak256(abi.encode(deposit, prevHash))`.
     pub fn hash_chain(&self, prev_hash: B256) -> B256 {
         match self {

@@ -209,8 +209,9 @@ The following table lists every privileged action and the role authorized to inv
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
 | `setSequencerSet(sequencers, threshold)` | [`ZonePortal`](#izoneportal) | **admin** |
-| `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
-| `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
+| `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setMaxTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setBouncebackGas(gasAmount)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **any active sequencer** |
 | `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **any active sequencer with a threshold certificate** |
@@ -223,7 +224,7 @@ The following table lists every privileged action and the role authorized to inv
 Rationale notes:
 
 - **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
-- **Gas rates are sequencer-controlled** because the sequencer takes the economic risk on gas-price fluctuations and needs to react quickly to operational events without involving the cold key.
+- **Withdrawal gas rates are sequencer-controlled within an admin ceiling** so the sequencer can react quickly to Tempo gas-price fluctuations while the admin retains control over the maximum user fee. The admin directly controls the Tempo-side deposit and bounce-back fee parameters.
 - **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key.
 - **Zone-side system calls** to `ZoneOutbox` may use `msg.sender == address(0)` so the block builder can inject protocol system transactions. Ordinary user transactions must come from the registered sequencer address for these calls.
 - **Withdrawal processing is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
@@ -331,16 +332,17 @@ The portal maintains a `TokenConfig` per token with an `enabled` flag and a conf
 
 ### Gas Rate Configuration
 
-The sequencer configures two gas rates for user-initiated deposit and withdrawal work. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
+The admin configures Tempo-side deposit and bounce-back fees, while sequencers configure the zone-side withdrawal rate. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
 
 | Rate | Set via | Used for |
 |------|---------|----------|
 | `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
+| `maxTempoGasRate` | `ZonePortal.setMaxTempoGasRate()` | Admin ceiling for the sequencer-controlled withdrawal gas rate |
 | `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fee reserve: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
-`zoneGasRate` lives on `ZonePortal` on Tempo and is read at deposit time. `tempoGasRate` lives on the zone-side `ZoneOutbox` and is read at withdrawal-request time. Both fees are snapshotted onto the queued entry, so in-flight rate changes never retroactively raise the fee on already-queued items.
+`zoneGasRate` and `maxTempoGasRate` live on `ZonePortal` on Tempo. `maxTempoGasRate` defaults to zero, so nonzero withdrawal pricing remains disabled until the admin explicitly configures a ceiling. `tempoGasRate` lives on the zone-side `ZoneOutbox`; the sequencer may update it only to a value less than or equal to the finalized portal maximum. The outbox reads `tempoGasRate` at withdrawal-request time. Deposit and withdrawal fees are snapshotted onto their queued entries, so in-flight rate changes never retroactively raise the fee on already-queued items.
 
-Deposit bounce-backs do not use `tempoGasRate`. Their fee is derived from the sequencer-configured `bouncebackGas`, Tempo `block.basefee`, and `TEMPO_BASE_FEE_SCALE (1e12)`. All rates are denominated in token units per gas unit and fees are paid in the same token being deposited or withdrawn. Tempo-side deposit and bounce-back fees are paid to the portal admin; the protocol does not distribute them among sequencers.
+Deposit bounce-backs do not use `tempoGasRate`. Their fee is derived from the admin-configured `bouncebackGas`, Tempo `block.basefee`, and `TEMPO_BASE_FEE_SCALE (1e12)`. All rates are denominated in token units per gas unit and fees are paid in the same token being deposited or withdrawn. Tempo-side deposit and bounce-back fees are paid to the portal admin; the protocol does not distribute them among sequencers.
 
 The sequencer can also configure `maxWithdrawalsPerBlock` via `ZoneOutbox.setMaxWithdrawalsPerBlock(limit)`. This is a zone-side load-shedding limit for withdrawal requests, not a fee parameter. A value of `0` disables the limit.
 
@@ -1660,12 +1662,7 @@ interface IZoneFactory {
     );
 
     function owner() external view returns (address);
-    function implementationUpdatesLocked() external view returns (bool);
     function transferOwnership(address newOwner) external;
-    function lockImplementationUpdates() external;
-    function setPortalImplementation(address source) external;
-    function setZoneMessengerImplementation(address source) external;
-    function setVerifierImplementation(address source) external;
     function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     function nextZoneId() external view returns (uint32);
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
@@ -1740,6 +1737,7 @@ interface IZonePortal {
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
@@ -1852,6 +1850,8 @@ interface IZonePortal {
 
     function setZoneGasRate(uint128 _zoneGasRate) external;
     function zoneGasRate() external view returns (uint128);
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external;
+    function maxTempoGasRate() external view returns (uint128);
 
     // Encryption keys
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
@@ -2072,11 +2072,12 @@ interface IZoneConfig {
     function isGatewayOpen() external view returns (bool);
     function isAllowedAccount(address account) external view returns (bool);
     function isZoneGateway(address gateway) external view returns (bool);
+    function maxTempoGasRate() external view returns (uint128);
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 }
 ```
 
-Reads sequencer membership, the token registry, enforcement modes, account membership, gateway membership, and the encryption key from the portal on Tempo via `TempoState` storage reads.
+Reads sequencer membership, the token registry, enforcement modes, account membership, gateway membership, the withdrawal gas-rate ceiling, and the encryption key from the portal on Tempo via `TempoState` storage reads.
 
 ### TIP-403 Registry
 
@@ -2088,11 +2089,11 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its read method
 
 Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
 
-TIP-1091 installs the shared portal implementation, verifier, and messenger runtimes at fixed protocol-managed addresses. The factory owner may replace those runtimes with `setPortalImplementation`, `setVerifierImplementation`, and `setZoneMessengerImplementation`. Replacing the portal implementation upgrades every portal proxy and therefore MUST preserve the portal storage layout. `lockImplementationUpdates` permanently disables these replacements.
+At the T9 boundary, Tempo copies the complete runtime bytecode from hardfork-specified portal implementation, verifier, and messenger source deployments to their fixed protocol-managed addresses, equivalent to `EXTCODECOPY`. The ZoneFactory owner cannot invoke these copies or replace the installed runtimes. Any later replacement requires a Tempo hardfork and uses the same copy operation at that hardfork boundary. Replacing the portal implementation upgrades every portal proxy and therefore MUST preserve the portal storage layout.
 
 Zone nodes and provers select execution rules from the imported Tempo block and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
 
-No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements must be coordinated with that activation and use verified source deployments.
+No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements are consensus changes coordinated with that activation.
 
 If the fork changes zone predeploy behavior, the zone node injects new bytecode at the predeploy addresses before `advanceTempo` executes in the first post-fork zone block.
 

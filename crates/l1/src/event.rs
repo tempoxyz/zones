@@ -63,6 +63,43 @@ impl L1PortalEvents {
         }
     }
 
+    /// Validate that `advanceTempo` processes every deposit and token enable observed in this
+    /// block's verified L1 receipts, in canonical log order.
+    ///
+    /// The sequencer-controlled `rejected` flag is deliberately excluded from deposit identity.
+    pub fn validate_advance_tempo_inputs(
+        &self,
+        deposits: &[abi::QueuedDeposit],
+        enabled_tokens: &[abi::EnabledToken],
+    ) -> eyre::Result<()> {
+        eyre::ensure!(
+            deposits.len() == self.deposits.len(),
+            "advanceTempo deposit count does not match observed L1 events: expected {}, got {}",
+            self.deposits.len(),
+            deposits.len()
+        );
+
+        for (index, (expected, actual)) in self.deposits.iter().zip(deposits).enumerate() {
+            let expected = expected.to_abi_queued_deposit();
+            eyre::ensure!(
+                actual.depositType == expected.depositType
+                    && actual.depositData == expected.depositData,
+                "advanceTempo deposit {index} does not match the observed L1 event"
+            );
+        }
+
+        let expected_tokens: Vec<_> = self
+            .enabled_tokens
+            .iter()
+            .map(EnabledToken::to_abi)
+            .collect();
+        eyre::ensure!(
+            enabled_tokens == expected_tokens,
+            "advanceTempo token enables do not match observed L1 events"
+        );
+        Ok(())
+    }
+
     /// Decode a portal log and add the event to this container.
     ///
     /// Logs whose topic0 does not match a known portal event are skipped.

@@ -64,6 +64,12 @@ pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000
 /// ZonePortal storage slot 0: `admin` (address).
 pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
+/// ZonePortal storage slot 3: `currentDepositQueueHash` (bytes32).
+pub const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(3);
+
+/// ZonePortal storage slot 5: `_encryptionKeys` dynamic array.
+pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
+
 /// ZonePortal storage slot 6: `_tokenConfigs` mapping.
 pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 
@@ -76,6 +82,9 @@ pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 
 /// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
 pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
+
+/// ZonePortal storage slot 22: `maxTempoGasRate` (uint128).
+pub const PORTAL_MAX_TEMPO_GAS_RATE_SLOT: B256 = B256::with_last_byte(22);
 
 /// Alias used by consumers reading account allowlist enforcement.
 pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;

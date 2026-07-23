@@ -10,7 +10,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{ContractStorage, Handler, Mapping},
+    storage::{ContractStorage, Handler, Mapping, Slot},
     tip20::{ITIP20, TIP20Error, TIP20Token},
     zone_factory::ZonePortalStorage as ZonePortal,
 };
@@ -20,7 +20,8 @@ use tempo_zone_contracts::{
     ZonePortalError,
 };
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -30,7 +31,6 @@ use crate::{
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
-const MAX_GAS_FEE_RATE: u128 = 1_000_000_000_000_000_000;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
 
 #[contract(addr = ZONE_OUTBOX_ADDRESS)]
@@ -233,7 +233,7 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn enqueue_deposit_bounce_back(
+    pub(crate) fn enqueue_deposit_bounce_back(
         &mut self,
         caller: Address,
         call: IZoneOutbox::enqueueDepositBounceBackCall,
@@ -245,7 +245,11 @@ impl ZoneOutbox {
         self.enqueue(PendingWithdrawal::from_bounce_back(call))
     }
 
-    fn consume_fallback_recipient(&mut self, caller: Address, nonce: u64) -> ZoneResult<Address> {
+    pub(crate) fn consume_fallback_recipient(
+        &mut self,
+        caller: Address,
+        nonce: u64,
+    ) -> ZoneResult<Address> {
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
@@ -255,6 +259,20 @@ impl ZoneOutbox {
         }
         self.fallback_recipients[nonce].delete()?;
         Ok(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_fallback_recipient(
+        &mut self,
+        nonce: u64,
+        recipient: Address,
+    ) -> TempoResult<()> {
+        self.fallback_recipients[nonce].write(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fallback_recipient(&self, nonce: u64) -> TempoResult<Address> {
+        self.fallback_recipients[nonce].read()
     }
 
     fn finalize_withdrawal_batch<P: L1StorageReader>(
@@ -316,7 +334,9 @@ impl ZoneOutbox {
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
         self.ensure_sequencer(l1, caller)?;
-        if call._tempoGasRate > MAX_GAS_FEE_RATE {
+        let max_tempo_gas_rate =
+            Slot::<u128>::new(PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(), l1.portal()).read_with(l1)?;
+        if call._tempoGasRate > max_tempo_gas_rate {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
         self.tempo_gas_rate.write(call._tempoGasRate)?;

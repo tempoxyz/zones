@@ -13,7 +13,10 @@ use revm::{
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
-use zone_primitives::constants::{PORTAL_ADMIN_SLOT, PORTAL_IS_SEQUENCER_SLOT, zone_chain_id};
+use zone_primitives::constants::{
+    PORTAL_ADMIN_SLOT, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, zone_chain_id,
+};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -568,8 +571,23 @@ fn advance_tempo_repro() {
 fn zone_portal_storage_slot_constants_match_solidity() {
     assert_eq!(PORTAL_ADMIN_SLOT, B256::ZERO, "admin is slot 0");
     assert_eq!(
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        B256::from(U256::from(3)),
+        "currentDepositQueueHash is slot 3"
+    );
+    assert_eq!(
+        PORTAL_ENCRYPTION_KEYS_SLOT,
+        B256::from(U256::from(5)),
+        "_encryptionKeys is slot 5"
+    );
+    assert_eq!(
         PORTAL_IS_SEQUENCER_SLOT,
         B256::from(U256::from(19)),
         "isSequencer is slot 19"
+    );
+    assert_eq!(
+        PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+        B256::from(U256::from(22)),
+        "maxTempoGasRate is slot 22"
     );
 }

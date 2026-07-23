@@ -35,6 +35,8 @@ contract ZeroTxContext {
 /// @notice Tests for ZoneOutbox finalizeWithdrawalBatch() functionality and withdrawal storage
 contract ZoneOutboxTest is Test {
 
+    uint128 internal constant TEST_MAX_TEMPO_GAS_RATE = 1e18;
+
     ZoneConfig public config;
     ZoneOutbox public outbox;
     ZoneInbox public inbox;
@@ -66,6 +68,7 @@ contract ZoneOutboxTest is Test {
             bytes32(uint256(1))
         );
         tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
+        tempoState.setMockMaxTempoGasRate(mockPortal, TEST_MAX_TEMPO_GAS_RATE);
         tempoState.setMockAccountAllowed(mockPortal, sequencer, true);
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
@@ -95,6 +98,10 @@ contract ZoneOutboxTest is Test {
         if (accessMode) modes |= 1;
         if (gatewayMode) modes |= 1 << 8;
         tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(modes));
+    }
+
+    function _setMaxTempoGasRate(uint128 rate) internal {
+        tempoState.setMockMaxTempoGasRate(mockPortal, rate);
     }
 
     function _withdrawal(
@@ -1330,9 +1337,37 @@ contract ZoneOutboxTest is Test {
         outbox.setTempoGasRate(1);
     }
 
+    function test_setTempoGasRate_revertsAboveAdminMaximum() public {
+        _setMaxTempoGasRate(6);
+
+        vm.prank(sequencer);
+        vm.expectRevert(ZoneOutbox.GasFeeRateTooHigh.selector);
+        outbox.setTempoGasRate(7);
+    }
+
+    function test_setTempoGasRate_acceptsAdminMaximum() public {
+        _setMaxTempoGasRate(6);
+
+        vm.prank(sequencer);
+        outbox.setTempoGasRate(6);
+        assertEq(outbox.tempoGasRate(), 6);
+    }
+
+    function test_setTempoGasRate_zeroAdminMaximumDisablesNonzeroRates() public {
+        _setMaxTempoGasRate(0);
+
+        vm.startPrank(sequencer);
+        vm.expectRevert(ZoneOutbox.GasFeeRateTooHigh.selector);
+        outbox.setTempoGasRate(1);
+        outbox.setTempoGasRate(0);
+        vm.stopPrank();
+
+        assertEq(outbox.tempoGasRate(), 0);
+    }
+
     /// @notice Withdrawal fee matches base plus callback gas times Tempo gas rate.
     function testFuzz_calculateWithdrawalFee(uint64 gasLimit, uint128 tempoGasRate) public {
-        tempoGasRate = uint128(bound(tempoGasRate, 0, outbox.MAX_GAS_FEE_RATE()));
+        tempoGasRate = uint128(bound(tempoGasRate, 0, config.maxTempoGasRate()));
         uint64 maxGasLimit = outbox.MAX_WITHDRAWAL_GAS_LIMIT();
 
         vm.prank(sequencer);

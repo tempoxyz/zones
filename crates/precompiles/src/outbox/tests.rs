@@ -1,17 +1,22 @@
 use super::*;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Bytes, address};
-use alloy_sol_types::{SolCall, SolInterface};
+use alloy_primitives::{Bytes, address, keccak256};
+use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    storage::StorageCtx, test_util::TIP20Setup, zone_factory::ZonePortalStorage as ZonePortal,
+    storage::{StorageCtx, StorageKey},
+    test_util::TIP20Setup,
 };
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
+use zone_primitives::constants::{
+    PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, TEMPO_STATE_ADDRESS,
+};
 
 use crate::{
     create_outbox_precompile,
-    storage::L1State,
+    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
         MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     },
@@ -19,6 +24,8 @@ use crate::{
 };
 
 const GAS: u64 = 10_000_000;
+const ANCHOR: u64 = 42;
+const TEST_MAX_TEMPO_GAS_RATE: u128 = 1_000_000_000_000_000_000;
 const TX_HASH: B256 = B256::repeat_byte(0x42);
 const PORTAL: Address = address!("0x7777777777777777777777777777777777777777");
 const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
@@ -30,8 +37,7 @@ const GATEWAY: Address = address!("0x00000000000000000000000000000000000000e5");
 struct Harness {
     ctx: TestContext,
     precompile: DynPrecompile,
-    l1: L1State<MockL1Reader>,
-    l1_reader: MockL1Reader,
+    l1: MockL1Reader,
     token: Address,
 }
 
@@ -39,18 +45,36 @@ impl Harness {
     fn new() -> eyre::Result<Self> {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
-        let l1_reader = MockL1Reader::default();
-        l1_reader.seed_portal(PORTAL, |portal| {
-            portal.is_sequencer[SEQUENCER].write(true)?;
-            let mut token_config = portal.token_configs[token].read()?;
-            token_config.enabled = true;
-            token_config.deposits_active = true;
-            portal.token_configs[token].write(token_config)
-        })?;
-        let l1 = L1State::new(l1_reader.clone(), PORTAL);
+        let l1 = MockL1Reader::default();
+        let sequencer_membership_slot =
+            keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        l1.insert(
+            PORTAL,
+            sequencer_membership_slot.into(),
+            ANCHOR,
+            U256::from(1),
+        );
+        l1.insert(
+            PORTAL,
+            token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()),
+            ANCHOR,
+            U256::ONE,
+        );
+        l1.insert(
+            PORTAL,
+            PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
+            ANCHOR,
+            U256::from(TEST_MAX_TEMPO_GAS_RATE),
+        );
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+                StorageCtx::default().sstore(
+                    TEMPO_STATE_ADDRESS,
+                    TEMPO_BLOCK_NUMBER_SLOT,
+                    U256::from(ANCHOR),
+                )?;
+
                 ZoneOutbox::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
                     .with_issuer(ALICE)
@@ -65,13 +89,12 @@ impl Harness {
         }
 
         let env = test_env(&ctx);
-        let precompile = create_outbox_precompile(l1.clone(), &env);
+        let precompile = create_outbox_precompile(L1State::new(l1.clone(), PORTAL), &env);
 
         Ok(Self {
             ctx,
             precompile,
             l1,
-            l1_reader,
             token,
         })
     }
@@ -170,29 +193,35 @@ impl Harness {
         )
     }
 
-    fn with_portal<T>(&self, f: impl FnOnce(&mut ZonePortal) -> TempoResult<T>) -> eyre::Result<T> {
-        Ok(self.l1_reader.seed_portal(self.l1.portal(), f)?)
+    fn set_max_tempo_gas_rate(&self, max: u128) {
+        self.l1.insert(
+            PORTAL,
+            PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
+            ANCHOR,
+            U256::from(max),
+        );
     }
 
-    fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {
-        self.with_portal(|portal| {
-            portal.is_access_enforced.write(access_enforced)?;
-            portal.is_gateway_enforced.write(gateway_enforced)
-        })
+    fn set_modes(&self, access_enforced: bool, gateway_enforced: bool) {
+        let modes =
+            U256::from(u8::from(access_enforced)) | (U256::from(u8::from(gateway_enforced)) << 8);
+        self.l1
+            .insert(PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT.into(), ANCHOR, modes);
     }
 
-    fn set_role(&mut self, account: Address, role: IZonePortal::Role) -> eyre::Result<()> {
-        self.with_portal(|portal| portal.role[account].write(role as u8))
+    fn set_role(&self, account: Address, role: IZonePortal::Role) {
+        let slot = keccak256((account, PORTAL_ROLE_SLOT).abi_encode());
+        self.l1
+            .insert(PORTAL, slot.into(), ANCHOR, U256::from(role as u8));
     }
 
-    fn set_token_enabled(&mut self, enabled: bool) -> eyre::Result<()> {
-        let token = self.token;
-        self.with_portal(|portal| {
-            let mut config = portal.token_configs[token].read()?;
-            config.enabled = enabled;
-            config.deposits_active = true;
-            portal.token_configs[token].write(config)
-        })
+    fn set_token_enabled(&self, enabled: bool) {
+        self.l1.insert(
+            PORTAL,
+            self.token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()),
+            ANCHOR,
+            U256::from(u8::from(enabled)),
+        );
     }
 
     fn balance_of(&mut self, account: Address) -> eyre::Result<U256> {
@@ -260,6 +289,36 @@ fn pending_withdrawal_getters_require_sequencer_or_system() -> eyre::Result<()> 
 }
 
 #[test]
+fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.set_gas_rate(1)?;
+    harness.request(1, BOB, B256::ZERO)?;
+
+    assert_eq!(
+        harness.l1.storage_requests(),
+        vec![
+            (
+                PORTAL,
+                keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
+                ANCHOR
+            ),
+            (PORTAL, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ANCHOR),
+            (
+                PORTAL,
+                harness
+                    .token
+                    .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
+                    .into(),
+                ANCHOR,
+            ),
+            (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
+            (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
+        ]
+    );
+    Ok(())
+}
+
+#[test]
 fn request_withdrawal_rejects_missing_transaction_hash() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let token = harness.token;
@@ -278,6 +337,10 @@ fn request_withdrawal_rejects_missing_transaction_hash() -> eyre::Result<()> {
         .abi_encode(),
     );
     assert_revert(result, ZoneOutboxError::invalid_current_tx_hash());
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "missing transaction context must be rejected before portal reads"
+    );
     Ok(())
 }
 
@@ -295,13 +358,17 @@ fn request_withdrawal_rejects_unknown_token_before_portal_read() -> eyre::Result
         revealTo: Bytes::new(),
     });
     assert_revert(result, TIP20Error::uninitialized());
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "unknown tokens must be rejected before portal reads"
+    );
     Ok(())
 }
 
 #[test]
 fn request_withdrawal_rejects_portal_disabled_token_before_state_mutation() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
-    harness.set_token_enabled(false)?;
+    harness.set_token_enabled(false);
     let balance_before = harness.balance_of(ALICE)?;
 
     assert_revert(
@@ -318,14 +385,14 @@ fn request_withdrawal_rejects_portal_disabled_token_before_state_mutation() -> e
 fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyre::Result<()> {
     // Open access, open gateway: plain and callback withdrawals accept arbitrary recipients.
     let mut open_open = Harness::new()?;
-    open_open.set_modes(false, false)?;
+    open_open.set_modes(false, false);
     open_open.request(1, BOB, B256::ZERO)?;
     open_open.request_with_gas(1, GATEWAY, B256::ZERO, 1)?;
 
     // Closed access, open gateway: plain recipients need the Account role, while callback
     // recipients remain unrestricted.
     let mut closed_open = Harness::new()?;
-    closed_open.set_modes(true, false)?;
+    closed_open.set_modes(true, false);
     let balance_before = closed_open.balance_of(ALICE)?;
     assert_revert(
         closed_open.request(1, BOB, B256::ZERO),
@@ -333,15 +400,15 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
     );
     assert_eq!(closed_open.balance_of(ALICE)?, balance_before);
     assert!(closed_open.pending()?.is_empty());
-    closed_open.set_role(BOB, IZonePortal::Role::Account)?;
+    closed_open.set_role(BOB, IZonePortal::Role::Account);
     closed_open.request(1, BOB, B256::ZERO)?;
     closed_open.request_with_gas(1, FEE_PAYER, B256::ZERO, 1)?;
 
     // Open access, enforced gateway: arbitrary plain recipients remain valid, but registered
     // gateways require callback gas and callback targets must have the CallbackGateway role.
     let mut open_enforced = Harness::new()?;
-    open_enforced.set_modes(false, true)?;
-    open_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway)?;
+    open_enforced.set_modes(false, true);
+    open_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway);
     open_enforced.request(1, BOB, B256::ZERO)?;
     let pending_before = open_enforced.pending()?.len();
     let balance_before = open_enforced.balance_of(ALICE)?;
@@ -359,9 +426,9 @@ fn request_withdrawal_enforces_all_access_and_gateway_mode_combinations() -> eyr
 
     // Closed access, enforced gateway: plain and callback paths enforce their distinct roles.
     let mut closed_enforced = Harness::new()?;
-    closed_enforced.set_modes(true, true)?;
-    closed_enforced.set_role(BOB, IZonePortal::Role::Account)?;
-    closed_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway)?;
+    closed_enforced.set_modes(true, true);
+    closed_enforced.set_role(BOB, IZonePortal::Role::Account);
+    closed_enforced.set_role(GATEWAY, IZonePortal::Role::CallbackGateway);
     closed_enforced.request(1, BOB, B256::ZERO)?;
     closed_enforced.request_with_gas(1, GATEWAY, B256::ZERO, 1)?;
     let pending_before = closed_enforced.pending()?.len();
@@ -494,9 +561,32 @@ fn fee_rate_and_gas_limit_validation_match_reference() -> eyre::Result<()> {
         ZoneOutboxError::gas_limit_too_high(),
     );
     assert_revert(
-        harness.set_gas_rate(MAX_GAS_FEE_RATE + 1),
+        harness.set_gas_rate(TEST_MAX_TEMPO_GAS_RATE + 1),
         ZoneOutboxError::gas_fee_rate_too_high(),
     );
+    harness.set_max_tempo_gas_rate(5);
+    assert_revert(
+        harness.set_gas_rate(6),
+        ZoneOutboxError::gas_fee_rate_too_high(),
+    );
+    harness.set_gas_rate(5)?;
+    harness.set_max_tempo_gas_rate(0);
+    assert_revert(
+        harness.set_gas_rate(1),
+        ZoneOutboxError::gas_fee_rate_too_high(),
+    );
+    harness.set_gas_rate(0)?;
+    Ok(())
+}
+
+#[test]
+fn setting_tempo_gas_rate_requires_a_sequencer() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let result = harness.call(
+        ALICE,
+        ZoneOutboxAbi::setTempoGasRateCall { _tempoGasRate: 1 }.abi_encode(),
+    );
+    assert_revert(result, ZoneOutboxError::only_sequencer());
     Ok(())
 }
 
@@ -732,6 +822,10 @@ fn static_mutation_reverts_with_static_call_not_allowed() -> eyre::Result<()> {
             .abi_encode(),
         ),
         ZoneOutboxError::static_call_not_allowed(),
+    );
+    assert!(
+        harness.l1.storage_requests().is_empty(),
+        "static mutation must reach dispatch without portal reads"
     );
     assert!(harness.pending()?.is_empty());
     Ok(())
