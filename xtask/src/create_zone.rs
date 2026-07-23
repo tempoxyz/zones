@@ -10,7 +10,7 @@ use alloy::{
     sol_types::SolEvent,
 };
 use alloy_rlp::Encodable;
-use eyre::{WrapErr as _, eyre};
+use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
@@ -159,37 +159,44 @@ impl CreateZone {
         println!("Verifier: {ZONE_VERIFIER_ADDRESS}");
         println!("Messenger: {ZONE_MESSENGER_ADDRESS}");
 
-        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
-        let mut policy = registry
-            .tokenTransferPolicyId(self.initial_token)
-            .call()
-            .await?;
-        if !policy.isSet {
-            println!(
-                "Migrating legacy transfer policy for initial token {}...",
-                self.initial_token
-            );
-            let receipt = registry
-                .migrateTransferPolicyIds(vec![self.initial_token])
-                .send_sync()
-                .await?;
-            if !receipt.status() {
-                return Err(eyre!(
-                    "transfer policy migration reverted (tx: {:?})",
-                    receipt.transaction_hash
-                ));
-            }
-
-            policy = registry
+        let factory_code = provider
+            .get_code_at(self.zone_factory)
+            .await
+            .wrap_err("failed reading ZoneFactory code")?;
+        if factory_code.as_ref() == [0xef] {
+            let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+            let mut policy = registry
                 .tokenTransferPolicyId(self.initial_token)
                 .call()
-                .await?;
-        }
-        if !policy.isSet {
-            return Err(eyre!(
-                "transfer policy is not set for initial token {} after migration",
-                self.initial_token
-            ));
+                .await
+                .wrap_err("failed querying the initial token transfer policy")?;
+            if !policy.isSet {
+                println!("Migrating the initial token's legacy transfer policy into TIP-403...");
+                let receipt = registry
+                    .migrateTransferPolicyIds(vec![self.initial_token])
+                    .send_sync()
+                    .await
+                    .wrap_err("failed migrating the initial token transfer policy")?;
+                ensure!(
+                    receipt.status(),
+                    "initial token transfer-policy migration reverted (tx: {:?})",
+                    receipt.transaction_hash
+                );
+                policy = registry
+                    .tokenTransferPolicyId(self.initial_token)
+                    .call()
+                    .await
+                    .wrap_err("failed verifying the migrated initial token transfer policy")?;
+                ensure!(
+                    policy.isSet,
+                    "TIP-403 did not register the initial token transfer policy"
+                );
+                println!(
+                    "Initial token transfer policy migrated in block {:?}",
+                    receipt.block_number
+                );
+            }
+            println!("Initial token transfer policy: {}", policy.policyId);
         }
 
         // Anchor before createZone so the zone replays the creation block and its
