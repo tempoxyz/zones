@@ -118,8 +118,8 @@ impl<P: L1StorageReader> TIP20Rules<P> {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        self.l1.portal().is_sequencer[caller]
-            .read()
+        self.l1
+            .read_portal(|portal| portal.is_sequencer[caller].read())
             .map_err(CallRuleError::Tempo)
     }
 }
@@ -137,6 +137,7 @@ mod tests {
         storage::StorageCtx,
         test_util::TIP20Setup,
         tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
+        zone_factory::ZonePortalStorage as ZonePortal,
     };
     use tempo_zone_contracts::Unauthorized;
 
@@ -190,7 +191,7 @@ mod tests {
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                    l1.portal().is_sequencer[sequencer].write(true)?;
+                    ZonePortal::new(l1.portal()).is_sequencer[sequencer].write(true)?;
                     TIP20Setup::path_usd(admin)
                         .with_issuer(admin)
                         .with_issuer(issuer)
@@ -266,7 +267,7 @@ mod tests {
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || {
-            rules.l1.portal().is_sequencer[sequencer]
+            ZonePortal::new(rules.l1.portal()).is_sequencer[sequencer]
                 .write(true)
                 .unwrap();
 
@@ -315,7 +316,7 @@ mod tests {
         {
             let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || {
-                let mut portal = harness.l1.portal();
+                let mut portal = ZonePortal::new(harness.l1.portal());
                 portal.is_sequencer[harness.sequencer].write(false)?;
                 portal.is_sequencer[next_sequencer].write(true)
             })?;

@@ -64,7 +64,7 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
     }
 
     const fn l1_accounts(&self) -> [Address; 2] {
-        [TIP403_REGISTRY_ADDRESS, self.l1.portal_address()]
+        [TIP403_REGISTRY_ADDRESS, self.l1.portal()]
     }
 }
 

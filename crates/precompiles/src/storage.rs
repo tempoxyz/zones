@@ -74,15 +74,18 @@ impl<P> L1State<P> {
     }
 
     /// Returns the configured ZonePortal address.
-    pub const fn portal_address(&self) -> Address {
+    pub const fn portal(&self) -> Address {
         self.portal_address
     }
 
-    /// Returns a typed view of the L1-mirrored ZonePortal.
+    /// Executes an explicit L1 read using the canonical ZonePortal storage handlers.
     ///
-    /// Reads use ordinary precompile handlers and therefore require an active [`StorageCtx`].
-    pub(crate) fn portal(&self) -> ZonePortal {
-        ZonePortal::new(self.portal_address)
+    /// Reads require an active [`StorageCtx`] and resolve through the L1 database overlay.
+    pub(crate) fn read_portal<T>(
+        &self,
+        read: impl FnOnce(&ZonePortal) -> tempo_precompiles::Result<T>,
+    ) -> tempo_precompiles::Result<T> {
+        read(&ZonePortal::new(self.portal_address))
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {

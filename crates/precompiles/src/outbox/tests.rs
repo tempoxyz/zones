@@ -4,7 +4,9 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Bytes, address};
 use alloy_sol_types::{SolCall, SolInterface};
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{storage::StorageCtx, test_util::TIP20Setup};
+use tempo_precompiles::{
+    storage::StorageCtx, test_util::TIP20Setup, zone_factory::ZonePortalStorage as ZonePortal,
+};
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 
 use crate::{
@@ -40,7 +42,7 @@ impl Harness {
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                let mut portal = l1.portal();
+                let mut portal = ZonePortal::new(l1.portal());
                 portal.is_sequencer[SEQUENCER].write(true)?;
                 let mut token_config = portal.token_configs[token].read()?;
                 token_config.enabled = true;
@@ -171,7 +173,9 @@ impl Harness {
     ) -> eyre::Result<T> {
         let l1 = self.l1.clone();
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
-        Ok(StorageCtx::enter(&mut storage, || f(&mut l1.portal()))?)
+        Ok(StorageCtx::enter(&mut storage, || {
+            f(&mut ZonePortal::new(l1.portal()))
+        })?)
     }
 
     fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {
