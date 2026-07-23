@@ -10,6 +10,7 @@ use crate::{
     settlement_attestation::collect_leader_settlements,
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions, route_p2p_events},
 };
+use alloy_evm::revm::context::result::InvalidTransaction;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
@@ -40,12 +41,12 @@ use reth_storage_api::{
 };
 use reth_transaction_pool::{
     Pool, PoolTransaction, TransactionPool as _, TransactionValidationTaskExecutor,
-    blobstore::InMemoryBlobStore,
-    error::{InvalidPoolTransactionError, PoolTransactionError},
+    blobstore::InMemoryBlobStore, error::InvalidPoolTransactionError,
 };
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
+use tempo_evm::TempoInvalidTransaction;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
@@ -1064,29 +1065,10 @@ impl ZonePoolBuilder {
     }
 }
 
-#[derive(Debug)]
-struct ZonePoolAdmissionError(&'static str);
-
-impl std::fmt::Display for ZonePoolAdmissionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.0)
-    }
-}
-
-impl std::error::Error for ZonePoolAdmissionError {}
-
-impl PoolTransactionError for ZonePoolAdmissionError {
-    fn is_bad_transaction(&self) -> bool {
-        false
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-}
-
 fn pool_admission_error(message: &'static str) -> InvalidPoolTransactionError {
-    InvalidPoolTransactionError::other(ZonePoolAdmissionError(message))
+    InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
+        TempoInvalidTransaction::EthInvalidTransaction(InvalidTransaction::Str(message.into())),
+    ))
 }
 
 fn sender_has_enabled_token_balance<E>(
