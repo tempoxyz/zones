@@ -178,6 +178,8 @@ crate::sol! {
         function setGatewayMode(uint8 newMode) external;
         function role(address account) external view returns (Role);
         function setRole(address account, Role role) external;
+        function setAllowedAccount(address account, bool allowed) external;
+        function setGateway(address account, bool allowed) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
         function sequencerThreshold() external view returns (uint8);
@@ -233,9 +235,6 @@ crate::sol! {
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
-        function role(address account) external view returns (Role);
-        function setAllowedAccount(address account, bool allowed) external;
-        function setGateway(address account, bool allowed) external;
 
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;

@@ -399,6 +399,16 @@ contract ZonePortal is IZonePortal {
         if (callbackMode == ZoneGatewayMode.Enforced) flags |= GATEWAY_ALLOWLIST_ENFORCED_FLAG;
     }
 
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        _setRole(account, allowed ? Role.Account : Role.None);
+    }
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external onlyAdmin {
+        _setRole(account, allowed ? Role.CallbackGateway : Role.None);
+    }
+
     /// @notice Assign an account's role across portal flows without changing enforcement modes.
     function setRole(address account, Role next) external onlyAdmin {
         _setRole(account, next);

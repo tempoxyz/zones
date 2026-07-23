@@ -1014,7 +1014,6 @@ async fn test_queued_callback_bounces_after_gateway_revocation() -> eyre::Result
 ///
 /// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "legacy cross-zone router callbacks are rejected by closed-loop source-return enforcement"]
 async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1152,7 +1151,6 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 /// The refund must go to the Tempo refund recipient encoded in the router payload,
 /// not to the encrypted recipient and not to the router contract.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "legacy cross-zone router callbacks are rejected before the target-zone deposit"]
 async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

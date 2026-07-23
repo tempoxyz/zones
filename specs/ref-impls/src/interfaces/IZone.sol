@@ -722,6 +722,13 @@ interface IZonePortal {
 
     /// @notice Assign an account's portal role. Only callable by the admin.
     function setRole(address account, Role role) external;
+
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external;
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external;
+
     function admin() external view returns (address);
 
     function pendingAdmin() external view returns (address);
@@ -812,15 +819,6 @@ interface IZonePortal {
 
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
     function acceptAdmin() external;
-
-    /// @notice Return an account's closed-loop portal role.
-    function role(address account) external view returns (Role);
-
-    /// @notice Add or remove an account from closed-loop portal flows.
-    function setAllowedAccount(address account, bool allowed) external;
-
-    /// @notice Add or remove a callback gateway.
-    function setGateway(address account, bool allowed) external;
 
     /// @notice Get the sequencer's current encryption public key for encrypted deposits
     /// @return x The X coordinate of the secp256k1 public key

@@ -192,6 +192,47 @@ contract ReentrantWithdrawalReceiver is IWithdrawalReceiver {
 
 }
 
+/// @dev Keeps the twelve-argument portal initializer encoder out of the already-large proxy test.
+contract ZonePortalInitializationForwarder {
+
+    function initialize(
+        address target,
+        uint32 id,
+        address initialToken,
+        address portalMessenger,
+        address portalAdmin,
+        address sequencer,
+        address portalVerifier
+    )
+        external
+    {
+        address[] memory accounts = new address[](2);
+        accounts[0] = portalAdmin;
+        accounts[1] = sequencer;
+        address[] memory gateways = new address[](1);
+        gateways[0] = portalMessenger;
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
+
+        ZonePortal(target)
+            .initialize(
+                id,
+                initialToken,
+                ZoneAccessMode.Closed,
+                ZoneGatewayMode.Enforced,
+                accounts,
+                gateways,
+                portalMessenger,
+                portalAdmin,
+                sequencers,
+                1,
+                portalVerifier,
+                ""
+            );
+    }
+
+}
+
 contract ZonePortalProxyStorageTest is Test {
 
     function _emptyAddresses() internal pure returns (address[] memory values) {
@@ -211,6 +252,8 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 1,
                 makeAddr("initial token"),
+                ZoneAccessMode.Closed,
+                ZoneGatewayMode.Enforced,
                 _emptyAddresses(),
                 _emptyAddresses(),
                 ZONE_MESSENGER_ADDRESS,
@@ -255,42 +298,17 @@ contract ZonePortalProxyStorageTest is Test {
         );
         vm.etch(proxyA, runtime);
         vm.etch(proxyB, runtime);
+        ZonePortalInitializationForwarder forwarder = new ZonePortalInitializationForwarder();
+        vm.etch(ZONE_FACTORY_ADDRESS, address(forwarder).code);
 
         address messengerA = makeAddr("messenger A");
         address messengerB = makeAddr("messenger B");
         address verifierA = makeAddr("verifier A");
         address verifierB = makeAddr("verifier B");
-        address[] memory sequencersA = new address[](1);
-        sequencersA[0] = makeAddr("sequencer A");
-        vm.prank(makeAddr("not factory"));
-        vm.expectRevert(IZonePortal.NotFactory.selector);
-        ZonePortal(proxyA)
-            .initialize(
-                1,
-                initialToken,
-                ZoneAccessMode.Closed,
-                ZoneGatewayMode.Enforced,
-                _emptyAddresses(),
-                _emptyAddresses(),
-                messengerA,
-                makeAddr("admin A"),
-                sequencersA,
-                1,
-                verifierA,
-                ""
-            );
+        _expectNotFactoryRevert(proxyA, initialToken, messengerA, verifierA);
 
         vm.startPrank(ZONE_FACTORY_ADDRESS);
-        address[] memory initialSequencersA = new address[](1);
-        initialSequencersA[0] = makeAddr("sequencer 1");
-        vm.expectEmit(true, false, false, true, proxyA);
-        emit IZonePortal.SequencerSetUpdated(0, 1, initialSequencersA);
-        vm.expectEmit(true, false, false, true, proxyA);
-        emit IZonePortal.RoleUpdated(messengerA, Role.None, Role.CallbackGateway);
-        vm.expectEmit(true, false, false, true, proxyA);
-        emit IZonePortal.RoleUpdated(makeAddr("admin 1"), Role.None, Role.Account);
-        vm.expectEmit(true, false, false, true, proxyA);
-        emit IZonePortal.RoleUpdated(makeAddr("sequencer 1"), Role.None, Role.Account);
+        _expectInitializationEvents(proxyA, messengerA);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA);
         _initializePortal(proxyB, initialToken, 2, messengerB, verifierB);
 
@@ -308,6 +326,53 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyB).messenger(), messengerB);
         assertEq(ZonePortal(proxyB).verifier(), verifierB);
         assertEq(ZonePortal(proxyB).blockHash(), bytes32(0));
+    }
+
+    function _expectNotFactoryRevert(
+        address proxy,
+        address initialToken,
+        address portalMessenger,
+        address portalVerifier
+    )
+        internal
+    {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer A");
+        address[] memory noAccounts = new address[](0);
+        address[] memory noGateways = new address[](0);
+        address portalAdmin = makeAddr("admin A");
+        vm.prank(makeAddr("not factory"));
+        vm.expectRevert(IZonePortal.NotFactory.selector);
+        ZonePortal(proxy)
+            .initialize(
+                1,
+                initialToken,
+                ZoneAccessMode.Closed,
+                ZoneGatewayMode.Enforced,
+                noAccounts,
+                noGateways,
+                portalMessenger,
+                portalAdmin,
+                sequencers,
+                1,
+                portalVerifier,
+                ""
+            );
+    }
+
+    function _expectInitializationEvents(address proxy, address portalMessenger) internal {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer 1");
+        vm.expectEmit(false, false, false, true, proxy);
+        emit IZonePortal.EnforcementModesUpdated(ZoneAccessMode.Closed, ZoneGatewayMode.Enforced);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.SequencerSetUpdated(0, 1, sequencers);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(portalMessenger, Role.None, Role.CallbackGateway);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(makeAddr("admin 1"), Role.None, Role.Account);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(makeAddr("sequencer 1"), Role.None, Role.Account);
     }
 
     function test_initializeRevertsIfTokenPolicyBindingIsNotSet() public {
@@ -344,6 +409,8 @@ contract ZonePortalProxyStorageTest is Test {
         portal.initialize(
             1,
             initialToken,
+            ZoneAccessMode.Closed,
+            ZoneGatewayMode.Enforced,
             noAccounts,
             noGateways,
             makeAddr("messenger"),
@@ -364,22 +431,15 @@ contract ZonePortalProxyStorageTest is Test {
     )
         internal
     {
-        address[] memory sequencers = new address[](1);
-        sequencers[0] = makeAddr(string.concat("sequencer ", vm.toString(id)));
-        ZonePortal(target)
+        ZonePortalInitializationForwarder(ZONE_FACTORY_ADDRESS)
             .initialize(
+                target,
                 id,
                 initialToken,
-                ZoneAccessMode.Closed,
-                ZoneGatewayMode.Enforced,
-                _proxyAccounts(id),
-                _proxyGateways(portalMessenger),
                 portalMessenger,
                 makeAddr(string.concat("admin ", vm.toString(id))),
-                sequencers,
-                1,
-                portalVerifier,
-                ""
+                makeAddr(string.concat("sequencer ", vm.toString(id))),
+                portalVerifier
             );
     }
 
@@ -1030,13 +1090,13 @@ contract ZonePortalTest is BaseTest {
         vm.expectEmit(true, false, false, true);
         emit IZonePortal.RoleUpdated(replacement, Role.None, Role.CallbackGateway);
         vm.prank(admin);
-        portal.setRole(replacement, Role.CallbackGateway);
+        portal.setGateway(replacement, true);
 
         assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
         assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
 
         vm.prank(admin);
-        portal.setRole(address(zoneGateway), Role.None);
+        portal.setGateway(address(zoneGateway), false);
         assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.None));
         assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
     }
@@ -1049,9 +1109,9 @@ contract ZonePortalTest is BaseTest {
 
     function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
         vm.startPrank(admin);
-        portal.setRole(address(0), Role.CallbackGateway);
+        portal.setGateway(address(0), true);
         assertEq(uint8(portal.role(address(0))), uint8(Role.CallbackGateway));
-        portal.setRole(address(0), Role.None);
+        portal.setGateway(address(0), false);
         vm.stopPrank();
 
         assertEq(uint8(portal.role(address(0))), uint8(Role.None));
@@ -1060,7 +1120,7 @@ contract ZonePortalTest is BaseTest {
     function test_setZoneGateway_revertsIfNotAdmin() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setRole(makeAddr("replacement gateway"), Role.CallbackGateway);
+        portal.setGateway(makeAddr("replacement gateway"), true);
     }
 
     function test_setAccessMode_opensAndReclosesWithoutDiscardingMembership() public {
@@ -1134,11 +1194,11 @@ contract ZonePortalTest is BaseTest {
         vm.expectEmit(true, false, false, true);
         emit IZonePortal.RoleUpdated(account, Role.None, Role.Account);
         vm.prank(admin);
-        portal.setRole(account, Role.Account);
+        portal.setAllowedAccount(account, true);
         assertEq(uint8(portal.role(account)), uint8(Role.Account));
 
         vm.prank(admin);
-        portal.setRole(account, Role.None);
+        portal.setAllowedAccount(account, false);
         assertEq(uint8(portal.role(account)), uint8(Role.None));
     }
 
@@ -1151,7 +1211,7 @@ contract ZonePortalTest is BaseTest {
     function test_setAllowedAccount_revertsForMessenger() public {
         vm.prank(admin);
         vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
-        portal.setRole(address(messenger), Role.Account);
+        portal.setAllowedAccount(address(messenger), true);
     }
 
     function test_setPortalRole_eventIncludesold() public {
@@ -1163,9 +1223,9 @@ contract ZonePortalTest is BaseTest {
 
     function test_setAllowedAccount_enablesAndDisablesZeroAddress() public {
         vm.startPrank(admin);
-        portal.setRole(address(0), Role.Account);
+        portal.setAllowedAccount(address(0), true);
         assertEq(uint8(portal.role(address(0))), uint8(Role.Account));
-        portal.setRole(address(0), Role.None);
+        portal.setAllowedAccount(address(0), false);
         vm.stopPrank();
 
         assertEq(uint8(portal.role(address(0))), uint8(Role.None));
@@ -1174,7 +1234,7 @@ contract ZonePortalTest is BaseTest {
     function test_setAllowedAccount_revertsIfNotAdmin() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
-        portal.setRole(makeAddr("managed account"), Role.Account);
+        portal.setAllowedAccount(makeAddr("managed account"), true);
     }
     /*//////////////////////////////////////////////////////////////
                          DEPOSIT TESTS (L1 -> ZONE)
@@ -1913,6 +1973,68 @@ contract ZonePortalTest is BaseTest {
         return _callbackData(flow, alice, 0);
     }
 
+    function _openPortalModes() internal {
+        vm.startPrank(admin);
+        portal.setAccessMode(ZoneAccessMode.Open);
+        portal.setGatewayMode(ZoneGatewayMode.Open);
+        vm.stopPrank();
+    }
+
+    function test_withdrawal_withCallback() public {
+        _openPortalModes();
+
+        // Fund portal
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        // Create withdrawal with callback
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            5_000_000,
+            alice,
+            "callback_data"
+        );
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        // Advance a block so the history precompile can return a hash
+        vm.roll(block.number + 1);
+
+        // Submit batch adding withdrawal
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash(),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            wHash,
+            "",
+            ""
+        );
+
+        // Process withdrawal (0 = last item in slot)
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+
+        // Receiver should have gotten funds and callback
+        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 500e6);
+        assertEq(withdrawalReceiver.lastSenderTag(), _senderTag(alice));
+        assertEq(withdrawalReceiver.lastAmount(), 500e6);
+        assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
+    }
+
     function _callbackData(
         GatewayFlow flow,
         address tempoRefundRecipient,
@@ -2357,6 +2479,71 @@ contract ZonePortalTest is BaseTest {
         vm.prank(alice); // Not sequencer
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+    }
+
+    function test_processWithdrawal_revertsOnSequencerCallbackReentrancy() public {
+        _openPortalModes();
+
+        ReentrantWithdrawalReceiver receiver = new ReentrantWithdrawalReceiver();
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        Withdrawal memory nested =
+            _withdrawal(address(pathUSD), alice, bob, 200e6, bytes32(0), 0, alice, "");
+        Withdrawal memory outer = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(receiver),
+            300e6,
+            bytes32(0),
+            500_000,
+            alice,
+            abi.encode(nested, bytes32(0))
+        );
+
+        bytes32 remainingQueue = keccak256(abi.encode(nested, EMPTY_SENTINEL));
+        bytes32 withdrawalQueue = keccak256(abi.encode(outer, remainingQueue));
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("reentrancy")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: portal.currentDepositQueueHash(),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalQueue,
+            "",
+            ""
+        );
+
+        address[] memory receiverSet = new address[](1);
+        receiverSet[0] = address(receiver);
+        vm.prank(admin);
+        portal.setSequencerSet(receiverSet, 1);
+
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        vm.prank(address(receiver));
+        portal.processWithdrawals(_singleWithdrawal(outer), remainingQueue);
+
+        assertFalse(receiver.nestedCallSucceeded());
+        assertEq(receiver.nestedRevertSelector(), IZonePortal.ReentrantWithdrawal.selector);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(portal.withdrawalQueueSlot(0), remainingQueue);
+
+        vm.prank(address(receiver));
+        portal.processWithdrawals(_singleWithdrawal(nested), bytes32(0));
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + nested.amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -2916,6 +3103,54 @@ contract ZonePortalTest is BaseTest {
 
         // But callback should NOT have been called
         assertEq(successfulReceiver.callCount(), callCountBefore);
+    }
+
+    function test_withdrawal_nonZeroGasLimit_callbackExecuted() public {
+        _openPortalModes();
+
+        // Fund portal
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+        portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""), alice);
+        vm.stopPrank();
+
+        bytes32 depositHash = portal.currentDepositQueueHash();
+
+        // Create withdrawal with callback
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(successfulReceiver),
+            500e6,
+            bytes32(0),
+            5_000_000,
+            alice,
+            "test"
+        );
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            wHash,
+            "",
+            ""
+        );
+
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+
+        // Callback should have been called
+        assertEq(successfulReceiver.callCount(), 1);
+        assertEq(pathUSD.balanceOf(address(successfulReceiver)), 500e6);
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -72,12 +72,10 @@ pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
 /// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
 /// `role` (mapping(address => Role)).
-pub const PORTAL_ROLE_SLOT: B256 =
-    B256::new((zone_portal_slots::IS_SEQUENCER + U256::ONE).to_be_bytes());
+pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 
 /// ZonePortal slot following `role`: dedicated packed account and gateway enforcement flags.
-pub const PORTAL_ENFORCEMENT_FLAGS_SLOT: B256 =
-    B256::new((zone_portal_slots::IS_SEQUENCER + U256::from_limbs([2, 0, 0, 0])).to_be_bytes());
+pub const PORTAL_ENFORCEMENT_FLAGS_SLOT: B256 = B256::with_last_byte(21);
 
 /// Alias used by consumers reading account allowlist enforcement.
 pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_FLAGS_SLOT;

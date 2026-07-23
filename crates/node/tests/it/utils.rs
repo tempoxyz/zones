@@ -66,10 +66,7 @@ use zone_l1::{
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::{
-    ACCOUNT_ALLOWLIST_ENFORCED_FLAG, GATEWAY_ALLOWLIST_ENFORCED_FLAG, PORTAL_ACCESS_MODE_SLOT,
-    PORTAL_ROLE_SLOT,
-};
+use zone_primitives::constants::PORTAL_ACCESS_MODE_SLOT;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -165,10 +162,6 @@ where
 fn portal_token_config_slot(token: Address) -> B256 {
     let portal_token_configs_slot = B256::with_last_byte(6);
     keccak256((token, portal_token_configs_slot).abi_encode())
-}
-
-fn portal_address_mapping_slot(account: Address, mapping_slot: B256) -> B256 {
-    keccak256((account, mapping_slot).abi_encode())
 }
 
 fn enabled_deposits_active_token_config() -> B256 {
@@ -1284,41 +1277,6 @@ impl L1TestNode {
         Ok(())
     }
 
-    /// Wait for a `WithdrawalProcessed` event with the expected callback result.
-    pub(crate) async fn wait_for_withdrawal_processed_with_status(
-        &self,
-        portal_address: Address,
-        to: Address,
-        token: Address,
-        amount: u128,
-        callback_success: bool,
-        timeout: Duration,
-    ) -> eyre::Result<()> {
-        use tempo_zone_contracts::ZonePortal;
-
-        let portal = ZonePortal::new(portal_address, self.provider());
-        poll_until(timeout, DEFAULT_POLL, "withdrawal processed", || {
-            let portal = &portal;
-            async move {
-                let events = portal
-                    .WithdrawalProcessed_filter()
-                    .from_block(0)
-                    .query()
-                    .await?;
-                Ok(events
-                    .iter()
-                    .any(|(event, _)| {
-                        event.to == to
-                            && event.token == token
-                            && event.amount == amount
-                            && event.callbackSuccess == callback_success
-                    })
-                    .then_some(()))
-            }
-        })
-        .await
-    }
-
     /// Wait for a matching withdrawal result and return its callback status.
     pub(crate) async fn wait_for_withdrawal_processed_status(
         &self,
@@ -1737,20 +1695,6 @@ impl L1TestNode {
             )
             .await?;
         let router = self.deploy_router(factory).await?;
-
-        let provider = self.dev_provider();
-        for portal_address in [portal_a, portal_b] {
-            let receipt = tempo_zone_contracts::ZonePortal::new(portal_address, &provider)
-                .setRole(router, PortalRole::CallbackGateway)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            eyre::ensure!(
-                receipt.status(),
-                "registering router as zone gateway failed"
-            );
-        }
 
         Ok((portal_a, portal_b, router))
     }
@@ -3103,7 +3047,6 @@ pub(crate) async fn start_local_zone_with_fixture(
         zone.l1_state_cache(),
         Address::ZERO,
         Address::ZERO,
-        &[l1_dev_signer().address()],
         seed_blocks,
     );
     Ok((zone, fixture))
@@ -3254,7 +3197,6 @@ pub(crate) async fn start_local_p2p_pair(
             zone.l1_state_cache(),
             Address::ZERO,
             Address::ZERO,
-            &[l1_dev_signer().address()],
             seed_blocks,
         );
     }
@@ -3420,7 +3362,6 @@ pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, se
         zone.l1_state_cache(),
         Address::ZERO,
         Address::ZERO,
-        &[l1_dev_signer().address()],
         seed_blocks,
     );
 }
@@ -3932,13 +3873,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
     .await?;
     let fixture = L1Fixture::new();
 
-    fixture.seed_l1_cache(
-        zone.l1_state_cache(),
-        Address::ZERO,
-        sequencer_address,
-        &[sequencer_address],
-        20,
-    );
+    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, sequencer_address, 20);
 
     let chain_id = zone_chain_id(&zone).await?;
 
@@ -4068,7 +4003,6 @@ impl L1Fixture {
         cache_handle: &L1StateCache,
         portal_address: Address,
         sequencer: Address,
-        allowed_accounts: &[Address],
         num_blocks: u64,
     ) {
         let mut cache = cache_handle.write();
@@ -4078,10 +4012,6 @@ impl L1Fixture {
             keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
-        let dev_account_role_slot: B256 = l1_dev_signer()
-            .address()
-            .mapping_slot(PORTAL_ROLE_SLOT.into())
-            .into();
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -4107,25 +4037,9 @@ impl L1Fixture {
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
-            // Synthetic fixtures use a closed portal. Cache every authorization
-            // read performed by ZoneConfig so a missing slot cannot fall through
-            // to the deliberately unreachable dummy L1 RPC endpoint.
-            cache.set(
-                portal_address,
-                PORTAL_ACCESS_MODE_SLOT,
-                block,
-                B256::with_last_byte(
-                    ACCOUNT_ALLOWLIST_ENFORCED_FLAG | GATEWAY_ALLOWLIST_ENFORCED_FLAG,
-                ),
-            );
-            for account in allowed_accounts {
-                cache.set(
-                    portal_address,
-                    portal_address_mapping_slot(*account, PORTAL_ROLE_SLOT),
-                    block,
-                    B256::with_last_byte(1),
-                );
-            }
+            // Synthetic fixtures use open account and gateway modes so their tests do not need
+            // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
+            cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
@@ -4135,12 +4049,6 @@ impl L1Fixture {
                 path_usd_config_slot,
                 block,
                 enabled_token_config,
-            );
-            cache.set(
-                portal_address,
-                dev_account_role_slot,
-                block,
-                B256::with_last_byte(1),
             );
         }
 
