@@ -98,8 +98,9 @@ where
                 )
                 .into());
             }
-            _ => {
-                // Non-system calls to this selector take the `(true, false)` path after the opening
+            (false, true) => self.has_advanced_tempo = true,
+            (true, false) => {
+                // Non-system calls to this selector take the `(true, false)` path aftehe opening
                 // transaction and execute normally; the Inbox rejects their caller with a revert.
             }
         }
@@ -113,15 +114,7 @@ where
             .execute_transaction_without_commit((tx_env, recovered));
 
         self.evm_mut().clear_l1_overlay_state();
-        let result = result?;
-        if is_advance_tempo && !result.result.result.is_success() {
-            return Err(BlockValidationError::msg(
-                "block-opening advanceTempo transaction must succeed",
-            )
-            .into());
-        }
-        self.has_advanced_tempo |= is_advance_tempo;
-        Ok(result)
+        result
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
