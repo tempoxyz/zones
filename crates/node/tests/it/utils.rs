@@ -42,6 +42,7 @@ use tempo_contracts::precompiles::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
 };
+use tempo_precompiles::zone_factory::zone_portal_slots::{IS_SEQUENCER, TOKEN_CONFIGS};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     storage::{
@@ -53,7 +54,7 @@ use tempo_precompiles::{
     },
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
@@ -137,11 +138,6 @@ where
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     Ok(())
-}
-
-fn portal_token_config_slot(token: Address) -> B256 {
-    let portal_token_configs_slot = B256::with_last_byte(6);
-    keccak256((token, portal_token_configs_slot).abi_encode())
 }
 
 fn enabled_deposits_active_token_config() -> B256 {
@@ -3544,9 +3540,8 @@ impl L1Fixture {
         let mut cache = cache_handle.write();
         let deposit_queue_hash_slot = B256::with_last_byte(3);
         let refunds_slot = B256::with_last_byte(8);
-        let sequencer_membership_slot =
-            keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
-        let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
+        let sequencer_membership_slot = sequencer.mapping_slot(IS_SEQUENCER).into();
+        let path_usd_config_slot = PATH_USD_ADDRESS.mapping_slot(TOKEN_CONFIGS).into();
         let enabled_token_config = enabled_deposits_active_token_config();
         let outbox_receive_policy_slot =
             ZONE_OUTBOX_ADDRESS.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);

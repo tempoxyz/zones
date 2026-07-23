@@ -40,7 +40,7 @@ use reth_evm::{
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{cell::RefCell, fmt, num::NonZeroU32, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::TempoChainSpec;
+use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
 use tempo_evm::{
     TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmError,
     TempoHaltReason, TempoNextBlockEnvAttributes,
@@ -50,13 +50,14 @@ use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
     RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
-    account_keychain::AccountKeychain, nonce::NonceManager,
+    account_keychain::AccountKeychain, error::Result as TempoResult, nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard, storage::actions::StorageActions,
     storage_credits::NonCreditableSlots, tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
+use tempo_revm::{FeeTokenResolver, TempoStateAccess, TempoTxEnv};
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
 };
@@ -291,6 +292,23 @@ where
     }
 }
 
+impl<L1> FeeTokenResolver for ZoneEvmConfig<L1> {
+    fn resolve_fee_token<S, M>(
+        &self,
+        state: &mut S,
+        tx: &TempoTxEnv,
+        fee_payer: Address,
+        spec: TempoHardfork,
+        actions: StorageActions,
+    ) -> TempoResult<Address>
+    where
+        S: TempoStateAccess<M>,
+    {
+        self.inner
+            .resolve_fee_token(state, tx, fee_payer, spec, actions)
+    }
+}
+
 impl ZoneEvmConfig {
     /// Creates a Zone EVM config without a usable L1 provider.
     ///
@@ -495,14 +513,14 @@ mod tests {
             database::{CacheDB, EmptyDB},
         };
         use tempo_precompiles::{
-            TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
+            TIP403_REGISTRY_ADDRESS,
+            storage::StorageKey,
+            tip403_registry::tip403_registry_slots,
+            zone_factory::zone_portal_slots::{CURRENT_DEPOSIT_QUEUE_HASH, IS_SEQUENCER},
         };
         use tempo_zone_contracts::IZoneInbox;
         use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-        use zone_primitives::constants::{
-            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS,
-            ZONE_INBOX_ADDRESS,
-        };
+        use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
         const PARENT: u64 = 0;
         const CHILD: u64 = 1;
@@ -511,15 +529,10 @@ mod tests {
         let token = address!("0x20C00000000000000000000000000000000000AA");
         let reader = MockL1Reader::default();
 
-        let membership_slot = sequencer.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
+        let membership_slot = sequencer.mapping_slot(IS_SEQUENCER);
         reader.set_u256(portal, membership_slot, PARENT, U256::ZERO);
         reader.set_u256(portal, membership_slot, CHILD, U256::ONE);
-        reader.set_u256(
-            portal,
-            U256::from_be_bytes(PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.0),
-            CHILD,
-            U256::ZERO,
-        );
+        reader.set_u256(portal, CURRENT_DEPOSIT_QUEUE_HASH, CHILD, U256::ZERO);
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
         let parent_policy = U256::from(0xaaaa);
@@ -594,7 +607,7 @@ mod tests {
             B256::from(policy_slot.to_be_bytes()),
             PARENT,
         );
-        let queue_head_request = (portal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, CHILD);
+        let queue_head_request = (portal, CURRENT_DEPOSIT_QUEUE_HASH.into(), CHILD);
 
         assert!(!requests.contains(&child_membership_request));
         assert!(!requests.contains(&parent_membership_request));

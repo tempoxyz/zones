@@ -9,6 +9,7 @@ use std::{
 use tempo_precompiles::{
     storage::{Handler, PrecompileStorageProvider, StorageCtx, hashmap::HashMapStorageProvider},
     tip403_registry::{CompoundPolicyData, PolicyData, TIP403Registry},
+    zone_factory::zone_portal_slots::IS_SEQUENCER,
 };
 
 pub type L1Slot = (Address, B256, u64);
@@ -72,13 +73,7 @@ impl MockL1Reader {
         block_number: u64,
         account: Address,
     ) {
-        let slot = keccak256(
-            (
-                account,
-                zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT,
-            )
-                .abi_encode(),
-        );
+        let slot = keccak256((account, IS_SEQUENCER).abi_encode());
         self.set_u256(
             portal_address,
             U256::from_be_bytes(slot.0),

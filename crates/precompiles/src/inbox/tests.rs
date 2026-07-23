@@ -1,7 +1,7 @@
 use super::*;
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{address, keccak256};
+use alloy_primitives::{Bytes, address, keccak256};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use tempo_precompiles::{
@@ -92,7 +92,7 @@ impl Harness {
     fn set_queue_hash(&self, hash: B256) {
         self.l1.set_u256(
             PORTAL,
-            U256::from_be_bytes(PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.0),
+            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
             1,
             U256::from_be_bytes(hash.0),
         );
@@ -205,7 +205,7 @@ fn system_advance_selects_child_anchor_and_reads_queue() -> eyre::Result<()> {
     assert_eq!(harness.l1_state.get_anchor(), Some(1));
     assert!(harness.l1.storage_requests().contains(&(
         PORTAL,
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.into(),
         1,
     )));
     Ok(())
@@ -486,7 +486,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
 
-    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.to_be_bytes::<32>()).0);
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
@@ -556,7 +556,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     let fixture = EncryptedDepositFixture::new();
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
     let portal = PORTAL;
-    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.to_be_bytes::<32>()).0);
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1

@@ -76,7 +76,7 @@ impl ChaumPedersenVerify {
     }
 
     /// Charge the gas cost for Chaum-Pedersen proof verification.
-    pub fn charge_gas() -> tempo_precompiles::Result<()> {
+    pub fn verify_chaum_pedersen_gas() -> tempo_precompiles::Result<()> {
         StorageCtx::default().deduct_gas(CP_VERIFY_GAS)
     }
 

@@ -25,7 +25,7 @@ impl TempoPrecompile for ChaumPedersenVerify {
                         debug!(target: "zone::precompile", "ChaumPedersenVerify: verifyProof");
 
                         let storage = StorageCtx::default();
-                        if let Err(error) = Self::charge_gas() {
+                        if let Err(error) = Self::verify_chaum_pedersen_gas() {
                             return storage.error_result(error);
                         }
 

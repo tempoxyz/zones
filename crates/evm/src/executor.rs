@@ -21,7 +21,7 @@ use tempo_precompiles::{
     TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
 };
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use tempo_revm::{ProtocolFeeManager, TempoFeeManager, evm::TempoContext};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader, tx_context};
@@ -70,7 +70,8 @@ where
         let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());
         let spec = ctx.cfg.spec;
 
-        let fee_token = match ctx.journaled_state.get_fee_token(
+        let fee_token = match TempoFeeManager::new().get_fee_token(
+            &mut ctx.journaled_state,
             &ctx.tx,
             fee_payer,
             spec,
