@@ -4,7 +4,7 @@
 //! - Authentication enforcement (missing/invalid tokens, wrong chain ID)
 //! - Public method access
 //! - Balance & state privacy (users only see their own data)
-//! - Block redaction (logsBloom zeroed, transactions cleared)
+//! - Block redaction (activity-derived header fields zeroed, transactions cleared)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
@@ -63,6 +63,54 @@ fn assert_filter_not_found_error(response: &serde_json::Value) {
         "filter not found",
         "filter-not-found message should be stable",
     );
+}
+
+fn assert_redacted_block(block: &Value) {
+    assert!(!block.is_null(), "block should not be null");
+    assert!(
+        block["transactions"]
+            .as_array()
+            .is_some_and(|transactions| transactions.is_empty()),
+        "block transactions should be empty (redacted)"
+    );
+
+    let zero_root = format!("{:#x}", B256::ZERO);
+    assert_eq!(block["transactionsRoot"], zero_root);
+    assert_eq!(block["receiptsRoot"], zero_root);
+    assert_eq!(block["stateRoot"], zero_root);
+    assert_eq!(block["extraData"], "0x");
+
+    if let Some(withdrawals_root) = block.get("withdrawalsRoot") {
+        assert!(
+            withdrawals_root.is_null() || withdrawals_root == zero_root.as_str(),
+            "block withdrawalsRoot should be null or zero"
+        );
+    }
+    if let Some(bloom) = block.get("logsBloom").and_then(Value::as_str) {
+        let bloom_trimmed = bloom.strip_prefix("0x").unwrap_or(bloom);
+        assert!(
+            bloom_trimmed.chars().all(|c| c == '0'),
+            "block logsBloom should be all zeros"
+        );
+    }
+    assert_eq!(block["gasUsed"], "0x0");
+    if let Some(size) = block.get("size") {
+        assert_eq!(size.as_str(), Some("0x0"));
+    }
+    if let Some(blob_gas_used) = block.get("blobGasUsed") {
+        assert_eq!(blob_gas_used.as_str(), Some("0x0"));
+    }
+    if let Some(excess_blob_gas) = block.get("excessBlobGas") {
+        assert_eq!(excess_blob_gas.as_str(), Some("0x0"));
+    }
+    if let Some(withdrawals) = block.get("withdrawals") {
+        assert!(
+            withdrawals
+                .as_array()
+                .is_some_and(|withdrawals| withdrawals.is_empty()),
+            "block withdrawals should be empty when present"
+        );
+    }
 }
 
 type PrivateRpcWs =
@@ -809,7 +857,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
 }
 
 /// Block access control: full=true is rejected for all callers;
-/// full=false returns redacted blocks (empty txs, zeroed logsBloom).
+/// full=false returns redacted blocks without activity-derived commitments.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_block_access_control() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -843,38 +891,17 @@ async fn test_block_access_control() -> eyre::Result<()> {
         )
         .await?;
     let block = resp.get("result").expect("should have result");
-    assert!(!block.is_null(), "block should not be null");
+    assert_redacted_block(block);
 
-    let txs = block
-        .get("transactions")
-        .expect("block should have transactions field");
-    assert!(
-        txs.as_array().is_some_and(|a| a.is_empty()),
-        "block transactions should be empty (redacted)"
-    );
-    if let Some(bloom) = block.get("logsBloom").and_then(|b| b.as_str()) {
-        let bloom_trimmed = bloom.strip_prefix("0x").unwrap_or(bloom);
-        assert!(
-            bloom_trimmed.chars().all(|c| c == '0'),
-            "block logsBloom should be all zeros"
-        );
-    }
-    assert_eq!(block["gasUsed"], "0x0");
-    if let Some(size) = block.get("size") {
-        assert_eq!(size.as_str(), Some("0x0"));
-    }
-    if let Some(blob_gas_used) = block.get("blobGasUsed") {
-        assert_eq!(blob_gas_used.as_str(), Some("0x0"));
-    }
-    if let Some(excess_blob_gas) = block.get("excessBlobGas") {
-        assert_eq!(excess_blob_gas.as_str(), Some("0x0"));
-    }
-    if let Some(withdrawals) = block.get("withdrawals") {
-        assert!(
-            withdrawals.as_array().is_some_and(|items| items.is_empty()),
-            "block withdrawals should be empty when present"
-        );
-    }
+    let block_hash = block["hash"].as_str().expect("block should have hash");
+    let resp = ctx
+        .call_as_user(
+            "eth_getBlockByHash",
+            serde_json::json!([block_hash, false]),
+            &user_signer,
+        )
+        .await?;
+    assert_redacted_block(resp.get("result").expect("should have result"));
 
     Ok(())
 }

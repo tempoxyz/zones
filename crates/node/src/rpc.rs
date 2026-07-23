@@ -867,9 +867,14 @@ fn redact_header(header: &mut TempoHeaderResponse) {
     header.inner.size = header.inner.size.map(|_| U256::ZERO);
     let inner = &mut header.inner.inner.inner;
     inner.gas_used = 0;
+    inner.state_root = B256::ZERO;
+    inner.transactions_root = B256::ZERO;
+    inner.receipts_root = B256::ZERO;
     inner.logs_bloom = Bloom::ZERO;
+    inner.extra_data = Bytes::new();
     inner.blob_gas_used = inner.blob_gas_used.map(|_| 0);
     inner.excess_blob_gas = inner.excess_blob_gas.map(|_| 0);
+    inner.withdrawals_root = inner.withdrawals_root.map(|_| B256::ZERO);
 }
 
 /// Clear gas related fields that leak the size (and therefore tx counts)
@@ -1040,9 +1045,14 @@ mod tests {
         assert_eq!(header.inner.size, Some(U256::ZERO));
         assert_eq!(header.timestamp_millis, 123_000);
         assert_eq!(inner.gas_used, 0);
+        assert_eq!(inner.state_root, B256::ZERO);
+        assert_eq!(inner.transactions_root, B256::ZERO);
+        assert_eq!(inner.receipts_root, B256::ZERO);
         assert_eq!(inner.logs_bloom, Bloom::ZERO);
+        assert!(inner.extra_data.is_empty());
         assert_eq!(inner.blob_gas_used, Some(0));
         assert_eq!(inner.excess_blob_gas, Some(0));
+        assert_eq!(inner.withdrawals_root, Some(B256::ZERO));
     }
 
     #[test]
