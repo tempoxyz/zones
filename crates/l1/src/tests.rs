@@ -199,7 +199,6 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
             symbol: "aUSD".to_owned(),
             currency: "USD".to_owned(),
         }],
-        ..Default::default()
     };
     let mut deposits: Vec<_> = events
         .deposits

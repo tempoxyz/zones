@@ -126,6 +126,10 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
         .index(1)?
         .build()?;
     let alice = alice_signer.address();
+    let sequencer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?
+        .address();
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
     // --- Block 1: fund Alice while pathUSD is still allow-all (anchor L1#1). ---
@@ -175,12 +179,13 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
                 &[
                     (alice, false),
                     (bob, true),
+                    (sequencer, false),
                     (TIP_FEE_MANAGER_ADDRESS, false),
                 ],
             )],
         )?;
         seed_raw_tip403_token_policy(
-            &mut node.l1_state_cache().write(),
+            &mut node.l1_state_cache().lock(),
             POLICY_L1_BLOCK,
             PATH_USD_ADDRESS,
             BLACKLIST_POLICY_ID,

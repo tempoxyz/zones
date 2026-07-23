@@ -1,5 +1,6 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
+use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
