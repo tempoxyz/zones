@@ -23,7 +23,7 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, Slot, StorageCtx, StorageOps},
+    storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ITIP20, TIP20Token},
 };
 use tempo_precompiles_macros::contract;

@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashSet;
+use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
@@ -8,8 +9,6 @@ const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>);
 
 fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
-    use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-
     (address == TIP403_REGISTRY_ADDRESS
         || (is_tip20_prefix(address) && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH)))
     .then_some(TIP403_REGISTRY_ADDRESS)
@@ -367,7 +366,7 @@ impl L1Subscriber {
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), &invalidated);
+            self.update_l1_state_anchor(block_number, &invalidated);
             self.deposit_queue.enqueue_sealed(sealed, events);
             enqueued += 1;
             self.subscriber_metrics.blocks_enqueued.increment(1);
@@ -438,14 +437,16 @@ impl L1Subscriber {
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
-                } else if let Some(address) =
-                    cache_invalidation_address(address, log.topics().first())
-                {
-                    invalidated.insert(address);
+                } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
+                    invalidated.extend([address, log.address()]);
                 }
             }
         }
 
+        // Enabling may migrate token-local policy storage into TIP-403.
+        for event in &portal_events.enabled_tokens {
+            invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
+        }
         self.record_portal_event_metrics(&portal_events);
         (portal_events, invalidated)
     }
@@ -489,15 +490,12 @@ impl L1Subscriber {
     pub(crate) fn update_l1_state_anchor(
         &self,
         number: u64,
-        hash: B256,
         invalidated_accounts: &HashSet<Address>,
     ) {
-        let mut guard = self.config.l1_state_cache.write();
-        for &address in invalidated_accounts {
-            guard.invalidate(address, number);
-        }
-        // Publish receipt coverage only after every mutation barrier from this block is visible.
-        guard.update_anchor(NumHash::new(number, hash));
+        self.config
+            .l1_state_cache
+            .lock()
+            .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
 }
 
@@ -563,7 +561,6 @@ pub(crate) fn verify_receipts(
 mod tests {
     use super::*;
     use alloy_primitives::address;
-    use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 
     #[test]
     fn token_policy_updates_invalidate_the_registry() {

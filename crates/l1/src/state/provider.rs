@@ -174,9 +174,8 @@ impl L1StateProvider {
     /// docs).
     pub fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         {
-            let cache = self.cache.read();
+            let mut cache = self.cache.lock();
             if let Some(value) = cache.get(address, slot, block_number) {
-                debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
             }
         }
@@ -195,7 +194,7 @@ impl L1StateProvider {
 
             match result {
                 Ok(value) => {
-                    self.cache.write().set(address, slot, block_number, value);
+                    self.cache.lock().set(address, slot, block_number, value);
                     if attempt > 1 {
                         info!(%address, %slot, block_number, %value, ?elapsed, attempt, "L1 storage RPC fetch succeeded after retries");
                     } else {
@@ -229,9 +228,8 @@ impl L1StateProvider {
         block_number: u64,
     ) -> Result<B256> {
         {
-            let cache = self.cache.read();
+            let mut cache = self.cache.lock();
             if let Some(value) = cache.get(address, slot, block_number) {
-                debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
             }
         }
@@ -239,7 +237,7 @@ impl L1StateProvider {
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
         let value = self.fetch_slot(address, slot, block_number).await?;
-        self.cache.write().set(address, slot, block_number, value);
+        self.cache.lock().set(address, slot, block_number, value);
         Ok(value)
     }
 

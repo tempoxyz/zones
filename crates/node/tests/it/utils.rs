@@ -1,6 +1,5 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
-use alloy_eips::NumHash;
 use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -20,7 +19,7 @@ use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     net::{SocketAddr, TcpListener},
     num::NonZeroU32,
@@ -55,7 +54,8 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_IS_SEQUENCER_SLOT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ZONE_FACTORY_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -342,7 +342,7 @@ pub(crate) fn seed_raw_tip403_policy(
     let registry = TIP403Registry::new();
     let counter_slot = registry.policy_id_counter.slot();
     let existing_next_policy_id = cache
-        .read()
+        .lock()
         .get(TIP403_REGISTRY_ADDRESS, counter_slot.into(), block_number)
         .and_then(|value| U256::from_be_bytes(value.0).try_into().ok())
         .unwrap_or(2u64);
@@ -390,7 +390,7 @@ pub(crate) fn seed_raw_tip403_policy(
         Ok(())
     })?;
 
-    let mut cache = cache.write();
+    let mut cache = cache.lock();
     for slot in slots {
         let value = storage.sload(TIP403_REGISTRY_ADDRESS, slot)?;
         cache.set(
@@ -983,7 +983,7 @@ impl ZoneTestNode {
         let deposit_queue = zone_node.deposit_queue();
         let l1_state_cache = zone_node.l1_state_cache();
         if is_local_dummy_l1 {
-            let mut cache = l1_state_cache.write();
+            let mut cache = l1_state_cache.lock();
             seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         }
 
@@ -2515,6 +2515,8 @@ pub(crate) struct ZoneAccount {
     portal_address: Address,
     /// Whether we've already approved the portal to spend pathUSD on L1.
     l1_portal_approved: bool,
+    /// Tokens already approved for the ZoneOutbox on L2.
+    l2_outbox_approved_tokens: BTreeSet<Address>,
 }
 
 impl ZoneAccount {
@@ -2550,6 +2552,7 @@ impl ZoneAccount {
             l2_provider,
             portal_address,
             l1_portal_approved: false,
+            l2_outbox_approved_tokens: BTreeSet::new(),
         }
     }
 
@@ -2583,6 +2586,7 @@ impl ZoneAccount {
             l2_provider,
             portal_address,
             l1_portal_approved: false,
+            l2_outbox_approved_tokens: BTreeSet::new(),
         }
     }
 
@@ -2955,9 +2959,15 @@ impl ZoneAccount {
     }
 
     /// Approve the ZoneOutbox for a token without submitting a withdrawal.
-    pub(crate) async fn approve_outbox(&self, token: Address) -> eyre::Result<()> {
+    ///
+    /// Reuses a successful max approval for subsequent withdrawals of the same token.
+    pub(crate) async fn approve_outbox(&mut self, token: Address) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
         use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+
+        if self.l2_outbox_approved_tokens.contains(&token) {
+            return Ok(());
+        }
 
         let receipt = ITIP20::new(token, &self.l2_provider)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
@@ -2967,6 +2977,7 @@ impl ZoneAccount {
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "L2 outbox approval failed");
+        self.l2_outbox_approved_tokens.insert(token);
         Ok(())
     }
 }
@@ -3013,6 +3024,7 @@ pub(crate) async fn spawn_sequencer_with_config(
         zone_poll_interval: Duration::from_millis(500),
         batch_interval_blocks: 1,
         batch_anchor_config,
+        attestation_store: None,
     };
 
     zone_sequencer::spawn_zone_sequencer(config, sequencer_signer).await
@@ -3987,7 +3999,7 @@ impl L1Fixture {
         sequencer: Address,
         num_blocks: u64,
     ) {
-        let mut cache = cache_handle.write();
+        let mut cache = cache_handle.lock();
         let deposit_queue_hash_slot = B256::with_last_byte(3);
         let refunds_slot = B256::with_last_byte(8);
         let sequencer_membership_slot =
@@ -3996,6 +4008,7 @@ impl L1Fixture {
             .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
             .into();
         let enabled_token_config = enabled_deposits_active_token_config();
+        let max_tempo_gas_rate = B256::from(U256::from(1_000_000_000_000_000_000_u128));
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -4024,6 +4037,14 @@ impl L1Fixture {
             // Synthetic fixtures use open account and gateway modes so their tests do not need
             // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
             cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            // Permit the protocol-wide maximum in synthetic fixtures. Production values are
+            // imported from the finalized ZonePortal storage slot.
+            cache.set(
+                portal_address,
+                PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+                block,
+                max_tempo_gas_rate,
+            );
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
@@ -4040,10 +4061,6 @@ impl L1Fixture {
         // synthetic token permissive in RPC-free fixtures, matching the old policy-provider stub.
         seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
-        cache.update_anchor(NumHash {
-            number: num_blocks,
-            hash: B256::ZERO,
-        });
         drop(cache);
         self.caches.lock().unwrap().push(cache_handle.clone());
     }
@@ -4058,7 +4075,7 @@ impl L1Fixture {
         // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
         let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
         for cache in self.caches.lock().unwrap().iter() {
-            cache.write().set(
+            cache.lock().set(
                 TIP403_REGISTRY_ADDRESS,
                 B256::from(receive_policy_slot.to_be_bytes()),
                 block_number,
@@ -4077,7 +4094,7 @@ impl L1Fixture {
 
     fn seed_enabled_token_policy_state(&self, block_number: u64, tokens: &[EnabledToken]) {
         for cache in self.caches.lock().unwrap().iter() {
-            let mut cache = cache.write();
+            let mut cache = cache.lock();
             for token in tokens {
                 seed_raw_tip403_token_policy(
                     &mut cache,
@@ -4116,9 +4133,7 @@ impl L1Fixture {
         // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
         // coverage the subscriber would publish before the engine consumes this block.
         for cache in self.caches.lock().unwrap().iter() {
-            cache
-                .write()
-                .update_anchor(NumHash::new(number, self.last_hash));
+            cache.lock().invalidate_and_set_anchor(number, []);
         }
 
         header

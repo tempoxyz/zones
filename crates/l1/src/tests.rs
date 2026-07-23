@@ -148,7 +148,7 @@ fn test_subscriber(
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
             genesis_tempo_block_number,
-            l1_state_cache: crate::L1StateCache::new(HashSet::from([portal_address])),
+            l1_state_cache: crate::L1StateCache::new(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
         },
@@ -427,31 +427,31 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     subscriber
         .config
         .l1_state_cache
-        .write()
+        .lock()
+        .invalidate_and_set_anchor(9, []);
+    subscriber
+        .config
+        .l1_state_cache
+        .lock()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
     subscriber
         .config
         .l1_state_cache
-        .write()
+        .lock()
         .set(stable_account, stable_slot, 10, stable_value);
 
-    let hash_10 = B256::with_last_byte(10);
-    subscriber.update_l1_state_anchor(10, hash_10, &HashSet::new());
+    subscriber.update_l1_state_anchor(10, &HashSet::new());
     assert_eq!(
         subscriber
             .config
             .l1_state_cache
-            .read()
+            .lock()
             .get(TIP403_REGISTRY_ADDRESS, slot, 10),
         Some(value)
     );
 
-    subscriber.update_l1_state_anchor(
-        11,
-        B256::with_last_byte(11),
-        &HashSet::from([TIP403_REGISTRY_ADDRESS]),
-    );
-    let cache = subscriber.config.l1_state_cache.read();
+    subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
+    let mut cache = subscriber.config.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
         Some(stable_value)

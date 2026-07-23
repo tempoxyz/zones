@@ -24,6 +24,7 @@ commonware-utils.workspace = true
 const-hex.workspace = true
 derive_more.workspace = true
 eyre.workspace = true
+metrics.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 tokio.workspace = true

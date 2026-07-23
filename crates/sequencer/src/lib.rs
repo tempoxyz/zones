@@ -16,6 +16,7 @@ pub mod abi {
     pub use tempo_zone_contracts::*;
 }
 
+pub mod attestation;
 mod encryption_key;
 mod metrics;
 pub mod monitor;
@@ -24,6 +25,7 @@ mod rpc;
 pub mod settlement;
 pub mod withdrawals;
 
+pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
 pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
@@ -34,6 +36,13 @@ pub use withdrawals::{
 };
 
 use crate::rpc::rpc_connection_config;
+
+/// Conservative Tempo L1 fee cap for sequencer transactions.
+///
+/// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
+/// explicitly avoids an `eth_feeHistory` request while remaining valid across those regimes.
+pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
+    tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128;
 
 /// Configuration for all zone sequencer background tasks.
 #[derive(Debug, Clone)]
@@ -62,6 +71,8 @@ pub struct ZoneSequencerConfig {
     pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
+    /// Shared P2P attestation store used for quorum batch submission.
+    pub attestation_store: Option<AttestationStore>,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -121,6 +132,7 @@ pub async fn spawn_zone_sequencer(
         batch_interval_blocks: config.batch_interval_blocks,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
+        attestation_store: config.attestation_store,
     };
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(

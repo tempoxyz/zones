@@ -79,7 +79,6 @@ crate::sol! {
         function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
         function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
-        function MAX_GAS_FEE_RATE() external view returns (uint128);
         function WITHDRAWAL_BASE_GAS() external view returns (uint64);
         function REVEAL_TO_KEY_LENGTH() external view returns (uint256);
         function AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH() external view returns (uint256);

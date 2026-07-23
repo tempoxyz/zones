@@ -127,6 +127,7 @@ impl ManifestNode {
 #[derive(Debug, Clone)]
 pub struct ZoneManifest {
     zone_id: u32,
+    sequencer_set_version: u64,
     leader_ed25519_public_key: PublicKey,
     nodes: Vec<ManifestNode>,
 }
@@ -135,6 +136,9 @@ impl ZoneManifest {
     /// Parses and validates a TOML manifest.
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
         let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Toml)?;
+        if raw.sequencer_set_version == 0 {
+            return Err(ManifestError::InvalidSequencerSetVersion);
+        }
         if raw.nodes.len() < 3 {
             return Err(ManifestError::TooFewNodes(raw.nodes.len()));
         }
@@ -201,6 +205,7 @@ impl ZoneManifest {
 
         Ok(Self {
             zone_id: raw.zone_id,
+            sequencer_set_version: raw.sequencer_set_version,
             leader_ed25519_public_key,
             nodes,
         })
@@ -263,6 +268,11 @@ impl ZoneManifest {
         self.zone_id
     }
 
+    /// Version of the registered L1 attester set used in EIP-712 statements.
+    pub const fn sequencer_set_version(&self) -> u64 {
+        self.sequencer_set_version
+    }
+
     /// Ed25519 Commonware public key of the statically assigned leader.
     pub const fn leader_ed25519_public_key(&self) -> &PublicKey {
         &self.leader_ed25519_public_key
@@ -299,8 +309,14 @@ impl ZoneManifest {
 #[serde(deny_unknown_fields)]
 struct RawManifest {
     zone_id: u32,
+    #[serde(default = "default_sequencer_set_version")]
+    sequencer_set_version: u64,
     leader_ed25519_public_key: String,
     nodes: Vec<RawManifestNode>,
+}
+
+const fn default_sequencer_set_version() -> u64 {
+    1
 }
 
 #[derive(Debug, Deserialize)]
@@ -327,6 +343,9 @@ fn parse_ed25519_public_key(field: &str, encoded: &str) -> Result<PublicKey, Man
 /// Manifest parsing and validation errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    #[error("sequencer_set_version must be non-zero")]
+    InvalidSequencerSetVersion,
+
     #[error("failed reading sequencer manifest `{path}`")]
     Read {
         path: std::path::PathBuf,

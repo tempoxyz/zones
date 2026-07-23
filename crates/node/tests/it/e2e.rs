@@ -14,6 +14,7 @@ use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
@@ -22,12 +23,14 @@ use tempo_zone_contracts::{
 use zone_l1::ChainTempoStateExt;
 
 use crate::utils::{
-    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, WITHDRAWAL_TX_GAS, ZoneTestNode, approve_outbox,
-    leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
+    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
+    approve_outbox, leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
     start_chain_id_rpc, start_local_p2p_pair, start_local_zone_with_fixture,
 };
 
 const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
+const LEADER_INCLUSION_TIMEOUT: Duration = Duration::from_secs(30);
+const P2P_RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// A follower imports the leader's executed block and exposes the resulting state over RPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -69,6 +72,104 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
         .await?;
     follower.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
     assert_eq!(follower_balance, U256::from(amount));
+
+    // Submit only to the follower. Its local pool admission is forwarded as canonical EIP-2718
+    // bytes, then independently validated by the leader pool for the next L1-derived build.
+    let (follower_wallet, sender) = local_dev_zone_account(&follower)?;
+    let transfer_recipient = address!("0x0000000000000000000000000000000000009abc");
+    fixture.seed_no_receive_policy(transfer_recipient)?;
+    let sender_deposit = fixture.make_deposit(PATH_USD_ADDRESS, sender, sender, amount);
+    fixture.inject_deposits(leader.deposit_queue(), vec![sender_deposit]);
+    leader
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            sender,
+            U256::from(amount),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+    follower
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            sender,
+            U256::from(amount),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+
+    let transfer_amount = 123_456_u128;
+    let pending = ITIP20::new(PATH_USD_ADDRESS, follower_wallet)
+        .transfer(transfer_recipient, U256::from(transfer_amount))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+    let transaction_hash = *pending.tx_hash();
+
+    let leader_provider = leader.provider();
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "forwarded transaction in leader pool",
+        || {
+            let leader_provider = &leader_provider;
+            async move {
+                Ok(leader_provider
+                    .get_transaction_by_hash(transaction_hash)
+                    .await?)
+            }
+        },
+    )
+    .await?;
+    // A transaction admitted to the pool is not guaranteed to make the very next payload under
+    // load. Produce blocks one at a time until it is included, with one overall timeout rather
+    // than spending the full timeout on every attempt.
+    let leader_receipt = tokio::time::timeout(LEADER_INCLUSION_TIMEOUT, async {
+        loop {
+            let next_block = leader_provider.get_block_number().await? + 1;
+            fixture.inject_empty_block(leader.deposit_queue());
+            leader
+                .wait_for_block_number(next_block, DEFAULT_TIMEOUT)
+                .await?;
+            if let Some(receipt) = leader_provider
+                .get_transaction_receipt(transaction_hash)
+                .await?
+            {
+                return Ok::<_, eyre::Report>(receipt);
+            }
+        }
+    })
+    .await
+    .map_err(|_| eyre::eyre!("timed out producing blocks for leader transaction inclusion"))??;
+    assert!(leader_receipt.status(), "leader receipt should succeed");
+    let inclusion_block = leader_receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("leader receipt missing block number"))?;
+
+    // A live broadcast can be missed while the peer reconnects. Allow enough time for the
+    // follower's 30-second inactivity probe to recover the inclusion block through backfill.
+    follower
+        .wait_for_block_number(inclusion_block, P2P_RECOVERY_TIMEOUT)
+        .await?;
+    let follower_receipt = tokio::time::timeout(DEFAULT_TIMEOUT, pending.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("timed out waiting for follower transaction receipt"))??;
+    assert!(
+        follower_receipt.status(),
+        "forwarded transfer should succeed"
+    );
+
+    for zone in [&leader, &follower] {
+        let balance = zone
+            .wait_for_balance(
+                PATH_USD_ADDRESS,
+                transfer_recipient,
+                U256::from(transfer_amount),
+                DEFAULT_TIMEOUT,
+            )
+            .await?;
+        assert_eq!(balance, U256::from(transfer_amount));
+    }
     Ok(())
 }
 
