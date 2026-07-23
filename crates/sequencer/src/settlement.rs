@@ -450,6 +450,8 @@ impl BatchSubmitter {
                 vec![signature],
             )
             .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+            .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+            .max_priority_fee_per_gas(0)
             .send()
             .await?;
 

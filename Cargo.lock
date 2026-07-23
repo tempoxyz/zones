@@ -13716,6 +13716,7 @@ dependencies = [
  "schnellru",
  "serde_json",
  "tempo-alloy",
+ "tempo-chainspec",
  "tempo-primitives",
  "tempo-zone-contracts",
  "tokio",

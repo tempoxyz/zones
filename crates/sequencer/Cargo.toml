@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 # tempo
 tempo-alloy.workspace = true
+tempo-chainspec.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 
 # reth
