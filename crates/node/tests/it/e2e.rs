@@ -17,8 +17,8 @@ use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
-    ZONE_OUTBOX_ADDRESS, ZoneInbox,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS,
 };
 use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
 
@@ -650,7 +650,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     .await?;
 
     // Query TempoAdvanced events from ZoneInbox
-    let zone_inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.provider());
+    let zone_inbox = IZoneInbox::new(ZONE_INBOX_ADDRESS, zone.provider());
     let tempo_advanced_filter = zone_inbox.TempoAdvanced_filter().from_block(0);
     let tempo_advanced_events = tempo_advanced_filter.query().await?;
 

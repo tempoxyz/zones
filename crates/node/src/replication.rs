@@ -24,7 +24,7 @@ use zone_l1::{L1BlockTracker, L1PortalEvents, TempoStateExt as _};
 use zone_p2p::{P2pCommand, P2pEvent, Role};
 use zone_payload::{
     ZonePayloadTypes,
-    abi::{ZONE_INBOX_ADDRESS, ZoneInbox},
+    abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
 };
 use zone_sequencer::{
     BatchAnchorConfig,
@@ -897,7 +897,7 @@ fn validate_l1_checkpoint_transition(
     Ok(())
 }
 
-/// Decode the L1 header embedded in the first `ZoneInbox.advanceTempo` system transaction.
+/// Decode the L1 header embedded in the first `IZoneInbox.advanceTempo` system transaction.
 #[cfg(test)]
 fn decode_advance_tempo_header(
     block: &SealedBlock<Block>,
@@ -923,9 +923,9 @@ fn decode_advance_tempo(
 
     // 2. Address is correct
     if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
-        eyre::bail!("first Tempo system transaction is not sent to ZoneInbox")
+        eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
     }
-    let call = ZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref())
+    let call = IZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref())
         .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
 
     // 3. the system tx is valid.
@@ -1042,7 +1042,7 @@ mod tests {
 
         let mut header_rlp = Vec::new();
         TempoHeader::default().encode(&mut header_rlp);
-        let calldata = zone_payload::abi::ZoneInbox::advanceTempoCall {
+        let calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
             header: Bytes::from(header_rlp),
             deposits: vec![],
             decryptions: vec![],
@@ -1071,7 +1071,7 @@ mod tests {
         });
 
         let error = super::decode_advance_tempo_header(&block).unwrap_err();
-        assert!(error.to_string().contains("ZoneInbox"));
+        assert!(error.to_string().contains("IZoneInbox"));
     }
 
     #[test]
@@ -1172,7 +1172,7 @@ mod tests {
         };
 
         let make_block = |header: Vec<u8>| {
-            let calldata = zone_payload::abi::ZoneInbox::advanceTempoCall {
+            let calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
                 header: Bytes::from(header),
                 deposits: vec![],
                 decryptions: vec![],

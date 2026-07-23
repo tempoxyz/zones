@@ -5,10 +5,10 @@ pub use ZonePortal::{
     ZonePortalErrors as ZonePortalError,
 };
 
-use crate::IZoneOutbox;
+use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
-use zone_primitives::constants::{EMPTY_SENTINEL, PORTAL_TOKEN_CONFIGS_SLOT};
+use zone_primitives::constants::EMPTY_SENTINEL;
 
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -369,6 +369,30 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     }
 }
 
+impl EncryptedDeposit {
+    /// Build the event emitted after a successful encrypted deposit.
+    pub fn processed_event(
+        &self,
+        deposit_hash: B256,
+        recipient: Address,
+        memo: B256,
+    ) -> ZoneInboxEvent {
+        ZoneInboxEvent::encrypted_deposit_processed(
+            deposit_hash,
+            self.sender,
+            recipient,
+            self.token,
+            self.amount,
+            memo,
+        )
+    }
+
+    /// Build the event emitted after a failed encrypted deposit.
+    pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
+        ZoneInboxEvent::encrypted_deposit_failed(deposit_hash, self.sender, self.token, self.amount)
+    }
+}
+
 impl Withdrawal {
     /// Build the authenticated-withdrawal sender plaintext `[sender(20) | tx_hash(32)]`.
     pub fn authenticated_sender_plaintext(sender: Address, tx_hash: B256) -> [u8; 52] {
@@ -434,9 +458,4 @@ impl Withdrawal {
         }
         hash
     }
-}
-
-/// Return the storage slot for `token` in the portal token-config mapping.
-pub fn portal_token_config_slot(token: Address) -> B256 {
-    keccak256((token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode())
 }

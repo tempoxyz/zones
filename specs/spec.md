@@ -1664,12 +1664,7 @@ interface IZoneFactory {
     );
 
     function owner() external view returns (address);
-    function implementationUpdatesLocked() external view returns (bool);
     function transferOwnership(address newOwner) external;
-    function lockImplementationUpdates() external;
-    function setPortalImplementation(address source) external;
-    function setZoneMessengerImplementation(address source) external;
-    function setVerifierImplementation(address source) external;
     function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     function nextZoneId() external view returns (uint32);
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
@@ -2096,11 +2091,11 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its read method
 
 Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
 
-TIP-1091 installs the shared portal implementation, verifier, and messenger runtimes at fixed protocol-managed addresses. The factory owner may replace those runtimes with `setPortalImplementation`, `setVerifierImplementation`, and `setZoneMessengerImplementation`. Replacing the portal implementation upgrades every portal proxy and therefore MUST preserve the portal storage layout. `lockImplementationUpdates` permanently disables these replacements.
+At the T9 boundary, Tempo copies the complete runtime bytecode from hardfork-specified portal implementation, verifier, and messenger source deployments to their fixed protocol-managed addresses, equivalent to `EXTCODECOPY`. The ZoneFactory owner cannot invoke these copies or replace the installed runtimes. Any later replacement requires a Tempo hardfork and uses the same copy operation at that hardfork boundary. Replacing the portal implementation upgrades every portal proxy and therefore MUST preserve the portal storage layout.
 
 Zone nodes and provers select execution rules from the imported Tempo block and the Tempo fork schedule compiled into the implementation. No zone-specific protocol version is encoded in the zone block header or prover witness. A node that does not support the active Tempo fork must halt rather than produce a block under stale rules.
 
-No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements must be coordinated with that activation and use verified source deployments.
+No onchain action is required from zone operators. Operators upgrade their zone node binary and prover program before the fork. When the fork Tempo block arrives, the node activates new rules automatically. Runtime replacements are consensus changes coordinated with that activation.
 
 If the fork changes zone predeploy behavior, the zone node injects new bytecode at the predeploy addresses before `advanceTempo` executes in the first post-fork zone block.
 

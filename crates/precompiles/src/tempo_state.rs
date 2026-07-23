@@ -3,9 +3,12 @@
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
 //! preserving the zone-facing checkpoint and Tempo storage read ABI.
 
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::{format, vec::Vec};
 
-use crate::storage::{L1State, L1StorageReader};
+use crate::{
+    ZoneResult,
+    storage::{L1State, L1StorageReader},
+};
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
@@ -13,11 +16,12 @@ use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    charge_input_cost, dispatch, error::TempoPrecompileError, storage::Handler, view,
+    EncodePrecompileResult, charge_input_cost, dispatch, error::TempoPrecompileError,
+    storage::Handler, view,
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
-use tempo_zone_contracts::TempoState as TempoStateAbi;
+use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
 use zone_primitives::constants::{
     TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
@@ -96,6 +100,47 @@ impl TempoState {
             .revert_output(Error(message.into()).abi_encode().into()))
     }
 
+    /// Validate and apply a finalized Tempo checkpoint transition.
+    ///
+    /// IMPORTANT: this operation only enforces local continuity: the decoded block number must
+    /// increment by one and its parent hash must match the previously stored Tempo hash.
+    ///
+    /// Canonicality is a separate proof obligation: the batch proof must bind the imported header
+    /// hash and state root to the canonical settlement anchor and authenticate every Tempo storage
+    /// read against that exact root.
+    ///
+    /// This typed operation is shared by the public `finalizeTempo` ABI and the native Inbox.
+    pub(crate) fn finalize_checkpoint<P>(
+        &mut self,
+        l1: &L1State<P>,
+        header_rlp: Bytes,
+    ) -> ZoneResult<()> {
+        let prev_block_hash = self.tempo_block_hash.read()?;
+        let prev_block_number = self.tempo_block_number.read()?;
+
+        let mut header_cursor = header_rlp.as_ref();
+        let header = TempoHeader::decode(&mut header_cursor)
+            .map_err(|_| TempoStateError::invalid_rlp_data())?;
+        if !header_cursor.is_empty() {
+            return Err(TempoStateError::invalid_rlp_data().into());
+        }
+        if header.parent_hash() != prev_block_hash {
+            return Err(TempoStateError::invalid_parent_hash().into());
+        }
+        if prev_block_number.checked_add(1) != Some(header.number()) {
+            return Err(TempoStateError::invalid_block_number().into());
+        }
+
+        l1.advance_anchor(prev_block_number, header.number())?;
+        let tempo_block_hash = self.write_checkpoint(&header_rlp, header.number())?;
+        self.emit_event(TempoStateAbi::TempoBlockFinalized {
+            blockHash: tempo_block_hash,
+            blockNumber: header.number(),
+            stateRoot: header.state_root(),
+        })?;
+        Ok(())
+    }
+
     fn apply_checkpoint<P>(
         &mut self,
         l1: &L1State<P>,
@@ -109,50 +154,18 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::OnlyZoneInbox {});
         }
 
-        let prev_block_hash = match self.tempo_block_hash.read() {
-            Ok(hash) => hash,
-            Err(err) => return self.storage.error_result(err),
-        };
-        let prev_block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
-            Err(err) => return self.storage.error_result(err),
-        };
+        self.finalize_checkpoint(l1, call.header)
+            .encode_precompile_result(0, 0, |()| Bytes::new())
+    }
 
-        let mut header_cursor = call.header.as_ref();
-        let header = match TempoHeader::decode(&mut header_cursor) {
-            Ok(header) => header,
-            Err(_) => return self.revert_error(TempoStateAbi::InvalidRlpData {}),
-        };
-        if !header_cursor.is_empty() {
-            return self.revert_error(TempoStateAbi::InvalidRlpData {});
-        }
+    /// Returns the currently finalized Tempo block number from Zone state.
+    pub(crate) fn tempo_block_number(&mut self) -> tempo_precompiles::Result<u64> {
+        self.tempo_block_number.read()
+    }
 
-        if header.parent_hash() != prev_block_hash {
-            return self.revert_error(TempoStateAbi::InvalidParentHash {});
-        }
-        if prev_block_number.checked_add(1) != Some(header.number()) {
-            return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
-        }
-
-        if let Err(err) = l1.advance_anchor(prev_block_number, header.number()) {
-            return self
-                .storage
-                .error_result(TempoPrecompileError::Fatal(err.to_string()));
-        }
-
-        let tempo_block_hash = match self.write_checkpoint(&call.header, header.number()) {
-            Ok(hash) => hash,
-            Err(err) => return self.storage.error_result(err),
-        };
-        if let Err(err) = self.emit_event(TempoStateAbi::TempoBlockFinalized {
-            blockHash: tempo_block_hash,
-            blockNumber: header.number(),
-            stateRoot: header.state_root(),
-        }) {
-            return self.storage.error_result(err);
-        }
-
-        Ok(self.storage.success_output(Bytes::new()))
+    /// Returns the currently finalized Tempo block hash from Zone state.
+    pub(crate) fn tempo_block_hash(&mut self) -> tempo_precompiles::Result<B256> {
+        self.tempo_block_hash.read()
     }
 
     fn read_tempo_storage_slot<P: L1StorageReader>(

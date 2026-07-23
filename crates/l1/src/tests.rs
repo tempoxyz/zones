@@ -201,7 +201,7 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
             currency: "USD".to_owned(),
         }],
     };
-    let mut deposits: Vec<_> = events
+    let deposits: Vec<_> = events
         .deposits
         .iter()
         .map(L1Deposit::to_abi_queued_deposit)
@@ -213,7 +213,6 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
         .collect();
 
     // Rejection is a sequencer decision and does not change the authenticated deposit identity.
-    deposits[0].rejected = true;
     events
         .validate_advance_tempo_inputs(&deposits, &enabled_tokens)
         .unwrap();
@@ -1241,10 +1240,6 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
     assert_eq!(
         prepared.queued_deposits[0].depositType,
         DepositType::Encrypted
-    );
-    assert!(
-        !prepared.queued_deposits[0].rejected,
-        "policy is enforced by upstream TIP-20 mint execution"
     );
     assert_eq!(
         prepared.decryptions.len(),

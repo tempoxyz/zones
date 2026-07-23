@@ -437,12 +437,6 @@ interface IZoneFactory {
         string rpcUrl;
     }
 
-    event PortalUpdated(address indexed source, bytes32 indexed codeHash);
-
-    event MessengerUpdated(address indexed source, bytes32 indexed codeHash);
-
-    event VerifierUpdated(address indexed source, bytes32 indexed codeHash);
-
     event ZoneCreated(
         uint32 indexed zoneId,
         address indexed portal,
@@ -459,10 +453,6 @@ interface IZoneFactory {
     error NotOwner();
     error InvalidAdmin();
     error InvalidSequencerSet();
-    error InvalidPortalImplementation();
-    error InvalidZoneMessengerImplementation();
-    error InvalidVerifierImplementation();
-    error ImplementationUpdatesLocked();
     error InvalidClosedLoopConfig();
     error DuplicateAllowedAccount();
     error DuplicateZoneGateway();
@@ -470,23 +460,8 @@ interface IZoneFactory {
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
 
-    /// @notice Returns whether shared runtime updates have been permanently disabled.
-    function implementationUpdatesLocked() external view returns (bool);
-
     /// @notice Transfers zone-creation authority to `newOwner`.
     function transferOwnership(address newOwner) external;
-
-    /// @notice Permanently disables updates to the shared protocol-managed runtimes.
-    function lockImplementationUpdates() external;
-
-    /// @notice Copies a deployed runtime to the protocol-managed portal implementation account.
-    function setPortalImplementation(address source) external;
-
-    /// @notice Copies a deployed runtime to the protocol-managed messenger account.
-    function setZoneMessengerImplementation(address source) external;
-
-    /// @notice Copies a deployed runtime to the protocol-managed verifier account.
-    function setVerifierImplementation(address source) external;
 
     /// @notice Creates a new zone and deploys its portal contract.
     /// @param params The initial token, admin, sequencer set, threshold, and RPC URL.

@@ -36,7 +36,7 @@ use tempo_primitives::{
     transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
 };
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox,
+    IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
@@ -762,7 +762,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let owner = owner_signer.address();
     let outsider_signer = PrivateKeySigner::random();
 
-    let refunds_call = ZoneInbox::refundsCall {
+    let refunds_call = IZoneInbox::refundsCall {
         token: ZONE_TOKEN_ADDRESS,
         owner,
     };
@@ -811,7 +811,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
             .trim_start_matches("0x"),
     )?;
     assert_eq!(
-        ZoneInbox::refundsCall::abi_decode_returns(&owner_refunds_bytes)?,
+        IZoneInbox::refundsCall::abi_decode_returns(&owner_refunds_bytes)?,
         0,
         "own refunds(token, owner) read should retain normal eth_call behavior"
     );

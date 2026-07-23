@@ -64,6 +64,12 @@ pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000
 /// ZonePortal storage slot 0: `admin` (address).
 pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
+/// ZonePortal storage slot 3: `currentDepositQueueHash` (bytes32).
+pub const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(3);
+
+/// ZonePortal storage slot 5: `_encryptionKeys` dynamic array.
+pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
+
 /// ZonePortal storage slot 6: `_tokenConfigs` mapping.
 pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 

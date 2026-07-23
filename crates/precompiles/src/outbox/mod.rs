@@ -16,11 +16,11 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
     IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal, ZonePortalError,
-    portal_token_config_slot,
 };
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT,
-    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT,
+    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -84,7 +84,10 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let token_config = self.read_portal_slot(l1, portal_token_config_slot(token))?;
+        let token_config = self.read_portal_slot(
+            l1,
+            token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()).into(),
+        )?;
         if token_config & U256::from(u8::MAX) == U256::ZERO {
             return Err(ZonePortalError::token_not_enabled().into());
         }
@@ -249,7 +252,7 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn enqueue_deposit_bounce_back(
+    pub(crate) fn enqueue_deposit_bounce_back(
         &mut self,
         caller: Address,
         call: IZoneOutbox::enqueueDepositBounceBackCall,
@@ -261,7 +264,11 @@ impl ZoneOutbox {
         self.enqueue(PendingWithdrawal::from_bounce_back(call))
     }
 
-    fn consume_fallback_recipient(&mut self, caller: Address, nonce: u64) -> ZoneResult<Address> {
+    pub(crate) fn consume_fallback_recipient(
+        &mut self,
+        caller: Address,
+        nonce: u64,
+    ) -> ZoneResult<Address> {
         if caller != ZONE_INBOX_ADDRESS {
             return Err(ZoneOutboxError::only_zone_inbox().into());
         }
@@ -271,6 +278,20 @@ impl ZoneOutbox {
         }
         self.fallback_recipients[nonce].delete()?;
         Ok(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_fallback_recipient(
+        &mut self,
+        nonce: u64,
+        recipient: Address,
+    ) -> TempoResult<()> {
+        self.fallback_recipients[nonce].write(recipient)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fallback_recipient(&self, nonce: u64) -> TempoResult<Address> {
+        self.fallback_recipients[nonce].read()
     }
 
     fn finalize_withdrawal_batch<P: L1StorageReader>(
