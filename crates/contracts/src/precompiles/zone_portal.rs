@@ -154,6 +154,7 @@ crate::sol! {
         );
 
         event RoleUpdated(address indexed account, Role prev, Role next);
+        event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
         // -- Errors --
 
@@ -165,11 +166,22 @@ crate::sol! {
         error PolicyForbids();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
+        error InvalidCallbackTarget();
+        error AccountNotAllowed(address account);
 
         // -- View functions --
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
+        function messenger() external view returns (address);
+        function isAccessEnforced() external view returns (bool);
+        function setAccessMode(bool enforced) external;
+        function isGatewayOpen() external view returns (bool);
+        function setGatewayMode(bool enforced) external;
+        function role(address account) external view returns (Role);
+        function setRole(address account, Role role) external;
+        function setAllowedAccount(address account, bool allowed) external;
+        function setGateway(address account, bool allowed) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
         function sequencerThreshold() external view returns (uint8);
@@ -225,9 +237,6 @@ crate::sol! {
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
-        function role(address account) external view returns (Role);
-        function setAllowedAccount(address account, bool allowed) external;
-        function setGateway(address account, bool allowed) external;
 
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
@@ -349,6 +358,8 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
+            Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
+            Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
         }
     }
 }

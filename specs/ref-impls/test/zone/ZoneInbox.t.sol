@@ -18,6 +18,7 @@ import {
     IZoneInbox,
     IZoneOutbox,
     IZonePortal,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
@@ -77,6 +78,7 @@ contract ZoneInboxTest is Test {
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
             bytes32(uint256(1))
         );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1)));
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, address(0x500), true);

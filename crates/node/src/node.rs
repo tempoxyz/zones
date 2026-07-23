@@ -67,7 +67,9 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
+use zone_sequencer::{
+    BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig, spawn_zone_sequencer,
+};
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
@@ -152,6 +154,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
+    /// Gas and concurrency limits for withdrawal processing transactions.
+    pub withdrawal_batch_limits: WithdrawalBatchLimits,
 }
 
 /// Configuration for the Zone private RPC server extension.
@@ -710,6 +714,7 @@ where
             l1_rpc_url,
             retry_connection_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
+            withdrawal_batch_limits: config.withdrawal_batch_limits,
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             tempo_state_address: TEMPO_STATE_ADDRESS,

@@ -76,8 +76,18 @@ pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
 pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
-/// ZonePortal storage slot 20: `role` (mapping(address => Role)).
+/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
+/// `role` (mapping(address => Role)).
 pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
+
+/// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
+pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
+
+/// Alias used by consumers reading account allowlist enforcement.
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
+
+/// Alias used by consumers reading callback gateway enforcement.
+pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system

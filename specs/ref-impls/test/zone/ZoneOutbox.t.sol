@@ -6,6 +6,7 @@ import {
     IZoneOutbox,
     IZonePortal,
     LastBatch,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PendingWithdrawal,
     Withdrawal,
@@ -70,6 +71,7 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);
         tempoState.setMockZoneGateway(mockPortal, callbackTarget, true);
+        _setModes(true, true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         outbox = new ZoneOutbox(address(config));
 
@@ -86,6 +88,13 @@ contract ZoneOutboxTest is Test {
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
         return keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence)));
+    }
+
+    function _setModes(bool accessMode, bool gatewayMode) internal {
+        uint256 modes;
+        if (accessMode) modes |= 1;
+        if (gatewayMode) modes |= 1 << 8;
+        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(modes));
     }
 
     function _withdrawal(
@@ -320,6 +329,34 @@ contract ZoneOutboxTest is Test {
 
         assertEq(_pendingWithdrawalsCount(), 0);
         assertEq(disabledToken.balanceOf(alice), 1000e6);
+    }
+
+    function test_requestWithdrawal_openAccessStillEnforcesGatewayRegistration() public {
+        address outsider = address(0x999);
+        _setModes(false, true);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 0, alice, "");
+        vm.expectRevert(IZonePortal.InvalidCallbackTarget.selector);
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 1, alice, "");
+        vm.stopPrank();
+    }
+
+    function test_requestWithdrawal_openGatewayStillEnforcesAccountAllowlist() public {
+        address outsider = address(0x999);
+        _setModes(true, false);
+        tempoState.setMockAccountAllowed(mockPortal, callbackTarget, true);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1500e6);
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 1, alice, "");
+        outbox.requestWithdrawal(
+            address(zoneToken), callbackTarget, 500e6, bytes32(0), 0, alice, ""
+        );
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        outbox.requestWithdrawal(address(zoneToken), outsider, 500e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
     }
 
     function test_requestWithdrawal_revertsOnInvalidCurrentTxHash() public {
@@ -581,8 +618,7 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         assertEq(zoneToken.balanceOf(alice), balanceBefore - 500e6);
-        vm.prank(sequencer);
-        assertEq(outbox.pendingWithdrawalsCount(), 1);
+        assertEq(_pendingWithdrawalsCount(), 1);
     }
 
     function test_requestWithdrawal_rejectsUnallowedPlainRecipient() public {

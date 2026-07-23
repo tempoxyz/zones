@@ -156,6 +156,10 @@ contract ZonePortal is IZonePortal {
     mapping(address => bool) public isSequencer;
     mapping(address => Role) public role;
 
+    /// @dev Solidity packs both enforcement booleans into slot 21.
+    bool internal _isAccessEnforced;
+    bool internal _isGatewayEnforced;
+
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
@@ -163,6 +167,8 @@ contract ZonePortal is IZonePortal {
     function initialize(
         uint32 _zoneId,
         address _initialToken,
+        bool accessEnforced,
+        bool gatewayEnforced,
         address[] calldata _allowedAccounts,
         address[] calldata _zoneGateways,
         address _messenger,
@@ -183,7 +189,10 @@ contract ZonePortal is IZonePortal {
         messenger = _messenger;
         admin = _admin;
         verifier = _verifier;
+        _isAccessEnforced = accessEnforced;
+        _isGatewayEnforced = gatewayEnforced;
         rpcUrl = _rpcUrl;
+        emit EnforcementModesUpdated(accessEnforced, gatewayEnforced);
 
         _replaceSequencerSet(initialSequencers, _threshold, false);
 
@@ -342,6 +351,28 @@ contract ZonePortal is IZonePortal {
         emit AdminTransferred(previousAdmin, admin);
     }
 
+    /// @notice Enable or disable account allowlist enforcement without discarding membership.
+    function setAccessMode(bool enforced) external onlyAdmin {
+        _isAccessEnforced = enforced;
+        emit EnforcementModesUpdated(enforced, _isGatewayEnforced);
+    }
+
+    /// @notice Enable or disable callback gateway registration enforcement.
+    function setGatewayMode(bool enforced) external onlyAdmin {
+        _isGatewayEnforced = enforced;
+        emit EnforcementModesUpdated(_isAccessEnforced, enforced);
+    }
+
+    /// @notice Return whether account allowlist enforcement is enabled.
+    function isAccessEnforced() public view returns (bool) {
+        return _isAccessEnforced;
+    }
+
+    /// @notice Return whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() public view returns (bool) {
+        return !_isGatewayEnforced;
+    }
+
     /// @notice Add or remove an account from closed-loop portal flows.
     function setAllowedAccount(address account, bool allowed) external onlyAdmin {
         _setRole(account, allowed ? Role.Account : Role.None);
@@ -352,10 +383,13 @@ contract ZonePortal is IZonePortal {
         _setRole(account, allowed ? Role.CallbackGateway : Role.None);
     }
 
+    /// @notice Assign an account's role across portal flows without changing enforcement modes.
+    function setRole(address account, Role next) external onlyAdmin {
+        _setRole(account, next);
+    }
+
     function _setRole(address account, Role next) internal {
-        if (next == Role.Account && account == messenger) {
-            revert InvalidAllowedAccount();
-        }
+        if (next == Role.Account && account == messenger) revert InvalidAllowedAccount();
         Role prev = role[account];
         role[account] = next;
         emit RoleUpdated(account, prev, next);
@@ -623,7 +657,19 @@ contract ZonePortal is IZonePortal {
     }
 
     function _requireAllowed(address account) internal view {
+        if (!_isAllowed(account)) revert AccountNotAllowed(account);
+    }
+
+    function _requireAllowedDepositor(address account) internal view {
+        if (!_isAccessEnforced) return;
+        if (_isGatewayEnforced && role[account] == Role.CallbackGateway) {
+            return;
+        }
         if (role[account] != Role.Account) revert AccountNotAllowed(account);
+    }
+
+    function _isAllowed(address account) internal view returns (bool) {
+        return !_isAccessEnforced || role[account] == Role.Account;
     }
 
     function _validateDepositPolicy(
@@ -653,6 +699,7 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint128 fee, uint128 netAmount)
     {
+        // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
         fee = calculateDepositFee();
         uint128 bouncebackFee = calculateBouncebackFee();
         if (amount < fee + bouncebackFee) revert DepositTooSmall();
@@ -692,8 +739,8 @@ contract ZonePortal is IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
-        // Gateways may deposit callback returns without also being allowed accounts.
-        if (role[msg.sender] != Role.CallbackGateway) _requireAllowed(msg.sender);
+        // An enforced, registered gateway is independently authorized to return callback funds.
+        _requireAllowedDepositor(msg.sender);
         _requireAllowed(tempoRefundRecipient);
 
         _validateDepositsActive(_token);
@@ -748,8 +795,8 @@ contract ZonePortal is IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
-        // Gateways may deposit callback returns without also being allowed accounts.
-        if (role[msg.sender] != Role.CallbackGateway) _requireAllowed(msg.sender);
+        // Enforced gateways may deposit callback returns without also being allowed accounts.
+        _requireAllowedDepositor(msg.sender);
         _requireAllowed(tempoRefundRecipient);
 
         _validateDepositsActive(_token);
@@ -874,9 +921,10 @@ contract ZonePortal is IZonePortal {
 
         bool success;
         if (withdrawal.gasLimit == 0) {
-            // Re-check current membership without reverting so an in-flight withdrawal to a
-            // revoked account bounces without blocking the FIFO.
-            success = role[withdrawal.to] == Role.Account
+            // Re-check current roles without reverting so an in-flight withdrawal to a revoked
+            // account or newly registered gateway bounces without blocking the FIFO.
+            success = (!_isGatewayEnforced || role[withdrawal.to] != Role.CallbackGateway)
+                && _isAllowed(withdrawal.to)
                 && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
             // Isolate callback effects so failure can be caught without reverting the dequeue.
@@ -915,19 +963,26 @@ contract ZonePortal is IZonePortal {
         external
         onlySelf
     {
-        if (role[target] != Role.CallbackGateway) revert InvalidCallbackTarget();
-        bytes32 depositQueueHashBefore = currentDepositQueueHash;
-
+        if (_isGatewayEnforced && role[target] != Role.CallbackGateway) {
+            revert InvalidCallbackTarget();
+        }
         if (!ITIP20(token).transfer(messenger, amount)) {
             revert TransferFailed();
         }
 
+        bytes32 depositQueueHashBefore = currentDepositQueueHash;
+
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
 
-        // This proves only that some deposit was appended. Callback data is opaque; the configured
-        // gateway is trusted to allow only deposit/redeem and deposit the result back into the zone.
-        if (currentDepositQueueHash == depositQueueHashBefore) revert CallbackDidNotReturnToZone();
+        // In closed access, this proves only that some deposit was appended to this portal; it does
+        // not bind that deposit to the callback's token, amount, or recipient. Callback data is
+        // opaque, so an enforced gateway is trusted to constrain the operation and return the
+        // intended result. Open access imposes no source-deposit invariant: callback value may go
+        // to another zone or leave the zone system entirely.
+        if (_isAccessEnforced && currentDepositQueueHash == depositQueueHashBefore) {
+            revert CallbackDidNotReturnToZone();
+        }
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
@@ -943,8 +998,8 @@ contract ZonePortal is IZonePortal {
             _tryTransfer(_token, admin, bouncebackFee);
         }
 
-        bool success = role[withdrawal.to] == Role.Account
-            && _tryTransfer(_token, withdrawal.to, refundAmount);
+        bool success =
+            _isAllowed(withdrawal.to) && _tryTransfer(_token, withdrawal.to, refundAmount);
 
         if (success) {
             emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);

@@ -38,7 +38,7 @@ use tempo_chainspec::{
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, IZoneFactory as LegacyZoneFactory, TIP403_REGISTRY_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -55,7 +55,8 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{
-    PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+    PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
@@ -65,7 +66,7 @@ use zone_l1::{
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::PORTAL_ROLE_SLOT;
+use zone_primitives::constants::PORTAL_ACCESS_MODE_SLOT;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -262,6 +263,24 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
             .with_nonce(Some(1))
             .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
     );
+
+    // The native factory requires the initial token's TIP-403 policy binding to exist.
+    let token_policy_slot = keccak256(
+        (
+            PATH_USD_ADDRESS,
+            tip403_registry_slots::TOKEN_TRANSFER_POLICIES,
+        )
+            .abi_encode(),
+    );
+    let packed_policy = U256::from(ALLOW_ALL_POLICY_ID) | (U256::ONE << u64::BITS);
+    genesis
+        .alloc
+        .entry(TIP403_REGISTRY_ADDRESS)
+        .or_default()
+        .storage
+        .get_or_insert_default()
+        .insert(token_policy_slot, B256::from(packed_policy.to_be_bytes()));
+
     Ok(())
 }
 
@@ -468,6 +487,60 @@ impl ZoneTestNode {
         ProviderBuilder::new()
             .connect_http(self.http_url.clone())
             .erased()
+    }
+
+    /// Assert the gateway view exposed by the L2 ZoneConfig predeploy.
+    pub(crate) async fn assert_zone_gateway(
+        &self,
+        gateway: Address,
+        expected: bool,
+    ) -> eyre::Result<()> {
+        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
+        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        eyre::ensure!(
+            config.isZoneGateway(gateway).call().await? == expected,
+            "ZoneConfig gateway state for {gateway} did not equal {expected}"
+        );
+        Ok(())
+    }
+
+    /// Assert whether account enforcement is enabled in the L2 ZoneConfig predeploy.
+    pub(crate) async fn assert_access_enforced(&self, expected: bool) -> eyre::Result<()> {
+        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
+        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        let actual = config.isAccessEnforced().call().await?;
+        eyre::ensure!(
+            actual == expected,
+            "ZoneConfig access enforcement {actual} did not equal {expected}"
+        );
+        Ok(())
+    }
+
+    /// Assert whether gateway registration is open in the L2 ZoneConfig predeploy.
+    pub(crate) async fn assert_gateway_open(&self, expected: bool) -> eyre::Result<()> {
+        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
+        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        let actual = config.isGatewayOpen().call().await?;
+        eyre::ensure!(
+            actual == expected,
+            "ZoneConfig gateway openness {actual} did not equal {expected}"
+        );
+        Ok(())
+    }
+
+    /// Assert the mode-aware account authorization view exposed by L2 ZoneConfig.
+    pub(crate) async fn assert_allowed_account(
+        &self,
+        account: Address,
+        expected: bool,
+    ) -> eyre::Result<()> {
+        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
+        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        eyre::ensure!(
+            config.isAllowedAccount(account).call().await? == expected,
+            "ZoneConfig account state for {account} did not equal {expected}"
+        );
+        Ok(())
     }
 
     /// Returns a handle to the deposit queue for injecting synthetic L1 blocks.
@@ -998,6 +1071,44 @@ pub(crate) struct L1TestNode {
     _tasks: Runtime,
 }
 
+/// Explicit account-access and callback-gateway configuration for a test zone.
+#[derive(Clone, Debug)]
+pub(crate) struct ZoneCreationConfig {
+    pub(crate) access_mode: bool,
+    pub(crate) gateway_mode: bool,
+    pub(crate) allowed_accounts: Vec<Address>,
+    pub(crate) zone_gateways: Vec<Address>,
+}
+
+impl ZoneCreationConfig {
+    pub(crate) fn closed(mut allowed_accounts: Vec<Address>) -> Self {
+        allowed_accounts.sort_unstable();
+        allowed_accounts.dedup();
+        Self {
+            access_mode: true,
+            gateway_mode: true,
+            allowed_accounts,
+            zone_gateways: Vec::new(),
+        }
+    }
+
+    pub(crate) fn open() -> Self {
+        Self {
+            access_mode: false,
+            gateway_mode: false,
+            allowed_accounts: Vec::new(),
+            zone_gateways: Vec::new(),
+        }
+    }
+
+    pub(crate) fn open_with_enforced_gateways() -> Self {
+        Self {
+            gateway_mode: true,
+            ..Self::open()
+        }
+    }
+}
+
 impl L1TestNode {
     /// Returns the HTTP RPC URL for this L1 node.
     pub(crate) fn http_url(&self) -> &url::Url {
@@ -1184,20 +1295,18 @@ impl L1TestNode {
         Ok(())
     }
 
-    /// Wait for a `WithdrawalProcessed` event with the expected callback result.
-    pub(crate) async fn wait_for_withdrawal_processed_with_status(
+    /// Wait for a matching withdrawal result and return its callback status.
+    pub(crate) async fn wait_for_withdrawal_processed_status(
         &self,
         portal_address: Address,
         to: Address,
         token: Address,
         amount: u128,
-        callback_success: bool,
         timeout: Duration,
-    ) -> eyre::Result<()> {
+    ) -> eyre::Result<bool> {
         use tempo_zone_contracts::ZonePortal;
-
         let portal = ZonePortal::new(portal_address, self.provider());
-        poll_until(timeout, DEFAULT_POLL, "withdrawal processed", || {
+        poll_until(timeout, DEFAULT_POLL, "WithdrawalProcessed event", || {
             let portal = &portal;
             async move {
                 let events = portal
@@ -1207,16 +1316,44 @@ impl L1TestNode {
                     .await?;
                 Ok(events
                     .iter()
-                    .any(|(event, _)| {
-                        event.to == to
-                            && event.token == token
-                            && event.amount == amount
-                            && event.callbackSuccess == callback_success
+                    .find(|(event, _)| {
+                        event.to == to && event.token == token && event.amount == amount
                     })
-                    .then_some(()))
+                    .map(|(event, _)| event.callbackSuccess))
             }
         })
         .await
+    }
+
+    /// Assert that matching withdrawal results were emitted in FIFO order.
+    pub(crate) async fn assert_withdrawals_processed_in_order(
+        &self,
+        portal_address: Address,
+        expected: &[(Address, Address, u128, bool)],
+    ) -> eyre::Result<()> {
+        use tempo_zone_contracts::ZonePortal;
+        let portal = ZonePortal::new(portal_address, self.provider());
+        let events = portal
+            .WithdrawalProcessed_filter()
+            .from_block(0)
+            .query()
+            .await?;
+        let mut expected_index = 0;
+        for (event, _) in events {
+            if let Some((to, token, amount, success)) = expected.get(expected_index)
+                && event.to == *to
+                && event.token == *token
+                && event.amount == *amount
+                && event.callbackSuccess == *success
+            {
+                expected_index += 1;
+            }
+        }
+        eyre::ensure!(
+            expected_index == expected.len(),
+            "expected ordered withdrawal results {expected:?}, matched only {expected_index}"
+        );
+        Ok(())
     }
 
     /// Returns an HTTP provider with the dev account wallet attached.
@@ -1234,6 +1371,17 @@ impl L1TestNode {
     pub(crate) fn admin_provider(&self) -> alloy_provider::DynProvider {
         ProviderBuilder::new()
             .wallet(self.admin_signer())
+            .connect_http(self.http_url.clone())
+            .erased()
+    }
+
+    /// Returns an HTTP provider with an explicit signer attached.
+    pub(crate) fn provider_with_signer(
+        &self,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> alloy_provider::DynProvider {
+        ProviderBuilder::new()
+            .wallet(signer)
             .connect_http(self.http_url.clone())
             .erased()
     }
@@ -1403,11 +1551,17 @@ impl L1TestNode {
     ///
     /// [`admin_address`]: Self::admin_address
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
+        let config = ZoneCreationConfig::closed(vec![
+            self.admin_address(),
+            self.dev_address(),
+            self.user_signer().address(),
+        ]);
         let portal = self
-            .create_zone_with_admin_and_sequencer(
+            .create_zone_with_admin_sequencer_and_config(
                 factory_address,
                 self.admin_address(),
                 self.dev_address(),
+                config,
             )
             .await?;
         // The admin is not pre-funded; give it pathUSD to pay for gas on
@@ -1416,31 +1570,26 @@ impl L1TestNode {
         Ok(portal)
     }
 
-    /// Create a zone on an existing ZoneFactory with explicit admin and sequencer addresses.
-    pub(crate) async fn create_zone_with_admin_and_sequencer(
+    /// Create a zone with an exact access-mode, membership, and gateway configuration.
+    pub(crate) async fn create_zone_with_admin_sequencer_and_config(
         &self,
         factory_address: Address,
         admin: Address,
         sequencer: Address,
+        config: ZoneCreationConfig,
     ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
-        use tempo_zone_contracts::{ZoneFactory, ZonePortal};
+        use tempo_zone_contracts::ZoneFactory;
 
         let l1_provider = self.dev_provider();
-        let mut allowed_accounts = vec![admin, sequencer];
-        for index in 0..10 {
-            allowed_accounts.push(self.signer_at(index).address());
-        }
-        allowed_accounts.sort_unstable();
-        allowed_accounts.dedup();
-
-        // The pinned Tempo dev L1 exposes TIP-1091's legacy factory selector. The production
-        // binding also carries initial membership for upgraded networks, so use the legacy call
-        // here and apply the same membership immediately through the newly created portal.
-        let create_zone = LegacyZoneFactory::createZoneCall {
-            params: LegacyZoneFactory::CreateZoneParams {
+        let create_zone = ZoneFactory::createZoneCall {
+            params: ZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
+                accessMode: config.access_mode,
+                gatewayMode: config.gateway_mode,
+                allowedAccounts: config.allowed_accounts,
+                zoneGateways: config.zone_gateways,
                 sequencers: vec![sequencer],
                 threshold: 1,
                 rpcUrl: String::new(),
@@ -1464,28 +1613,7 @@ impl L1TestNode {
             .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
             .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
 
-        let portal_address = zone_created.portal;
-        let admin_provider = if admin == self.dev_address() {
-            self.dev_provider()
-        } else if admin == self.admin_address() {
-            self.admin_provider()
-        } else {
-            return Err(eyre::eyre!(
-                "test helper cannot configure membership for unknown admin {admin}"
-            ));
-        };
-        let portal = ZonePortal::new(portal_address, &admin_provider);
-        for account in allowed_accounts {
-            let receipt = portal
-                .setAllowedAccount(account, true)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            eyre::ensure!(receipt.status(), "setting initial portal member failed");
-        }
-
-        Ok(portal_address)
+        Ok(zone_created.portal)
     }
 
     /// Deploy the SwapAndDepositRouter contract on L1 from the Foundry artifact.
@@ -1530,62 +1658,30 @@ impl L1TestNode {
             .ok_or_else(|| eyre::eyre!("SwapAndDepositRouter deployment missing contract address"))
     }
 
-    /// Register an account as a callback gateway on a zone portal.
-    pub(crate) async fn set_portal_gateway_as_admin(
-        &self,
-        portal_address: Address,
-        account: Address,
-    ) -> eyre::Result<()> {
-        use tempo_zone_contracts::ZonePortal;
-
-        let provider = self.admin_provider();
-        let receipt = ZonePortal::new(portal_address, &provider)
-            .setGateway(account, true)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "registering portal role failed");
-        Ok(())
-    }
-
-    /// Deploy L1 infrastructure for a two-zone cross-zone test with separate sequencers.
-    pub(crate) async fn deploy_two_zones_with_sequencers(
+    /// Deploy two open zones for cross-zone routing, with separate sequencers.
+    pub(crate) async fn deploy_two_open_zones_with_sequencers(
         &self,
         sequencer_a: alloy_signer_local::PrivateKeySigner,
         sequencer_b: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<(Address, Address, Address)> {
         let factory = self.native_zone_factory().await?;
         let portal_a = self
-            .create_zone_with_admin_and_sequencer(
+            .create_zone_with_admin_sequencer_and_config(
                 factory,
                 self.dev_address(),
                 sequencer_a.address(),
+                ZoneCreationConfig::open(),
             )
             .await?;
         let portal_b = self
-            .create_zone_with_admin_and_sequencer(
+            .create_zone_with_admin_sequencer_and_config(
                 factory,
                 self.dev_address(),
                 sequencer_b.address(),
+                ZoneCreationConfig::open(),
             )
             .await?;
         let router = self.deploy_router(factory).await?;
-
-        use tempo_zone_contracts::ZonePortal;
-        let provider = self.dev_provider();
-        for portal_address in [portal_a, portal_b] {
-            let receipt = ZonePortal::new(portal_address, &provider)
-                .setGateway(router, true)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            eyre::ensure!(
-                receipt.status(),
-                "registering router as zone gateway failed"
-            );
-        }
 
         Ok((portal_a, portal_b, router))
     }
@@ -1647,6 +1743,144 @@ impl L1TestNode {
             .await?;
         eyre::ensure!(receipt.status(), "enableToken failed");
         Ok(())
+    }
+
+    /// Update a portal callback gateway with the default distinct admin signer.
+    pub(crate) async fn set_zone_gateway_on_portal(
+        &self,
+        portal_address: Address,
+        gateway: Address,
+        enabled: bool,
+    ) -> eyre::Result<u64> {
+        self.set_zone_gateway_on_portal_with_signer(
+            portal_address,
+            gateway,
+            enabled,
+            self.admin_signer(),
+        )
+        .await
+    }
+
+    /// Update account allowlist enforcement with the default portal admin.
+    pub(crate) async fn set_access_mode_on_portal(
+        &self,
+        portal_address: Address,
+        mode: bool,
+    ) -> eyre::Result<u64> {
+        use tempo_zone_contracts::ZonePortal;
+        let provider = self.admin_provider();
+        let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .setAccessMode(mode)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setAccessMode failed");
+        eyre::ensure!(
+            portal.isAccessEnforced().call().await? == mode,
+            "L1 ZonePortal access mode did not update"
+        );
+        Ok(provider.get_block_number().await?)
+    }
+
+    /// Update callback gateway registration enforcement with the default portal admin.
+    pub(crate) async fn set_gateway_mode_on_portal(
+        &self,
+        portal_address: Address,
+        mode: bool,
+    ) -> eyre::Result<u64> {
+        use tempo_zone_contracts::ZonePortal;
+        let provider = self.admin_provider();
+        let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .setGatewayMode(mode)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setGatewayMode failed");
+        eyre::ensure!(
+            portal.isGatewayOpen().call().await? != mode,
+            "L1 ZonePortal gateway mode did not update"
+        );
+        Ok(provider.get_block_number().await?)
+    }
+
+    /// Update a portal callback gateway with the signer that owns that portal's admin role.
+    pub(crate) async fn set_zone_gateway_on_portal_with_signer(
+        &self,
+        portal_address: Address,
+        gateway: Address,
+        enabled: bool,
+        admin_signer: alloy_signer_local::PrivateKeySigner,
+    ) -> eyre::Result<u64> {
+        use tempo_zone_contracts::ZonePortal;
+        let provider = self.provider_with_signer(admin_signer);
+        let portal = ZonePortal::new(portal_address, &provider);
+        let role = if enabled {
+            PortalRole::CallbackGateway
+        } else {
+            PortalRole::None
+        };
+        let receipt = portal
+            .setRole(gateway, role)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setRole for gateway failed");
+        eyre::ensure!(
+            portal.role(gateway).call().await? as u8 == role as u8,
+            "L1 ZonePortal gateway role for {gateway} did not equal {role:?}"
+        );
+        Ok(provider.get_block_number().await?)
+    }
+
+    /// Update closed-mode account membership with the default distinct admin signer.
+    pub(crate) async fn set_allowed_account_on_portal(
+        &self,
+        portal_address: Address,
+        account: Address,
+        enabled: bool,
+    ) -> eyre::Result<u64> {
+        self.set_allowed_account_on_portal_with_signer(
+            portal_address,
+            account,
+            enabled,
+            self.admin_signer(),
+        )
+        .await
+    }
+
+    /// Update closed-mode account membership with an explicit portal admin signer.
+    pub(crate) async fn set_allowed_account_on_portal_with_signer(
+        &self,
+        portal_address: Address,
+        account: Address,
+        enabled: bool,
+        admin_signer: alloy_signer_local::PrivateKeySigner,
+    ) -> eyre::Result<u64> {
+        use tempo_zone_contracts::ZonePortal;
+        let provider = self.provider_with_signer(admin_signer);
+        let portal = ZonePortal::new(portal_address, &provider);
+        let role = if enabled {
+            PortalRole::Account
+        } else {
+            PortalRole::None
+        };
+        let receipt = portal
+            .setRole(account, role)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setRole for account failed");
+        eyre::ensure!(
+            portal.role(account).call().await? as u8 == role as u8,
+            "L1 ZonePortal account role for {account} did not equal {role:?}"
+        );
+        Ok(provider.get_block_number().await?)
     }
 
     /// Pause deposits for a token on the ZonePortal.
@@ -2150,6 +2384,7 @@ where
 ///
 /// Use [`WithdrawalArgs::new`] for the common case (amount only, self-withdrawal),
 /// then override individual fields as needed.
+#[derive(Clone)]
 pub(crate) struct WithdrawalArgs {
     pub amount: u128,
     pub to: Option<Address>,
@@ -2377,6 +2612,29 @@ impl ZoneAccount {
         zone: &ZoneTestNode,
     ) -> eyre::Result<U256> {
         self.deposit_to(self.address, amount, timeout, zone).await
+    }
+
+    /// Simulate a plaintext deposit without submitting a transaction.
+    pub(crate) async fn simulate_deposit(
+        &self,
+        amount: u128,
+        recipient: Address,
+        tempo_refund_recipient: Address,
+    ) -> eyre::Result<()> {
+        use tempo_precompiles::PATH_USD_ADDRESS;
+        use tempo_zone_contracts::ZonePortal;
+
+        ZonePortal::new(self.portal_address, &self.l1_provider)
+            .deposit(
+                PATH_USD_ADDRESS,
+                recipient,
+                amount,
+                B256::ZERO,
+                tempo_refund_recipient,
+            )
+            .call()
+            .await?;
+        Ok(())
     }
 
     /// Approve the ZonePortal to spend pathUSD on L1, then deposit to a specific recipient.
@@ -2628,6 +2886,30 @@ impl ZoneAccount {
         self.withdraw_token_with(ZONE_TOKEN_ADDRESS, args).await
     }
 
+    /// Simulate a withdrawal request without submitting it to the transaction pool.
+    /// Useful for asserting deterministic validation reverts.
+    pub(crate) async fn simulate_withdraw_with(&self, args: WithdrawalArgs) -> eyre::Result<()> {
+        use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS};
+
+        let to = args.to.unwrap_or(self.address);
+        let zone_fallback_recipient = args.zone_fallback_recipient.unwrap_or(self.address);
+        IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider)
+            .requestWithdrawal(
+                ZONE_TOKEN_ADDRESS,
+                to,
+                args.amount,
+                args.memo,
+                args.gas_limit,
+                zone_fallback_recipient,
+                args.data,
+                args.reveal_to,
+            )
+            .from(self.address)
+            .call()
+            .await?;
+        Ok(())
+    }
+
     /// Approve the ZoneOutbox for a specific token, then request a withdrawal on L2.
     pub(crate) async fn withdraw_token(
         &mut self,
@@ -2644,17 +2926,9 @@ impl ZoneAccount {
         token: Address,
         args: WithdrawalArgs,
     ) -> eyre::Result<()> {
-        use tempo_contracts::precompiles::ITIP20;
         use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
-        // Approve outbox for this token
-        ITIP20::new(token, &self.l2_provider)
-            .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-            .gas(TIP20_TX_GAS)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        self.approve_outbox(token).await?;
 
         let to = args.to.unwrap_or(self.address);
         let zone_fallback_recipient = args.zone_fallback_recipient.unwrap_or(self.address);
@@ -2684,6 +2958,22 @@ impl ZoneAccount {
 
         Ok(())
     }
+
+    /// Approve the ZoneOutbox for a token without submitting a withdrawal.
+    pub(crate) async fn approve_outbox(&self, token: Address) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+        use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+
+        let receipt = ITIP20::new(token, &self.l2_provider)
+            .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+            .gas(TIP20_TX_GAS)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L2 outbox approval failed");
+        Ok(())
+    }
 }
 
 /// Spawn the zone sequencer background tasks (batch submitter + withdrawal processor).
@@ -2693,23 +2983,25 @@ pub(crate) async fn spawn_sequencer(
     portal_address: Address,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
 ) -> zone_sequencer::ZoneSequencerHandle {
-    spawn_sequencer_with_anchor_config(
+    spawn_sequencer_with_config(
         l1,
         zone,
         portal_address,
         sequencer_signer,
         zone_sequencer::BatchAnchorConfig::default(),
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await
 }
 
-/// Spawn the zone sequencer background tasks with custom EIP-2935 anchor limits.
-pub(crate) async fn spawn_sequencer_with_anchor_config(
+/// Spawn the zone sequencer background tasks with custom limits.
+pub(crate) async fn spawn_sequencer_with_config(
     l1: &L1TestNode,
     zone: &ZoneTestNode,
     portal_address: Address,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
     batch_anchor_config: zone_sequencer::BatchAnchorConfig,
+    withdrawal_batch_limits: zone_sequencer::WithdrawalBatchLimits,
 ) -> zone_sequencer::ZoneSequencerHandle {
     use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -2718,6 +3010,7 @@ pub(crate) async fn spawn_sequencer_with_anchor_config(
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),
         withdrawal_poll_interval: Duration::from_millis(500),
+        withdrawal_batch_limits,
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
         tempo_state_address: TEMPO_STATE_ADDRESS,
@@ -3706,10 +3999,6 @@ impl L1Fixture {
             keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
         let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
-        let dev_account_role_slot: B256 = l1_dev_signer()
-            .address()
-            .mapping_slot(PORTAL_ROLE_SLOT.into())
-            .into();
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
         // address-level receive policies, so seed their absence as baseline raw L1 state.
@@ -3735,6 +4024,9 @@ impl L1Fixture {
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
+            // Synthetic fixtures use open account and gateway modes so their tests do not need
+            // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
+            cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
             // Local fixtures treat pathUSD as the default enabled bridge token.
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
@@ -3744,12 +4036,6 @@ impl L1Fixture {
                 path_usd_config_slot,
                 block,
                 enabled_token_config,
-            );
-            cache.set(
-                portal_address,
-                dev_account_role_slot,
-                block,
-                B256::with_last_byte(1),
             );
         }
 

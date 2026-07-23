@@ -14,9 +14,13 @@ use tempo_precompiles::{
     tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
-use tempo_zone_contracts::{IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent};
+use tempo_zone_contracts::{
+    IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal, ZonePortalError,
+    portal_token_config_slot,
+};
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_IS_SEQUENCER_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -74,6 +78,47 @@ impl ZoneOutbox {
         Ok(())
     }
 
+    fn validate_withdrawal_policy<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        token: Address,
+        to: Address,
+        gas_limit: u64,
+    ) -> ZoneResult<()> {
+        let token_config = self.read_portal_slot(l1, portal_token_config_slot(token))?;
+        if token_config & U256::from(u8::MAX) == U256::ZERO {
+            return Err(ZonePortalError::token_not_enabled().into());
+        }
+
+        let modes = self.read_portal_slot(l1, PORTAL_ENFORCEMENT_MODES_SLOT)?;
+        let access_enforced = modes & U256::from(u8::MAX) != U256::ZERO;
+        let gateway_enforced = (modes >> 8) & U256::from(u8::MAX) != U256::ZERO;
+
+        if gas_limit == 0 {
+            if !access_enforced && !gateway_enforced {
+                return Ok(());
+            }
+
+            let role_slot = to.mapping_slot(PORTAL_ROLE_SLOT.into());
+            let role = self.read_portal_slot(l1, role_slot.into())?;
+            if gateway_enforced && role == U256::from(ZonePortal::Role::CallbackGateway as u8) {
+                return Err(ZonePortalError::invalid_callback_target().into());
+            }
+            if access_enforced && role != U256::from(ZonePortal::Role::Account as u8) {
+                return Err(ZonePortalError::account_not_allowed(to).into());
+            }
+        } else if gateway_enforced {
+            let role_slot = to.mapping_slot(PORTAL_ROLE_SLOT.into());
+            if self.read_portal_slot(l1, role_slot.into())?
+                != U256::from(ZonePortal::Role::CallbackGateway as u8)
+            {
+                return Err(ZonePortalError::invalid_callback_target().into());
+            }
+        }
+
+        Ok(())
+    }
+
     fn calculate_fee_unchecked(&self, gas_limit: u64) -> TempoResult<u128> {
         let gas = u128::from(WITHDRAWAL_BASE_GAS) + u128::from(gas_limit);
         gas.checked_mul(self.tempo_gas_rate.read()?)
@@ -122,8 +167,9 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn request_withdrawal(
+    fn request_withdrawal<P: L1StorageReader>(
         &mut self,
+        l1: &L1State<P>,
         caller: Address,
         fee_payer: Address,
         current_tx_hash: B256,
@@ -145,6 +191,7 @@ impl ZoneOutbox {
         if !zone_token.is_initialized()? {
             return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
         }
+        self.validate_withdrawal_policy(l1, call.token, call.to, call.gasLimit)?;
         self.enforce_withdrawal_block_cap()?;
 
         // If necessary, validate reveal

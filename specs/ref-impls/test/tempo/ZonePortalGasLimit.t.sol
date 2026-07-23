@@ -77,6 +77,8 @@ contract ZonePortalGasLimitTest is Test {
         portal.initialize(
             1,
             address(token),
+            true,
+            true,
             allowedAccounts,
             noGateways,
             address(0x400),
@@ -134,6 +136,32 @@ contract ZonePortalGasLimitTest is Test {
 
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertTrue(portal.currentDepositQueueHash() != bytes32(0));
+    }
+
+    function test_processWithdrawal_simpleTransferFailureBouncesBackWithinPlannerLimit() public {
+        token.mint(address(portal), 500e6);
+        token.setBlockedRecipient(recipient, true);
+
+        Withdrawal memory w = Withdrawal({
+            token: address(token),
+            senderTag: keccak256("sender"),
+            to: recipient,
+            amount: 500e6,
+            memo: bytes32(0),
+            gasLimit: 0,
+            fallbackNonce: 1,
+            callbackData: "",
+            encryptedSender: ""
+        });
+        _storeSingleWithdrawal(w);
+
+        (bool success,) = address(portal).call{ gas: 1_500_000 }(
+            abi.encodeCall(IZonePortal.processWithdrawals, (_singleWithdrawal(w), bytes32(0)))
+        );
+
+        assertTrue(success);
+        assertEq(portal.withdrawalQueueHead(), 1);
         assertTrue(portal.currentDepositQueueHash() != bytes32(0));
     }
 

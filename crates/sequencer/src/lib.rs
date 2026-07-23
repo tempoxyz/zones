@@ -27,7 +27,11 @@ pub mod withdrawals;
 pub use encryption_key::register_encryption_key;
 pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
-pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
+pub use withdrawals::{
+    DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
+    MAX_WITHDRAWAL_BATCH_GAS, SharedWithdrawalStore, WithdrawalBatchLimits,
+    WithdrawalProcessorConfig, WithdrawalStore,
+};
 
 use crate::rpc::rpc_connection_config;
 
@@ -42,6 +46,8 @@ pub struct ZoneSequencerConfig {
     pub retry_connection_interval: Duration,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
+    /// Gas and concurrency limits for withdrawal processing transactions.
+    pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// ZoneOutbox contract address on Zone L2.
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
@@ -81,6 +87,7 @@ pub async fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
 ) -> ZoneSequencerHandle {
+    let sequencer_address = signer.address();
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
@@ -100,6 +107,8 @@ pub async fn spawn_zone_sequencer(
         portal_address: config.portal_address,
         l1_rpc_url: config.l1_rpc_url.clone(),
         fallback_poll_interval: config.withdrawal_poll_interval,
+        sequencer_address,
+        batch_limits: config.withdrawal_batch_limits,
     };
 
     let monitor_config = ZoneMonitorConfig {

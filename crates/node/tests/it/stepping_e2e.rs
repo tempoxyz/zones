@@ -6,7 +6,7 @@
 //! ancestry path instead of the simpler direct-mode case.
 
 use crate::utils::{
-    L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_anchor_config,
+    L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_config,
 };
 use alloy::providers::Provider;
 use alloy_sol_types::SolCall;
@@ -273,12 +273,13 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
         l1_tip.saturating_sub(first_step_tempo),
     );
 
-    let seq = spawn_sequencer_with_anchor_config(
+    let seq = spawn_sequencer_with_config(
         &l1,
         &zone,
         portal_address,
         l1.dev_signer(),
         anchor_config,
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await;
 
@@ -379,12 +380,13 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
     );
 
     // Start the sequencer only after the backlog has accumulated.
-    let seq = spawn_sequencer_with_anchor_config(
+    let seq = spawn_sequencer_with_config(
         &l1,
         &zone,
         portal_address,
         l1.dev_signer(),
         anchor_config,
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await;
 
@@ -513,12 +515,13 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
         l1_tip.saturating_sub(first_step_tempo),
     );
 
-    let seq = spawn_sequencer_with_anchor_config(
+    let seq = spawn_sequencer_with_config(
         &l1,
         &zone,
         portal_address,
         l1.dev_signer(),
         anchor_config,
+        zone_sequencer::WithdrawalBatchLimits::default(),
     )
     .await;
 

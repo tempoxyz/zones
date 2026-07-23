@@ -258,11 +258,15 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         if (gasLimit == 0) {
-            if (config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            if (!config.isGatewayOpen() && config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
             if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
         } else {
             _validateGasLimit(gasLimit);
-            if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            if (!config.isGatewayOpen() && !config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
         }
 
         _validateRevealTo(revealTo);

@@ -35,6 +35,8 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
+    bool accessMode; // creation-time enforcement flag; query the portal for the current value
+    bool gatewayMode; // creation-time enforcement flag; query the portal for the current value
     address admin;
     address[] sequencers;
     uint8 threshold;
@@ -354,6 +356,8 @@ interface IZoneTxContext {
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
 //   slot 19: isSequencer (mapping(address => bool))
+//   slot 20: role (mapping(address => Role))
+//   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -367,6 +371,9 @@ bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
+bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
+bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
+bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -417,7 +424,9 @@ interface IZoneFactory {
 
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (admin can enable more later)
-        address[] allowedAccounts; // initial closed-loop account allowlist
+        bool accessMode; // whether to initially enforce the account allowlist
+        bool gatewayMode; // whether to initially enforce callback gateway registration
+        address[] allowedAccounts; // initial account allowlist (retained while access is open)
         address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
         address[] sequencers;
@@ -435,6 +444,8 @@ interface IZoneFactory {
         uint32 indexed zoneId,
         address indexed portal,
         address initialToken,
+        bool accessMode,
+        bool gatewayMode,
         address admin,
         address[] sequencers,
         uint8 threshold,
@@ -449,6 +460,9 @@ interface IZoneFactory {
     error InvalidZoneMessengerImplementation();
     error InvalidVerifierImplementation();
     error ImplementationUpdatesLocked();
+    error InvalidClosedLoopConfig();
+    error DuplicateAllowedAccount();
+    error DuplicateZoneGateway();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
@@ -606,6 +620,9 @@ interface IZonePortal {
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
+    /// @notice Emitted when the independently mutable enforcement flags are initialized or updated.
+    event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
+
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
@@ -641,11 +658,14 @@ interface IZonePortal {
     error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
 
+    /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);
 
     function initialize(
         uint32 zoneId,
         address initialToken,
+        bool accessMode,
+        bool gatewayMode,
         address[] calldata allowedAccounts,
         address[] calldata zoneGateways,
         address messenger,
@@ -670,6 +690,29 @@ interface IZonePortal {
 
     /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
+
+    /// @notice Whether account allowlist enforcement is enabled.
+    function isAccessEnforced() external view returns (bool);
+
+    /// @notice Change account allowlist enforcement. Only callable by the admin.
+    function setAccessMode(bool enforced) external;
+
+    /// @notice Whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() external view returns (bool);
+
+    /// @notice Change callback gateway enforcement. Only callable by the admin.
+    function setGatewayMode(bool enforced) external;
+
+    function role(address account) external view returns (Role);
+
+    /// @notice Assign an account's portal role. Only callable by the admin.
+    function setRole(address account, Role role) external;
+
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external;
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external;
 
     function admin() external view returns (address);
 
@@ -761,15 +804,6 @@ interface IZonePortal {
 
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
     function acceptAdmin() external;
-
-    /// @notice Return an account's closed-loop portal role.
-    function role(address account) external view returns (Role);
-
-    /// @notice Add or remove an account from closed-loop portal flows.
-    function setAllowedAccount(address account, bool allowed) external;
-
-    /// @notice Add or remove a callback gateway.
-    function setGateway(address account, bool allowed) external;
 
     /// @notice Get the sequencer's current encryption public key for encrypted deposits
     /// @return x The X coordinate of the secp256k1 public key
@@ -1258,7 +1292,14 @@ interface IZoneConfig {
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
 
-    /// @notice Check closed-loop account membership by reading from L1 ZonePortal.
+    /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
+    function isAccessEnforced() external view returns (bool);
+
+    /// @notice Read whether callback gateway registration enforcement is disabled on L1 ZonePortal.
+    function isGatewayOpen() external view returns (bool);
+
+    /// @notice Check whether an account is authorized under the zone's access policy.
+    /// @dev Returns true for every account when enforcement is disabled.
     function isAllowedAccount(address account) external view returns (bool);
 
     /// @notice Check whether an address is a registered callback-only ZoneGateway.
