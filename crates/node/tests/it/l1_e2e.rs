@@ -509,7 +509,6 @@ async fn test_many_concurrent_withdrawals_are_batched() -> eyre::Result<()> {
 /// An open zone has no account allowlist: an unlisted account can complete the full
 /// L1 deposit -> L2 mint -> L2 withdrawal -> L1 release loop.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -739,7 +738,6 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
 
 /// Account and gateway enforcement can be changed independently without rewriting either set.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -898,7 +896,6 @@ async fn test_queued_plain_withdrawal_bounces_after_recipient_revocation() -> ey
 /// gateway is revoked before L1 processing. The callback bounces, and the next
 /// plain withdrawal proves the failed head did not block the FIFO.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_queued_callback_bounces_after_gateway_revocation() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1002,7 +999,6 @@ async fn test_queued_callback_bounces_after_gateway_revocation() -> eyre::Result
 ///
 /// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1132,7 +1128,6 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 /// The refund must go to the Tempo refund recipient encoded in the router payload,
 /// not to the encrypted recipient and not to the router contract.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1246,7 +1241,6 @@ async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Resu
 ///  4. Deposit BetaUSD back into the same zone.
 ///  5. Verify AlphaUSD was consumed and BetaUSD was minted.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1349,7 +1343,6 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
 /// Deposits for BetaUSD are paused on the target portal so the router callback
 /// reverts and the original AlphaUSD withdrawal bounces back to the sender.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_failure()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1449,7 +1442,6 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
 /// encrypted payload and key index, a target-portal deposit failure must revert
 /// the callback and bounce the original token back to the sender.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires upgraded Tempo native ZoneFactory ABI; re-enable after tempo#6934"]
 async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_failure()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

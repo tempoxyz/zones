@@ -38,7 +38,7 @@ use tempo_chainspec::{
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, IZoneFactory as LegacyZoneFactory, TIP403_REGISTRY_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -263,6 +263,24 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
             .with_nonce(Some(1))
             .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
     );
+
+    // The native factory requires the initial token's TIP-403 policy binding to exist.
+    let token_policy_slot = keccak256(
+        (
+            PATH_USD_ADDRESS,
+            tip403_registry_slots::TOKEN_TRANSFER_POLICIES,
+        )
+            .abi_encode(),
+    );
+    let packed_policy = U256::from(ALLOW_ALL_POLICY_ID) | (U256::ONE << u64::BITS);
+    genesis
+        .alloc
+        .entry(TIP403_REGISTRY_ADDRESS)
+        .or_default()
+        .storage
+        .get_or_insert_default()
+        .insert(token_policy_slot, B256::from(packed_policy.to_be_bytes()));
+
     Ok(())
 }
 
@@ -1561,13 +1579,17 @@ impl L1TestNode {
         config: ZoneCreationConfig,
     ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
-        use tempo_zone_contracts::ZonePortal;
+        use tempo_zone_contracts::ZoneFactory;
 
         let l1_provider = self.dev_provider();
-        let create_zone = LegacyZoneFactory::createZoneCall {
-            params: LegacyZoneFactory::CreateZoneParams {
+        let create_zone = ZoneFactory::createZoneCall {
+            params: ZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
+                accessMode: config.access_mode,
+                gatewayMode: config.gateway_mode,
+                allowedAccounts: config.allowed_accounts,
+                zoneGateways: config.zone_gateways,
                 sequencers: vec![sequencer],
                 threshold: 1,
                 rpcUrl: String::new(),
@@ -1588,60 +1610,10 @@ impl L1TestNode {
             .inner
             .logs()
             .iter()
-            .find_map(|log| LegacyZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
+            .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
             .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
 
-        let portal_address = zone_created.portal;
-        let admin_provider = if admin == self.dev_address() {
-            self.dev_provider()
-        } else if admin == self.admin_address() {
-            self.admin_provider()
-        } else {
-            return Err(eyre::eyre!(
-                "test helper cannot configure portal for unknown admin {admin}"
-            ));
-        };
-        let portal = ZonePortal::new(portal_address, &admin_provider);
-        for account in config.allowed_accounts {
-            let receipt = portal
-                .setAllowedAccount(account, true)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            eyre::ensure!(receipt.status(), "setting initial portal member failed");
-        }
-        for gateway in config.zone_gateways {
-            let receipt = portal
-                .setGateway(gateway, true)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            eyre::ensure!(receipt.status(), "setting initial portal gateway failed");
-        }
-        let receipt = portal
-            .setAccessMode(config.access_mode)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(
-            receipt.status(),
-            "setting initial portal access mode failed"
-        );
-        let receipt = portal
-            .setGatewayMode(config.gateway_mode)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(
-            receipt.status(),
-            "setting initial portal gateway mode failed"
-        );
-
-        Ok(portal_address)
+        Ok(zone_created.portal)
     }
 
     /// Deploy the SwapAndDepositRouter contract on L1 from the Foundry artifact.
