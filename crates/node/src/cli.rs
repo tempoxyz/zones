@@ -18,7 +18,10 @@ use crate::{
     ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
-use zone_sequencer::BatchAnchorConfig;
+use zone_sequencer::{
+    BatchAnchorConfig, DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
+    MAX_WITHDRAWAL_BATCH_GAS, WithdrawalBatchLimits,
+};
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
 const MAX_BLOCKS_PER_FILTER: u64 = 1_000_000;
@@ -33,7 +36,7 @@ const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
 /// Tempo Zone CLI entry point.
 pub enum ZoneCli {
     Node(Box<Cli<ZoneChainSpecParser, ZoneArgs>>),
-    Dev(DevCommand),
+    Dev(Box<DevCommand>),
 }
 
 impl ZoneCli {
@@ -65,7 +68,9 @@ impl ZoneCli {
     {
         let matches = Self::command().try_get_matches_from(args)?;
         if let Some(("dev", dev_matches)) = matches.subcommand() {
-            return DevCommand::from_arg_matches(dev_matches).map(Self::Dev);
+            return DevCommand::from_arg_matches(dev_matches)
+                .map(Box::new)
+                .map(Self::Dev);
         }
         Cli::from_arg_matches(&matches)
             .map(Box::new)
@@ -79,7 +84,7 @@ impl ZoneCli {
     pub fn run(self) -> eyre::Result<()> {
         match self {
             Self::Node(cli) => run_node(*cli),
-            Self::Dev(command) => command.run(),
+            Self::Dev(command) => (*command).run(),
         }
     }
 }
@@ -183,6 +188,10 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 batch_interval_blocks: args.zone_batch_interval_blocks,
                 batch_anchor_config: BatchAnchorConfig::default(),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
+                withdrawal_batch_limits: WithdrawalBatchLimits {
+                    max_batch_gas: args.withdrawal_max_batch_gas,
+                    max_in_flight_batches: args.withdrawal_max_in_flight_batches,
+                },
             });
         }
         if manifest_role == Some(Role::Follower) {
@@ -358,6 +367,26 @@ pub struct ZoneArgs {
     )]
     pub withdrawal_poll_interval_secs: u64,
 
+    /// Maximum gas reserved by one processWithdrawals transaction, up to 20,000,000. An oversized
+    /// withdrawal is submitted alone.
+    #[arg(
+        long = "withdrawal-max-batch-gas",
+        env = "WITHDRAWAL_MAX_BATCH_GAS",
+        default_value_t = DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
+        value_parser = clap::builder::RangedU64ValueParser::<u64>::new()
+            .range(1..=MAX_WITHDRAWAL_BATCH_GAS)
+    )]
+    pub withdrawal_max_batch_gas: u64,
+
+    /// Maximum number of ordered processWithdrawals transactions kept in flight.
+    #[arg(
+        long = "withdrawal-max-in-flight-batches",
+        env = "WITHDRAWAL_MAX_IN_FLIGHT_BATCHES",
+        default_value_t = DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES,
+        value_parser = clap::builder::RangedU64ValueParser::<usize>::new().range(1..)
+    )]
+    pub withdrawal_max_in_flight_batches: usize,
+
     /// Genesis Tempo L1 block number override.
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
@@ -455,6 +484,7 @@ mod tests {
         validate_portal_address,
     };
     use zone_p2p::Role;
+    use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
     struct ZoneArgsParser {
@@ -643,6 +673,24 @@ mod tests {
         .unwrap();
         assert!(parsed.zone.enable_sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
+    }
+
+    #[test]
+    fn withdrawal_batch_gas_rejects_values_above_the_safe_limit() {
+        let above_limit = (MAX_WITHDRAWAL_BATCH_GAS + 1).to_string();
+        let error = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer-key",
+            "0x01",
+            "--withdrawal-max-batch-gas",
+            &above_limit,
+        ])
+        .unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

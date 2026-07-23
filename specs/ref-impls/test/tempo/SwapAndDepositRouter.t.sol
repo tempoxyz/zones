@@ -98,14 +98,14 @@ contract MockZonePortalForRouter {
         address to,
         uint128 amount,
         bytes32 memo,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32)
     {
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastDepositRecipient = to;
-        lastDepositBouncebackRecipient = bouncebackRecipient;
+        lastDepositBouncebackRecipient = tempoRefundRecipient;
         lastDepositAmount = amount;
         lastDepositMemo = memo;
         depositCalled = true;
@@ -117,7 +117,7 @@ contract MockZonePortalForRouter {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32)
@@ -125,7 +125,7 @@ contract MockZonePortalForRouter {
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastEncryptedAmount = amount;
         lastEncryptedKeyIndex = keyIndex;
-        lastEncryptedBouncebackRecipient = bouncebackRecipient;
+        lastEncryptedBouncebackRecipient = tempoRefundRecipient;
         encryptedDepositCalled = true;
         return bytes32(0);
     }
@@ -181,7 +181,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         address tokenOut,
         address targetPortal,
         address recipient,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         bytes32 memo,
         uint128 minAmountOut
     )
@@ -190,7 +190,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         returns (bytes memory)
     {
         return abi.encode(
-            false, tokenOut, targetPortal, recipient, bouncebackRecipient, memo, minAmountOut
+            false, tokenOut, targetPortal, recipient, tempoRefundRecipient, memo, minAmountOut
         );
     }
 
@@ -199,7 +199,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         address targetPortal,
         uint256 keyIndex,
         EncryptedDepositPayload memory encrypted,
-        address bouncebackRecipient,
+        address tempoRefundRecipient,
         uint128 minAmountOut
     )
         internal
@@ -207,7 +207,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         returns (bytes memory)
     {
         return abi.encode(
-            true, tokenOut, targetPortal, keyIndex, encrypted, bouncebackRecipient, minAmountOut
+            true, tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
         );
     }
 

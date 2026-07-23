@@ -12,18 +12,14 @@ use alloy_evm::{
 };
 use reth_evm::block::StateDB;
 use reth_revm::Inspector;
-use revm::context::{ContextTr, JournalTr, Transaction};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
-use tempo_precompiles::{
-    TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
-};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
-use tempo_revm::{TempoStateAccess, evm::TempoContext};
+use tempo_revm::evm::TempoContext;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::L1StorageReader;
+use zone_precompiles::{L1StorageReader, tx_context};
 
-use crate::{L1OverlayDB, ZoneEvm, tx_context};
+use crate::{L1OverlayDB, ZoneEvm};
 
 /// Simplified block executor for zone nodes.
 ///
@@ -54,33 +50,6 @@ where
             ),
         }
     }
-
-    /// Overrides `validatorTokens[beneficiary]` to match the resolved fee token
-    /// so the handler skips FeeAMM.
-    // TODO: Remove this override once ZoneFeeManager lands.
-    fn override_validator_token(&mut self) {
-        let ctx = self.inner.evm.ctx_mut();
-        let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());
-        let spec = ctx.cfg.spec;
-
-        let fee_token = match ctx.journaled_state.get_fee_token(
-            &ctx.tx,
-            fee_payer,
-            spec,
-            StorageActions::disabled(),
-        ) {
-            Ok(token) => token,
-            Err(_) => return,
-        };
-
-        let beneficiary = ctx.block.beneficiary;
-        let slot = TipFeeManager::new().validator_tokens[beneficiary].slot();
-
-        let _ = ctx.journal_mut().load_account(TIP_FEE_MANAGER_ADDRESS);
-        let _ =
-            ctx.journal_mut()
-                .sstore(TIP_FEE_MANAGER_ADDRESS, slot, fee_token.into_word().into());
-    }
 }
 
 impl<'a, DB, I, L1> BlockExecutor for ZoneBlockExecutor<'a, DB, I, L1>
@@ -108,11 +77,10 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
-        // Override the validator's fee token preference to match this
-        // transaction's resolved fee token, so the handler skips FeeAMM.
-        self.override_validator_token();
-
-        let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
+        let _tx_context_guard = tx_context::set_current_transaction(
+            *recovered.tx().tx_hash(),
+            tx_env.fee_payer().unwrap_or(tx_env.caller),
+        );
         let result = self
             .inner
             .execute_transaction_without_commit((tx_env, recovered));

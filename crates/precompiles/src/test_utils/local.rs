@@ -9,7 +9,7 @@ use k256::{
 };
 use revm::{
     Context,
-    context::{BlockEnv, CfgEnv, TxEnv},
+    context::{CfgEnv, TxEnv},
     database::{CacheDB, EmptyDB},
     precompile::PrecompileResult,
 };
@@ -19,6 +19,7 @@ use tempo_precompiles::{
     storage::{actions::StorageActions, evm::EvmPrecompileStorageProvider},
     storage_credits::NonCreditableSlots,
 };
+use tempo_primitives::TempoBlockEnv;
 
 use crate::{
     ZonePrecompileEnv,
@@ -29,7 +30,8 @@ use crate::{
 pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// EVM context used by local precompile unit tests.
-pub(crate) type TestContext = Context<BlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
+pub(crate) type TestContext =
+    Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 
 /// Create an empty test EVM context at the default Tempo hardfork.
 pub(crate) fn test_context() -> TestContext {

@@ -16,7 +16,7 @@ use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_node::rpc::NATIVE_BALANCE_PLACEHOLDER;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
+use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
 use crate::utils::{
     DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
@@ -122,7 +122,7 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
 
     let withdrawal_amount: u128 = 250_000;
 
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let withdrawal_fee = outbox.calculateWithdrawalFee(0).call().await?;
     let gas_buffer = u128::from(TIP20_TX_GAS)

@@ -17,6 +17,7 @@ import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { Verifier } from "../src/tempo/Verifier.sol";
 import { ZoneMessenger } from "../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../src/tempo/ZonePortal.sol";
+import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -81,11 +82,14 @@ contract BaseTest is Test {
     ITIP20Token public token1;
     ITIP20Token public token2;
     MockZoneTxContext public zoneTxContext = MockZoneTxContext(_ZONE_TX_CONTEXT);
+    MockZoneGateway public zoneGateway;
 
     error MissingPrecompile(string name, address addr);
     error CallShouldHaveReverted();
 
     function setUp() public virtual {
+        zoneGateway = new MockZoneGateway();
+
         if (_ACCOUNT_KEYCHAIN.code.length == 0) {
             revert MissingPrecompile("AccountKeychain", _ACCOUNT_KEYCHAIN);
         }
@@ -146,6 +150,37 @@ contract BaseTest is Test {
                 "TOKEN2", "T2", "USD", ITIP20(_PATH_USD), sequencer, bytes32("token2")
             )
         );
+
+        _mockTokenPolicyMigration(_PATH_USD, true);
+    }
+
+    function _mockTokenPolicyMigration(address token, bool isSet) internal {
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        vm.mockCall(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(isSet ? 1 : 0)
+        );
+        vm.mockCall(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token)),
+            abi.encode(isSet, uint64(1))
+        );
+    }
+
+    function _zoneGateways() internal view returns (address[] memory gateways) {
+        gateways = new address[](1);
+        gateways[0] = address(zoneGateway);
+    }
+
+    function _closedLoopAccounts() internal view returns (address[] memory accounts) {
+        accounts = new address[](5);
+        accounts[0] = address(this);
+        accounts[1] = admin;
+        accounts[2] = alice;
+        accounts[3] = bob;
+        accounts[4] = charlie;
     }
 
     /// @notice Installs the shared runtimes managed by the native TIP-1091 factory.
@@ -174,6 +209,10 @@ contract BaseTest is Test {
         portal.initialize(
             zoneId,
             initialToken,
+            true,
+            true,
+            _closedLoopAccounts(),
+            _zoneGateways(),
             ZONE_MESSENGER_ADDRESS,
             portalAdmin,
             sequencers,
@@ -189,6 +228,8 @@ contract BaseTest is Test {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(portal),
+                    accessMode: true,
+                    gatewayMode: true,
                     admin: portalAdmin,
                     sequencers: sequencers,
                     threshold: threshold,

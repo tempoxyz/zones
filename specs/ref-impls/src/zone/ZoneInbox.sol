@@ -221,7 +221,7 @@ contract ZoneInbox is IZoneInbox {
                 Deposit memory d = abi.decode(qd.depositData, (Deposit));
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-                if (d.bouncebackRecipient == address(0)) {
+                if (d.tempoRefundRecipient == address(0)) {
                     _processWithdrawalBounceBack(d);
                 } else if (qd.rejected) {
                     _rejectDeposit(
@@ -230,7 +230,7 @@ contract ZoneInbox is IZoneInbox {
                         d.sender,
                         d.token,
                         d.amount,
-                        d.bouncebackRecipient
+                        d.tempoRefundRecipient
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
@@ -238,9 +238,9 @@ contract ZoneInbox is IZoneInbox {
                             currentHash, d.sender, d.to, d.token, d.amount, d.memo
                         );
                     } catch {
-                        _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+                        _enqueueDepositBounceBack(d.token, d.amount, d.tempoRefundRecipient);
                         emit DepositFailed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
+                            currentHash, d.sender, d.to, d.token, d.amount, d.tempoRefundRecipient
                         );
                     }
                 }
@@ -255,7 +255,7 @@ contract ZoneInbox is IZoneInbox {
                         ed.sender,
                         ed.token,
                         ed.amount,
-                        ed.bouncebackRecipient
+                        ed.tempoRefundRecipient
                     );
                     continue;
                 }
@@ -364,37 +364,38 @@ contract ZoneInbox is IZoneInbox {
         address sender,
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         internal
     {
-        _enqueueDepositBounceBack(token, amount, bouncebackRecipient);
-        emit DepositRejected(currentHash, sender, depositType, token, amount, bouncebackRecipient);
+        _enqueueDepositBounceBack(token, amount, tempoRefundRecipient);
+        emit DepositRejected(currentHash, sender, depositType, token, amount, tempoRefundRecipient);
     }
 
     function _failEncryptedDeposit(bytes32 currentHash, EncryptedDeposit memory ed) internal {
-        _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+        _enqueueDepositBounceBack(ed.token, ed.amount, ed.tempoRefundRecipient);
         emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
     }
 
     function _enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         internal
     {
-        IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, bouncebackRecipient);
+        IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, tempoRefundRecipient);
     }
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
         uint64 fallbackNonce = uint64(uint160(d.to));
-        address fallbackRecipient = IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
-        try IZoneToken(d.token).mint(fallbackRecipient, d.amount) {
-            emit WithdrawalBounceBackProcessed(fallbackRecipient, d.token, d.amount);
+        address zoneFallbackRecipient =
+            IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
+        try IZoneToken(d.token).mint(zoneFallbackRecipient, d.amount) {
+            emit WithdrawalBounceBackProcessed(zoneFallbackRecipient, d.token, d.amount);
         } catch {
-            refunds[d.token][fallbackRecipient] += d.amount;
-            emit WithdrawalBounceBackPending(fallbackRecipient, d.token, d.amount);
+            refunds[d.token][zoneFallbackRecipient] += d.amount;
+            emit WithdrawalBounceBackPending(zoneFallbackRecipient, d.token, d.amount);
         }
     }
 

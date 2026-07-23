@@ -1,5 +1,6 @@
 use super::*;
 use std::collections::HashSet;
+use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
 use std::collections::BTreeMap;
@@ -228,6 +229,18 @@ impl L1BlockTracker {
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 type L1ProcessedEvents = (L1PortalEvents, HashSet<Address>);
+
+fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option<Address> {
+    (address == TIP403_REGISTRY_ADDRESS
+        || (is_tip20_prefix(address) && topic0 == Some(&TransferPolicyUpdate::SIGNATURE_HASH)))
+    .then_some(TIP403_REGISTRY_ADDRESS)
+}
+
+fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Address> {
+    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+
+    (topic0 == Some(&TokenEnabled::SIGNATURE_HASH)).then_some(TIP403_REGISTRY_ADDRESS)
+}
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -537,7 +550,7 @@ impl L1Subscriber {
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 
-        eyre::bail!("L1 head notification stream ended")
+        Err(eyre::eyre!("L1 head notification stream ended"))
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -617,7 +630,7 @@ impl L1Subscriber {
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), &invalidated);
+            self.update_l1_state_anchor(block_number, &invalidated);
             let anchor = sealed.num_hash();
             self.config
                 .block_tracker
@@ -679,8 +692,6 @@ impl L1Subscriber {
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> L1ProcessedEvents {
-        use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
@@ -691,18 +702,24 @@ impl L1Subscriber {
 
                 if address == portal_address {
                     invalidated.insert(address);
+                    if let Some(address) =
+                        portal_event_cache_invalidation_address(log.topics().first())
+                    {
+                        invalidated.insert(address);
+                    }
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
-                } else if address == TIP403_REGISTRY_ADDRESS
-                    || (is_tip20_prefix(address)
-                        && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH))
-                {
-                    invalidated.insert(address);
+                } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
+                    invalidated.extend([address, log.address()]);
                 }
             }
         }
 
+        // Enabling may migrate token-local policy storage into TIP-403.
+        for event in &portal_events.enabled_tokens {
+            invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
+        }
         self.record_portal_event_metrics(&portal_events);
         (portal_events, invalidated)
     }
@@ -746,15 +763,12 @@ impl L1Subscriber {
     pub(crate) fn update_l1_state_anchor(
         &self,
         number: u64,
-        hash: B256,
         invalidated_accounts: &HashSet<Address>,
     ) {
-        let mut guard = self.config.l1_state_cache.write();
-        for &address in invalidated_accounts {
-            guard.invalidate(address, number);
-        }
-        // Publish receipt coverage only after every mutation barrier from this block is visible.
-        guard.update_anchor(NumHash::new(number, hash));
+        self.config
+            .l1_state_cache
+            .lock()
+            .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
 }
 
@@ -814,4 +828,29 @@ pub(crate) fn verify_receipts(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::address;
+
+    #[test]
+    fn token_policy_updates_invalidate_the_registry() {
+        let token = address!("20C0000000000000000000000000000000000999");
+
+        assert_eq!(
+            cache_invalidation_address(token, Some(&TransferPolicyUpdate::SIGNATURE_HASH)),
+            Some(TIP403_REGISTRY_ADDRESS)
+        );
+    }
+
+    #[test]
+    fn token_enabled_events_invalidate_the_registry() {
+        assert_eq!(
+            portal_event_cache_invalidation_address(Some(&TokenEnabled::SIGNATURE_HASH)),
+            Some(TIP403_REGISTRY_ADDRESS)
+        );
+        assert_eq!(portal_event_cache_invalidation_address(None), None);
+    }
 }

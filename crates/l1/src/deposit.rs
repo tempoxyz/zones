@@ -14,7 +14,7 @@ pub struct Deposit {
     /// Fee paid on L1.
     pub fee: u128,
     /// Tempo recipient for a failed-deposit refund.
-    pub bounceback_recipient: Address,
+    pub tempo_refund_recipient: Address,
     /// User-provided memo.
     pub memo: B256,
 }
@@ -28,7 +28,7 @@ impl Deposit {
             to: event.to,
             amount: event.netAmount,
             fee: event.fee,
-            bounceback_recipient: event.bouncebackRecipient,
+            tempo_refund_recipient: event.tempoRefundRecipient,
             memo: event.memo,
         }
     }
@@ -43,7 +43,7 @@ impl Deposit {
             to: Address::from(encoded_nonce),
             amount: event.amount,
             fee: 0,
-            bounceback_recipient: Address::ZERO,
+            tempo_refund_recipient: Address::ZERO,
             memo: B256::ZERO,
         }
     }
@@ -61,7 +61,7 @@ pub struct EncryptedDeposit {
     /// Fee paid on L1.
     pub fee: u128,
     /// Tempo recipient for a failed-deposit refund.
-    pub bounceback_recipient: Address,
+    pub tempo_refund_recipient: Address,
     /// Index of the encryption key used.
     pub key_index: U256,
     /// Ephemeral public key X coordinate.
@@ -84,7 +84,7 @@ impl EncryptedDeposit {
             sender: event.sender,
             amount: event.netAmount,
             fee: event.fee,
-            bounceback_recipient: event.bouncebackRecipient,
+            tempo_refund_recipient: event.tempoRefundRecipient,
             key_index: event.keyIndex,
             ephemeral_pubkey_x: event.ephemeralPubkeyX,
             ephemeral_pubkey_y_parity: event.ephemeralPubkeyYParity,
@@ -115,7 +115,7 @@ impl L1Deposit {
                     sender: d.sender,
                     to: d.to,
                     amount: d.amount,
-                    bouncebackRecipient: d.bounceback_recipient,
+                    tempoRefundRecipient: d.tempo_refund_recipient,
                     memo: d.memo,
                 }
                 .abi_encode()
@@ -128,7 +128,7 @@ impl L1Deposit {
                     token: d.token,
                     sender: d.sender,
                     amount: d.amount,
-                    bouncebackRecipient: d.bounceback_recipient,
+                    tempoRefundRecipient: d.tempo_refund_recipient,
                     keyIndex: d.key_index,
                     encrypted: AbiEncryptedDepositPayload {
                         ephemeralPubkeyX: d.ephemeral_pubkey_x,
@@ -156,7 +156,7 @@ impl L1Deposit {
                         sender: d.sender,
                         to: d.to,
                         amount: d.amount,
-                        bouncebackRecipient: d.bounceback_recipient,
+                        tempoRefundRecipient: d.tempo_refund_recipient,
                         memo: d.memo,
                     },
                     prev_hash,
@@ -170,7 +170,7 @@ impl L1Deposit {
                         token: d.token,
                         sender: d.sender,
                         amount: d.amount,
-                        bouncebackRecipient: d.bounceback_recipient,
+                        tempoRefundRecipient: d.tempo_refund_recipient,
                         keyIndex: d.key_index,
                         encrypted: AbiEncryptedDepositPayload {
                             ephemeralPubkeyX: d.ephemeral_pubkey_x,

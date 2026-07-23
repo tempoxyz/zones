@@ -36,7 +36,7 @@ use tracing::{error, info, instrument, warn};
 use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
-    abi::{self, NO_QUEUE_INDEX, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
+    abi::{self, IZoneOutbox, NO_QUEUE_INDEX, TempoState, ZoneInbox, ZonePortal},
     rpc::rpc_connection_config,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_finalized_batch,
@@ -99,7 +99,7 @@ pub struct ZoneMonitor {
     provider: DynProvider<TempoNetwork>,
     /// ZoneOutbox contract on **Zone L2** — source of `WithdrawalRequested` and
     /// `BatchFinalized` events.
-    outbox: ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// ZoneInbox contract on **Zone L2** — queried for the processed deposit queue hash.
     inbox: ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// TempoState predeploy on **Zone L2** — provides the latest Tempo L1 block number
@@ -185,7 +185,7 @@ impl ZoneMonitor {
         repair_notify: Arc<Notify>,
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
-        let outbox = ZoneOutbox::new(config.outbox_address, provider.clone());
+        let outbox = IZoneOutbox::new(config.outbox_address, provider.clone());
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
@@ -1006,7 +1006,7 @@ mod tests {
             config,
             metrics: crate::metrics::ZoneMonitorMetrics::default(),
             provider: zone_provider.clone(),
-            outbox: ZoneOutbox::new(Address::repeat_byte(0x22), zone_provider.clone()),
+            outbox: IZoneOutbox::new(Address::repeat_byte(0x22), zone_provider.clone()),
             inbox: ZoneInbox::new(Address::repeat_byte(0x33), zone_provider.clone()),
             tempo_state: TempoState::new(Address::repeat_byte(0x44), zone_provider),
             withdrawal_store: SharedWithdrawalStore::new(),
