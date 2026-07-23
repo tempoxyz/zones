@@ -1,17 +1,12 @@
-//! Installs the Solidity reference ZoneFactory and canonical EIP-2935 history contract in a
-//! Tempo genesis file.
-//!
-//! The reference factory's constructor cannot run at its protocol-managed address on an ordinary
-//! EVM chain. This command reproduces the constructor's code, nonce, and storage allocations so a
-//! real Tempo localnet can create zones through the canonical address.
+//! Installs the native ZoneFactory marker, its shared runtimes, and EIP-2935 history into a
+//! Tempo genesis file used by the local benchmark topology.
 
 use alloy::{
     genesis::{Genesis, GenesisAccount},
-    primitives::{Address, B256, Bytes, U256, address, keccak256},
-    sol_types::SolValue,
+    primitives::{Address, B256, Bytes, U256},
 };
 use alloy_eips::eip2935::{HISTORY_STORAGE_ADDRESS, HISTORY_STORAGE_CODE};
-use eyre::{WrapErr as _, ensure, eyre};
+use eyre::{WrapErr as _, ensure};
 use serde::Deserialize;
 use std::{
     collections::BTreeMap,
@@ -19,10 +14,9 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
 };
-use tempo_zone_contracts::ZONE_FACTORY_ADDRESS;
-
-const VERIFIER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000001");
-const MESSENGER_ADDRESS: Address = address!("0x5aF2000000000000000000000000000000000002");
+use tempo_zone_contracts::{
+    ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct InstallReferenceZoneFactory {
@@ -38,14 +32,14 @@ pub(crate) struct InstallReferenceZoneFactory {
     #[arg(long)]
     owner: Address,
 
-    /// Foundry output directory containing the reference contract artifacts.
+    /// Foundry output directory containing the shared Zone runtime artifacts.
     #[arg(long, default_value = "specs/ref-impls/out")]
     specs_out: PathBuf,
 }
 
 #[derive(Debug)]
-struct ReferenceArtifacts {
-    factory: Bytes,
+struct NativeArtifacts {
+    portal: Bytes,
     verifier: Bytes,
     messenger: Bytes,
 }
@@ -54,36 +48,11 @@ struct ReferenceArtifacts {
 #[serde(rename_all = "camelCase")]
 struct FoundryArtifact {
     deployed_bytecode: DeployedBytecode,
-    #[serde(default)]
-    storage_layout: StorageLayout,
 }
 
 #[derive(Debug, Deserialize)]
 struct DeployedBytecode {
     object: String,
-    #[serde(default, rename = "immutableReferences")]
-    immutable_references: BTreeMap<String, Vec<ImmutableReference>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ImmutableReference {
-    start: usize,
-    length: usize,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct StorageLayout {
-    #[serde(default)]
-    storage: Vec<StorageEntry>,
-}
-
-#[derive(Debug, Deserialize)]
-struct StorageEntry {
-    label: String,
-    offset: usize,
-    slot: String,
-    #[serde(rename = "type")]
-    type_name: String,
 }
 
 impl InstallReferenceZoneFactory {
@@ -107,9 +76,9 @@ impl InstallReferenceZoneFactory {
         let mut genesis: Genesis = serde_json::from_str(&genesis_json)
             .wrap_err_with(|| format!("failed parsing genesis `{}`", self.genesis.display()))?;
 
-        let artifacts = load_reference_artifacts(&self.specs_out)?;
+        let artifacts = load_native_artifacts(&self.specs_out)?;
         install_eip2935_history_storage(&mut genesis)?;
-        install_reference_zone_factory(&mut genesis, self.owner, artifacts)?;
+        install_native_zone_factory(&mut genesis, self.owner, artifacts)?;
 
         if let Some(parent) = self
             .output
@@ -134,18 +103,15 @@ impl InstallReferenceZoneFactory {
 
         println!("Patched Tempo genesis written to {}", self.output.display());
         println!("  ZoneFactory: {ZONE_FACTORY_ADDRESS}");
-        println!("  Verifier:    {VERIFIER_ADDRESS}");
-        println!("  Messenger:   {MESSENGER_ADDRESS}");
+        println!("  Portal impl: {ZONE_PORTAL_IMPL_ADDRESS}");
+        println!("  Verifier:    {ZONE_VERIFIER_ADDRESS}");
+        println!("  Messenger:   {ZONE_MESSENGER_ADDRESS}");
         println!("  EIP-2935:    {HISTORY_STORAGE_ADDRESS}");
         println!("  Owner:       {}", self.owner);
         Ok(())
     }
 }
 
-/// Install the canonical EIP-2935 history contract for local chains that activate Prague at
-/// genesis. Production networks deploy this contract as part of the fork transition, but a
-/// genesis-active chain must include it in its initial allocation so per-block system calls can
-/// populate the block-hash ring buffer.
 fn install_eip2935_history_storage(genesis: &mut Genesis) -> eyre::Result<()> {
     let expected = GenesisAccount::default()
         .with_nonce(Some(1))
@@ -163,32 +129,15 @@ fn install_eip2935_history_storage(genesis: &mut Genesis) -> eyre::Result<()> {
     Ok(())
 }
 
-fn load_reference_artifacts(specs_out: &Path) -> eyre::Result<ReferenceArtifacts> {
-    let factory_artifact = load_artifact(specs_out, "ZoneFactory")?;
-    validate_factory_storage_layout(&factory_artifact.storage_layout)?;
-    let verifier_artifact = load_artifact(specs_out, "Verifier")?;
-    let messenger_artifact = load_artifact(specs_out, "ZoneMessenger")?;
-
-    let factory = decode_runtime("ZoneFactory", &factory_artifact.deployed_bytecode.object)?;
-    let verifier = decode_runtime("Verifier", &verifier_artifact.deployed_bytecode.object)?;
-    let mut messenger = decode_runtime(
-        "ZoneMessenger",
-        &messenger_artifact.deployed_bytecode.object,
-    )?
-    .to_vec();
-    patch_messenger_factory_immutable(
-        &mut messenger,
-        &messenger_artifact.deployed_bytecode.immutable_references,
-    )?;
-
-    Ok(ReferenceArtifacts {
-        factory,
-        verifier,
-        messenger: messenger.into(),
+fn load_native_artifacts(specs_out: &Path) -> eyre::Result<NativeArtifacts> {
+    Ok(NativeArtifacts {
+        portal: load_runtime(specs_out, "ZonePortal")?,
+        verifier: load_runtime(specs_out, "Verifier")?,
+        messenger: load_runtime(specs_out, "ZoneMessenger")?,
     })
 }
 
-fn load_artifact(specs_out: &Path, contract: &str) -> eyre::Result<FoundryArtifact> {
+fn load_runtime(specs_out: &Path, contract: &str) -> eyre::Result<Bytes> {
     let path = specs_out
         .join(format!("{contract}.sol"))
         .join(format!("{contract}.json"));
@@ -198,12 +147,13 @@ fn load_artifact(specs_out: &Path, contract: &str) -> eyre::Result<FoundryArtifa
             path.display()
         )
     })?;
-    serde_json::from_str(&json)
-        .wrap_err_with(|| format!("failed parsing {contract} artifact `{}`", path.display()))
-}
-
-fn decode_runtime(contract: &str, object: &str) -> eyre::Result<Bytes> {
-    let object = object.strip_prefix("0x").unwrap_or(object);
+    let artifact: FoundryArtifact = serde_json::from_str(&json)
+        .wrap_err_with(|| format!("failed parsing {contract} artifact `{}`", path.display()))?;
+    let object = artifact
+        .deployed_bytecode
+        .object
+        .strip_prefix("0x")
+        .unwrap_or(&artifact.deployed_bytecode.object);
     let bytecode = const_hex::decode(object)
         .wrap_err_with(|| format!("failed decoding {contract} deployed bytecode"))?;
     ensure!(
@@ -213,76 +163,17 @@ fn decode_runtime(contract: &str, object: &str) -> eyre::Result<Bytes> {
     Ok(bytecode.into())
 }
 
-fn validate_factory_storage_layout(layout: &StorageLayout) -> eyre::Result<()> {
-    let expected = [
-        ("_nextZoneId", "0", 0, "t_uint32"),
-        ("_validVerifiers", "3", 0, "t_mapping(t_address,t_bool)"),
-        ("_verifier", "4", 0, "t_address"),
-        ("_messenger", "5", 0, "t_address"),
-        ("owner", "6", 0, "t_address"),
-        ("_deploymentNonce", "7", 0, "t_uint256"),
-    ];
-
-    for (label, slot, offset, type_name) in expected {
-        let entry = layout
-            .storage
-            .iter()
-            .find(|entry| entry.label == label)
-            .ok_or_else(|| eyre!("ZoneFactory artifact is missing storage entry `{label}`"))?;
-        ensure!(
-            entry.slot == slot && entry.offset == offset && entry.type_name == type_name,
-            "ZoneFactory storage entry `{label}` changed: expected slot {slot}, offset {offset}, type {type_name}; got slot {}, offset {}, type {}",
-            entry.slot,
-            entry.offset,
-            entry.type_name
-        );
-    }
-    Ok(())
-}
-
-fn patch_messenger_factory_immutable(
-    bytecode: &mut [u8],
-    references: &BTreeMap<String, Vec<ImmutableReference>>,
-) -> eyre::Result<()> {
-    let references: Vec<_> = references.values().flatten().collect();
-    ensure!(
-        !references.is_empty(),
-        "ZoneMessenger artifact has no immutable references"
-    );
-
-    for reference in references {
-        ensure!(
-            reference.length == 32,
-            "ZoneMessenger immutable has unexpected length {}",
-            reference.length
-        );
-        let end = reference
-            .start
-            .checked_add(reference.length)
-            .ok_or_else(|| eyre!("ZoneMessenger immutable range overflowed"))?;
-        ensure!(
-            end <= bytecode.len(),
-            "ZoneMessenger immutable range {}..{} exceeds runtime length {}",
-            reference.start,
-            end,
-            bytecode.len()
-        );
-        bytecode[reference.start..end].fill(0);
-        bytecode[reference.start + 12..end].copy_from_slice(ZONE_FACTORY_ADDRESS.as_slice());
-    }
-    Ok(())
-}
-
-fn install_reference_zone_factory(
+fn install_native_zone_factory(
     genesis: &mut Genesis,
     owner: Address,
-    artifacts: ReferenceArtifacts,
+    artifacts: NativeArtifacts,
 ) -> eyre::Result<()> {
     ensure!(owner != Address::ZERO, "ZoneFactory owner must not be zero");
     for (name, address) in [
         ("ZoneFactory", ZONE_FACTORY_ADDRESS),
-        ("Verifier", VERIFIER_ADDRESS),
-        ("ZoneMessenger", MESSENGER_ADDRESS),
+        ("ZonePortal implementation", ZONE_PORTAL_IMPL_ADDRESS),
+        ("Verifier", ZONE_VERIFIER_ADDRESS),
+        ("ZoneMessenger", ZONE_MESSENGER_ADDRESS),
     ] {
         ensure!(
             !genesis.alloc.contains_key(&address),
@@ -290,98 +181,68 @@ fn install_reference_zone_factory(
         );
     }
 
-    let one = B256::with_last_byte(1);
-    let mut factory_storage = BTreeMap::new();
-    factory_storage.insert(B256::ZERO, one);
-    factory_storage.insert(
-        keccak256((VERIFIER_ADDRESS, U256::from(3)).abi_encode()),
-        one,
-    );
-    factory_storage.insert(
-        B256::with_last_byte(4),
-        B256::left_padding_from(VERIFIER_ADDRESS.as_slice()),
-    );
-    factory_storage.insert(
-        B256::with_last_byte(5),
-        B256::left_padding_from(MESSENGER_ADDRESS.as_slice()),
-    );
-    factory_storage.insert(
-        B256::with_last_byte(6),
-        B256::left_padding_from(owner.as_slice()),
-    );
-    factory_storage.insert(B256::with_last_byte(7), B256::with_last_byte(3));
-
+    // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot zero packs
+    // uint32 nextZoneId, address owner, and the implementation-lock flag.
+    let packed_factory_config: U256 =
+        U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32_usize);
+    let factory_storage =
+        BTreeMap::from([(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()))]);
     genesis.alloc.insert(
         ZONE_FACTORY_ADDRESS,
         GenesisAccount::default()
-            .with_nonce(Some(3))
-            .with_code(Some(artifacts.factory))
+            .with_nonce(Some(1))
+            .with_code(Some(Bytes::from_static(&[0xef])))
             .with_storage(Some(factory_storage)),
     );
-    genesis.alloc.insert(
-        VERIFIER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(artifacts.verifier)),
-    );
-    genesis.alloc.insert(
-        MESSENGER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(artifacts.messenger)),
-    );
+    for (address, code) in [
+        (ZONE_PORTAL_IMPL_ADDRESS, artifacts.portal),
+        (ZONE_VERIFIER_ADDRESS, artifacts.verifier),
+        (ZONE_MESSENGER_ADDRESS, artifacts.messenger),
+    ] {
+        genesis.alloc.insert(
+            address,
+            GenesisAccount::default()
+                .with_nonce(Some(1))
+                .with_code(Some(code)),
+        );
+    }
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy::primitives::address;
 
-    fn test_artifacts() -> ReferenceArtifacts {
-        let mut messenger = vec![0x60; 64];
-        messenger[4..36].fill(0);
-        messenger[16..36].copy_from_slice(ZONE_FACTORY_ADDRESS.as_slice());
-        ReferenceArtifacts {
-            factory: Bytes::from_static(&[0x60, 0x00]),
+    fn test_artifacts() -> NativeArtifacts {
+        NativeArtifacts {
+            portal: Bytes::from_static(&[0x60, 0x00]),
             verifier: Bytes::from_static(&[0x60, 0x01]),
-            messenger: messenger.into(),
+            messenger: Bytes::from_static(&[0x60, 0x02]),
         }
     }
 
     #[test]
-    fn installs_constructor_equivalent_factory_state() {
+    fn installs_native_factory_and_shared_runtimes() {
         let owner = address!("0x0000000000000000000000000000000000001234");
         let mut genesis = Genesis::default();
         install_eip2935_history_storage(&mut genesis).unwrap();
-        install_reference_zone_factory(&mut genesis, owner, test_artifacts()).unwrap();
+        install_native_zone_factory(&mut genesis, owner, test_artifacts()).unwrap();
 
         let factory = &genesis.alloc[&ZONE_FACTORY_ADDRESS];
-        assert_eq!(factory.nonce, Some(3));
+        assert_eq!(factory.nonce, Some(1));
         assert_eq!(
             factory.code.as_ref().map(|code| code.as_ref()),
-            Some(&[0x60, 0x00][..])
+            Some(&[0xef][..])
         );
-        let storage = factory.storage.as_ref().unwrap();
-        assert_eq!(storage[&B256::ZERO], B256::with_last_byte(1));
+        let packed: U256 = U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32_usize);
         assert_eq!(
-            storage[&keccak256((VERIFIER_ADDRESS, U256::from(3)).abi_encode())],
-            B256::with_last_byte(1)
+            factory.storage.as_ref().unwrap()[&B256::ZERO],
+            B256::from(packed.to_be_bytes())
         );
-        assert_eq!(
-            storage[&B256::with_last_byte(4)],
-            B256::left_padding_from(VERIFIER_ADDRESS.as_slice())
-        );
-        assert_eq!(
-            storage[&B256::with_last_byte(5)],
-            B256::left_padding_from(MESSENGER_ADDRESS.as_slice())
-        );
-        assert_eq!(
-            storage[&B256::with_last_byte(6)],
-            B256::left_padding_from(owner.as_slice())
-        );
-        assert_eq!(storage[&B256::with_last_byte(7)], B256::with_last_byte(3));
-        assert_eq!(genesis.alloc[&VERIFIER_ADDRESS].nonce, Some(1));
-        assert_eq!(genesis.alloc[&MESSENGER_ADDRESS].nonce, Some(1));
+        assert_eq!(genesis.alloc[&ZONE_PORTAL_IMPL_ADDRESS].nonce, Some(1));
+        assert_eq!(genesis.alloc[&ZONE_VERIFIER_ADDRESS].nonce, Some(1));
+        assert_eq!(genesis.alloc[&ZONE_MESSENGER_ADDRESS].nonce, Some(1));
         assert_eq!(
             genesis.alloc[&HISTORY_STORAGE_ADDRESS],
             GenesisAccount::default()
@@ -399,9 +260,7 @@ mod tests {
         genesis
             .alloc
             .insert(HISTORY_STORAGE_ADDRESS, expected.clone());
-
         install_eip2935_history_storage(&mut genesis).unwrap();
-
         assert_eq!(genesis.alloc[&HISTORY_STORAGE_ADDRESS], expected);
     }
 
@@ -412,9 +271,7 @@ mod tests {
             HISTORY_STORAGE_ADDRESS,
             GenesisAccount::default().with_code(Some(Bytes::from_static(&[0x60, 0x00]))),
         );
-
         let error = install_eip2935_history_storage(&mut genesis).unwrap_err();
-
         assert!(error.to_string().contains("conflicting EIP-2935"));
     }
 
@@ -424,59 +281,12 @@ mod tests {
         genesis
             .alloc
             .insert(ZONE_FACTORY_ADDRESS, GenesisAccount::default());
-        let error = install_reference_zone_factory(
+        let error = install_native_zone_factory(
             &mut genesis,
             address!("0x0000000000000000000000000000000000001234"),
             test_artifacts(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("refusing to replace"));
-    }
-
-    #[test]
-    fn patches_all_messenger_immutable_references() {
-        let mut bytecode = vec![0xff; 96];
-        let references = BTreeMap::from([(
-            "42".to_owned(),
-            vec![
-                ImmutableReference {
-                    start: 4,
-                    length: 32,
-                },
-                ImmutableReference {
-                    start: 48,
-                    length: 32,
-                },
-            ],
-        )]);
-        patch_messenger_factory_immutable(&mut bytecode, &references).unwrap();
-        for start in [4, 48] {
-            assert_eq!(&bytecode[start..start + 12], &[0; 12]);
-            assert_eq!(
-                &bytecode[start + 12..start + 32],
-                ZONE_FACTORY_ADDRESS.as_slice()
-            );
-        }
-    }
-
-    #[test]
-    fn validates_factory_storage_slots() {
-        let storage = [
-            ("_nextZoneId", "0", "t_uint32"),
-            ("_validVerifiers", "3", "t_mapping(t_address,t_bool)"),
-            ("_verifier", "4", "t_address"),
-            ("_messenger", "5", "t_address"),
-            ("owner", "6", "t_address"),
-            ("_deploymentNonce", "7", "t_uint256"),
-        ]
-        .into_iter()
-        .map(|(label, slot, type_name)| StorageEntry {
-            label: label.to_owned(),
-            offset: 0,
-            slot: slot.to_owned(),
-            type_name: type_name.to_owned(),
-        })
-        .collect();
-        validate_factory_storage_layout(&StorageLayout { storage }).unwrap();
     }
 }

@@ -10,8 +10,9 @@ readonly L1_SNAPSHOT_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && 
 readonly L1_SNAPSHOT_ZONES_ROOT="$(cd -- "$L1_SNAPSHOT_SCRIPT_DIR/../.." && pwd)"
 readonly L1_SNAPSHOT_SCHEMA=1
 readonly L1_SNAPSHOT_ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
-readonly L1_SNAPSHOT_VERIFIER="0x5aF2000000000000000000000000000000000001"
-readonly L1_SNAPSHOT_MESSENGER="0x5aF2000000000000000000000000000000000002"
+readonly L1_SNAPSHOT_PORTAL_IMPL="0x5AD1000000000000000000000000000000000000"
+readonly L1_SNAPSHOT_VERIFIER="0x5a56000000000000000000000000000000000000"
+readonly L1_SNAPSHOT_MESSENGER="0x5A4d000000000000000000000000000000000000"
 readonly L1_SNAPSHOT_HISTORY="0x0000F90827F1C53a10cb7A02335B175320002935"
 readonly L1_SNAPSHOT_PUBLIC_DEV_MNEMONIC="test test test test test test test test test test test junk"
 
@@ -95,7 +96,7 @@ l1_snapshot_inputs_hash() {
             crates/contracts/Cargo.toml \
             crates/contracts/src/lib.rs \
             crates/contracts/src/precompiles/zone_factory.rs \
-            specs/ref-impls/out/ZoneFactory.sol/ZoneFactory.json \
+            specs/ref-impls/out/ZonePortal.sol/ZonePortal.json \
             specs/ref-impls/out/Verifier.sol/Verifier.json \
             specs/ref-impls/out/ZoneMessenger.sol/ZoneMessenger.json
         do
@@ -109,6 +110,7 @@ l1_snapshot_inputs_hash() {
 l1_snapshot_allocation_hash() {
     jq -cS \
         --arg factory "${L1_SNAPSHOT_ZONE_FACTORY,,}" \
+        --arg portalImpl "${L1_SNAPSHOT_PORTAL_IMPL,,}" \
         --arg verifier "${L1_SNAPSHOT_VERIFIER,,}" \
         --arg messenger "${L1_SNAPSHOT_MESSENGER,,}" \
         --arg history "${L1_SNAPSHOT_HISTORY,,}" '
@@ -116,6 +118,7 @@ l1_snapshot_allocation_hash() {
         | to_entries
         | map(select(
             (.key | ascii_downcase) == $factory or
+            (.key | ascii_downcase) == $portalImpl or
             (.key | ascii_downcase) == $verifier or
             (.key | ascii_downcase) == $messenger or
             (.key | ascii_downcase) == $history
@@ -223,11 +226,12 @@ l1_snapshot_load_config() {
 }
 
 l1_snapshot_prepare_expectations() {
-    echo "building canonical reference ZoneFactory artifacts"
+    echo "building native ZoneFactory shared runtime artifacts"
     forge build --root "$L1_SNAPSHOT_ZONES_ROOT/specs/ref-impls" --skip test >/dev/null
 
-    local factory_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash
-    factory_hash="$(l1_snapshot_artifact_hash ZoneFactory)"
+    local factory_hash portal_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash
+    factory_hash="$(l1_snapshot_sha256 "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/src/precompiles/zone_factory.rs")"
+    portal_hash="$(l1_snapshot_artifact_hash ZonePortal)"
     verifier_hash="$(l1_snapshot_artifact_hash Verifier)"
     messenger_hash="$(l1_snapshot_artifact_hash ZoneMessenger)"
     genesis_inputs_hash="$(l1_snapshot_inputs_hash)"
@@ -256,6 +260,7 @@ l1_snapshot_prepare_expectations() {
         --arg tempoPatchSha256 "$tempo_patch_hash" \
         --arg genesisInputsSha256 "$genesis_inputs_hash" \
         --arg factoryArtifactSha256 "$factory_hash" \
+        --arg portalArtifactSha256 "$portal_hash" \
         --arg verifierArtifactSha256 "$verifier_hash" \
         --arg messengerArtifactSha256 "$messenger_hash" \
         --arg owner "$owner" --arg validatorA "$validator_a" --arg validatorB "$validator_b" \
@@ -276,6 +281,7 @@ l1_snapshot_prepare_expectations() {
           zonesGenesis: {
             inputsSha256: $genesisInputsSha256,
             factoryArtifactSha256: $factoryArtifactSha256,
+            portalArtifactSha256: $portalArtifactSha256,
             verifierArtifactSha256: $verifierArtifactSha256,
             messengerArtifactSha256: $messengerArtifactSha256
           },
@@ -412,7 +418,7 @@ l1_snapshot_build() {
         --validators 127.0.0.2:8000,127.0.0.3:8100 \
         --seed "$L1_SNAPSHOT_LOCALNET_SEED"
 
-    echo "installing the canonical reference ZoneFactory in genesis"
+    echo "installing the native ZoneFactory marker and shared runtimes in genesis"
     "$L1_SNAPSHOT_ZONES_XTASK_BIN" install-reference-zone-factory \
         --genesis "$L1_SNAPSHOT_RAW_GENESIS" \
         --output "$L1_SNAPSHOT_PATCHED_GENESIS" \
