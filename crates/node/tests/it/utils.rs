@@ -4,9 +4,9 @@ use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rlp::Encodable;
-use alloy_rpc_types_eth::{BlockNumberOrTag, Filter};
+use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, TransactionRequest};
 use alloy_signer_local::{MnemonicBuilder, PrivateKeySigner, coins_bip39::English};
-use alloy_sol_types::{SolEvent, SolValue};
+use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use commonware_codec::Encode as _;
 use commonware_cryptography::{Signer as _, ed25519::PrivateKey as Ed25519PrivateKey};
 use eyre::WrapErr;
@@ -37,7 +37,7 @@ use tempo_chainspec::{
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
 };
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, TIP403_REGISTRY_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20, IZoneFactory as LegacyZoneFactory, TIP403_REGISTRY_ADDRESS,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
@@ -61,6 +61,7 @@ use zone_l1::{
 };
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
+use zone_primitives::constants::PORTAL_ROLE_SLOT;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -1392,20 +1393,34 @@ impl L1TestNode {
         sequencer: Address,
     ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
-        use tempo_zone_contracts::ZoneFactory;
+        use tempo_zone_contracts::{ZoneFactory, ZonePortal};
 
         let l1_provider = self.dev_provider();
-        let factory = ZoneFactory::new(factory_address, &l1_provider);
+        let mut allowed_accounts = vec![admin, sequencer];
+        for index in 0..10 {
+            allowed_accounts.push(self.signer_at(index).address());
+        }
+        allowed_accounts.sort_unstable();
+        allowed_accounts.dedup();
 
-        let receipt = factory
-            .createZone(ZoneFactory::CreateZoneParams {
+        // The pinned Tempo dev L1 exposes TIP-1091's legacy factory selector. The production
+        // binding also carries initial membership for upgraded networks, so use the legacy call
+        // here and apply the same membership immediately through the newly created portal.
+        let create_zone = LegacyZoneFactory::createZoneCall {
+            params: LegacyZoneFactory::CreateZoneParams {
                 admin,
                 initialToken: PATH_USD_ADDRESS,
                 sequencers: vec![sequencer],
                 threshold: 1,
                 rpcUrl: String::new(),
-            })
-            .send()
+            },
+        };
+        let receipt = l1_provider
+            .send_transaction(
+                TransactionRequest::default()
+                    .to(factory_address)
+                    .input(create_zone.abi_encode().into()),
+            )
             .await?
             .get_receipt()
             .await?;
@@ -1418,7 +1433,28 @@ impl L1TestNode {
             .find_map(|log| ZoneFactory::ZoneCreated::decode_log(&log.inner).ok())
             .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
 
-        Ok(zone_created.portal)
+        let portal_address = zone_created.portal;
+        let admin_provider = if admin == self.dev_address() {
+            self.dev_provider()
+        } else if admin == self.admin_address() {
+            self.admin_provider()
+        } else {
+            return Err(eyre::eyre!(
+                "test helper cannot configure membership for unknown admin {admin}"
+            ));
+        };
+        let portal = ZonePortal::new(portal_address, &admin_provider);
+        for account in allowed_accounts {
+            let receipt = portal
+                .setAllowedAccount(account, true)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(receipt.status(), "setting initial portal member failed");
+        }
+
+        Ok(portal_address)
     }
 
     /// Deploy the SwapAndDepositRouter contract on L1 from the Foundry artifact.

@@ -122,6 +122,8 @@ impl CreateZone {
                 sequencers: vec![self.sequencer],
                 threshold: 1,
                 rpcUrl: self.rpc_url.clone(),
+                allowedAccounts: self.allowed_accounts.clone(),
+                zoneGateways: self.zone_gateways.clone(),
             })
             .send_sync()
             .await?;

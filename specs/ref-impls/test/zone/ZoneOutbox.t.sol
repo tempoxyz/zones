@@ -581,6 +581,7 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         assertEq(zoneToken.balanceOf(alice), balanceBefore - 500e6);
+        vm.prank(sequencer);
         assertEq(outbox.pendingWithdrawalsCount(), 1);
     }
 

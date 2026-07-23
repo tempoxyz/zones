@@ -12,7 +12,6 @@ workspace = true
 
 [dependencies]
 alloy-primitives = { workspace = true }
-tempo-precompiles = { workspace = true }
 
 [features]
 default = ["std", "serde"]

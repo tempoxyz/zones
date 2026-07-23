@@ -1,6 +1,5 @@
 use super::*;
 use std::collections::HashSet;
-use tempo_precompiles::storage::StorageKey;
 use tempo_primitives::is_tip20_prefix;
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
@@ -562,22 +561,6 @@ mod tests {
         assert_eq!(
             cache_invalidation_address(token, Some(&TransferPolicyUpdate::SIGNATURE_HASH)),
             Some(TIP403_REGISTRY_ADDRESS)
-        );
-    }
-}
-pub(crate) fn apply_membership_events_to_cache(
-    cache: &mut L1StateCacheInner,
-    portal_address: Address,
-    block_number: u64,
-    membership_events: &[L1MembershipEvent],
-) {
-    for event in membership_events {
-        let L1MembershipEvent::RoleUpdated { account, role } = *event;
-        cache.set(
-            portal_address,
-            account.mapping_slot(PORTAL_ROLE_SLOT.into()).into(),
-            block_number,
-            B256::with_last_byte(role),
         );
     }
 }

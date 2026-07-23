@@ -71,12 +71,13 @@ contract ZonePortalGasLimitTest is Test {
         );
 
         vm.prank(ZONE_FACTORY_ADDRESS);
-        address[] memory noAccounts = new address[](0);
+        address[] memory allowedAccounts = new address[](1);
+        allowedAccounts[0] = recipient;
         address[] memory noGateways = new address[](0);
         portal.initialize(
             1,
             address(token),
-            noAccounts,
+            allowedAccounts,
             noGateways,
             address(0x400),
             admin,

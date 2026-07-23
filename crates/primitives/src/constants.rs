@@ -1,7 +1,6 @@
 //! Zone protocol constants shared between host and guest.
 
 use alloy_primitives::{Address, B256, U256, address};
-use tempo_precompiles::zone_factory::zone_portal_slots;
 
 /// Sentinel value for empty withdrawal queue slots.
 pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
@@ -57,19 +56,16 @@ pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
 /// ZonePortal storage slot 0: `admin` (address).
-pub const PORTAL_ADMIN_SLOT: B256 = B256::new(zone_portal_slots::ADMIN.to_be_bytes());
+pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
 /// ZonePortal storage slot 6: `_tokenConfigs` mapping.
-pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 =
-    B256::new(zone_portal_slots::TOKEN_CONFIGS.to_be_bytes());
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
 
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
-pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::new(zone_portal_slots::IS_SEQUENCER.to_be_bytes());
+pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 
-/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
-/// `role` (mapping(address => Role)).
-pub const PORTAL_ROLE_SLOT: B256 =
-    B256::new((zone_portal_slots::IS_SEQUENCER + U256::ONE).to_be_bytes());
+/// ZonePortal storage slot 20: `role` (mapping(address => Role)).
+pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
