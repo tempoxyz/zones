@@ -50,7 +50,8 @@ contract TempoState is ITempoState {
         uint64 prevBlockNumber = tempoBlockNumber;
 
         (bytes32 parentHash, bytes32 stateRoot, uint64 blockNumber) = _decodeHeader(header);
-
+        // TODO: basically check if 0 and if so, then check if portal exists or something but not parent hash and
+        // dont init with genesis parent hash
         if (parentHash != prevBlockHash) revert InvalidParentHash();
         if (blockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
 
@@ -294,12 +295,16 @@ contract TempoState is ITempoState {
         } else if (prefix <= 0xb7) {
             uint256 strLen = prefix - 0x80;
             if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
-            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) revert InvalidRlpData();
+            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) {
+                revert InvalidRlpData();
+            }
             return (1 + strLen, ptr + 1 + strLen);
         } else if (prefix <= 0xbf) {
             uint256 lenLen = prefix - 0xb7;
             uint256 strLen = _decodeRlpLongPayloadLength(data, ptr, lenLen);
-            if (ptr + 1 + lenLen + strLen > data.length) revert InvalidRlpData();
+            if (ptr + 1 + lenLen + strLen > data.length) {
+                revert InvalidRlpData();
+            }
             return (1 + lenLen + strLen, ptr + 1 + lenLen + strLen);
         } else if (prefix <= 0xf7) {
             uint256 listLen = prefix - 0xc0;
@@ -308,7 +313,9 @@ contract TempoState is ITempoState {
         } else {
             uint256 lenLen = prefix - 0xf7;
             uint256 listLen = _decodeRlpLongPayloadLength(data, ptr, lenLen);
-            if (ptr + 1 + lenLen + listLen > data.length) revert InvalidRlpData();
+            if (ptr + 1 + lenLen + listLen > data.length) {
+                revert InvalidRlpData();
+            }
             return (1 + lenLen + listLen, ptr + 1 + lenLen + listLen);
         }
     }
@@ -369,7 +376,9 @@ contract TempoState is ITempoState {
             uint256 strLen = prefix - 0x80;
             if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
             if (uint8(data[ptr + 1]) == 0) revert InvalidRlpData();
-            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) revert InvalidRlpData();
+            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) {
+                revert InvalidRlpData();
+            }
 
             value = 0;
             for (uint256 i = 0; i < strLen; i++) {
@@ -401,7 +410,9 @@ contract TempoState is ITempoState {
             uint256 strLen = prefix - 0x80;
             if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
             if (uint8(data[ptr + 1]) == 0) revert InvalidRlpData();
-            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) revert InvalidRlpData();
+            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) {
+                revert InvalidRlpData();
+            }
 
             value = 0;
             for (uint256 i = 0; i < strLen; i++) {

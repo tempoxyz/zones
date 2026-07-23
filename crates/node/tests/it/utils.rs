@@ -1,6 +1,7 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
 use alloy_eips::NumHash;
+use alloy_network::{EthereumWallet, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rlp::Encodable;
@@ -31,7 +32,7 @@ use std::{
     },
     time::Duration,
 };
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tempo_chainspec::{
     hardfork::TempoHardfork,
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
@@ -51,10 +52,11 @@ use tempo_precompiles::{
         ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
         TIP403Registry, tip403_registry_slots,
     },
-    zone_factory::zone_portal_slots::{IS_SEQUENCER, TOKEN_CONFIGS},
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::{
+    PORTAL_IS_SEQUENCER_SLOT, ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
@@ -62,6 +64,8 @@ use zone_l1::{
 };
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
+use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
+use zone_primitives::constants::PORTAL_ROLE_SLOT;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -119,6 +123,20 @@ pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynPr
     Ok((provider, dev_address))
 }
 
+pub(crate) fn local_dev_tempo_zone_account(
+    zone: &ZoneTestNode,
+) -> eyre::Result<(DynProvider<TempoNetwork>, Address)> {
+    let dev_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let dev_address = dev_signer.address();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .wallet(EthereumWallet::from(dev_signer))
+        .connect_http(zone.http_url().clone())
+        .erased();
+    Ok((provider, dev_address))
+}
+
 pub(crate) async fn approve_outbox<P>(
     fixture: &mut L1Fixture,
     zone: &ZoneTestNode,
@@ -138,6 +156,11 @@ where
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     Ok(())
+}
+
+fn portal_token_config_slot(token: Address) -> B256 {
+    let portal_token_configs_slot = B256::with_last_byte(6);
+    keccak256((token, portal_token_configs_slot).abi_encode())
 }
 
 fn enabled_deposits_active_token_config() -> B256 {
@@ -248,8 +271,6 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
 /// connection until the first request, so `L1StateProvider::new` succeeds
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
-// TODO: Import `ROLE` from `zone_portal_slots` once Tempo exports it.
-const PORTAL_ROLE_SLOT: U256 = IS_SEQUENCER.saturating_add(U256::ONE);
 
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
 pub(crate) fn seed_raw_tip403_token_policy(
@@ -533,7 +554,14 @@ impl ZoneTestNode {
             || {
                 let tempo_state = &tempo_state;
                 async move {
-                    let n = tempo_state.tempoBlockNumber().call().await?;
+                    // During a pre-creation replay the zone can advance before the initial
+                    // TokenEnabled event has initialized the default fee token on L2. Treat the
+                    // resulting transient eth_call failure as "not ready" and keep polling.
+                    let n = match tempo_state.tempoBlockNumber().call().await {
+                        Ok(n) => n,
+                        Err(err) if err.to_string().contains("InvalidToken") => return Ok(None),
+                        Err(err) => return Err(err.into()),
+                    };
                     if n >= target { Ok(Some(n)) } else { Ok(None) }
                 }
             },
@@ -614,7 +642,13 @@ impl ZoneTestNode {
                             && ev.blockNumber > after_block
                         {
                             // Confirm on-chain state matches
-                            let on_chain = tempo_state.tempoBlockNumber().call().await?;
+                            let on_chain = match tempo_state.tempoBlockNumber().call().await {
+                                Ok(n) => n,
+                                Err(err) if err.to_string().contains("InvalidToken") => {
+                                    return Ok(None);
+                                }
+                                Err(err) => return Err(err.into()),
+                            };
                             if on_chain >= ev.blockNumber {
                                 return Ok(Some(on_chain));
                             }
@@ -1749,9 +1783,14 @@ impl L1TestNode {
         amount: u128,
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
-        let provider = self.dev_provider();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .wallet(EthereumWallet::from(self.dev_signer()))
+            .connect_http(self.http_url.clone());
         let receipt = ITIP20::new(token, &provider)
             .transfer(to, U256::from(amount))
+            // A transfer call would otherwise infer `token` as its L1 fee token. Newly created
+            // test tokens intentionally have no FeeAMM pool, so pay gas explicitly in pathUSD.
+            .fee_token(PATH_USD_ADDRESS)
             .send()
             .await?
             .get_receipt()
@@ -2048,7 +2087,15 @@ async fn build_l1_anchored_genesis(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address)
+    let default_fee_token = if portal_address.is_zero() {
+        PATH_USD_ADDRESS
+    } else {
+        ZonePortal::new(portal_address, &l1_provider)
+            .enabledTokenAt(U256::ZERO)
+            .call()
+            .await?
+    };
+    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
 }
 
 /// Build a zone test genesis anchored to a specific L1 block number.
@@ -2065,7 +2112,15 @@ async fn build_l1_anchored_genesis_at_block(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
-    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address)
+    let default_fee_token = if portal_address.is_zero() {
+        PATH_USD_ADDRESS
+    } else {
+        ZonePortal::new(portal_address, &l1_provider)
+            .enabledTokenAt(U256::ZERO)
+            .call()
+            .await?
+    };
+    zone_node::genesis::l1_anchored_genesis(l1_header, portal_address, default_fee_token)
 }
 
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.
@@ -3647,24 +3702,27 @@ impl L1Fixture {
         let mut cache = cache_handle.write();
         let deposit_queue_hash_slot = B256::with_last_byte(3);
         let refunds_slot = B256::with_last_byte(8);
-        let sequencer_membership_slot = sequencer.mapping_slot(IS_SEQUENCER).into();
-        let path_usd_config_slot = PATH_USD_ADDRESS.mapping_slot(TOKEN_CONFIGS).into();
+        let sequencer_membership_slot =
+            keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
+        let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
         let enabled_token_config = enabled_deposits_active_token_config();
         let dev_account_role_slot: B256 = l1_dev_signer()
             .address()
-            .mapping_slot(PORTAL_ROLE_SLOT)
+            .mapping_slot(PORTAL_ROLE_SLOT.into())
             .into();
-        let outbox_receive_policy_slot =
-            ZONE_OUTBOX_ADDRESS.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
 
-        // Local fixtures have no RPC fallback. A withdrawal transfers to the outbox, so seed the
-        // absence of its address-level receive policy as baseline raw L1 state.
-        cache.set(
-            TIP403_REGISTRY_ADDRESS,
-            B256::from(outbox_receive_policy_slot.to_be_bytes()),
-            0,
-            B256::ZERO,
-        );
+        // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their
+        // address-level receive policies, so seed their absence as baseline raw L1 state.
+        for recipient in [ZONE_OUTBOX_ADDRESS, ZONE_FEE_MANAGER_ADDRESS] {
+            let receive_policy_slot =
+                recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
+            cache.set(
+                TIP403_REGISTRY_ADDRESS,
+                B256::from(receive_policy_slot.to_be_bytes()),
+                0,
+                B256::ZERO,
+            );
+        }
 
         for block in 0..=num_blocks {
             cache.set(

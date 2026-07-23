@@ -12,12 +12,11 @@ use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{ContractStorage, Handler, Mapping, StorageKey},
     tip20::{ITIP20, TIP20Error, TIP20Token},
-    zone_factory::zone_portal_slots::IS_SEQUENCER as PORTAL_IS_SEQUENCER_SLOT,
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent};
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_IS_SEQUENCER_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -68,7 +67,7 @@ impl ZoneOutbox {
         if caller == Address::ZERO {
             return Ok(());
         }
-        let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT);
+        let membership_slot = caller.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
         if self.read_portal_slot(l1, membership_slot.into())? == U256::ZERO {
             return Err(ZoneOutboxError::only_sequencer().into());
         }

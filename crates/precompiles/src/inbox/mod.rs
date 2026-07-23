@@ -25,17 +25,15 @@ use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{Handler, Mapping, StorageCtx},
     tip20::{ITIP20, TIP20Token},
-    zone_factory::zone_portal_slots::{
-        CURRENT_DEPOSIT_QUEUE_HASH as PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
-        ENCRYPTION_KEYS as PORTAL_ENCRYPTION_KEYS_SLOT,
-    },
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
     DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneInbox, IZoneOutbox,
     QueuedDeposit, ZoneInboxError, ZoneInboxEvent,
 };
-use zone_primitives::constants::ZONE_INBOX_ADDRESS;
+use zone_primitives::constants::{
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, ZONE_INBOX_ADDRESS,
+};
 
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
@@ -157,7 +155,7 @@ impl ZoneInbox {
         if !portal.is_zero() {
             let _tempo_current_hash = l1.read_l1_storage(
                 portal,
-                PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.into(),
+                PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
                 tempo_block_number,
             )?;
         }
@@ -388,7 +386,7 @@ fn read_encryption_key<P: L1StorageReader>(
     let read_l1_portal_slot =
         |slot: U256| l1.read_l1_storage(portal, slot.into(), tempo_block_number);
 
-    let base: U256 = keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.to_be_bytes::<32>()).into();
+    let base: U256 = keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).into();
     let slot_x = key_index
         .checked_mul(U256::from(2))
         .and_then(|offset| base.checked_add(offset))

@@ -988,6 +988,8 @@ where
                 DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
+            // Zones collect the selected fee token directly and never route through FeeAMM.
+            .with_disable_fee_amm_check(true)
         });
         let protocol_pool = Pool::new(
             validator,

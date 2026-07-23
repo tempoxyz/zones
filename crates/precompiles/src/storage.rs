@@ -10,7 +10,7 @@ use revm::{context::result::AnyError, precompile::PrecompileError};
 use thiserror::Error;
 
 pub(crate) use tempo_precompiles::storage::*;
-use tempo_precompiles::zone_factory::zone_portal_slots::IS_SEQUENCER as PORTAL_IS_SEQUENCER_SLOT;
+use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {

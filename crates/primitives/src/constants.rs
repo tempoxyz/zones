@@ -52,8 +52,32 @@ pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C000000000000000000000
 pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
     address!("0x20Fc000000000000000000000000000000000000");
 
+/// Zone-native fee manager precompile address.
+///
+/// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.
+pub const ZONE_FEE_MANAGER_ADDRESS: Address =
+    address!("0xfeec000000000000000000000000000000000001");
+
 /// Default zone token address (pathUSD TIP-20).
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
+
+/// ZonePortal storage slot 0: `admin` (address).
+pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
+
+/// ZonePortal storage slot 3: `currentDepositQueueHash` (bytes32).
+pub const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(3);
+
+/// ZonePortal storage slot 5: `_encryptionKeys` dynamic array.
+pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
+
+/// ZonePortal storage slot 6: `_tokenConfigs` mapping.
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
+
+/// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
+pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
+
+/// ZonePortal storage slot 20: `role` (mapping(address => Role)).
+pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
