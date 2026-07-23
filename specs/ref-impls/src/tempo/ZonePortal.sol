@@ -2,7 +2,6 @@
 pragma solidity ^0.8.13;
 
 import {
-    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
     BlockTransition,
     Deposit,
     DepositQueueTransition,
@@ -11,7 +10,6 @@ import {
     EncryptedDeposit,
     EncryptedDepositPayload,
     EncryptionKeyEntry,
-    GATEWAY_ALLOWLIST_ENFORCED_FLAG,
     IVerifier,
     IZoneMessenger,
     IZonePortal,
@@ -160,8 +158,9 @@ contract ZonePortal is IZonePortal {
     mapping(address => bool) public isSequencer;
     mapping(address => Role) public role;
 
-    /// @dev Dedicated packed mode slot. Zero is the common open/open configuration.
-    uint8 internal _enforcementFlags;
+    /// @dev Solidity packs both mode booleans into slot 21. Zero is open/open.
+    bool internal _isAccessEnforced;
+    bool internal _isGatewayEnforced;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -192,7 +191,8 @@ contract ZonePortal is IZonePortal {
         messenger = _messenger;
         admin = _admin;
         verifier = _verifier;
-        _enforcementFlags = _encodeEnforcementFlags(_accessMode, _gatewayMode);
+        _isAccessEnforced = _accessMode == ZoneAccessMode.Closed;
+        _isGatewayEnforced = _gatewayMode == ZoneGatewayMode.Enforced;
         rpcUrl = _rpcUrl;
         emit EnforcementModesUpdated(_accessMode, _gatewayMode);
 
@@ -355,48 +355,24 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Enable or disable account allowlist enforcement without discarding membership.
     function setAccessMode(ZoneAccessMode newMode) external onlyAdmin {
-        if (newMode == ZoneAccessMode.Closed) {
-            _enforcementFlags |= ACCOUNT_ALLOWLIST_ENFORCED_FLAG;
-        } else {
-            _enforcementFlags &= ~ACCOUNT_ALLOWLIST_ENFORCED_FLAG;
-        }
+        _isAccessEnforced = newMode == ZoneAccessMode.Closed;
         emit EnforcementModesUpdated(newMode, gatewayMode());
     }
 
     /// @notice Enable or disable callback gateway registration enforcement.
     function setGatewayMode(ZoneGatewayMode newMode) external onlyAdmin {
-        if (newMode == ZoneGatewayMode.Enforced) {
-            _enforcementFlags |= GATEWAY_ALLOWLIST_ENFORCED_FLAG;
-        } else {
-            _enforcementFlags &= ~GATEWAY_ALLOWLIST_ENFORCED_FLAG;
-        }
+        _isGatewayEnforced = newMode == ZoneGatewayMode.Enforced;
         emit EnforcementModesUpdated(accessMode(), newMode);
     }
 
     /// @notice Return whether account allowlist enforcement is closed or open.
     function accessMode() public view returns (ZoneAccessMode) {
-        return (_enforcementFlags & ACCOUNT_ALLOWLIST_ENFORCED_FLAG) != 0
-            ? ZoneAccessMode.Closed
-            : ZoneAccessMode.Open;
+        return _isAccessEnforced ? ZoneAccessMode.Closed : ZoneAccessMode.Open;
     }
 
     /// @notice Return whether callback gateway registration is enforced or open.
     function gatewayMode() public view returns (ZoneGatewayMode) {
-        return (_enforcementFlags & GATEWAY_ALLOWLIST_ENFORCED_FLAG) != 0
-            ? ZoneGatewayMode.Enforced
-            : ZoneGatewayMode.Open;
-    }
-
-    function _encodeEnforcementFlags(
-        ZoneAccessMode accountMode,
-        ZoneGatewayMode callbackMode
-    )
-        internal
-        pure
-        returns (uint8 flags)
-    {
-        if (accountMode == ZoneAccessMode.Closed) flags |= ACCOUNT_ALLOWLIST_ENFORCED_FLAG;
-        if (callbackMode == ZoneGatewayMode.Enforced) flags |= GATEWAY_ALLOWLIST_ENFORCED_FLAG;
+        return _isGatewayEnforced ? ZoneGatewayMode.Enforced : ZoneGatewayMode.Open;
     }
 
     /// @notice Add or remove an account from closed-loop portal flows.

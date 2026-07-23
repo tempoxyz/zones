@@ -369,7 +369,7 @@ interface IZoneTxContext {
 //   slot 18: _sequencers (address[])
 //   slot 19: isSequencer (mapping(address => bool))
 //   slot 20: role (mapping(address => Role))
-//   slot 21: _enforcementFlags (uint8; bit 0 accounts, bit 1 gateways)
+//   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -383,11 +383,9 @@ bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
-bytes32 constant PORTAL_ENFORCEMENT_FLAGS_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
-bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_FLAGS_SLOT;
-bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_FLAGS_SLOT;
-uint8 constant ACCOUNT_ALLOWLIST_ENFORCED_FLAG = 1 << 0;
-uint8 constant GATEWAY_ALLOWLIST_ENFORCED_FLAG = 1 << 1;
+bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
+bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
+bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification

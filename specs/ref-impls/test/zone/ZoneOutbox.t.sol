@@ -2,9 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
     EncryptedDepositPayload,
-    GATEWAY_ALLOWLIST_ENFORCED_FLAG,
     IZoneOutbox,
     IZonePortal,
     LastBatch,
@@ -95,10 +93,10 @@ contract ZoneOutboxTest is Test {
     }
 
     function _setModes(ZoneAccessMode accessMode, ZoneGatewayMode gatewayMode) internal {
-        uint8 flags;
-        if (accessMode == ZoneAccessMode.Closed) flags |= ACCOUNT_ALLOWLIST_ENFORCED_FLAG;
-        if (gatewayMode == ZoneGatewayMode.Enforced) flags |= GATEWAY_ALLOWLIST_ENFORCED_FLAG;
-        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(flags)));
+        uint256 modes;
+        if (accessMode == ZoneAccessMode.Closed) modes |= 1;
+        if (gatewayMode == ZoneGatewayMode.Enforced) modes |= 1 << 8;
+        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(modes));
     }
 
     function _withdrawal(

@@ -21,7 +21,7 @@ import {
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_ENFORCEMENT_FLAGS_SLOT,
+    PORTAL_ENFORCEMENT_MODES_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_ROLE_SLOT,
@@ -3986,7 +3986,7 @@ contract ZonePortalTest is BaseTest {
     ///        slot 18: _sequencers.length
     ///        slot 19: isSequencer mapping
     ///        slot 20: role mapping
-    ///        slot 21: account/gateway enforcement flags [packed]
+    ///        slot 21: account/gateway enforcement booleans [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -4090,8 +4090,8 @@ contract ZonePortalTest is BaseTest {
             "slot 20: gateway role mismatch"
         );
 
-        bytes32 modeSlot = vm.load(address(portal), PORTAL_ENFORCEMENT_FLAGS_SLOT);
-        assertEq(uint8(uint256(modeSlot)), 3, "slot 21: enforcement flags mismatch");
+        bytes32 modeSlot = vm.load(address(portal), PORTAL_ENFORCEMENT_MODES_SLOT);
+        assertEq(uint16(uint256(modeSlot)), 0x0101, "slot 21: enforcement modes mismatch");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

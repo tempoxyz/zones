@@ -2,8 +2,6 @@
 pragma solidity ^0.8.13;
 
 import {
-    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
-    GATEWAY_ALLOWLIST_ENFORCED_FLAG,
     ITempoState,
     IZoneConfig,
     PORTAL_ACCESS_MODE_SLOT,
@@ -122,17 +120,13 @@ contract ZoneConfig is IZoneConfig {
     /// @notice Read account allowlist enforcement from the dedicated packed mode slot.
     function accessMode() public view returns (ZoneAccessMode) {
         bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_ACCESS_MODE_SLOT);
-        return (uint8(uint256(value)) & ACCOUNT_ALLOWLIST_ENFORCED_FLAG) != 0
-            ? ZoneAccessMode.Closed
-            : ZoneAccessMode.Open;
+        return uint8(uint256(value)) != 0 ? ZoneAccessMode.Closed : ZoneAccessMode.Open;
     }
 
     /// @notice Read callback gateway enforcement from the dedicated packed mode slot.
     function gatewayMode() public view returns (ZoneGatewayMode) {
         bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_GATEWAY_MODE_SLOT);
-        return (uint8(uint256(value)) & GATEWAY_ALLOWLIST_ENFORCED_FLAG) != 0
-            ? ZoneGatewayMode.Enforced
-            : ZoneGatewayMode.Open;
+        return uint8(uint256(value) >> 8) != 0 ? ZoneGatewayMode.Enforced : ZoneGatewayMode.Open;
     }
 
     /// @notice Check whether an account is authorized under the portal's access mode.

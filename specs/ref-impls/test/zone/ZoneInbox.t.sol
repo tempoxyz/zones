@@ -2,7 +2,6 @@
 pragma solidity ^0.8.13;
 
 import {
-    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
     ChaumPedersenProof,
@@ -79,9 +78,7 @@ contract ZoneInboxTest is Test {
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
             bytes32(uint256(1))
         );
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(ACCOUNT_ALLOWLIST_ENFORCED_FLAG))
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1)));
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, address(0x500), true);

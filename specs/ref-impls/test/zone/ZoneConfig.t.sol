@@ -2,8 +2,6 @@
 pragma solidity ^0.8.13;
 
 import {
-    ACCOUNT_ALLOWLIST_ENFORCED_FLAG,
-    GATEWAY_ALLOWLIST_ENFORCED_FLAG,
     IZoneConfig,
     IZonePortal,
     PORTAL_ACCESS_MODE_SLOT,
@@ -129,9 +127,7 @@ contract ZoneConfigTest is BaseTest {
 
     function test_openModeBypassesAccountMembershipButNotGatewayState() public {
         tempoState.setMockStorageValue(
-            address(portal),
-            PORTAL_ACCESS_MODE_SLOT,
-            bytes32(uint256(GATEWAY_ALLOWLIST_ENFORCED_FLAG))
+            address(portal), PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1 << 8))
         );
 
         address outsider = makeAddr("open mode outsider");
@@ -144,9 +140,7 @@ contract ZoneConfigTest is BaseTest {
 
     function test_gatewayModeIsIndependentFromAccessMode() public {
         tempoState.setMockStorageValue(
-            address(portal),
-            PORTAL_ACCESS_MODE_SLOT,
-            bytes32(uint256(ACCOUNT_ALLOWLIST_ENFORCED_FLAG))
+            address(portal), PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1))
         );
 
         assertEq(uint8(config.accessMode()), uint8(ZoneAccessMode.Closed));

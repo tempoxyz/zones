@@ -29,10 +29,10 @@ pub struct ProvisionConfig {
     pub factory: Option<Address>,
     /// Initial TIP-20 enabled on the portal.
     pub initial_token: Address,
-    /// Initial account allowlist enforcement mode.
-    pub access_mode: ZoneAccessMode,
-    /// Initial callback gateway registration enforcement mode.
-    pub gateway_mode: ZoneGatewayMode,
+    /// Whether account allowlist enforcement starts enabled.
+    pub is_access_enforced: bool,
+    /// Whether callback gateway registration enforcement starts enabled.
+    pub is_gateway_enforced: bool,
     /// Initial callback-only ZoneGateway implementations.
     pub zone_gateways: Vec<Address>,
     /// Initial portal membership (required for closed mode, retained but unenforced in open mode).
@@ -71,20 +71,12 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         dev_key,
         factory,
         initial_token,
-        access_mode,
-        gateway_mode,
+        is_access_enforced,
+        is_gateway_enforced,
         zone_gateways,
         allowed_accounts,
         rpc_url,
     } = config;
-    match access_mode {
-        ZoneAccessMode::Closed | ZoneAccessMode::Open => {}
-        _ => return Err(eyre::eyre!("invalid zone access mode")),
-    }
-    match gateway_mode {
-        ZoneGatewayMode::Enforced | ZoneGatewayMode::Open => {}
-        _ => return Err(eyre::eyre!("invalid zone gateway mode")),
-    }
     let dev_address = dev_key.address();
     let wallet = EthereumWallet::from(dev_key.clone());
 
@@ -125,8 +117,16 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
-            accessMode: access_mode,
-            gatewayMode: gateway_mode,
+            accessMode: if is_access_enforced {
+                ZoneAccessMode::Closed
+            } else {
+                ZoneAccessMode::Open
+            },
+            gatewayMode: if is_gateway_enforced {
+                ZoneGatewayMode::Enforced
+            } else {
+                ZoneGatewayMode::Open
+            },
             allowedAccounts: allowed_accounts,
             zoneGateways: zone_gateways,
             admin: dev_address,
@@ -252,7 +252,6 @@ mod command {
     use super::{ProvisionConfig, provision_zone};
     use crate::cli::ZoneCli;
     use tempo_contracts::precompiles::PATH_USD_ADDRESS;
-    use tempo_zone_contracts::{ZoneAccessMode, ZoneGatewayMode};
 
     #[derive(Clone, Copy, Debug, clap::ValueEnum)]
     enum DevAccessMode {
@@ -261,13 +260,6 @@ mod command {
     }
 
     impl DevAccessMode {
-        const fn contract_value(self) -> ZoneAccessMode {
-            match self {
-                Self::Closed => ZoneAccessMode::Closed,
-                Self::Open => ZoneAccessMode::Open,
-            }
-        }
-
         const fn label(self) -> &'static str {
             match self {
                 Self::Closed => "closed",
@@ -283,13 +275,6 @@ mod command {
     }
 
     impl DevGatewayMode {
-        const fn contract_value(self) -> ZoneGatewayMode {
-            match self {
-                Self::Enforced => ZoneGatewayMode::Enforced,
-                Self::Open => ZoneGatewayMode::Open,
-            }
-        }
-
         const fn label(self) -> &'static str {
             match self {
                 Self::Enforced => "enforced",
@@ -406,8 +391,8 @@ mod command {
                     dev_key: dev_key.clone(),
                     factory: self.factory_address,
                     initial_token: self.initial_token,
-                    access_mode: self.access_mode.contract_value(),
-                    gateway_mode: self.gateway_mode.contract_value(),
+                    is_access_enforced: matches!(self.access_mode, DevAccessMode::Closed),
+                    is_gateway_enforced: matches!(self.gateway_mode, DevGatewayMode::Enforced),
                     zone_gateways: self.zone_gateways.clone(),
                     allowed_accounts: allowed_accounts.clone(),
                     rpc_url: format!("http://{}:{}", self.http_addr, self.http_port),

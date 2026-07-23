@@ -74,20 +74,14 @@ pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
 /// `role` (mapping(address => Role)).
 pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 
-/// ZonePortal slot following `role`: dedicated packed account and gateway enforcement flags.
-pub const PORTAL_ENFORCEMENT_FLAGS_SLOT: B256 = B256::with_last_byte(21);
+/// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
+pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
 
 /// Alias used by consumers reading account allowlist enforcement.
-pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_FLAGS_SLOT;
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 /// Alias used by consumers reading callback gateway enforcement.
-pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_FLAGS_SLOT;
-
-/// Bit set when account allowlist enforcement is closed.
-pub const ACCOUNT_ALLOWLIST_ENFORCED_FLAG: u8 = 1 << 0;
-
-/// Bit set when callback gateway registration is enforced.
-pub const GATEWAY_ALLOWLIST_ENFORCED_FLAG: u8 = 1 << 1;
+pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system

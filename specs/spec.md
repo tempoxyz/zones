@@ -262,7 +262,8 @@ The shared portal runtime MUST preserve the native factory's constructor-equival
 | 18 | 0 | `_sequencers` |
 | 19 | 0 | `isSequencer` |
 | 20 | 0 | `role` |
-| 21 | 0 | `_enforcementFlags` |
+| 21 | 0 | `_isAccessEnforced` |
+| 21 | 1 | `_isGatewayEnforced` |
 
 The factory performs this initialization natively in the portal account; the Solidity
 `initialize` function documents and tests the equivalent state transition.
