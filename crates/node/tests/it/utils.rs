@@ -112,10 +112,6 @@ pub(crate) const TEST_MNEMONIC: &str =
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 
-/// Test-only adapter that expands the pinned Tempo dev L1's legacy ZoneInfo response.
-pub(crate) const TEST_ZONE_FACTORY_ADAPTER_ADDRESS: Address =
-    address!("0x5Af3000000000000000000000000000000000000");
-
 pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynProvider, Address)> {
     let dev_signer = MnemonicBuilder::<English>::default()
         .phrase(TEST_MNEMONIC)
@@ -262,16 +258,10 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
             .with_code(Some(forge_deployed_bytecode("ZonePortal")?)),
     );
     genesis.alloc.insert(
-        TEST_ZONE_FACTORY_ADAPTER_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("TestZoneFactoryAdapter")?)),
-    );
-    genesis.alloc.insert(
         ZONE_MESSENGER_ADDRESS,
         GenesisAccount::default()
             .with_nonce(Some(1))
-            .with_code(Some(forge_deployed_bytecode("TestZoneMessenger")?)),
+            .with_code(Some(forge_deployed_bytecode("ZoneMessenger")?)),
     );
     Ok(())
 }
@@ -1679,15 +1669,7 @@ impl L1TestNode {
 
         // Constructor: constructor(address _stablecoinDEX, address _zoneFactory)
         let mut deploy_bytes = forge_bytecode("SwapAndDepositRouter")?.to_vec();
-        // The pinned Tempo dev L1 factory returns the legacy ZoneInfo tuple. Router reads against
-        // that factory go through the adapter installed in the test genesis; custom factories are
-        // still passed through unchanged.
-        let router_factory = if factory_address == ZONE_FACTORY_ADDRESS {
-            TEST_ZONE_FACTORY_ADAPTER_ADDRESS
-        } else {
-            factory_address
-        };
-        deploy_bytes.extend_from_slice(&(dex_address, router_factory).abi_encode());
+        deploy_bytes.extend_from_slice(&(dex_address, factory_address).abi_encode());
         let bytecode = Bytes::from(deploy_bytes);
 
         let mut deploy_tx = TransactionRequest::default().input(bytecode.into());
