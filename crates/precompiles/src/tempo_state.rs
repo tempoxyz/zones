@@ -261,7 +261,7 @@ mod tests {
             StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             drop(storage);
 
-            let l1 = L1State::new(reader);
+            let l1 = L1State::new(reader, Address::ZERO);
             let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
             Ok(Self {
                 ctx,

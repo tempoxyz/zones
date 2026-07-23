@@ -8,6 +8,8 @@ use alloy_primitives::{Address, B256};
 use revm::{context::result::AnyError, precompile::PrecompileError};
 use thiserror::Error;
 
+use crate::portal::L1Portal;
+
 pub(crate) use tempo_precompiles::storage::*;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
@@ -48,14 +50,17 @@ pub struct L1State<P> {
     anchor: Rc<Cell<Option<u64>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
+    /// ZonePortal whose storage is mirrored into this execution context.
+    portal_address: Address,
 }
 
 impl<P> L1State<P> {
-    /// Creates execution-local L1 state backed by `provider`.
-    pub fn new(provider: P) -> Self {
+    /// Creates execution-local L1 state backed by `provider` for `portal_address`.
+    pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
             anchor: Rc::new(Cell::new(None)),
             provider,
+            portal_address,
         }
     }
 
@@ -67,6 +72,18 @@ impl<P> L1State<P> {
     /// Returns the anchor selected for the current transaction, if any.
     pub fn get_anchor(&self) -> Option<u64> {
         self.anchor.get()
+    }
+
+    /// Returns the configured ZonePortal address.
+    pub const fn portal_address(&self) -> Address {
+        self.portal_address
+    }
+
+    /// Returns a typed view of the L1-mirrored ZonePortal.
+    ///
+    /// Reads use ordinary precompile handlers and therefore require an active [`StorageCtx`].
+    pub(crate) fn portal(&self) -> L1Portal {
+        L1Portal::new(self.portal_address)
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
@@ -113,6 +130,7 @@ impl<P> fmt::Debug for L1State<P> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("L1State")
             .field("anchor", &self.get_anchor())
+            .field("portal_address", &self.portal_address)
             .finish_non_exhaustive()
     }
 }
@@ -176,14 +194,14 @@ mod tests {
 
     #[test]
     fn l1_state_rejects_advance_after_parent_read() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         assert!(l1.advance_anchor(10, 11).is_err());
     }
 
     #[test]
     fn l1_state_accepts_reads_at_advanced_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         l1.advance_anchor(10, 11).unwrap();
         read(&l1, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
@@ -191,7 +209,7 @@ mod tests {
 
     #[test]
     fn l1_state_clones_reject_reads_at_different_anchors() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         let clone = l1.clone();
         read(&l1, 10).unwrap();
         assert!(read(&clone, 11).is_err());
@@ -199,21 +217,21 @@ mod tests {
 
     #[test]
     fn l1_state_rejects_duplicate_advance() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         l1.advance_anchor(10, 11).unwrap();
         assert!(l1.advance_anchor(11, 12).is_err());
     }
 
     #[test]
     fn l1_state_rejects_non_contiguous_advance() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         assert!(l1.advance_anchor(10, 12).is_err());
         assert_eq!(l1.get_anchor(), None);
     }
 
     #[test]
     fn l1_state_reset_allows_a_new_anchor() {
-        let l1 = L1State::new(MockL1Reader::default());
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
         l1.reset_anchor();
         l1.advance_anchor(10, 11).unwrap();

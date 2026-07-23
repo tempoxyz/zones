@@ -9,8 +9,10 @@ use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 
 use crate::{
     create_outbox_precompile,
-    portal::PortalState,
-    test_utils::{TestContext, call_precompile, test_context, test_env, test_storage_provider},
+    storage::L1State,
+    test_utils::{
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+    },
     tx_context,
 };
 
@@ -26,6 +28,7 @@ const GATEWAY: Address = address!("0x00000000000000000000000000000000000000e5");
 struct Harness {
     ctx: TestContext,
     precompile: DynPrecompile,
+    l1: L1State<MockL1Reader>,
     token: Address,
 }
 
@@ -33,10 +36,11 @@ impl Harness {
     fn new() -> eyre::Result<Self> {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
+        let l1 = L1State::new(MockL1Reader::default(), PORTAL);
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                let mut portal = PortalState::new(PORTAL);
+                let mut portal = l1.portal();
                 portal.set_sequencer(SEQUENCER, true)?;
                 portal.set_token_config(token, true, true)?;
 
@@ -54,11 +58,12 @@ impl Harness {
         }
 
         let env = test_env(&ctx);
-        let precompile = create_outbox_precompile(PORTAL, &env);
+        let precompile = create_outbox_precompile(l1.clone(), &env);
 
         Ok(Self {
             ctx,
             precompile,
+            l1,
             token,
         })
     }
@@ -160,7 +165,9 @@ impl Harness {
     fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            PortalState::new(PORTAL).set_enforcement_modes(access_enforced, gateway_enforced)?;
+            self.l1
+                .portal()
+                .set_enforcement_modes(access_enforced, gateway_enforced)?;
             Ok(())
         })
     }
@@ -168,7 +175,7 @@ impl Harness {
     fn set_role(&mut self, account: Address, role: ZonePortal::Role) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            PortalState::new(PORTAL).set_role(account, role as u8)?;
+            self.l1.portal().set_role(account, role as u8)?;
             Ok(())
         })
     }
@@ -176,7 +183,9 @@ impl Harness {
     fn set_token_enabled(&mut self, enabled: bool) -> eyre::Result<()> {
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            PortalState::new(PORTAL).set_token_config(self.token, enabled, true)?;
+            self.l1
+                .portal()
+                .set_token_config(self.token, enabled, true)?;
             Ok(())
         })
     }

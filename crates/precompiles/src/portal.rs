@@ -20,12 +20,12 @@ struct PortalTokenConfig {
 }
 
 /// Read-only semantic facade over the canonical `ZonePortal` storage layout.
-pub(crate) struct PortalState {
+pub(crate) struct L1Portal {
     storage: ZonePortalStorage,
     token_configs: Mapping<Address, PortalTokenConfig>,
 }
 
-impl PortalState {
+impl L1Portal {
     pub(crate) fn new(address: Address) -> Self {
         Self {
             storage: ZonePortalStorage::new(address),

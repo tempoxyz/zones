@@ -104,9 +104,9 @@ where
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         let outbox_env = env.clone();
-        let portal_address = self.portal_address;
+        let outbox_l1 = l1.clone();
         precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, move |_| {
-            Some(create_outbox_precompile(portal_address, &outbox_env))
+            Some(create_outbox_precompile(outbox_l1.clone(), &outbox_env))
         });
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
             Some(ChaumPedersenVerify::create(&env))
@@ -126,11 +126,11 @@ where
         precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
             Some(create_tip403_precompile(&tip403_env))
         });
-        let portal_address = self.portal_address;
+        let tip20_l1 = l1.clone();
         let tempo_env = PrecompileEnv::new(&cfg, actions, non_creditable_slots);
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
-                Some(create_tip20_precompile(*address, &env, portal_address))
+                Some(create_tip20_precompile(*address, &env, tip20_l1.clone()))
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {

@@ -11,15 +11,15 @@ use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
 use crate::{
     dispatch::{metadata, mutate, mutate_void, view},
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, COMPRESSED_PUBLIC_KEY_SIZE},
-    portal::PortalState,
+    storage::{L1State, L1StorageReader},
 };
 
 use super::{MAX_CALLBACK_DATA_SIZE, MAX_GAS_FEE_RATE, WITHDRAWAL_BASE_GAS, ZoneOutbox};
 
 impl ZoneOutbox {
-    pub(crate) fn call_with_transaction(
+    pub(crate) fn call_with_transaction<P: L1StorageReader>(
         &mut self,
-        portal_address: Address,
+        l1: &L1State<P>,
         calldata: &[u8],
         msg_sender: Address,
         tx_hash: B256,
@@ -29,7 +29,7 @@ impl ZoneOutbox {
             return err;
         }
 
-        let portal = PortalState::new(portal_address);
+        let portal = l1.portal();
         dispatch!(calldata, |call| match call {
             IZoneOutbox::IZoneOutboxCalls {
                 config(_) => metadata::<IZoneOutbox::configCall>(|| Ok(ZONE_CONFIG_ADDRESS)),

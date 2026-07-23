@@ -24,7 +24,7 @@ use zone_primitives::constants::{
 use crate::{
     ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
-    portal::PortalState,
+    portal::L1Portal,
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
@@ -52,7 +52,7 @@ impl ZoneOutbox {
         self.__initialize()
     }
 
-    fn ensure_sequencer(&self, portal: &PortalState, caller: Address) -> ZoneResult<()> {
+    fn ensure_sequencer(&self, portal: &L1Portal, caller: Address) -> ZoneResult<()> {
         if caller != Address::ZERO && !portal.is_sequencer(caller)? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
@@ -61,7 +61,7 @@ impl ZoneOutbox {
 
     fn validate_withdrawal_policy(
         &self,
-        portal: &PortalState,
+        portal: &L1Portal,
         token: Address,
         to: Address,
         gas_limit: u64,
@@ -141,7 +141,7 @@ impl ZoneOutbox {
 
     fn request_withdrawal(
         &mut self,
-        portal: &PortalState,
+        portal: &L1Portal,
         caller: Address,
         fee_payer: Address,
         current_tx_hash: B256,
@@ -248,7 +248,7 @@ impl ZoneOutbox {
 
     fn finalize_withdrawal_batch(
         &mut self,
-        portal: &PortalState,
+        portal: &L1Portal,
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
@@ -300,7 +300,7 @@ impl ZoneOutbox {
 
     fn set_tempo_gas_rate(
         &mut self,
-        portal: &PortalState,
+        portal: &L1Portal,
         caller: Address,
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
@@ -315,7 +315,7 @@ impl ZoneOutbox {
 
     fn set_max_withdrawals_per_block(
         &mut self,
-        portal: &PortalState,
+        portal: &L1Portal,
         caller: Address,
         call: IZoneOutbox::setMaxWithdrawalsPerBlockCall,
     ) -> ZoneResult<()> {
@@ -328,7 +328,7 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn pending_withdrawals_count(&self, portal: &PortalState, caller: Address) -> ZoneResult<U256> {
+    fn pending_withdrawals_count(&self, portal: &L1Portal, caller: Address) -> ZoneResult<U256> {
         self.ensure_sequencer(portal, caller)?;
         self.pending_withdrawals
             .len()
@@ -338,7 +338,7 @@ impl ZoneOutbox {
 
     fn get_pending_withdrawals(
         &self,
-        portal: &PortalState,
+        portal: &L1Portal,
         caller: Address,
     ) -> ZoneResult<Vec<IZoneOutbox::PendingWithdrawal>> {
         self.ensure_sequencer(portal, caller)?;

@@ -27,7 +27,6 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 pub struct L1OverlayDB<DB, L1> {
     inner: DB,
     l1: L1State<L1>,
-    portal_address: Address,
 }
 
 impl<DB, L1> L1OverlayDB<DB, L1> {
@@ -35,8 +34,7 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
     pub fn new(inner: DB, l1: L1, portal_address: Address) -> Self {
         Self {
             inner,
-            l1: L1State::new(l1),
-            portal_address,
+            l1: L1State::new(l1, portal_address),
         }
     }
 
@@ -163,7 +161,7 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         state: &mut AddressMap<Account>,
     ) -> Result<(), ZoneDbError<DB::Error>> {
         Self::sanitize_mirrored_account(state, TIP403_REGISTRY_ADDRESS)?;
-        Self::sanitize_mirrored_account(state, self.portal_address)
+        Self::sanitize_mirrored_account(state, self.l1.portal_address())
     }
 }
 
@@ -181,7 +179,7 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
     }
 
     fn storage(&mut self, address: Address, slot: StorageKey) -> Result<StorageValue, Self::Error> {
-        if address == TIP403_REGISTRY_ADDRESS || address == self.portal_address {
+        if address == TIP403_REGISTRY_ADDRESS || address == self.l1.portal_address() {
             let anchor = self.anchor()?;
             self.l1_storage(address, slot, anchor)
         } else {

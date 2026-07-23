@@ -19,7 +19,7 @@ use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     execution::{CallCheck, CallRuleError, CallRules},
-    portal::PortalState,
+    storage::{L1State, L1StorageReader},
 };
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
@@ -45,17 +45,17 @@ fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck)
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
-pub(crate) struct TIP20Rules {
-    portal_address: Address,
+pub(crate) struct TIP20Rules<P> {
+    l1: L1State<P>,
 }
 
-impl TIP20Rules {
-    pub(crate) fn new(portal_address: Address) -> Self {
-        Self { portal_address }
+impl<P> TIP20Rules<P> {
+    pub(crate) fn new(l1: L1State<P>) -> Self {
+        Self { l1 }
     }
 }
 
-impl CallRules for TIP20Rules {
+impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
         selector
             .is_some_and(|selector| TIP20_FIXED_GAS_SELECTORS.contains(&selector))
@@ -96,7 +96,7 @@ impl CallRules for TIP20Rules {
     }
 }
 
-impl TIP20Rules {
+impl<P: L1StorageReader> TIP20Rules<P> {
     fn check_auth(&self, caller: Address, auths: &[Address]) -> CallCheck {
         if auths.contains(&caller) {
             CallCheck::Continue
@@ -118,7 +118,8 @@ impl TIP20Rules {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        PortalState::new(self.portal_address)
+        self.l1
+            .portal()
             .is_sequencer(caller)
             .map_err(CallRuleError::Tempo)
     }
@@ -141,23 +142,23 @@ mod tests {
     use tempo_zone_contracts::Unauthorized;
 
     use crate::test_utils::{
-        TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
 
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
 
-    fn rules() -> TIP20Rules {
-        TIP20Rules::new(PORTAL_ADDRESS)
+    fn rules() -> TIP20Rules<MockL1Reader> {
+        TIP20Rules::new(L1State::new(MockL1Reader::default(), PORTAL_ADDRESS))
     }
 
-    fn assert_allowed(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
+    fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
         assert!(matches!(
             rules.admit(&call.abi_encode(), caller),
             CallCheck::Continue
         ));
     }
 
-    fn assert_unauthorized(rules: &TIP20Rules, call: impl SolCall, caller: Address) {
+    fn assert_unauthorized(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
         assert!(matches!(
             rules.admit(&call.abi_encode(), caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
@@ -171,6 +172,7 @@ mod tests {
         bob: Address,
         spender: Address,
         sequencer: Address,
+        l1: L1State<MockL1Reader>,
         precompile: DynPrecompile,
     }
 
@@ -183,12 +185,13 @@ mod tests {
             let spender = address!("0x00000000000000000000000000000000000000a4");
             let issuer = address!("0x00000000000000000000000000000000000000a5");
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
+            let l1 = L1State::new(MockL1Reader::default(), PORTAL_ADDRESS);
             let mut ctx = test_context();
 
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                    PortalState::new(PORTAL_ADDRESS).set_sequencer(sequencer, true)?;
+                    l1.portal().set_sequencer(sequencer, true)?;
                     TIP20Setup::path_usd(admin)
                         .with_issuer(admin)
                         .with_issuer(issuer)
@@ -203,7 +206,7 @@ mod tests {
             }
 
             let env = test_env(&ctx);
-            let precompile = crate::create_tip20_precompile(token, &env, PORTAL_ADDRESS);
+            let precompile = crate::create_tip20_precompile(token, &env, l1.clone());
 
             Ok(Self {
                 ctx,
@@ -212,6 +215,7 @@ mod tests {
                 bob,
                 spender,
                 sequencer,
+                l1,
                 precompile,
             })
         }
@@ -263,9 +267,7 @@ mod tests {
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || {
-            PortalState::new(PORTAL_ADDRESS)
-                .set_sequencer(sequencer, true)
-                .unwrap();
+            rules.l1.portal().set_sequencer(sequencer, true).unwrap();
 
             let balance = ITIP20::balanceOfCall { account: owner };
             assert_allowed(&rules, balance.clone(), owner);
@@ -312,7 +314,7 @@ mod tests {
         {
             let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || {
-                let mut portal = PortalState::new(PORTAL_ADDRESS);
+                let mut portal = harness.l1.portal();
                 portal.set_sequencer(harness.sequencer, false)?;
                 portal.set_sequencer(next_sequencer, true)
             })?;
@@ -402,7 +404,11 @@ mod tests {
         let to = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
         let env = test_env(&ctx);
-        let precompile = crate::create_tip20_precompile(token, &env, PORTAL_ADDRESS);
+        let precompile = crate::create_tip20_precompile(
+            token,
+            &env,
+            L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
+        );
         let calldata: Bytes = ITIP20::transferCall {
             to,
             amount: U256::from(1u64),
