@@ -104,7 +104,7 @@ contract ZoneMessengerTest is BaseTest {
         vm.etch(ZONE_MESSENGER_ADDRESS, type(ZoneMessenger).runtimeCode);
         messenger = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         vm.mockCall(
-            portal, abi.encodeWithSelector(IZonePortal.gatewayMode.selector), abi.encode(true)
+            portal, abi.encodeWithSelector(IZonePortal.isGatewayOpen.selector), abi.encode(false)
         );
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         zoneToken.setMinter(address(this), true);

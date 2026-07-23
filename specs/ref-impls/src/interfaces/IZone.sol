@@ -692,13 +692,13 @@ interface IZonePortal {
     function messenger() external view returns (address);
 
     /// @notice Whether account allowlist enforcement is enabled.
-    function accessMode() external view returns (bool);
+    function isAccessEnforced() external view returns (bool);
 
     /// @notice Change account allowlist enforcement. Only callable by the admin.
     function setAccessMode(bool enforced) external;
 
-    /// @notice Whether callback gateway registration enforcement is enabled.
-    function gatewayMode() external view returns (bool);
+    /// @notice Whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() external view returns (bool);
 
     /// @notice Change callback gateway enforcement. Only callable by the admin.
     function setGatewayMode(bool enforced) external;
@@ -1293,10 +1293,10 @@ interface IZoneConfig {
     function isEnabledToken(address token) external view returns (bool);
 
     /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
-    function accessMode() external view returns (bool);
+    function isAccessEnforced() external view returns (bool);
 
-    /// @notice Read whether callback gateway registration enforcement is enabled on L1 ZonePortal.
-    function gatewayMode() external view returns (bool);
+    /// @notice Read whether callback gateway registration enforcement is disabled on L1 ZonePortal.
+    function isGatewayOpen() external view returns (bool);
 
     /// @notice Check whether an account is authorized under the zone's access policy.
     /// @dev Returns true for every account when enforcement is disabled.

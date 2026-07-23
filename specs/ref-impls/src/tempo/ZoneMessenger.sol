@@ -49,7 +49,7 @@ contract ZoneMessenger is IZoneMessenger {
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
 
         if (
-            IZonePortal(msg.sender).gatewayMode()
+            !IZonePortal(msg.sender).isGatewayOpen()
                 && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
         ) {
             revert InvalidCallbackTarget();

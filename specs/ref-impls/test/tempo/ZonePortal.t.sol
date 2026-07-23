@@ -1147,7 +1147,7 @@ contract ZonePortalTest is BaseTest {
         vm.prank(admin);
         portal.setAccessMode(true);
 
-        assertTrue(portal.accessMode());
+        assertTrue(portal.isAccessEnforced());
         assertEq(uint8(portal.role(stagedAccount)), uint8(Role.Account));
         vm.prank(outsider);
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));

@@ -172,9 +172,9 @@ crate::sol! {
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
         function messenger() external view returns (address);
-        function accessMode() external view returns (bool);
+        function isAccessEnforced() external view returns (bool);
         function setAccessMode(bool enforced) external;
-        function gatewayMode() external view returns (bool);
+        function isGatewayOpen() external view returns (bool);
         function setGatewayMode(bool enforced) external;
         function role(address account) external view returns (Role);
         function setRole(address account, Role role) external;

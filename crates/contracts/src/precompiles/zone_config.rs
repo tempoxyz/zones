@@ -3,8 +3,8 @@
 crate::sol! {
     #[derive(Debug)]
     contract ZoneConfig {
-        function accessMode() external view returns (bool);
-        function gatewayMode() external view returns (bool);
+        function isAccessEnforced() external view returns (bool);
+        function isGatewayOpen() external view returns (bool);
         function isAllowedAccount(address account) external view returns (bool);
         function isZoneGateway(address gateway) external view returns (bool);
         function isEnabledToken(address token) external view returns (bool);

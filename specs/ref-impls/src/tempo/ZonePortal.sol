@@ -364,13 +364,13 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Return whether account allowlist enforcement is enabled.
-    function accessMode() public view returns (bool) {
+    function isAccessEnforced() public view returns (bool) {
         return _isAccessEnforced;
     }
 
-    /// @notice Return whether callback gateway registration enforcement is enabled.
-    function gatewayMode() public view returns (bool) {
-        return _isGatewayEnforced;
+    /// @notice Return whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() public view returns (bool) {
+        return !_isGatewayEnforced;
     }
 
     /// @notice Add or remove an account from closed-loop portal flows.

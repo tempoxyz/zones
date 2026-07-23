@@ -115,8 +115,8 @@ contract ZoneConfigTest is BaseTest {
     }
 
     function test_closedLoopMembershipAndGatewayAreIndependent() public view {
-        assertTrue(config.accessMode());
-        assertTrue(config.gatewayMode());
+        assertTrue(config.isAccessEnforced());
+        assertFalse(config.isGatewayOpen());
         assertTrue(config.isAllowedAccount(alice));
         assertFalse(config.isZoneGateway(alice));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
@@ -129,7 +129,7 @@ contract ZoneConfigTest is BaseTest {
         );
 
         address outsider = makeAddr("open mode outsider");
-        assertFalse(config.accessMode());
+        assertFalse(config.isAccessEnforced());
         assertTrue(config.isAllowedAccount(outsider));
         assertTrue(config.isAllowedAccount(address(zoneGateway)));
         assertTrue(config.isZoneGateway(address(zoneGateway)));
@@ -141,8 +141,8 @@ contract ZoneConfigTest is BaseTest {
             address(portal), PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1))
         );
 
-        assertTrue(config.accessMode());
-        assertFalse(config.gatewayMode());
+        assertTrue(config.isAccessEnforced());
+        assertTrue(config.isGatewayOpen());
         assertTrue(config.isZoneGateway(address(zoneGateway)));
     }
 

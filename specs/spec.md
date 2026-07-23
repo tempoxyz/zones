@@ -980,7 +980,7 @@ The zone exposes four methods under the `zone_` namespace:
 | Method | Access | Description |
 |--------|--------|-------------|
 | `zone_getAuthorizationTokenInfo` | Any authenticated | Returns the authenticated account address and token expiry |
-| `zone_getZoneInfo` | Any authenticated | Returns `zoneId`, `accessMode`, `gatewayMode`, `zoneTokens`, `sequencers`, `chainId`, and `tempoBlockNumber` |
+| `zone_getZoneInfo` | Any authenticated | Returns `zoneId`, `isAccessEnforced`, `isGatewayOpen`, `zoneTokens`, `sequencers`, `chainId`, and `tempoBlockNumber` |
 | `zone_getEncryptionKey` | Any authenticated | Returns the active sequencer encryption key at the current Tempo L1 head |
 
 `zone_getEncryptionKey` reads the active key directly from the portal at the current Tempo L1 head.
@@ -1786,9 +1786,9 @@ interface IZonePortal {
     function enabledTokenAt(uint256 index) external view returns (address);
 
     // Access and callback configuration
-    function accessMode() external view returns (bool);
+    function isAccessEnforced() external view returns (bool);
     function setAccessMode(bool enforced) external; // admin-only
-    function gatewayMode() external view returns (bool);
+    function isGatewayOpen() external view returns (bool);
     function setGatewayMode(bool enforced) external; // admin-only
     function role(address account) external view returns (Role);
     function setRole(address account, Role role) external; // admin-only
@@ -2068,8 +2068,8 @@ Address: `0x1c00000000000000000000000000000000000003`
 interface IZoneConfig {
     function isSequencer(address account) external view returns (bool);
     function isEnabledToken(address token) external view returns (bool);
-    function accessMode() external view returns (bool);
-    function gatewayMode() external view returns (bool);
+    function isAccessEnforced() external view returns (bool);
+    function isGatewayOpen() external view returns (bool);
     function isAllowedAccount(address account) external view returns (bool);
     function isZoneGateway(address gateway) external view returns (bool);
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);

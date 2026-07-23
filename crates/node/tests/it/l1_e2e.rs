@@ -528,12 +528,12 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
 
     let portal = ZonePortal::new(portal_address, l1.provider());
     let account_address = l1.user_signer().address();
-    assert_eq!(portal.accessMode().call().await?, false);
+    assert!(!portal.isAccessEnforced().call().await?);
     assert_eq!(
         portal.role(account_address).call().await? as u8,
         PortalRole::None as u8
     );
-    zone.assert_access_mode(false).await?;
+    zone.assert_access_enforced(false).await?;
 
     let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
     let deposit_amount = 2_000_000u128;
@@ -654,7 +654,7 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
     let portal_address = l1.deploy_zone().await?;
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-    zone.assert_access_mode(true).await?;
+    zone.assert_access_enforced(true).await?;
 
     let outsider_signer = l1.signer_at(3);
     let outsider = outsider_signer.address();
@@ -748,8 +748,8 @@ async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Re
     let portal_address = l1.create_zone(factory).await?;
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-    zone.assert_access_mode(true).await?;
-    zone.assert_gateway_mode(true).await?;
+    zone.assert_access_enforced(true).await?;
+    zone.assert_gateway_open(false).await?;
 
     let outsider_signer = l1.signer_at(3);
     let outsider = outsider_signer.address();
@@ -767,7 +767,7 @@ async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Re
     let open_access_block = l1.set_access_mode_on_portal(portal_address, false).await?;
     zone.wait_for_l2_tempo_finalized(open_access_block, L1_TIMEOUT)
         .await?;
-    zone.assert_access_mode(false).await?;
+    zone.assert_access_enforced(false).await?;
     zone.assert_allowed_account(outsider, true).await?;
     outsider_account
         .deposit(5_000_000, L1_TIMEOUT, &zone)
@@ -793,7 +793,7 @@ async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Re
     let open_gateway_block = l1.set_gateway_mode_on_portal(portal_address, false).await?;
     zone.wait_for_l2_tempo_finalized(open_gateway_block, L1_TIMEOUT)
         .await?;
-    zone.assert_gateway_mode(false).await?;
+    zone.assert_gateway_open(true).await?;
     outsider_account
         .withdraw_with(callback.clone())
         .await
@@ -802,7 +802,7 @@ async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Re
     let closed_access_block = l1.set_access_mode_on_portal(portal_address, true).await?;
     zone.wait_for_l2_tempo_finalized(closed_access_block, L1_TIMEOUT)
         .await?;
-    zone.assert_access_mode(true).await?;
+    zone.assert_access_enforced(true).await?;
     assert!(
         outsider_account
             .simulate_deposit(100_000, outsider, outsider)
@@ -1024,10 +1024,10 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 
     zone_a.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
     zone_b.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-    zone_a.assert_access_mode(false).await?;
-    zone_b.assert_access_mode(false).await?;
-    zone_a.assert_gateway_mode(false).await?;
-    zone_b.assert_gateway_mode(false).await?;
+    zone_a.assert_access_enforced(false).await?;
+    zone_b.assert_access_enforced(false).await?;
+    zone_a.assert_gateway_open(true).await?;
+    zone_b.assert_gateway_open(true).await?;
 
     // --- Step 4: Deposit into zone_a ---
     let mut account_a = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
@@ -1161,10 +1161,10 @@ async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Resu
 
     zone_a.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
     zone_b.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-    zone_a.assert_access_mode(false).await?;
-    zone_b.assert_access_mode(false).await?;
-    zone_a.assert_gateway_mode(false).await?;
-    zone_b.assert_gateway_mode(false).await?;
+    zone_a.assert_access_enforced(false).await?;
+    zone_b.assert_access_enforced(false).await?;
+    zone_a.assert_gateway_open(true).await?;
+    zone_b.assert_gateway_open(true).await?;
 
     let encryption_key = k256::SecretKey::from(seq_b_signer.credential());
     l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())

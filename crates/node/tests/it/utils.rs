@@ -486,26 +486,26 @@ impl ZoneTestNode {
         Ok(())
     }
 
-    /// Assert the current account mode exposed by the L2 ZoneConfig predeploy.
-    pub(crate) async fn assert_access_mode(&self, expected: bool) -> eyre::Result<()> {
+    /// Assert whether account enforcement is enabled in the L2 ZoneConfig predeploy.
+    pub(crate) async fn assert_access_enforced(&self, expected: bool) -> eyre::Result<()> {
         use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
         let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
-        let actual = config.accessMode().call().await?;
+        let actual = config.isAccessEnforced().call().await?;
         eyre::ensure!(
             actual == expected,
-            "ZoneConfig access mode {actual} did not equal {expected}"
+            "ZoneConfig access enforcement {actual} did not equal {expected}"
         );
         Ok(())
     }
 
-    /// Assert the gateway mode exposed by the L2 ZoneConfig predeploy.
-    pub(crate) async fn assert_gateway_mode(&self, expected: bool) -> eyre::Result<()> {
+    /// Assert whether gateway registration is open in the L2 ZoneConfig predeploy.
+    pub(crate) async fn assert_gateway_open(&self, expected: bool) -> eyre::Result<()> {
         use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
         let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
-        let actual = config.gatewayMode().call().await?;
+        let actual = config.isGatewayOpen().call().await?;
         eyre::ensure!(
             actual == expected,
-            "ZoneConfig gateway mode {actual} did not equal {expected}"
+            "ZoneConfig gateway openness {actual} did not equal {expected}"
         );
         Ok(())
     }
@@ -1806,7 +1806,7 @@ impl L1TestNode {
             .await?;
         eyre::ensure!(receipt.status(), "setAccessMode failed");
         eyre::ensure!(
-            portal.accessMode().call().await? == mode,
+            portal.isAccessEnforced().call().await? == mode,
             "L1 ZonePortal access mode did not update"
         );
         Ok(provider.get_block_number().await?)
@@ -1829,7 +1829,7 @@ impl L1TestNode {
             .await?;
         eyre::ensure!(receipt.status(), "setGatewayMode failed");
         eyre::ensure!(
-            portal.gatewayMode().call().await? == mode,
+            portal.isGatewayOpen().call().await? != mode,
             "L1 ZonePortal gateway mode did not update"
         );
         Ok(provider.get_block_number().await?)

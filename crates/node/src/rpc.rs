@@ -272,25 +272,25 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
         Ok(sequencers)
     }
 
-    async fn zone_access_mode(&self) -> Result<bool, JsonRpcError> {
+    async fn zone_is_access_enforced(&self) -> Result<bool, JsonRpcError> {
         if self.config.zone_portal.is_zero() {
             return Ok(false);
         }
 
         ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
-            .accessMode()
+            .isAccessEnforced()
             .call()
             .await
             .map_err(internal)
     }
 
-    async fn zone_gateway_mode(&self) -> Result<bool, JsonRpcError> {
+    async fn zone_is_gateway_open(&self) -> Result<bool, JsonRpcError> {
         if self.config.zone_portal.is_zero() {
-            return Ok(false);
+            return Ok(true);
         }
 
         ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
-            .gatewayMode()
+            .isGatewayOpen()
             .call()
             .await
             .map_err(internal)
@@ -823,8 +823,8 @@ where
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
             let sequencers = self.zone_sequencers().await?;
-            let access_mode = self.zone_access_mode().await?;
-            let gateway_mode = self.zone_gateway_mode().await?;
+            let is_access_enforced = self.zone_is_access_enforced().await?;
+            let is_gateway_open = self.zone_is_gateway_open().await?;
             let tempo_block_number = self
                 .tempo_state
                 .tempoBlockNumber()
@@ -833,8 +833,8 @@ where
                 .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
-                access_mode,
-                gateway_mode,
+                is_access_enforced,
+                is_gateway_open,
                 zone_tokens,
                 sequencers,
                 chain_id: U64::from(self.config.chain_id),
