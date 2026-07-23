@@ -31,7 +31,10 @@ use std::{
     },
     time::Duration,
 };
-use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
+use tempo_alloy::{
+    TempoNetwork,
+    rpc::{TempoCallBuilderExt, TempoHeaderResponse},
+};
 use tempo_chainspec::{
     hardfork::TempoHardfork,
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
@@ -286,10 +289,130 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
 
 /// Dummy L1 URL used when no real L1 is needed.
 ///
-/// Uses HTTP (not WS) because HTTP providers are lazy — they don't attempt a
-/// connection until the first request, so `L1StateProvider::new` succeeds
-/// without a running L1. The L1Subscriber will fail and retry in the background.
+/// The launch helper recognizes this sentinel and replaces it with a local RPC
+/// server that exposes the enabled-token snapshot required during node startup.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
+
+async fn spawn_test_l1_rpc() -> eyre::Result<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let enabled_tokens = Arc::new(vec![PATH_USD_ADDRESS]);
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let enabled_tokens = enabled_tokens.clone();
+            tokio::spawn(handle_test_l1_rpc_request(stream, enabled_tokens));
+        }
+    });
+    Ok(format!("http://{address}"))
+}
+
+async fn handle_test_l1_rpc_request(
+    mut stream: tokio::net::TcpStream,
+    enabled_tokens: Arc<Vec<Address>>,
+) {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 1024];
+    let mut headers_end = None;
+    let mut content_length = 0usize;
+
+    loop {
+        let Ok(read) = stream.read(&mut buf).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buf[..read]);
+
+        if headers_end.is_none()
+            && let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            headers_end = Some(end + 4);
+            let headers = String::from_utf8_lossy(&request[..end]);
+            content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+        }
+
+        if let Some(end) = headers_end
+            && request.len() >= end + content_length
+        {
+            break;
+        }
+    }
+
+    let request = headers_end
+        .and_then(|end| request.get(end..end + content_length))
+        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let result = match method {
+        "eth_chainId" => serde_json::json!("0x539"),
+        "eth_blockNumber" => serde_json::json!("0x0"),
+        "eth_newBlockFilter" => serde_json::json!("0x1"),
+        "eth_getFilterChanges" => serde_json::json!([]),
+        "eth_uninstallFilter" => serde_json::json!(true),
+        "eth_getHeaderByNumber" => serde_json::to_value(TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header::new(TempoHeader::default()),
+            timestamp_millis: 0,
+        })
+        .expect("test L1 header should serialize"),
+        "eth_call" => {
+            let input = request
+                .pointer("/params/0/input")
+                .or_else(|| request.pointer("/params/0/data"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|input| const_hex::decode(input.trim_start_matches("0x")).ok())
+                .unwrap_or_default();
+
+            if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
+                serde_json::json!(const_hex::encode_prefixed(
+                    U256::from(enabled_tokens.len()).abi_encode()
+                ))
+            } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
+                let index = input
+                    .get(4..36)
+                    .map(U256::from_be_slice)
+                    .map(|index| index.to::<u64>() as usize);
+                index
+                    .and_then(|index| enabled_tokens.get(index))
+                    .map(|token| serde_json::json!(const_hex::encode_prefixed(token.abi_encode())))
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        _ => serde_json::Value::Null,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+}
 
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
 pub(crate) fn seed_raw_tip403_token_policy(
@@ -783,7 +906,6 @@ impl ZoneTestNode {
             signer,
             8,
             None,
-            None,
             true,
         )
         .await
@@ -807,7 +929,6 @@ impl ZoneTestNode {
             Some(genesis),
             signer,
             withdrawal_batch_interval_blocks,
-            None,
             None,
             true,
         )
@@ -879,7 +1000,6 @@ impl ZoneTestNode {
             None,
             signer,
             8,
-            Some(vec![PATH_USD_ADDRESS]),
             Some(p2p_config),
             true,
         )
@@ -895,7 +1015,6 @@ impl ZoneTestNode {
         // Generate a throwaway signer for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
-        let initial_tokens = (l1_ws_url == DUMMY_L1_URL).then(|| vec![PATH_USD_ADDRESS]);
         Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_ws_url,
             portal_address,
@@ -904,7 +1023,6 @@ impl ZoneTestNode {
             None,
             signer,
             8,
-            initial_tokens,
             None,
             true,
         )
@@ -928,7 +1046,6 @@ impl ZoneTestNode {
             sequencer_signer,
             8,
             None,
-            None,
             true,
         )
         .await
@@ -943,12 +1060,16 @@ impl ZoneTestNode {
         custom_genesis: Option<Genesis>,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
         withdrawal_batch_interval_blocks: u64,
-        initial_tokens: Option<Vec<Address>>,
         p2p_config: Option<P2pConfig>,
         spawn_engine: bool,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
+        let l1_ws_url = if is_local_dummy_l1 {
+            spawn_test_l1_rpc().await?
+        } else {
+            l1_ws_url
+        };
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -969,9 +1090,6 @@ impl ZoneTestNode {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
                 .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
-        }
-        if let Some(initial_tokens) = initial_tokens {
-            zone_node = zone_node.with_initial_tokens(initial_tokens);
         }
         let p2p_enabled = p2p_config.is_some();
         if let Some(p2p_config) = p2p_config {
@@ -3073,46 +3191,6 @@ pub(crate) async fn start_local_p2p_pair(
         Ok(listener.local_addr()?)
     }
 
-    async fn spawn_test_l1_rpc() -> eyre::Result<String> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return;
-                };
-                tokio::spawn(async move {
-                    let mut request = vec![0_u8; 16 * 1024];
-                    let Ok(read) = stream.read(&mut request).await else {
-                        return;
-                    };
-                    let request = String::from_utf8_lossy(&request[..read]);
-                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-                    let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-                    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                    let result = match value.get("method").and_then(|method| method.as_str()) {
-                        Some("eth_chainId") => serde_json::json!("0x539"),
-                        Some("eth_blockNumber") => serde_json::json!("0x0"),
-                        _ => serde_json::Value::Null,
-                    };
-                    let response_body = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": result,
-                    })
-                    .to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        response_body.len(),
-                        response_body
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        });
-        Ok(format!("http://{address}"))
-    }
-
     let addresses = [
         available_address()?,
         available_address()?,
@@ -3186,7 +3264,6 @@ pub(crate) async fn start_local_p2p_pair(
         Some(genesis.clone()),
         signer.clone(),
         8,
-        Some(vec![PATH_USD_ADDRESS]),
         Some(configs.remove(0)),
         true,
     )
@@ -3199,7 +3276,6 @@ pub(crate) async fn start_local_p2p_pair(
         Some(genesis),
         signer,
         8,
-        Some(vec![PATH_USD_ADDRESS]),
         Some(configs.remove(0)),
         false,
     )

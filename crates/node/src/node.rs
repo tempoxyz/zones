@@ -196,8 +196,6 @@ pub struct ZoneNode {
     enabled_tokens: EnabledTokenRegistry,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
-    /// Optional pre-configured list of enabled token addresses.
-    initial_tokens: Option<Vec<Address>>,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
@@ -247,7 +245,6 @@ impl ZoneNode {
             l1_state_cache,
             enabled_tokens,
             portal_address,
-            initial_tokens: None,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
             private_rpc_config: ZonePrivateRpcConfig::default(),
@@ -292,12 +289,6 @@ impl ZoneNode {
     /// Set the parent L1 chain ID, avoiding a startup RPC lookup.
     pub fn with_l1_chain_id(mut self, chain_id: u64) -> Self {
         self.l1_state_provider_config.chain_id = Some(chain_id);
-        self
-    }
-
-    /// Use a pre-configured enabled-token list instead of querying the portal at startup.
-    pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
-        self.initial_tokens = Some(tokens);
         self
     }
 
@@ -399,8 +390,6 @@ where
     l1_config: L1SubscriberConfig,
     /// ZonePortal address on L1.
     portal_address: Address,
-    /// Pre-configured list of initial tokens.
-    initial_tokens: Option<Vec<Address>>,
     /// Private RPC configuration.
     private_rpc_config: ZonePrivateRpcConfig,
     /// Sequencer configuration.
@@ -428,7 +417,6 @@ where
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
         portal_address: Address,
-        initial_tokens: Option<Vec<Address>>,
         private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
@@ -445,7 +433,6 @@ where
             deposit_queue,
             l1_config,
             portal_address,
-            initial_tokens,
             private_rpc_config,
             sequencer_config,
             p2p_config,
@@ -697,28 +684,22 @@ where
         block_number: u64,
     ) -> eyre::Result<()> {
         let portal = self.portal_address;
-        let enabled_tokens = if let Some(tokens) = self.initial_tokens.take() {
-            info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
-            tokens
-        } else {
-            let tokens = ZonePortal::new(portal, l1_provider)
-                .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
-                .await
-                .map_err(|err| {
-                    eyre::eyre!(
-                        "failed to discover enabled tokens from portal {portal} at L1 block \
-                         {block_number}: {err}"
-                    )
-                })?;
-            info!(
-                target: "reth::cli",
-                count = tokens.len(),
-                ?tokens,
-                block_number,
-                "Discovered enabled tokens from L1"
-            );
-            tokens
-        };
+        let enabled_tokens = ZonePortal::new(portal, l1_provider)
+            .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
+            .await
+            .map_err(|err| {
+                eyre::eyre!(
+                    "failed to discover enabled tokens from portal {portal} at L1 block \
+                     {block_number}: {err}"
+                )
+            })?;
+        info!(
+            target: "reth::cli",
+            count = enabled_tokens.len(),
+            ?enabled_tokens,
+            block_number,
+            "Discovered enabled tokens from L1"
+        );
 
         let mut registry = self.l1_config.enabled_tokens.write();
         registry.clear();
@@ -955,7 +936,6 @@ where
             self.deposit_queue.clone(),
             self.l1_config.clone(),
             self.portal_address,
-            self.initial_tokens.clone(),
             self.private_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
