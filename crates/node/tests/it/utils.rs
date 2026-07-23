@@ -62,7 +62,6 @@ use zone_l1::{
 };
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
-use zone_primitives::constants::PORTAL_ROLE_SLOT;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -249,6 +248,8 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
 /// connection until the first request, so `L1StateProvider::new` succeeds
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
+// TODO: Import `ROLE` from `zone_portal_slots` once Tempo exports it.
+const PORTAL_ROLE_SLOT: U256 = IS_SEQUENCER.saturating_add(U256::ONE);
 
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
 pub(crate) fn seed_raw_tip403_token_policy(
@@ -3651,7 +3652,7 @@ impl L1Fixture {
         let enabled_token_config = enabled_deposits_active_token_config();
         let dev_account_role_slot: B256 = l1_dev_signer()
             .address()
-            .mapping_slot(PORTAL_ROLE_SLOT.into())
+            .mapping_slot(PORTAL_ROLE_SLOT)
             .into();
         let outbox_receive_policy_slot =
             ZONE_OUTBOX_ADDRESS.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
