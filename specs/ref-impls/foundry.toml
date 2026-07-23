@@ -11,6 +11,10 @@ fs_permissions = [{ access = "read-write", path = "./" }]
 remappings = [
     "tempo-std/=lib/tempo-std/src/",
     "forge-std/=lib/forge-std/src/",
+    "auth-registry/src/=test/fixtures/earn/vendor/bridge/auth-registry/",
+    "openzeppelin-contracts/=lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@openzeppelin/contracts-upgradeable/=lib/openzeppelin-contracts-upgradeable/contracts/",
 ]
 
 # optimizer and invariants

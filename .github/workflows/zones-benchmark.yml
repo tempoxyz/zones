@@ -503,6 +503,9 @@ jobs:
           test -s specs/ref-impls/out/ClosedLoopZoneGateway.sol/ClosedLoopZoneGateway.json
           test -s specs/ref-impls/out/VaultAdapter.sol/VaultAdapter.json
           test -s specs/ref-impls/out/VaultRewards.sol/VaultRewards.json
+          test -s specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json
+          test -s specs/ref-impls/out/TIP20Controller.sol/TIP20Controller.json
+          test -s specs/ref-impls/out/BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |

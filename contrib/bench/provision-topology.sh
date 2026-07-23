@@ -367,14 +367,22 @@ verify_neobank_fixture_topology() {
     local metadata="$2"
     local expected_owner="$3"
     local expected_asset="$4"
-    local field address code vault engine adapter rewards
-    local observed_adapter observed_asset observed_owner observed_engine observed_vault
+    local field address code vault engine adapter rewards direct_swap swap_adapter controller handler auth_registry gateway dlusd reserve_ledger
+    local observed_adapter observed_asset observed_owner observed_engine observed_vault observed
 
     vault="$(jq -er '.vault' "$metadata")"
     engine="$(jq -er '.engine' "$metadata")"
     adapter="$(jq -er '.vaultAdapter' "$metadata")"
     rewards="$(jq -er '.rewards' "$metadata")"
-    for field in vault engine adapter rewards; do
+    direct_swap="$(jq -er '.directSwap' "$metadata")"
+    swap_adapter="$(jq -er '.swapAdapter' "$metadata")"
+    controller="$(jq -er '.tip20Controller' "$metadata")"
+    handler="$(jq -er '.tip20Handler' "$metadata")"
+    auth_registry="$(jq -er '.authRegistry' "$metadata")"
+    gateway="$(jq -er '.gateway' "$metadata")"
+    dlusd="$(jq -er '.dlusd' "$metadata")"
+    reserve_ledger="$(jq -er '.reserveLedger' "$metadata")"
+    for field in vault engine adapter rewards direct_swap swap_adapter controller handler auth_registry gateway reserve_ledger; do
         address="${!field}"
         code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
         [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
@@ -390,6 +398,19 @@ verify_neobank_fixture_topology() {
     [[ "${observed_adapter,,}" == "${adapter,,}" ]] || die "VaultRewards adapter does not match fixture metadata"
     [[ "${observed_asset,,}" == "${expected_asset,,}" ]] || die "VaultRewards asset does not match PathUSD"
     [[ "${observed_owner,,}" == "${expected_owner,,}" ]] || die "VaultRewards owner does not match the benchmark control account"
+
+    observed="$(cast call "$swap_adapter" 'directSwap()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${direct_swap,,}" ]] || die "Bridge swap adapter does not use DirectSwap"
+    observed="$(cast call "$direct_swap" 'STABLECOIN_HANDLER_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${handler,,}" ]] || die "DirectSwap does not use the TIP20 handler"
+    observed="$(cast call "$direct_swap" 'RESERVE_LEDGER_TOKEN_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${reserve_ledger,,}" ]] || die "DirectSwap does not use the Bridge reserve ledger"
+    observed="$(cast call "$handler" 'CONTROLLER()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${controller,,}" ]] || die "TIP20 handler does not use the Bridge controller"
+    observed="$(cast call "$gateway" 'depositSwapperFor(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${swap_adapter,,}" ]] || die "DLUSD deposit route does not use the Bridge swap adapter"
+    observed="$(cast call "$gateway" 'redeemSwapperFor(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${swap_adapter,,}" ]] || die "DLUSD redeem route does not use the Bridge swap adapter"
 }
 
 write_env() {

@@ -15,7 +15,7 @@ boundaries:
 5. a DLUSD off-ramp to the bridge-wallet fixture and its exact
    `WithdrawalProcessed` event.
 
-The gateway, vault adapter, rewards controller, engine, StablecoinDEX adapter, and proxy are the
+The gateway, vault adapter, rewards controller, engine, Bridge DirectSwap stack, and proxy are the
 Earn boundary fixtures from #750 under
 `specs/ref-impls/test/fixtures/earn`. Foundry builds their artifacts alongside
 the Zone specs; benchmark provisioning never fetches or clones external source.
@@ -89,8 +89,8 @@ the scenario report or an artifact.
 
 The pinned transaction generator supports the required in-memory encrypted
 deposit preparation and named-tuple ABI encoding. The topology provisioner has
-a `neobank` profile which deploys and seeds the copied Earn stack and the
-L1 StablecoinDEX outside the measured interval, enables EarnToken, sets the
+a `neobank` profile which deploys and seeds the copied Earn stack and Bridge
+`DirectSwapV2`/TIP-20 controller outside the measured interval, enables EarnToken, sets the
 bridge rates to zero, waits for Zone token ingestion, and writes only
 non-secret runtime metadata:
 
@@ -220,7 +220,7 @@ latency, and remove the temporary material on exit.
 
 The topology exercises real L1 and Zone nodes, portal deposits, outbox batches,
 authenticated private RPC, and receipt-scoped cross-chain correlation. The
-StablecoinDEX liquidity and `Simple4626Vault` venue are benchmark fixtures.
+Bridge controller reserves and the `Simple4626Vault` venue are benchmark fixtures.
 They do not represent final production economics, liquidity, policy
 administration, or a final vault venue.
 
