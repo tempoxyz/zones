@@ -165,33 +165,33 @@ impl Harness {
         )
     }
 
-    fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {
+    fn with_portal<T>(
+        &mut self,
+        f: impl FnOnce(&mut ZonePortal) -> TempoResult<T>,
+    ) -> eyre::Result<T> {
+        let l1 = self.l1.clone();
         let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || {
-            let mut portal = self.l1.portal();
+        Ok(StorageCtx::enter(&mut storage, || f(&mut l1.portal()))?)
+    }
+
+    fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {
+        self.with_portal(|portal| {
             portal.is_access_enforced.write(access_enforced)?;
-            portal.is_gateway_enforced.write(gateway_enforced)?;
-            Ok(())
+            portal.is_gateway_enforced.write(gateway_enforced)
         })
     }
 
     fn set_role(&mut self, account: Address, role: IZonePortal::Role) -> eyre::Result<()> {
-        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || {
-            self.l1.portal().role[account].write(role as u8)?;
-            Ok(())
-        })
+        self.with_portal(|portal| portal.role[account].write(role as u8))
     }
 
     fn set_token_enabled(&mut self, enabled: bool) -> eyre::Result<()> {
-        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || {
-            let mut portal = self.l1.portal();
-            let mut token_config = portal.token_configs[self.token].read()?;
-            token_config.enabled = enabled;
-            token_config.deposits_active = true;
-            portal.token_configs[self.token].write(token_config)?;
-            Ok(())
+        let token = self.token;
+        self.with_portal(|portal| {
+            let mut config = portal.token_configs[token].read()?;
+            config.enabled = enabled;
+            config.deposits_active = true;
+            portal.token_configs[token].write(config)
         })
     }
 
