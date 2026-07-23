@@ -786,6 +786,15 @@ jobs from different PRs and manual dispatches serialize on the shared Schelk
 host resources. The scripts can also be executed directly on the benchmark host
 while the workflow is under review.
 
+For a sustained generic roundtrip, the validated profile is 200 accounts,
+1,000 journeys, 20 journey starts per second, and 200 maximum in flight. It
+completed 1,000/1,000 with no failures or timeouts at 13.332 journeys/s, with
+12.540 s p50 and 15.208 s p95 journey latency in
+[run 29978880031](https://github.com/tempoxyz/zones/actions/runs/29978880031).
+The corresponding report is published under the
+[`zones-roundtrip`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/zones-roundtrip)
+scenario.
+
 This is a public repository, and a `pull_request` run evaluates the workflow
 definition from the PR. The GitHub repository or organization policy must
 require approval for outside-collaborator workflows before they can reach a

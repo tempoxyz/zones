@@ -138,6 +138,23 @@ The fast validation defaults are 100 accounts, 100 complete journeys, 20
 journey starts per second, and at most 100 in flight. Increase those values only
 after the selected preset completes successfully at that scale.
 
+For sustained runs, use the validated profiles below. Offered load is kept
+above the observed completion rate so the configured in-flight set stays full;
+the observed rate includes ramp-up and drain. Each linked run completed all
+1,000 journeys with no failures or timeouts using the 30,000,000 L1 gas limit
+and 1 GiB L1 state-bloat preset, and published its report to ClickHouse.
+
+| Preset | Accounts | Journeys | Starts/s | Max in flight | Observed journeys/s | Journey p50 | Journey p95 | Run |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| [`encrypted-deposit`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-encrypted-deposit) | 100 | 1,000 | 40 | 100 | 36.334 | 1.505 s | 1.507 s | [29978182968](https://github.com/tempoxyz/zones/actions/runs/29978182968) |
+| [`private-withdrawal`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-private-withdrawal) | 200 | 1,000 | 30 | 200 | 12.744 | 12.037 s | 28.418 s | [29978430968](https://github.com/tempoxyz/zones/actions/runs/29978430968) |
+| [`slippage-bounce`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-slippage-bounce) | 100 | 1,000 | 4 | 100 | 1.964 | 50.662 s | 51.445 s | [29979095057](https://github.com/tempoxyz/zones/actions/runs/29979095057) |
+| [`rewards-redemption`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-rewards-redemption) | 100 | 1,000 | 2 | 100 | 0.986 | 100.875 s | 102.368 s | [29979802140](https://github.com/tempoxyz/zones/actions/runs/29979802140) |
+| [`swapped-lifecycle`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-swapped-lifecycle) | 100 | 1,000 | 2 | 100 | 0.984 | 100.864 s | 102.367 s | [29980825511](https://github.com/tempoxyz/zones/actions/runs/29980825511) |
+| [`direct-lifecycle`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-direct-lifecycle) | 100 | 1,000 | 2 | 100 | 0.984 | 100.895 s | 102.358 s | [29981899744](https://github.com/tempoxyz/zones/actions/runs/29981899744) |
+| [`third-party-recipient`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-third-party-recipient) | 200 | 1,000 | 2 | 100 | 0.983 | 100.876 s | 102.373 s | [29982874753](https://github.com/tempoxyz/zones/actions/runs/29982874753) |
+| [`full-journey`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/neobank-private-zone-flow) | 100 | 1,000 | 2 | 100 | 0.937 | 104.863 s | 109.381 s | [29983931381](https://github.com/tempoxyz/zones/actions/runs/29983931381) |
+
 ### Focused encrypted-deposit load
 
 The measured boundary starts at the per-journey Zone checkpoint and in-memory
