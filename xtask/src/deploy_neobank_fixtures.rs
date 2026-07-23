@@ -102,6 +102,10 @@ alloy::sol! {
             address owner_
         );
     }
+
+    contract FixtureVaultRewards {
+        constructor(address adapter_, address owner_);
+    }
 }
 
 #[derive(Debug, clap::Parser)]
@@ -148,6 +152,7 @@ struct FixtureMetadata {
     vault: String,
     engine: String,
     vault_adapter: String,
+    rewards: String,
     gateway: String,
     bridge_wallet: String,
 }
@@ -280,6 +285,19 @@ impl DeployNeobankFixtures {
             .await
             .wrap_err("failed waiting for canonical ERC4626 engine initialization")?;
         check(&receipt, "initialize canonical ERC4626 engine")?;
+        let rewards = deploy(
+            &deployer_provider,
+            with_constructor(
+                load_bytecode(&self.specs_out, "VaultRewards.sol/VaultRewards")?,
+                FixtureVaultRewards::constructorCall {
+                    adapter_: vault_adapter,
+                    owner_: deployer_address,
+                }
+                .abi_encode(),
+            ),
+            "VaultRewards",
+        )
+        .await?;
         let gateway = deploy(
             &deployer_provider,
             with_constructor(
@@ -403,6 +421,7 @@ impl DeployNeobankFixtures {
             vault: vault.to_string(),
             engine: engine.to_string(),
             vault_adapter: vault_adapter.to_string(),
+            rewards: rewards.to_string(),
             gateway: gateway.to_string(),
             bridge_wallet: bridge_wallet.to_string(),
         };
@@ -415,6 +434,7 @@ impl DeployNeobankFixtures {
         println!("Private-Zone benchmark fixtures deployed");
         println!("  Gateway:       {gateway}");
         println!("  Vault adapter: {vault_adapter}");
+        println!("  Rewards:       {rewards}");
         println!("  Bridge wallet: {bridge_wallet}");
         println!("  Metadata:      {}", self.output.display());
         Ok(())
@@ -559,6 +579,53 @@ mod tests {
     use super::*;
     use clap::Parser as _;
 
+    fn function_shapes(abi: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+        abi.as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["type"] == "function" && entry["name"] == name)
+            .map(|entry| {
+                serde_json::json!({
+                    "inputs": entry["inputs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|input| input["type"].clone())
+                        .collect::<Vec<_>>(),
+                    "outputs": entry["outputs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|output| output["type"].clone())
+                        .collect::<Vec<_>>(),
+                    "stateMutability": entry["stateMutability"],
+                })
+            })
+            .collect()
+    }
+
+    fn event_shapes(abi: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+        abi.as_array()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry["type"] == "event" && entry["name"] == name)
+            .map(|entry| {
+                serde_json::json!({
+                    "anonymous": entry["anonymous"],
+                    "inputs": entry["inputs"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|input| serde_json::json!({
+                            "type": input["type"],
+                            "indexed": input["indexed"],
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
     fn required_args() -> [&'static str; 11] {
         [
             "deploy-neobank-fixtures",
@@ -609,5 +676,50 @@ mod tests {
             artifact_path(&out, "VaultAdapter.sol/VaultAdapter"),
             PathBuf::from("specs/ref-impls/out/VaultAdapter.sol/VaultAdapter.json")
         );
+        assert_eq!(
+            artifact_path(&out, "VaultRewards.sol/VaultRewards"),
+            PathBuf::from("specs/ref-impls/out/VaultRewards.sol/VaultRewards.json")
+        );
+    }
+
+    #[test]
+    fn benchmark_abis_match_pinned_reward_interfaces() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        for (minimal, artifact, functions) in [
+            (
+                "contrib/bench/neobank/abis/vault-rewards.json",
+                "specs/ref-impls/out/VaultRewards.sol/VaultRewards.json",
+                &["fund"][..],
+            ),
+            (
+                "contrib/bench/neobank/abis/vault-adapter.json",
+                "specs/ref-impls/out/VaultAdapter.sol/VaultAdapter.json",
+                &["redeem", "shareSupply", "previewRedeem"][..],
+            ),
+        ] {
+            let minimal: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join(minimal)).unwrap()).unwrap();
+            let artifact: serde_json::Value =
+                serde_json::from_slice(&fs::read(root.join(artifact)).unwrap()).unwrap();
+            for function in functions {
+                assert_eq!(
+                    function_shapes(&minimal, function),
+                    function_shapes(&artifact["abi"], function),
+                    "minimal {function} ABI diverges from its pinned artifact"
+                );
+            }
+            if minimal
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["name"] == "Funded")
+            {
+                assert_eq!(
+                    event_shapes(&minimal, "Funded"),
+                    event_shapes(&artifact["abi"], "Funded"),
+                    "minimal Funded ABI diverges from its pinned artifact"
+                );
+            }
+        }
     }
 }

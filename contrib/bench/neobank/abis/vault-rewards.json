@@ -1,0 +1,45 @@
+[
+  {
+    "type": "function",
+    "name": "fund",
+    "stateMutability": "nonpayable",
+    "inputs": [
+      {
+        "name": "funder",
+        "type": "address"
+      },
+      {
+        "name": "requested",
+        "type": "uint256"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "funded",
+        "type": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Funded",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "funder",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "requested",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "funded",
+        "type": "uint256",
+        "indexed": false
+      }
+    ]
+  }
+]

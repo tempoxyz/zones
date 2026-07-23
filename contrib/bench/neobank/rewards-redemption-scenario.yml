@@ -1,0 +1,77 @@
+version: 1
+
+include:
+  - ./scenario-fragments.yml
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: __L1_CHAIN_ID__
+    workload: ./l1-onramp.yml
+
+  zone:
+    network: tempo
+    rpc_url: "${ZONE_PRIVATE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    request_auth:
+      sender_header:
+        name: X-Authorization-Token
+        map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
+        reload_interval: 1s
+    chain_id: __ZONE_CHAIN_ID__
+    workload: ./zone-flow.yml
+
+scenario:
+  name: neobank-rewards-redemption
+  timeout: 10m
+
+  bindings:
+    account:
+      account: { pool: users, select: lease }
+    first_redeem_action_id:
+      bytes32: { random_bytes: 32 }
+    second_redeem_action_id:
+      bytes32: { random_bytes: 32 }
+
+  steps:
+    - use: earn-redeem-and-return
+      as: first_redeem
+      with:
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
+        recipient: { var: account.address }
+        output_token: "__PATHUSD__"
+        fee_token: "__PATHUSD__"
+        amount: "__REWARD_FIRST_REDEEM_AMOUNT__"
+        min_vault_assets: "__REWARD_FIRST_REDEEM_AMOUNT__"
+        min_output_amount: "__REWARD_FIRST_REDEEM_AMOUNT__"
+        action_id:
+          keccak256_packed:
+            types: [bytes32, bytes32]
+            values:
+              - "0x1ab742d23afcb30cdecd25dbff2f2577f2b21f4786346b3b35acf8ab3f2d0acf"
+              - { var: first_redeem_action_id }
+        fallback_recipient: { var: account.address }
+        refund_recipient: { var: account.address }
+
+    - use: earn-redeem-and-return
+      as: second_redeem
+      with:
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
+        recipient: { var: account.address }
+        output_token: "__PATHUSD__"
+        fee_token: "__PATHUSD__"
+        amount: "__REWARD_SECOND_REDEEM_AMOUNT__"
+        min_vault_assets: "__REWARD_SECOND_REDEEM_AMOUNT__"
+        min_output_amount: "__REWARD_SECOND_REDEEM_AMOUNT__"
+        action_id:
+          keccak256_packed:
+            types: [bytes32, bytes32]
+            values:
+              - "0x3315464805c2d07802442ac9905d97044dbb1d92cfb1c54f2343e48108e99bdd"
+              - { var: second_redeem_action_id }
+        fallback_recipient: { var: account.address }
+        refund_recipient: { var: account.address }

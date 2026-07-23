@@ -2131,12 +2131,34 @@ mod tests {
                 "__BRIDGE_WALLET__".into(),
                 Value::from("0x3000000000000000000000000000000000000002"),
             ),
+            (
+                "__REWARDS__".into(),
+                Value::from("0x3000000000000000000000000000000000000003"),
+            ),
             ("__PRIVATE_TRANSFER_AMOUNT__".into(), Value::from(1_u64)),
             ("__EARN_DEPOSIT_AMOUNT__".into(), Value::from(100_u64)),
             ("__EARN_REDEEM_AMOUNT__".into(), Value::from(100_u64)),
             ("__OFFRAMP_AMOUNT__".into(), Value::from(1_u64)),
             ("__CALLBACK_GAS_LIMIT__".into(), Value::from(2_000_000_u64)),
             ("__ONRAMP_AMOUNT__".into(), Value::from(1_000_u64)),
+            (
+                "__REWARD_ONRAMP_PER_ACCOUNT__".into(),
+                Value::from(2_000_u64),
+            ),
+            (
+                "__REWARD_POSITION_PER_ACCOUNT__".into(),
+                Value::from(1_000_u64),
+            ),
+            ("__REWARD_FUND_AMOUNT__".into(), Value::from(10_000_u64)),
+            (
+                "__REWARD_FUND_GAS_LIMIT__".into(),
+                Value::from(5_000_000_u64),
+            ),
+            ("__REWARD_FIRST_REDEEM_AMOUNT__".into(), Value::from(40_u64)),
+            (
+                "__REWARD_SECOND_REDEEM_AMOUNT__".into(),
+                Value::from(60_u64),
+            ),
             ("__ZONE_ID__".into(), Value::from(1_u64)),
         ]));
         for source in [
@@ -2148,6 +2170,9 @@ mod tests {
             "../neobank/direct-lifecycle-scenario.yml",
             "../neobank/third-party-recipient-scenario.yml",
             "../neobank/slippage-bounce-scenario.yml",
+            "../neobank/rewards-position-scenario.yml",
+            "../neobank/rewards-funding-scenario.yml",
+            "../neobank/rewards-redemption-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2341,6 +2366,75 @@ mod tests {
         assert_eq!(
             bounce_steps[1]["with"]["fallback_recipient"]["var"],
             "account.address"
+        );
+
+        let reward_position: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("rewards-position-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let reward_position_steps = reward_position["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(reward_position_steps.len(), 2);
+        assert_eq!(reward_position_steps[0]["use"], "encrypted-zone-entry");
+        assert_eq!(
+            reward_position_steps[0]["with"]["token"],
+            "0x2000000000000000000000000000000000000002"
+        );
+        assert_eq!(reward_position_steps[0]["with"]["amount"], 2_000);
+        assert_eq!(reward_position_steps[1]["use"], "earn-deposit-and-return");
+        assert_eq!(reward_position_steps[1]["with"]["amount"], 1_000);
+
+        let reward_funding: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("rewards-funding-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            reward_funding["scenario"]["bindings"]["control"]["account"]["select"]["index"],
+            0
+        );
+        let reward_funding_steps = reward_funding["scenario"]["steps"].as_sequence().unwrap();
+        assert_eq!(reward_funding_steps.len(), 3);
+        assert_eq!(reward_funding_steps[0]["submit"]["await"], "receipt");
+        assert_eq!(reward_funding_steps[1]["submit"]["await"], "receipt");
+        assert_eq!(reward_funding_steps[2]["wait_log"]["event"], "Funded");
+        for field in ["requested", "funded"] {
+            assert_eq!(reward_funding_steps[2]["wait_log"]["where"][field], 10_000);
+        }
+
+        let reward_redemption: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("rewards-redemption-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let reward_redemption_steps = reward_redemption["scenario"]["steps"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(reward_redemption_steps.len(), 2);
+        for (step, amount) in reward_redemption_steps.iter().zip([40, 60]) {
+            assert_eq!(step["use"], "earn-redeem-and-return");
+            assert_eq!(step["with"]["amount"], amount);
+            assert_eq!(
+                step["with"]["output_token"],
+                "0x2000000000000000000000000000000000000002"
+            );
+        }
+        let reward_action_domains = [
+            &reward_position_steps[0]["with"]["memo"]["keccak256_packed"]["values"][0],
+            &reward_position_steps[1]["with"]["action_id"]["keccak256_packed"]["values"][0],
+            &reward_redemption_steps[0]["with"]["action_id"]["keccak256_packed"]["values"][0],
+            &reward_redemption_steps[1]["with"]["action_id"]["keccak256_packed"]["values"][0],
+        ];
+        assert!(reward_action_domains.iter().all(|domain| {
+            domain
+                .as_str()
+                .is_some_and(|value| value.len() == 66 && value.starts_with("0x"))
+        }));
+        assert_eq!(
+            reward_action_domains
+                .iter()
+                .filter_map(|domain| domain.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            reward_action_domains.len(),
+            "reward setup and measured action IDs must use disjoint domains"
         );
 
         let fragments: Value = serde_yaml::from_str(
@@ -2795,12 +2889,34 @@ mod tests {
                 "__BRIDGE_WALLET__".into(),
                 Value::from("0x3000000000000000000000000000000000000002"),
             ),
+            (
+                "__REWARDS__".into(),
+                Value::from("0x3000000000000000000000000000000000000003"),
+            ),
             ("__PRIVATE_TRANSFER_AMOUNT__".into(), Value::from(1_u64)),
             ("__EARN_DEPOSIT_AMOUNT__".into(), Value::from(100_u64)),
             ("__EARN_REDEEM_AMOUNT__".into(), Value::from(100_u64)),
             ("__OFFRAMP_AMOUNT__".into(), Value::from(1_u64)),
             ("__CALLBACK_GAS_LIMIT__".into(), Value::from(2_000_000_u64)),
             ("__ONRAMP_AMOUNT__".into(), Value::from(1_000_u64)),
+            (
+                "__REWARD_ONRAMP_PER_ACCOUNT__".into(),
+                Value::from(2_000_u64),
+            ),
+            (
+                "__REWARD_POSITION_PER_ACCOUNT__".into(),
+                Value::from(1_000_u64),
+            ),
+            ("__REWARD_FUND_AMOUNT__".into(), Value::from(10_000_u64)),
+            (
+                "__REWARD_FUND_GAS_LIMIT__".into(),
+                Value::from(5_000_000_u64),
+            ),
+            ("__REWARD_FIRST_REDEEM_AMOUNT__".into(), Value::from(40_u64)),
+            (
+                "__REWARD_SECOND_REDEEM_AMOUNT__".into(),
+                Value::from(60_u64),
+            ),
             ("__ZONE_ID__".into(), Value::from(1_u64)),
         ]));
         for source in [
@@ -2812,6 +2928,9 @@ mod tests {
             "../neobank/direct-lifecycle-scenario.yml",
             "../neobank/third-party-recipient-scenario.yml",
             "../neobank/slippage-bounce-scenario.yml",
+            "../neobank/rewards-position-scenario.yml",
+            "../neobank/rewards-funding-scenario.yml",
+            "../neobank/rewards-redemption-scenario.yml",
         ] {
             let destination = output.join(Path::new(source).file_name().unwrap());
             render_document(source, &destination, &replacements, false).unwrap();
@@ -2828,7 +2947,13 @@ mod tests {
         }
         let fixture_abis = output.join("abis");
         fs::create_dir_all(&fixture_abis).unwrap();
-        for name in ["zone-gateway.json", "zone-inbox.json", "zone-portal.json"] {
+        for name in [
+            "vault-adapter.json",
+            "vault-rewards.json",
+            "zone-gateway.json",
+            "zone-inbox.json",
+            "zone-portal.json",
+        ] {
             fs::copy(
                 Path::new(SOURCE_DIR).join("../neobank/abis").join(name),
                 fixture_abis.join(name),
@@ -2842,6 +2967,9 @@ mod tests {
             ("direct-lifecycle-scenario.yml", 23),
             ("third-party-recipient-scenario.yml", 28),
             ("slippage-bounce-scenario.yml", 14),
+            ("rewards-position-scenario.yml", 14),
+            ("rewards-funding-scenario.yml", 3),
+            ("rewards-redemption-scenario.yml", 18),
         ] {
             let rendered_path = output.join(format!("{scenario}.rendered.yml"));
             let validation = Command::new(txgen)

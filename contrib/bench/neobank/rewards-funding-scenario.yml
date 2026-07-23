@@ -1,0 +1,57 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: __L1_CHAIN_ID__
+    workload: ./l1-onramp.yml
+
+scenario:
+  name: neobank-rewards-funding-setup
+  timeout: 10m
+
+  bindings:
+    control:
+      account: { pool: control, select: { index: 0 } }
+
+  steps:
+    - submit:
+        chain: l1
+        template: reward_approval
+        with:
+          from: { var: control.ref }
+          call:
+            args:
+              - "__REWARDS__"
+              - "__REWARD_FUND_AMOUNT__"
+        await: receipt
+      save: approval
+
+    - submit:
+        chain: l1
+        template: reward_fund
+        with:
+          from: { var: control.ref }
+          call:
+            args:
+              - { var: control.address }
+              - "__REWARD_FUND_AMOUNT__"
+        await: receipt
+      save: funding
+
+    - wait_log:
+        chain: l1
+        transaction_hash: { var: funding.tx_hash }
+        sender: { var: funding.sender }
+        address: "__REWARDS__"
+        abi: VaultRewards
+        event: Funded
+        where:
+          funder: { var: control.address }
+          requested: "__REWARD_FUND_AMOUNT__"
+          funded: "__REWARD_FUND_AMOUNT__"
+        max_block_range: 1000
+      timeout: 45s
+      save: funded

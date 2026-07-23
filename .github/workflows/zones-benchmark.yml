@@ -7,8 +7,9 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-slippage-bounce
+        default: neobank-rewards-redemption
         options:
+          - neobank-rewards-redemption
           - neobank-slippage-bounce
           - neobank-third-party-recipient
           - neobank-direct-lifecycle
@@ -74,6 +75,7 @@ on:
     paths:
       - ".github/workflows/zones-benchmark.yml"
       - "contrib/bench/**"
+      - "docs/NEOBANK_PRIVATE_ZONE_BENCHMARK.md"
       - "docs/ZONES_BENCHMARK.md"
       - "xtask/**"
 
@@ -93,7 +95,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: slippage-bounce
+  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: rewards-redemption
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -181,6 +183,11 @@ jobs:
             requested_phase="neobank-$ZONES_BENCH_DEFAULT_NEOBANK_PRESET"
           fi
           case "$requested_phase" in
+            neobank-rewards-redemption)
+              phase=neobank-e2e
+              neobank_preset=rewards-redemption
+              leases_per_journey=1
+              ;;
             neobank-slippage-bounce)
               phase=neobank-e2e
               neobank_preset=slippage-bounce
@@ -459,6 +466,15 @@ jobs:
             echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
           } >> "$GITHUB_ENV"
+
+      - name: Build pinned neobank fixture contracts
+        if: needs.authorize.outputs.phase == 'neobank-e2e'
+        run: |
+          set -euo pipefail
+          forge build --root specs/ref-impls
+          test -s specs/ref-impls/out/ClosedLoopZoneGateway.sol/ClosedLoopZoneGateway.json
+          test -s specs/ref-impls/out/VaultAdapter.sol/VaultAdapter.json
+          test -s specs/ref-impls/out/VaultRewards.sol/VaultRewards.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |

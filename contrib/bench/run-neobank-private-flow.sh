@@ -37,9 +37,11 @@ load_benchmark_mnemonic
 
 for name in L1_RPC_URL ZONE_RPC_URL ZONE_PRIVATE_RPC_URL \
     L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
-    ZONES_BENCH_GATEWAY ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_VAULT ZONES_BENCH_ENGINE ZONES_BENCH_SEED
+    ZONES_BENCH_GATEWAY ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_VAULT ZONES_BENCH_ENGINE \
+    ZONES_BENCH_VAULT_ADAPTER ZONES_BENCH_REWARDS ZONES_BENCH_SEED
 do need "$name"; done
 
+ZONES_BENCH_CONTROL_ACCOUNT_INDEX="${ZONES_BENCH_CONTROL_ACCOUNT_INDEX:-0}"
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
 ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
 ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
@@ -60,7 +62,7 @@ ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
-ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-slippage-bounce}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-rewards-redemption}"
 case "$ZONES_BENCH_NEOBANK_PRESET" in
     direct-lifecycle)
         scenario_file=direct-lifecycle-scenario.yml
@@ -80,6 +82,12 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
         ;;
+    rewards-redemption)
+        scenario_file=rewards-redemption-scenario.yml
+        base_token_label=pathusd
+        expected_base_token="$ZONES_BENCH_PATHUSD"
+        leases_per_journey=1
+        ;;
     slippage-bounce)
         scenario_file=slippage-bounce-scenario.yml
         base_token_label=dlusd
@@ -96,24 +104,186 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
 esac
 [[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
     die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"
-for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
+for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
     ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_SEED
 do uint "$name"; done
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
+[[ "$ZONES_BENCH_CONTROL_ACCOUNT_INDEX" == 0 ]] ||
+    die "this topology fixes the neobank control account at mnemonic index 0"
+[[ "$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX" == 4 ]] ||
+    die "this topology fixes the approval sponsor at mnemonic index 4"
 required_accounts=$((10#$ZONES_BENCH_MAX_CONCURRENT * leases_per_journey))
 (( required_accounts <= 10#$ZONES_BENCH_ACCOUNTS )) ||
     die "$ZONES_BENCH_NEOBANK_PRESET requires at least $required_accounts accounts for max-concurrent=$ZONES_BENCH_MAX_CONCURRENT"
 account_journeys=$((10#$ZONES_BENCH_COUNT * leases_per_journey))
 journeys_per_account=$(((account_journeys + 10#$ZONES_BENCH_ACCOUNTS - 1) / 10#$ZONES_BENCH_ACCOUNTS))
 
+# Reward sizing uses arbitrary-precision arithmetic so configured uint128
+# amounts cannot silently wrap in the shell.
+reward_onramp_per_account="$ZONES_BENCH_DEPOSIT_AMOUNT"
+reward_position_per_account="$ZONES_BENCH_WITHDRAWAL_AMOUNT"
+reward_total_position=0
+reward_fund_amount=1
+reward_first_redeem_amount=1
+reward_second_redeem_amount=1
+reward_expected_remaining=0
+reward_fund_gas_limit=5000000
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
+    command -v python3 >/dev/null || die "missing python3"
+    reward_sizing="$(python3 - \
+        "$ZONES_BENCH_ACCOUNTS" "$ZONES_BENCH_COUNT" \
+        "$ZONES_BENCH_DEPOSIT_AMOUNT" "$ZONES_BENCH_WITHDRAWAL_AMOUNT" <<'PY'
+import sys
+
+a, j, d, w = map(int, sys.argv[1:])
+u128_max = 2**128 - 1
+u256_max = 2**256 - 1
+if min(a, j, d, w) <= 0:
+    raise SystemExit("rewards-redemption sizing values must be positive")
+if w <= 1:
+    raise SystemExit("rewards-redemption requires withdrawal-amount greater than 1")
+if d <= w:
+    raise SystemExit(
+        "rewards-redemption requires deposit-amount greater than withdrawal-amount for Zone fees"
+    )
+n = (j + a - 1) // a
+position = n * w
+onramp = n * d
+total = a * position
+reward = total // 10
+first = w // 2
+second = w - first
+redeemed = j * w
+remaining = total - redeemed
+if max(onramp, position, first, second) > u128_max:
+    raise SystemExit("reward scenario uint128 call amount overflow")
+if max(total, reward, redeemed, remaining) > u256_max:
+    raise SystemExit("reward scenario uint256 accounting overflow")
+if reward <= 0 or first <= 0 or second <= 0 or remaining < 0:
+    raise SystemExit("invalid reward scenario sizing result")
+print(onramp, position, total, reward, first, second, remaining, sep="\n")
+PY
+)"
+    mapfile -t reward_values <<<"$reward_sizing"
+    (( ${#reward_values[@]} == 7 )) || die "could not compute reward scenario sizing"
+    reward_onramp_per_account="${reward_values[0]}"
+    reward_position_per_account="${reward_values[1]}"
+    reward_total_position="${reward_values[2]}"
+    reward_fund_amount="${reward_values[3]}"
+    reward_first_redeem_amount="${reward_values[4]}"
+    reward_second_redeem_amount="${reward_values[5]}"
+    reward_expected_remaining="${reward_values[6]}"
+fi
+
 stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 
+read_l1_uint() {
+    local address="$1" signature="$2"
+    shift 2
+    local value
+    value="$(cast call "$address" "$signature" "$@" --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
+    [[ "$value" =~ ^[0-9]+$ ]] || die "could not read $signature from $address"
+    printf '%s\n' "$value"
+}
+
+assert_scenario_report() {
+    local report="$1" expected="$2" label="$3"
+    jq -e --argjson expected "$expected" '
+        .started == $expected and
+        .completed == $expected and
+        .failed == 0 and
+        .timed_out == 0
+    ' "$report" >/dev/null || die "$label did not complete successfully"
+}
+
+# Query private balances with each account's token entirely in process memory.
+# Authorization tokens never appear in argv, stdout, or an uploaded artifact.
+verify_reward_zone_balances() {
+    local mode="$1" expected_total="$2" expected_unit="$3"
+    python3 - \
+        "$ZONE_PRIVATE_RPC_URL" "$ZONES_BENCH_ZONE_AUTH_MAP" \
+        "$ZONES_BENCH_OUTPUT/preflight.json" "$ZONES_BENCH_EARN_TOKEN" \
+        "$ZONES_BENCH_ACCOUNTS" "$mode" "$expected_total" "$expected_unit" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+rpc_url, auth_path, preflight_path, token, expected_accounts, mode, expected_total, expected_unit = sys.argv[1:]
+expected_accounts = int(expected_accounts)
+expected_total = int(expected_total)
+expected_unit = int(expected_unit)
+with open(auth_path, encoding="utf-8") as handle:
+    auth = json.load(handle)
+with open(preflight_path, encoding="utf-8") as handle:
+    accounts = json.load(handle)["accounts"]
+if len(accounts) != expected_accounts:
+    raise SystemExit(
+        f"preflight contains {len(accounts)} accounts, expected {expected_accounts}"
+    )
+
+balances = []
+for request_id, account in enumerate(accounts, 1):
+    address = account["address"]
+    authorization = auth.get(address.lower())
+    if not authorization:
+        raise SystemExit(f"authorization map has no entry for benchmark account {address}")
+    calldata = "0x70a08231" + address[2:].lower().rjust(64, "0")
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": "eth_call",
+            "params": [{"from": address, "to": token, "data": calldata}, "latest"],
+        }
+    ).encode()
+    request = urllib.request.Request(
+        rpc_url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "X-Authorization-Token": authorization,
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            result = json.load(response)
+    except (OSError, urllib.error.HTTPError) as error:
+        raise SystemExit(f"private Zone balance query failed for {address}: {error}") from None
+    if "error" in result:
+        raise SystemExit(f"private Zone balance query failed for {address}: {result['error']}")
+    balances.append(int(result["result"], 16))
+
+if mode == "seeded":
+    bad = next((balance for balance in balances if balance != expected_unit), None)
+    if bad is not None:
+        raise SystemExit(
+            f"reward position balance {bad} does not equal expected {expected_unit}"
+        )
+elif mode == "remaining":
+    bad = next((balance for balance in balances if balance not in (0, expected_unit)), None)
+    if bad is not None:
+        raise SystemExit(
+            f"terminal reward balance {bad} is neither zero nor {expected_unit}"
+        )
+else:
+    raise SystemExit(f"unknown reward balance validation mode: {mode}")
+observed_total = sum(balances)
+if observed_total != expected_total:
+    raise SystemExit(
+        f"aggregate Zone EarnToken balance {observed_total} does not equal expected {expected_total}"
+    )
+print(f"verified {len(balances)} private Zone EarnToken balances; aggregate={observed_total}")
+PY
+}
+
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
-for command in "$txgen_bin" "$bench_bin" awk cast grep jq sed; do command -v "$command" >/dev/null || die "missing $command"; done
+for command in "$txgen_bin" "$bench_bin" awk cast grep jq python3 sed; do command -v "$command" >/dev/null || die "missing $command"; done
 if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark-preflight); else preflight=(cargo run --profile release -p tempo-xtask -- benchmark-preflight); fi
 
 mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_RENDERED_SCENARIO")"
@@ -226,31 +396,38 @@ zone_chain_id="$(cast chain-id --rpc-url "$ZONE_RPC_URL")"
 l1_fee="$(cast gas-price --rpc-url "$L1_RPC_URL")"
 zone_fee="$(cast gas-price --rpc-url "$ZONE_RPC_URL")"
 account_end=$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))
+control_account_end=$((10#$ZONES_BENCH_CONTROL_ACCOUNT_INDEX + 1))
 sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
-for source in l1-onramp.yml zone-flow.yml scenario-fragments.yml "$scenario_file"; do
+render_sources=(l1-onramp.yml zone-flow.yml scenario-fragments.yml "$scenario_file")
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
+    render_sources+=(rewards-position-scenario.yml rewards-funding-scenario.yml)
+fi
+rendered_documents=()
+for source in "${render_sources[@]}"; do
     destination="$source"
     [[ "$source" != "$scenario_file" ]] || destination=private-flow-scenario.yml
+    rendered_documents+=("$ZONES_BENCH_OUTPUT/$destination")
     sed \
         -e "s|__L1_CHAIN_ID__|$l1_chain_id|g" -e "s|__ZONE_CHAIN_ID__|$zone_chain_id|g" \
         -e "s|__ZONE_ID__|$zone_id|g" -e "s|__ACCOUNT_START__|$ZONES_BENCH_ACCOUNT_START|g" -e "s|__ACCOUNT_END__|$account_end|g" \
+        -e "s|__CONTROL_ACCOUNT_INDEX__|$ZONES_BENCH_CONTROL_ACCOUNT_INDEX|g" -e "s|__CONTROL_ACCOUNT_END__|$control_account_end|g" \
         -e "s|__SEQUENCER_ACCOUNT_INDEX__|$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX|g" -e "s|__SEQUENCER_ACCOUNT_END__|$sequencer_account_end|g" \
         -e "s|__L1_MAX_FEE_PER_GAS__|$l1_fee|g" -e "s|__L1_MAX_PRIORITY_FEE_PER_GAS__|$l1_fee|g" \
         -e "s|__ZONE_MAX_FEE_PER_GAS__|$zone_fee|g" -e "s|__ZONE_MAX_PRIORITY_FEE_PER_GAS__|$zone_fee|g" \
         -e "s|__PORTAL__|$L1_PORTAL_ADDRESS|g" -e "s|__INBOX__|0x1c00000000000000000000000000000000000001|g" -e "s|__OUTBOX__|0x1c00000000000000000000000000000000000002|g" \
         -e "s|__ZONE_TOKEN__|$ZONES_BENCH_TOKEN|g" \
         -e "s|__DLUSD__|$ZONES_BENCH_DLUSD|g" -e "s|__PATHUSD__|$ZONES_BENCH_PATHUSD|g" -e "s|__EARN_TOKEN__|$ZONES_BENCH_EARN_TOKEN|g" \
-        -e "s|__GATEWAY__|$ZONES_BENCH_GATEWAY|g" -e "s|__BRIDGE_WALLET__|$ZONES_BENCH_BRIDGE_WALLET|g" \
+        -e "s|__GATEWAY__|$ZONES_BENCH_GATEWAY|g" -e "s|__BRIDGE_WALLET__|$ZONES_BENCH_BRIDGE_WALLET|g" -e "s|__REWARDS__|$ZONES_BENCH_REWARDS|g" \
         -e "s|__ONRAMP_AMOUNT__|$ZONES_BENCH_DEPOSIT_AMOUNT|g" -e "s|__PRIVATE_TRANSFER_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" \
         -e "s|__EARN_DEPOSIT_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__EARN_REDEEM_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" \
         -e "s|__OFFRAMP_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" -e "s|__CALLBACK_GAS_LIMIT__|$ZONES_BENCH_CALLBACK_GAS_LIMIT|g" \
+        -e "s|__REWARD_ONRAMP_PER_ACCOUNT__|$reward_onramp_per_account|g" -e "s|__REWARD_POSITION_PER_ACCOUNT__|$reward_position_per_account|g" \
+        -e "s|__REWARD_FUND_AMOUNT__|$reward_fund_amount|g" -e "s|__REWARD_FUND_GAS_LIMIT__|$reward_fund_gas_limit|g" \
+        -e "s|__REWARD_FIRST_REDEEM_AMOUNT__|$reward_first_redeem_amount|g" -e "s|__REWARD_SECOND_REDEEM_AMOUNT__|$reward_second_redeem_amount|g" \
         -e 's|__DEPOSIT_GAS_LIMIT__|2000000|g' -e 's|__ACTIVITY_GAS_LIMIT__|500000|g' -e 's|__WITHDRAWAL_TX_GAS_LIMIT__|10000000|g' \
         "$ZONES_BENCH_OUTPUT/neobank/$source" >"$ZONES_BENCH_OUTPUT/$destination"
 done
-if grep -En '__[A-Z0-9_]+__' \
-    "$ZONES_BENCH_OUTPUT/l1-onramp.yml" \
-    "$ZONES_BENCH_OUTPUT/zone-flow.yml" \
-    "$ZONES_BENCH_OUTPUT/scenario-fragments.yml" \
-    "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml"
+if grep -En '__[A-Z0-9_]+__' "${rendered_documents[@]}"
 then
     die "unresolved placeholder in rendered private-flow spec"
 fi
@@ -261,6 +438,15 @@ fi
     --output "$ZONES_BENCH_RENDERED_SCENARIO"
 [[ -s "$ZONES_BENCH_RENDERED_SCENARIO" ]] ||
     die "txgen did not render the composed private-flow scenario"
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
+    for setup in rewards-position rewards-funding; do
+        "$txgen_bin" scenario render \
+            --scenario "$ZONES_BENCH_OUTPUT/${setup}-scenario.yml" \
+            --output "$ZONES_BENCH_OUTPUT/${setup}-scenario.rendered.yml"
+        [[ -s "$ZONES_BENCH_OUTPUT/${setup}-scenario.rendered.yml" ]] ||
+            die "txgen did not render the composed $setup scenario"
+    done
+fi
 stage_end render_scenario
 
 # The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
@@ -277,6 +463,118 @@ stage_end auth_token_map
 # the sequencer sponsors these setup transactions from its untimed bootstrap balance.
 send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
 send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
+
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
+    control_address="$(cast wallet address \
+        --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
+        --mnemonic-index "$ZONES_BENCH_CONTROL_ACCOUNT_INDEX")"
+    control_pathusd_balance="$(read_l1_uint "$ZONES_BENCH_PATHUSD" 'balanceOf(address)(uint256)' "$control_address")"
+    initial_share_supply="$(read_l1_uint "$ZONES_BENCH_VAULT_ADAPTER" 'shareSupply()(uint256)')"
+    initial_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
+    [[ "$initial_share_supply" == 0 && "$initial_earn_supply" == 0 ]] ||
+        die "reward position setup requires zero initial EarnToken supply"
+
+    python3 - \
+        "$ZONES_BENCH_ACCOUNTS" "$ZONES_BENCH_COUNT" "$journeys_per_account" \
+        "$reward_onramp_per_account" "$reward_position_per_account" "$reward_fund_amount" \
+        "$control_pathusd_balance" "$l1_fee" "$zone_fee" "$reward_fund_gas_limit" <<'PY'
+import sys
+
+a, j, n, onramp, position, reward, control_balance, l1_fee, zone_fee, fund_gas = map(
+    int, sys.argv[1:]
+)
+scale = 10**12
+withdrawal_gas = 10_000_000
+approval_gas = 2_000_000
+
+def fee(gas_limit: int, gas_price: int) -> int:
+    return (gas_limit * gas_price + scale - 1) // scale
+
+# Each scenario engine starts its own expiring-fee uniqueness counter. Reserve
+# the worst setup bump and every one of the 2*N measured redemptions at the
+# measured run's worst global bump.
+setup_fee = fee(withdrawal_gas, zone_fee + a)
+measured_fee = fee(withdrawal_gas, zone_fee + 2 * j)
+zone_required = setup_fee + 2 * n * measured_fee
+zone_reserve = onramp - position
+if zone_reserve < zone_required:
+    raise SystemExit(
+        f"per-account pathUSD fee reserve {zone_reserve} is below required cap {zone_required}"
+    )
+
+control_required = reward + fee(approval_gas, l1_fee) + fee(fund_gas, l1_fee)
+if control_balance < control_required:
+    raise SystemExit(
+        f"control pathUSD balance {control_balance} is below reward plus fee cap {control_required}"
+    )
+print(
+    "reward setup capacity verified: "
+    f"per-account Zone reserve={zone_reserve}/{zone_required}, "
+    f"control L1 balance={control_balance}/{control_required}"
+)
+PY
+
+    stage_start rewards_position_setup
+    position_concurrency="$ZONES_BENCH_MAX_CONCURRENT"
+    if (( 10#$position_concurrency > 10#$ZONES_BENCH_ACCOUNTS )); then
+        position_concurrency="$ZONES_BENCH_ACCOUNTS"
+    fi
+    "$txgen_bin" scenario run \
+        --scenario "$ZONES_BENCH_OUTPUT/rewards-position-scenario.yml" \
+        --count "$ZONES_BENCH_ACCOUNTS" \
+        --max-in-flight "$position_concurrency" --max-rpc-in-flight "$position_concurrency" \
+        --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
+        --seed "$ZONES_BENCH_SEED" \
+        --report "$ZONES_BENCH_OUTPUT/rewards-position-report.json"
+    assert_scenario_report \
+        "$ZONES_BENCH_OUTPUT/rewards-position-report.json" \
+        "$ZONES_BENCH_ACCOUNTS" "reward position setup"
+    stage_end rewards_position_setup
+
+    stage_start rewards_position_check
+    positioned_share_supply="$(read_l1_uint "$ZONES_BENCH_VAULT_ADAPTER" 'shareSupply()(uint256)')"
+    positioned_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
+    [[ "$positioned_share_supply" == "$reward_total_position" ]] ||
+        die "reward position share supply $positioned_share_supply does not equal $reward_total_position"
+    [[ "$positioned_earn_supply" == "$reward_total_position" ]] ||
+        die "reward position EarnToken supply $positioned_earn_supply does not equal $reward_total_position"
+    verify_reward_zone_balances seeded "$reward_total_position" "$reward_position_per_account"
+    reward_quote_before="$(read_l1_uint \
+        "$ZONES_BENCH_VAULT_ADAPTER" 'previewRedeem(uint256)(uint256)' \
+        "$ZONES_BENCH_WITHDRAWAL_AMOUNT")"
+    stage_end rewards_position_check
+
+    stage_start rewards_funding
+    "$txgen_bin" scenario run \
+        --scenario "$ZONES_BENCH_OUTPUT/rewards-funding-scenario.yml" \
+        --count 1 --max-in-flight 1 --max-rpc-in-flight 2 \
+        --failure-policy fail-fast --step-timeout 2m \
+        --seed "$ZONES_BENCH_SEED" \
+        --report "$ZONES_BENCH_OUTPUT/rewards-funding-report.json"
+    assert_scenario_report \
+        "$ZONES_BENCH_OUTPUT/rewards-funding-report.json" 1 "reward funding setup"
+    stage_end rewards_funding
+
+    stage_start rewards_funding_check
+    funded_share_supply="$(read_l1_uint "$ZONES_BENCH_VAULT_ADAPTER" 'shareSupply()(uint256)')"
+    funded_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
+    reward_quote_after="$(read_l1_uint \
+        "$ZONES_BENCH_VAULT_ADAPTER" 'previewRedeem(uint256)(uint256)' \
+        "$ZONES_BENCH_WITHDRAWAL_AMOUNT")"
+    [[ "$funded_share_supply" == "$reward_total_position" ]] ||
+        die "reward funding changed VaultAdapter share supply"
+    [[ "$funded_earn_supply" == "$reward_total_position" ]] ||
+        die "reward funding changed EarnToken total supply"
+    python3 - "$reward_quote_before" "$reward_quote_after" <<'PY'
+import sys
+
+before, after = map(int, sys.argv[1:])
+if after <= before:
+    raise SystemExit(f"reward funding did not increase redemption value: {before} -> {after}")
+print(f"reward redemption quote increased: {before} -> {after}")
+PY
+    stage_end rewards_funding_check
+fi
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
     stage_start slippage_precondition
@@ -308,10 +606,17 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
     stage_end slippage_postcondition
 fi
 
-jq -e --argjson expected "$ZONES_BENCH_COUNT" '
-    .started == $expected and
-    .completed == $expected and
-    .failed == 0 and
-    .timed_out == 0
-' "$ZONES_BENCH_REPORT" >/dev/null ||
-    die "private flow did not complete every requested journey successfully"
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
+    stage_start rewards_postcondition
+    final_share_supply="$(read_l1_uint "$ZONES_BENCH_VAULT_ADAPTER" 'shareSupply()(uint256)')"
+    final_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
+    [[ "$final_share_supply" == "$reward_expected_remaining" ]] ||
+        die "terminal reward share supply $final_share_supply does not equal $reward_expected_remaining"
+    [[ "$final_earn_supply" == "$reward_expected_remaining" ]] ||
+        die "terminal reward EarnToken supply $final_earn_supply does not equal $reward_expected_remaining"
+    verify_reward_zone_balances \
+        remaining "$reward_expected_remaining" "$ZONES_BENCH_WITHDRAWAL_AMOUNT"
+    stage_end rewards_postcondition
+fi
+
+assert_scenario_report "$ZONES_BENCH_REPORT" "$ZONES_BENCH_COUNT" "private flow"

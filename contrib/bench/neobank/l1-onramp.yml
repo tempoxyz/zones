@@ -8,11 +8,16 @@ accounts:
   users:
     mnemonic: "${ZONES_BENCH_MNEMONIC}"
     range: [__ACCOUNT_START__, __ACCOUNT_END__]
+  control:
+    mnemonic: "${ZONES_BENCH_MNEMONIC}"
+    range: [__CONTROL_ACCOUNT_INDEX__, __CONTROL_ACCOUNT_END__]
 
 artifacts:
   TIP20: txgen/abis/tip20.json
   ZonePortal: abis/zone-portal.json
   ZoneGateway: abis/zone-gateway.json
+  VaultRewards: abis/vault-rewards.json
+  VaultAdapter: abis/vault-adapter.json
 
 setup: { steps: [] }
 
@@ -34,5 +39,31 @@ templates:
         - { var: encrypted.keyIndex }
         - { var: encrypted.encrypted }
         - { var: account.address }
+
+  reward_approval:
+    type: tempo
+    from: { var: account.ref }
+    gas_limit: __DEPOSIT_GAS_LIMIT__
+    fee_token: "__PATHUSD__"
+    call:
+      to: "__PATHUSD__"
+      abi: TIP20
+      function: "approve(address,uint256)"
+      args:
+        - "__REWARDS__"
+        - "__REWARD_FUND_AMOUNT__"
+
+  reward_fund:
+    type: tempo
+    from: { var: account.ref }
+    gas_limit: __REWARD_FUND_GAS_LIMIT__
+    fee_token: "__PATHUSD__"
+    call:
+      to: "__REWARDS__"
+      abi: VaultRewards
+      function: "fund(address,uint256)"
+      args:
+        - { var: account.address }
+        - "__REWARD_FUND_AMOUNT__"
 
 mix: []

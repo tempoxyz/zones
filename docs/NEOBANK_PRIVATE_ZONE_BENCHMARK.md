@@ -15,7 +15,7 @@ boundaries:
 5. a DLUSD off-ramp to the bridge-wallet fixture and its exact
    `WithdrawalProcessed` event.
 
-The gateway, vault adapter, engine, StablecoinDEX adapter, and proxy are the
+The gateway, vault adapter, rewards controller, engine, StablecoinDEX adapter, and proxy are the
 Earn boundary fixtures from #750 under
 `specs/ref-impls/test/fixtures/earn`. Foundry builds their artifacts alongside
 the Zone specs; benchmark provisioning never fetches or clones external source.
@@ -26,8 +26,8 @@ Provision the existing two-validator L1 plus authenticated private Zone RPC.
 The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile creates
 EarnToken through the native TIP-20 factory and selects the initial Zone token
 for the requested preset: DLUSD for the full, swapped, and slippage-bounce
-lifecycle flows, or pathUSD for the direct and third-party-recipient lifecycle
-flows. It deploys
+lifecycle flows, or pathUSD for the direct, third-party-recipient, and rewards
+redemption flows. It deploys
 the copied Earn proxy stack outside the measured interval and enables EarnToken
 on the portal. The stable asset not selected by the preset remains L1-only. The
 profile does not replace these assets with ordinary ERC-20 test contracts.
@@ -64,18 +64,22 @@ as the Zone fee buffer before B submits the redemption.
 `slippage-bounce-scenario.yml` enters with DLUSD, submits a gateway deposit
 whose callback requires an impossible minimum vault-asset amount, observes the
 failed callback and L1 bounce-back in the same receipt, and waits for the exact
-terminal Zone bounce-back event. All five scenarios
+terminal Zone bounce-back event. `rewards-position-scenario.yml` and
+`rewards-funding-scenario.yml` prepare a private Earn position and contribute
+pathUSD backing outside measurement. `rewards-redemption-scenario.yml` measures
+two sequential partial redemptions and both exact encrypted pathUSD returns.
+All scenarios
 compose shared, receipt-correlated boundaries from `scenario-fragments.yml`.
 `l1-onramp.yml` and `zone-flow.yml` contain the underlying transaction templates
 and remain separate from the generic roundtrip assets.
 
-The transaction generator prepares all three encrypted payloads in memory from
+The transaction generator prepares each encrypted payload in memory from
 the leased account, action ID, portal address, and current portal encryption
 key. It ABI-encodes the canonical callback tuple directly into the composable
 withdrawal `bytes` argument. Neither ciphertext nor callback data is written to
 the scenario report or an artifact.
 
-## Current blocking capability
+## Running the benchmark
 
 The pinned transaction generator supports the required in-memory encrypted
 deposit preparation and named-tuple ABI encoding. The topology provisioner has
@@ -104,7 +108,8 @@ contrib/bench/run-neobank-private-flow.sh
 
 Set `ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle` before provisioning for the
 swapped stablecoin lifecycle, `third-party-recipient` for the two-user direct
-lifecycle, `slippage-bounce` for the failed-callback return path, or
+lifecycle, `slippage-bounce` for the failed-callback return path,
+`rewards-redemption` for the rewarded private-holder redemption path, or
 `full-journey` for the five-boundary journey. The selected preset is recorded
 in the workflow summary and run metadata while the rendered scenario remains
 at the stable results-renderer path.
@@ -168,6 +173,38 @@ event does not expose the queue hash or fallback nonce, so its strongest
 available correlation is the exact L1 receipt and fallback nonce followed by
 the leased recipient/token/amount matcher from the pre-request Zone block.
 
+To run the rewards-redemption path independently, provision pathUSD plus
+EarnToken and select the same preset for the runner:
+
+```bash
+forge build --root specs/ref-impls
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/rewards-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=rewards-redemption
+export ZONES_BENCH_ACCOUNTS=100
+export ZONES_BENCH_COUNT=1000
+export ZONES_BENCH_TPS=20
+export ZONES_BENCH_MAX_CONCURRENT=100
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
+contrib/bench/run-neobank-private-flow.sh
+```
+
+For `A` accounts, `J` journeys, deposit amount `D`, and redemption amount `W`,
+the runner computes `N=ceil(J/A)`. Untimed setup onramps `N*D` pathUSD and
+mints `N*W` private EarnToken per account, then contributes 10% of the total
+`A*N*W` backing through `VaultRewards`. It verifies every private position,
+the unchanged share supply, and an increased `previewRedeem(W)` quote before
+measurement. The measured boundary begins with the first `W/2` redemption and
+ends at the exact terminal Zone encrypted-deposit event for the second
+`W-W/2` redemption. Terminal checks require both L1 share supplies and the
+aggregate private Zone EarnToken balance to equal `(A*N-J)*W`.
+
+The runner rejects reward configurations whose pathUSD cannot cover the
+position plus worst-case setup and measured transaction fee caps. Position
+setup and reward funding write separate reports; only the 18-step two-redeem
+scenario contributes benchmark latency and throughput.
+
 That runner should provision the existing topology, deploy and configure the
 fixtures outside measurement, create the private-RPC authorization map in a
 mode-0700 temporary directory, run the scenario, publish per-step and journey
@@ -180,3 +217,15 @@ authenticated private RPC, and receipt-scoped cross-chain correlation. The
 StablecoinDEX liquidity and `Simple4626Vault` venue are benchmark fixtures.
 They do not represent final production economics, liquidity, policy
 administration, or a final vault venue.
+
+The checked-in rewards fixture is ABI-consistent with its pinned Earn stack and
+uses `fund(address,uint256)`. Current upstream Earn adds a `maxShareSupply`
+argument. This benchmark intentionally does not mix that newer interface with
+the pinned gateway, adapter, and rewards bytecode; the missing supply guard is
+a known production difference.
+
+The pinned `VaultAdapter` uses `redeem(uint256,address)`, and its gateway checks
+`minVaultAssets` after the adapter returns. Current upstream forwards that
+minimum into `redeem(uint256,address,uint256)` so the adapter enforces it. The
+benchmark keeps the gateway and adapter from the same pinned stack; this
+minimum-assets enforcement boundary is another known production difference.
