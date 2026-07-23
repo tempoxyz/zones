@@ -27,6 +27,7 @@ use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 pub struct L1OverlayDB<DB, L1> {
     inner: DB,
     l1: L1State<L1>,
+    portal_address: Address,
 }
 
 impl<DB, L1> L1OverlayDB<DB, L1> {
@@ -35,6 +36,7 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
         Self {
             inner,
             l1: L1State::new(l1, portal_address),
+            portal_address,
         }
     }
 
@@ -127,7 +129,7 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             .map_err(ZoneDbError::L1State)
     }
 
-    /// Rejects writes to the L1-mirrored TIP-403 registry.
+    /// Rejects writes to L1-owned state.
     pub fn sanitize_state(
         &mut self,
         state: &mut AddressMap<Account>,
@@ -151,6 +153,23 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             // above, but committing the touched account could still persist that L1 value locally.
             // Since every registry slot is mirrored and writes were rejected, drop the transition.
             state.remove(&TIP403_REGISTRY_ADDRESS);
+        }
+
+        if let Some(account) = state.get(&self.portal_address) {
+            if account.info != account.original_info() {
+                return Err(ZoneDbError::L1Write {
+                    address: self.portal_address,
+                    slot: U256::ZERO,
+                });
+            }
+            for (slot, value) in &account.storage {
+                if value.is_changed() {
+                    return Err(ZoneDbError::L1Write {
+                        address: self.portal_address,
+                        slot: *slot,
+                    });
+                }
+            }
         }
 
         Ok(())
@@ -280,6 +299,30 @@ mod tests {
         let mut inner = db.into_inner();
         inner.commit(state);
         assert_eq!(inner.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), local);
+    }
+
+    #[test]
+    fn portal_writes_are_rejected() {
+        let portal = Address::repeat_byte(0x22);
+        let slot = U256::from(7);
+        let mut db = L1OverlayDB::new(test_db(42), TestL1::default(), portal);
+        let mut account = Account::default();
+        account.mark_touch();
+        account.storage.insert(
+            slot,
+            EvmStorageSlot {
+                original_value: U256::ZERO,
+                present_value: U256::ONE,
+                ..Default::default()
+            },
+        );
+        let mut state = AddressMap::from_iter([(portal, account)]);
+
+        assert!(matches!(
+            db.sanitize_state(&mut state),
+            Err(ZoneDbError::L1Write { address, slot: changed_slot })
+                if address == portal && changed_slot == slot
+        ));
     }
 
     #[test]
