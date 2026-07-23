@@ -29,8 +29,8 @@ pub struct ProvisionConfig {
     pub factory: Option<Address>,
     /// Initial TIP-20 enabled on the portal.
     pub initial_token: Address,
-    /// Whether account allowlist enforcement starts enabled.
-    pub is_access_enforced: bool,
+    /// Whether account access starts open.
+    pub is_access_open: bool,
     /// Whether callback gateway registration enforcement starts enabled.
     pub is_gateway_enforced: bool,
     /// Initial callback-only ZoneGateway implementations.
@@ -71,7 +71,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         dev_key,
         factory,
         initial_token,
-        is_access_enforced,
+        is_access_open,
         is_gateway_enforced,
         zone_gateways,
         allowed_accounts,
@@ -117,7 +117,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
-            accessMode: is_access_enforced,
+            accessMode: !is_access_open,
             gatewayMode: is_gateway_enforced,
             allowedAccounts: allowed_accounts,
             zoneGateways: zone_gateways,
@@ -349,7 +349,7 @@ mod command {
                     dev_key: dev_key.clone(),
                     factory: self.factory_address,
                     initial_token: self.initial_token,
-                    is_access_enforced: self.access_mode,
+                    is_access_open: !self.access_mode,
                     is_gateway_enforced: self.gateway_mode,
                     zone_gateways: self.zone_gateways.clone(),
                     allowed_accounts: allowed_accounts.clone(),

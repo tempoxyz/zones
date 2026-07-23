@@ -180,7 +180,7 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
         dev_key: l1.dev_signer(),
         factory: None,
         initial_token,
-        is_access_enforced: true,
+        is_access_open: false,
         is_gateway_enforced: true,
         zone_gateways: vec![Address::repeat_byte(0x42)],
         allowed_accounts: vec![dev_address],
