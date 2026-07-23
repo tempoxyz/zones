@@ -50,6 +50,14 @@ contract ZoneInboxHarness is ZoneInbox {
 
 }
 
+contract RefundCallForwarder {
+
+    function refunds(address inbox, address token, address owner) external view returns (uint128) {
+        return IZoneInbox(inbox).refunds(token, owner);
+    }
+
+}
+
 /// @title ZoneInboxTest
 /// @notice Tests for ZoneInbox covering edge cases
 contract ZoneInboxTest is Test {
@@ -1203,6 +1211,30 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(alice), 0);
     }
 
+    function test_refunds_ownerCanRead() public {
+        vm.prank(bob);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+    }
+
+    function test_refunds_sequencerCanRead() public {
+        vm.prank(sequencer);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+    }
+
+    function test_refunds_nonOwnerReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(IZoneInbox.Unauthorized.selector);
+        inbox.refunds(address(zoneToken), bob);
+    }
+
+    function test_refunds_forwardedReadReverts() public {
+        RefundCallForwarder forwarder = new RefundCallForwarder();
+
+        vm.prank(bob);
+        vm.expectRevert(IZoneInbox.Unauthorized.selector);
+        forwarder.refunds(address(inbox), address(zoneToken), bob);
+    }
+
     /// @notice Claiming pays a parked withdrawal bounce-back refund and clears it.
     function test_claimRefund_success() public {
         uint64 fallbackNonce = 1;
@@ -1230,6 +1262,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         _advanceTempo(deposits);
+        vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
 
         zoneToken.setMinter(address(inbox), true);
@@ -1238,6 +1271,7 @@ contract ZoneInboxTest is Test {
         uint128 amount = inbox.claimRefund(address(zoneToken));
 
         assertEq(amount, 100e6);
+        vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
         assertEq(zoneToken.balanceOf(bob), 100e6);
     }
@@ -1273,6 +1307,7 @@ contract ZoneInboxTest is Test {
             inbox.processedDepositQueueHash(),
             keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)))
         );
+        vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
         assertEq(zoneToken.balanceOf(bob), 100e6);
     }
@@ -1335,8 +1370,11 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
-        uint256 parkedRefunds = inbox.refunds(address(zoneToken), bob)
-            + inbox.refunds(address(zoneToken), encryptedRecipient);
+        vm.prank(bob);
+        uint128 bobRefunds = inbox.refunds(address(zoneToken), bob);
+        vm.prank(encryptedRecipient);
+        uint128 encryptedRecipientRefunds = inbox.refunds(address(zoneToken), encryptedRecipient);
+        uint256 parkedRefunds = uint256(bobRefunds) + encryptedRecipientRefunds;
         assertEq(zoneToken.totalSupply() + parkedRefunds, netCredited);
     }
 

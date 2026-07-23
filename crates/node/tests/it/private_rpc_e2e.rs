@@ -17,7 +17,7 @@ use alloy::{
 };
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolError};
 use futures::{SinkExt, StreamExt};
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
@@ -30,13 +30,28 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox,
+    TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
+    ZoneInbox,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
     tungstenite::{Message, client::IntoClientRequest},
 };
+
+alloy::sol! {
+    interface IMulticall3 {
+        struct Call {
+            address target;
+            bytes callData;
+        }
+
+        function aggregate(Call[] memory calls)
+            external
+            payable
+            returns (uint256 blockNumber, bytes[] memory returnData);
+    }
+}
 
 fn corrupt_token_hex(token: &str) -> String {
     let mut bytes = hex::decode(token).expect("token hex should decode");
@@ -693,14 +708,13 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
             &outsider_signer,
         )
         .await?;
-    assert_eq!(
-        outsider_refunds["error"]["code"].as_i64().unwrap(),
-        -32004,
-        "non-owner refunds(token, owner) should be rejected"
-    );
-    assert_eq!(
-        outsider_refunds["error"]["message"].as_str().unwrap(),
-        "Account mismatch"
+    let outsider_error = outsider_refunds["error"]["message"]
+        .as_str()
+        .expect("non-owner refund read should return an RPC error message");
+    let unauthorized_selector = format!("0x{}", hex::encode(Unauthorized::SELECTOR));
+    assert!(
+        outsider_error.contains("Unauthorized") && outsider_error.contains(&unauthorized_selector),
+        "the ZoneInbox getter must reject a direct non-owner refund read with Unauthorized(): {outsider_refunds}"
     );
 
     let owner_refunds = ctx
@@ -726,6 +740,30 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
         ZoneInbox::refundsCall::abi_decode_returns(&owner_refunds_bytes)?,
         0,
         "own refunds(token, owner) read should retain normal eth_call behavior"
+    );
+
+    let multicall = IMulticall3::aggregateCall {
+        calls: vec![IMulticall3::Call {
+            target: ZONE_INBOX_ADDRESS,
+            callData: refunds_call.abi_encode().into(),
+        }],
+    };
+    let forwarded_refunds = ctx
+        .call_as_user(
+            "eth_call",
+            json!([
+                {
+                    "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
+                    "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+                },
+                "latest"
+            ]),
+            &outsider_signer,
+        )
+        .await?;
+    assert!(
+        forwarded_refunds.get("result").is_none() && forwarded_refunds.get("error").is_some(),
+        "Multicall3 must not expose another owner's refund balance: {forwarded_refunds}"
     );
 
     Ok(())
