@@ -21,7 +21,7 @@
         "type": "bytes32"
       },
       {
-        "name": "bouncebackRecipient",
+        "name": "tempoRefundRecipient",
         "type": "address"
       }
     ],
@@ -73,7 +73,7 @@
         "indexed": false
       },
       {
-        "name": "bouncebackRecipient",
+        "name": "tempoRefundRecipient",
         "type": "address",
         "indexed": false
       },

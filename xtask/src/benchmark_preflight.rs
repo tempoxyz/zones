@@ -2160,7 +2160,7 @@ mod tests {
         assert_eq!(call.to, sender);
         assert_eq!(call.amount, config.deposit_amount);
         assert_ne!(call.memo, alloy::primitives::B256::ZERO);
-        assert_eq!(call.bouncebackRecipient, sender);
+        assert_eq!(call.tempoRefundRecipient, sender);
         let (_, second_input) = only_call(&deposits[1]);
         let second_call = ZonePortal::depositCall::abi_decode(second_input).unwrap();
         assert_ne!(call.memo, second_call.memo);
@@ -2209,7 +2209,7 @@ mod tests {
         assert_eq!(call.amount, config.withdrawal_amount);
         assert_ne!(call.memo, alloy::primitives::B256::ZERO);
         assert_eq!(call.gasLimit, 0);
-        assert_eq!(call.fallbackRecipient, sender);
+        assert_eq!(call.zoneFallbackRecipient, sender);
         assert!(call.data.is_empty());
         assert!(call.revealTo.is_empty());
         let (_, second_input) = only_call(&withdrawals[1]);

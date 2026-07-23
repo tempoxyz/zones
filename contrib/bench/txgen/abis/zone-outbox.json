@@ -25,7 +25,7 @@
         "type": "uint64"
       },
       {
-        "name": "fallbackRecipient",
+        "name": "zoneFallbackRecipient",
         "type": "address"
       },
       {
