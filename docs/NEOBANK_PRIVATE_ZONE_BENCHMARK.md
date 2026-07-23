@@ -177,8 +177,10 @@ Published scenario reports use the `neobank-encrypted-deposit` results route.
 This preset first deposits `ceil(count/accounts) * deposit-amount` DLUSD to
 each benchmark account through the encrypted portal path. That funding run,
 portal approval, and user outbox approval are setup traffic. The runner waits
-for the exact terminal Zone deposit events and verifies that each account can
-cover every withdrawal plus its worst-case Zone transaction fee cap before it
+for the exact terminal Zone deposit events, then waits up to two minutes for
+the portal's processed-deposit counter to reach the recorded deposit count. It
+verifies that each account can cover every withdrawal plus its worst-case Zone
+transaction fee cap and already has the required outbox allowance before it
 starts measurement.
 
 Each measured journey checkpoints L1, submits the exact eight-argument outbox

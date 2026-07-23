@@ -718,10 +718,11 @@ routes:
 
 The withdrawal setup deposits
 `ceil(count / accounts) * deposit-amount` DLUSD to each account and waits for
-each exact terminal Zone event. Measurement does not begin until those balances
-and allowance checks pass. The measured request uses `gasLimit=0`, empty
-callback data and `revealTo`, the benchmark account as fallback recipient, and
-the Bridge-wallet fixture as the allowlisted L1 recipient. See
+each exact terminal Zone event. It then waits for the L1 portal's processed
+counter to confirm the recorded deposits before running the per-account balance
+and allowance preflight. The measured request uses `gasLimit=0`, empty callback
+data and `revealTo`, the benchmark account as fallback recipient, and the
+Bridge-wallet fixture as the allowlisted L1 recipient. See
 `docs/NEOBANK_PRIVATE_ZONE_BENCHMARK.md` for the complete event keys and local
 commands.
 

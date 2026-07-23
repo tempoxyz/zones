@@ -65,6 +65,7 @@ ZONES_BENCH_RENDERED_SCENARIO="${ZONES_BENCH_RENDERED_SCENARIO:-$ZONES_BENCH_OUT
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
+ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS="${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-120}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
 ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-rewards-redemption}"
 case "$ZONES_BENCH_NEOBANK_PRESET" in
@@ -123,9 +124,11 @@ esac
 for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
-    ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_SEED
+    ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS ZONES_BENCH_SEED
 do uint "$name"; done
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
+(( 10#$ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS > 0 )) ||
+    die "setup settlement timeout must be positive"
 [[ "$ZONES_BENCH_CONTROL_ACCOUNT_INDEX" == 0 ]] ||
     die "this topology fixes the neobank control account at mnemonic index 0"
 [[ "$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX" == 4 ]] ||
@@ -219,6 +222,31 @@ read_l1_uint() {
     value="$(cast call "$address" "$signature" "$@" --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
     [[ "$value" =~ ^[0-9]+$ ]] || die "could not read $signature from $address"
     printf '%s\n' "$value"
+}
+
+wait_for_l1_deposit_settlement() {
+    local expected processed started_at elapsed progress_bucket=-1
+
+    expected="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'depositCount()(uint64)')"
+    started_at="$SECONDS"
+    while true; do
+        processed="$(read_l1_uint \
+            "$L1_PORTAL_ADDRESS" 'lastProcessedDepositNumber()(uint64)')"
+        if (( 10#$processed >= 10#$expected )); then
+            echo "private-withdrawal L1 deposit settlement complete: $processed/$expected"
+            return
+        fi
+
+        elapsed=$((SECONDS - started_at))
+        if (( elapsed >= 10#$ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS )); then
+            die "timed out waiting for L1 deposit settlement: $processed/$expected after ${elapsed}s"
+        fi
+        if (( elapsed / 5 > progress_bucket )); then
+            echo "private-withdrawal L1 deposit settlement: $processed/$expected elapsed=${elapsed}s"
+            progress_bucket=$((elapsed / 5))
+        fi
+        sleep 1
+    done
 }
 
 assert_scenario_report() {
@@ -554,6 +582,10 @@ PY
         "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-report.json" \
         "$ZONES_BENCH_ACCOUNTS" "private-withdrawal funding setup"
     stage_end private_withdrawal_funding
+
+    stage_start private_withdrawal_settlement
+    wait_for_l1_deposit_settlement
+    stage_end private_withdrawal_settlement
 
     stage_start private_withdrawal_preflight
     preflight_phase withdrawal funded true
