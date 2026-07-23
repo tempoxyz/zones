@@ -51,7 +51,7 @@ impl Harness {
         );
         l1.insert(
             PORTAL,
-            portal_token_config_slot(token).into(),
+            token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()),
             ANCHOR,
             U256::ONE,
         );
@@ -198,7 +198,7 @@ impl Harness {
     fn set_token_enabled(&self, enabled: bool) {
         self.l1.insert(
             PORTAL,
-            portal_token_config_slot(self.token).into(),
+            self.token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()),
             ANCHOR,
             U256::from(u8::from(enabled)),
         );
@@ -282,7 +282,14 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
                 keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
                 ANCHOR
             ),
-            (PORTAL, portal_token_config_slot(harness.token), ANCHOR),
+            (
+                PORTAL,
+                harness
+                    .token
+                    .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
+                    .into(),
+                ANCHOR,
+            ),
             (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
         ]
     );

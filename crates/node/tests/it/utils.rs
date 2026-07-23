@@ -66,7 +66,7 @@ use zone_l1::{
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
-use zone_primitives::constants::PORTAL_ACCESS_MODE_SLOT;
+use zone_primitives::constants::{PORTAL_ACCESS_MODE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -157,11 +157,6 @@ where
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
     Ok(())
-}
-
-fn portal_token_config_slot(token: Address) -> B256 {
-    let portal_token_configs_slot = B256::with_last_byte(6);
-    keccak256((token, portal_token_configs_slot).abi_encode())
 }
 
 fn enabled_deposits_active_token_config() -> B256 {
@@ -3997,7 +3992,9 @@ impl L1Fixture {
         let refunds_slot = B256::with_last_byte(8);
         let sequencer_membership_slot =
             keccak256((sequencer, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
-        let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
+        let path_usd_config_slot: B256 = PATH_USD_ADDRESS
+            .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
+            .into();
         let enabled_token_config = enabled_deposits_active_token_config();
 
         // Local fixtures have no RPC fallback. Transfers to protocol accounts still consult their

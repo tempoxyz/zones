@@ -16,11 +16,10 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
     IZoneOutbox, Withdrawal, ZoneOutboxError, ZoneOutboxEvent, ZonePortal, ZonePortalError,
-    portal_token_config_slot,
 };
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT,
-    PORTAL_ROLE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_ROLE_SLOT, PORTAL_TOKEN_CONFIGS_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -85,7 +84,10 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let token_config = self.read_portal_slot(l1, portal_token_config_slot(token))?;
+        let token_config = self.read_portal_slot(
+            l1,
+            token.mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into()).into(),
+        )?;
         if token_config & U256::from(u8::MAX) == U256::ZERO {
             return Err(ZonePortalError::token_not_enabled().into());
         }
