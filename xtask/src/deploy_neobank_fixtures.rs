@@ -194,7 +194,7 @@ impl DeployNeobankFixtures {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         ensure!(self.liquidity > 0, "--liquidity must be greater than zero");
         ensure!(
-            self.liquidity <= (1_u128 << 96) - 1,
+            self.liquidity < (1_u128 << 96),
             "--liquidity exceeds the Bridge DirectSwap uint96 transaction limit"
         );
         let deployer = signer_from_env("FIXTURE_DEPLOYER_KEY")?;
