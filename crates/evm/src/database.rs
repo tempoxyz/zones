@@ -214,30 +214,19 @@ mod tests {
     }
 
     #[test]
-    fn overlays_registry_at_selected_state_anchor() {
-        let anchor = 42;
-        let slot = U256::from(7);
-        let expected = U256::from(99);
-        let l1 = TestL1::default();
-        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor - 1, U256::from(98));
-        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
-        let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
-
-        assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
-        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
-    }
-
-    #[test]
-    fn overlays_portal_at_selected_state_anchor() {
-        let anchor = 42;
+    fn overlays_l1_addresses_at_selected_state_anchor() {
+        let (anchor, slot) = (42, U256::from(7));
         let portal = Address::repeat_byte(0x22);
-        let slot = U256::from(7);
         let l1 = TestL1::default();
-        l1.insert(portal, slot, anchor - 1, U256::from(98));
-        l1.insert(portal, slot, anchor, U256::from(99));
+        for address in [TIP403_REGISTRY_ADDRESS, portal] {
+            l1.insert(address, slot, anchor - 1, U256::from(98));
+            l1.insert(address, slot, anchor, U256::from(99));
+        }
         let mut db = L1OverlayDB::new(test_db(anchor), l1, portal);
 
-        assert_eq!(db.storage(portal, slot).unwrap(), U256::from(99));
+        for address in [TIP403_REGISTRY_ADDRESS, portal] {
+            assert_eq!(db.storage(address, slot).unwrap(), U256::from(99));
+        }
         assert_eq!(db.l1_state().get_anchor(), Some(anchor));
     }
 
@@ -270,94 +259,69 @@ mod tests {
     }
 
     #[test]
-    fn registry_overlay_is_removed_from_canonical_transition() {
-        let (anchor, slot) = (42, U256::from(7));
-        let (local, l1_value) = (U256::from(5), U256::from(99));
-        let l1 = TestL1::default();
-        l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, l1_value);
-        let mut inner = test_db(anchor);
-        inner
-            .insert_account_storage(TIP403_REGISTRY_ADDRESS, slot, local)
-            .unwrap();
-        let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
-        let observed = db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap();
-        assert_eq!(observed, l1_value);
-
-        let mut account = Account::default();
-        account.mark_touch();
-        account.storage.insert(
-            slot,
-            EvmStorageSlot {
-                original_value: observed,
-                present_value: observed,
-                ..Default::default()
-            },
-        );
-        let mut state = AddressMap::from_iter([(TIP403_REGISTRY_ADDRESS, account)]);
-
-        db.sanitize_state(&mut state).unwrap();
-        assert!(!state.contains_key(&TIP403_REGISTRY_ADDRESS));
-
-        let mut inner = db.into_inner();
-        inner.commit(state);
-        assert_eq!(inner.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), local);
-    }
-
-    #[test]
-    fn portal_overlay_is_removed_from_canonical_transition() {
+    fn l1_overlays_are_removed_from_canonical_transition() {
         let (anchor, slot) = (42, U256::from(7));
         let portal = Address::repeat_byte(0x22);
+        let addresses = [TIP403_REGISTRY_ADDRESS, portal];
         let (local, l1_value) = (U256::from(5), U256::from(99));
         let l1 = TestL1::default();
-        l1.insert(portal, slot, anchor, l1_value);
         let mut inner = test_db(anchor);
-        inner.insert_account_storage(portal, slot, local).unwrap();
+        for address in addresses {
+            l1.insert(address, slot, anchor, l1_value);
+            inner.insert_account_storage(address, slot, local).unwrap();
+        }
         let mut db = L1OverlayDB::new(inner, l1, portal);
-        let observed = db.storage(portal, slot).unwrap();
-        assert_eq!(observed, l1_value);
-
-        let mut account = Account::default();
-        account.mark_touch();
-        account.storage.insert(
-            slot,
-            EvmStorageSlot {
-                original_value: observed,
-                present_value: observed,
-                ..Default::default()
-            },
-        );
-        let mut state = AddressMap::from_iter([(portal, account)]);
+        let mut state = AddressMap::default();
+        for address in addresses {
+            let observed = db.storage(address, slot).unwrap();
+            assert_eq!(observed, l1_value);
+            let mut account = Account::default();
+            account.mark_touch();
+            account.storage.insert(
+                slot,
+                EvmStorageSlot {
+                    original_value: observed,
+                    present_value: observed,
+                    ..Default::default()
+                },
+            );
+            state.insert(address, account);
+        }
 
         db.sanitize_state(&mut state).unwrap();
-        assert!(!state.contains_key(&portal));
+        assert!(addresses.iter().all(|address| !state.contains_key(address)));
 
         let mut inner = db.into_inner();
         inner.commit(state);
-        assert_eq!(inner.storage(portal, slot).unwrap(), local);
+        for address in addresses {
+            assert_eq!(inner.storage(address, slot).unwrap(), local);
+        }
     }
 
     #[test]
-    fn portal_writes_are_rejected() {
+    fn l1_writes_are_rejected() {
         let portal = Address::repeat_byte(0x22);
         let slot = U256::from(7);
-        let mut db = L1OverlayDB::new(test_db(42), TestL1::default(), portal);
-        let mut account = Account::default();
-        account.mark_touch();
-        account.storage.insert(
-            slot,
-            EvmStorageSlot {
-                original_value: U256::ZERO,
-                present_value: U256::ONE,
-                ..Default::default()
-            },
-        );
-        let mut state = AddressMap::from_iter([(portal, account)]);
+        for address in [TIP403_REGISTRY_ADDRESS, portal] {
+            let mut db = L1OverlayDB::new(test_db(42), TestL1::default(), portal);
+            let mut account = Account::default();
+            account.mark_touch();
+            account.storage.insert(
+                slot,
+                EvmStorageSlot {
+                    original_value: U256::ZERO,
+                    present_value: U256::ONE,
+                    ..Default::default()
+                },
+            );
+            let mut state = AddressMap::from_iter([(address, account)]);
 
-        assert!(matches!(
-            db.sanitize_state(&mut state),
-            Err(ZoneDbError::L1Write { address, slot: changed_slot })
-                if address == portal && changed_slot == slot
-        ));
+            assert!(matches!(
+                db.sanitize_state(&mut state),
+                Err(ZoneDbError::L1Write { address: changed_address, slot: changed_slot })
+                    if changed_address == address && changed_slot == slot
+            ));
+        }
     }
 
     #[test]
