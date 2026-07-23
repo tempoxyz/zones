@@ -2196,6 +2196,16 @@ mod tests {
             zone["templates"]["private_transfer"]["expiring_nonce"],
             true
         );
+        for template in ["gateway_deposit", "gateway_redeem", "offramp"] {
+            assert!(
+                zone["templates"][template].get("expiring_nonce").is_none(),
+                "{template} must use a regular nonce so it cannot expire under load"
+            );
+            assert!(
+                zone["templates"][template].get("valid_for_secs").is_none(),
+                "{template} must not have a transaction validity deadline"
+            );
+        }
         assert_eq!(
             zone["templates"]["gateway_deposit"]["call"]["function"],
             "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
