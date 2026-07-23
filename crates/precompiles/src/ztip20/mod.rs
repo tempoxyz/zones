@@ -10,6 +10,7 @@
 
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError, SolInterface};
+use tempo_contracts::MULTICALL3_ADDRESS;
 use tempo_precompiles::tip20::{IRolesAuth, ITIP20};
 use tempo_zone_contracts::Unauthorized;
 
@@ -59,7 +60,7 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
     }
 
     /// Apply zone privacy and selector restrictions before upstream execution.
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address, tx_origin: Address) -> CallCheck {
         if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
             return match call {
                 ITIP20::ITIP20Calls::balanceOf(call) => {
@@ -95,6 +96,16 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 | ITIP20::ITIP20Calls::burnBlocked(_) => {
                     CallCheck::Revert(Unauthorized {}.abi_encode().into())
                 }
+                ITIP20::ITIP20Calls::transferFrom(_)
+                | ITIP20::ITIP20Calls::transfer(_)
+                | ITIP20::ITIP20Calls::transferWithMemo(_)
+                | ITIP20::ITIP20Calls::transferFromWithMemo(_) => {
+                    if caller != tx_origin && caller != MULTICALL3_ADDRESS {
+                        CallCheck::Continue
+                    } else {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    }
+                }
                 ITIP20::ITIP20Calls::name(_)
                 | ITIP20::ITIP20Calls::symbol(_)
                 | ITIP20::ITIP20Calls::decimals(_)
@@ -110,15 +121,9 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                 | ITIP20::ITIP20Calls::UNPAUSE_ROLE(_)
                 | ITIP20::ITIP20Calls::ISSUER_ROLE(_)
                 | ITIP20::ITIP20Calls::BURN_BLOCKED_ROLE(_)
-                | ITIP20::ITIP20Calls::transferFrom(_)
                 | ITIP20::ITIP20Calls::approve(_)
-                | ITIP20::ITIP20Calls::transferFromWithMemo(_)
                 | ITIP20::ITIP20Calls::permit(_)
                 | ITIP20::ITIP20Calls::DOMAIN_SEPARATOR(_) => CallCheck::Continue,
-                ITIP20::ITIP20Calls::transfer(_)
-                | ITIP20::ITIP20Calls::transferWithMemo(_) => {
-                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
-                }
             };
         }
 
@@ -148,7 +153,7 @@ mod tests {
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::{SolCall, SolError, SolInterface};
-    use revm::precompile::{PrecompileError, PrecompileResult};
+    use revm::precompile::PrecompileResult;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
@@ -180,14 +185,14 @@ mod tests {
 
     fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller),
+            rules.admit(&call.abi_encode(), caller, caller),
             CallCheck::Continue
         ));
     }
 
     fn assert_unauthorized(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), caller),
+            rules.admit(&call.abi_encode(), caller, caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -340,6 +345,31 @@ mod tests {
     }
 
     #[test]
+    fn transfers_require_an_internal_non_multicall_caller() {
+        let rules = rules();
+        let origin = Address::repeat_byte(0x11);
+        let contract = Address::repeat_byte(0x22);
+        let transfer = ITIP20::transferCall {
+            to: Address::repeat_byte(0x33),
+            amount: U256::from(1),
+        }
+        .abi_encode();
+
+        assert!(matches!(
+            rules.admit(&transfer, origin, origin),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+        ));
+        assert!(matches!(
+            rules.admit(&transfer, contract, origin),
+            CallCheck::Continue
+        ));
+        assert!(matches!(
+            rules.admit(&transfer, MULTICALL3_ADDRESS, origin),
+            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+        ));
+    }
+
+    #[test]
     fn reward_reads_are_disallowed() {
         let caller = Address::repeat_byte(0x11);
         let account = Address::repeat_byte(0x22);
@@ -482,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_enforces_call_rules() -> eyre::Result<()> {
+    fn wrapper_still_enforces_privacy_and_fixed_gas() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
 
         let private_balance = harness.call(
@@ -501,34 +531,26 @@ mod tests {
             Bytes::from(Unauthorized {}.abi_encode())
         );
 
-        for calldata in [
-            ITIP20::ITIP20Calls::transfer(ITIP20::transferCall {
+        let transfer = harness.call(
+            harness.alice,
+            ITIP20::transferCall {
                 to: harness.bob,
                 amount: U256::from(12_345u64),
-            }),
-            ITIP20::ITIP20Calls::transferWithMemo(ITIP20::transferWithMemoCall {
-                to: harness.bob,
-                amount: U256::from(12_345u64),
-                memo: Default::default(),
-            }),
-        ] {
-            let transfer = harness.call(
-                harness.alice,
-                calldata.abi_encode().into(),
-                TIP20_FIXED_TRANSFER_GAS,
-                false,
-            )?;
-            assert!(transfer.is_revert());
-            assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
-            assert_eq!(transfer.bytes, Bytes::from(Unauthorized {}.abi_encode()));
-        }
-        assert_eq!(harness.balance_of(harness.bob)?, U256::ZERO);
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(transfer.is_success());
+        assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
 
         Ok(())
     }
 
     #[test]
-    fn call_rules_reject_transfer_before_upstream_dispatch() -> eyre::Result<()> {
+    fn uninitialized_token_rejects_before_policy_read() -> eyre::Result<()> {
         let token = address!("20C0000000000000000000000000000000000999");
         let caller = address!("0x00000000000000000000000000000000000000a2");
         let to = address!("0x00000000000000000000000000000000000000a3");
@@ -558,7 +580,10 @@ mod tests {
         )?;
 
         assert!(result.is_revert());
-        assert_eq!(result.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+        assert_eq!(
+            result.bytes,
+            Bytes::from(TIP20Error::uninitialized().selector().to_vec())
+        );
 
         Ok(())
     }
@@ -583,7 +608,7 @@ mod tests {
             false,
         )?;
         assert!(transfer.is_revert());
-        assert_eq!(transfer.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+        assert_eq!(transfer.bytes, Bytes::new());
         assert_eq!(transfer.gas_used, TIP20_FIXED_TRANSFER_GAS);
 
         Ok(())
@@ -804,9 +829,8 @@ mod tests {
         );
 
         let transfer = harness.call(
-            harness.spender,
-            ITIP20::transferFromCall {
-                from: harness.alice,
+            harness.alice,
+            ITIP20::transferCall {
                 to: harness.bob,
                 amount: U256::from(7_654u64),
             }

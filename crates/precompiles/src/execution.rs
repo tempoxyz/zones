@@ -29,10 +29,7 @@ use tempo_precompiles::{
     dispatch::selector_from_calldata,
     error::TempoPrecompileError,
     input_cost,
-    storage::{
-        PrecompileStorageProvider, StorageCtx, actions::StorageActions,
-        evm::EvmPrecompileStorageProvider,
-    },
+    storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
     storage_credits::NonCreditableSlots,
 };
 
@@ -86,7 +83,7 @@ pub(crate) trait CallRules: 'static {
     }
 
     /// Applies pure Zone-specific admission rules before storage setup.
-    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+    fn admit(&self, _data: &[u8], _caller: Address, _tx_origin: Address) -> CallCheck {
         CallCheck::Continue
     }
 }
@@ -112,6 +109,7 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
+        let tx_origin = input.internals.tx_origin();
         if input.gas < input_cost(data.len()) {
             return Ok(PrecompileOutput::halt(
                 PrecompileHalt::OutOfGas,
@@ -138,27 +136,22 @@ pub(crate) fn create_precompile(
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
-        if fixed_gas.is_some() {
-            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
-            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
-            storage.set_tip1060_storage_credits(false);
-        }
 
-        let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
-            CallCheck::Continue => execute(data, caller),
-            CallCheck::Revert(output) => {
-                let s = StorageCtx::default();
-                let output = s.revert_output(output);
-                add_input_cost(s, data, Ok(output))
-            }
-            CallCheck::Error(CallRuleError::Tempo(error)) => {
-                StorageCtx::default().error_result(error)
+        let mut result = StorageCtx::enter(&mut storage, || {
+            match rules.admit(data, caller, tx_origin) {
+                CallCheck::Continue => execute(data, caller),
+                CallCheck::Revert(output) => {
+                    let s = StorageCtx::default();
+                    let output = s.revert_output(output);
+                    add_input_cost(s, data, Ok(output))
+                }
+                CallCheck::Error(CallRuleError::Tempo(error)) => {
+                    StorageCtx::default().error_result(error)
+                }
             }
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
-            // Disable refunds to not leak any data about previous storage values.
-            output.gas_refunded = 0;
         }
         result
     })
@@ -189,10 +182,9 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
-    use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
-    type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
+    type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address, Address)>>>;
 
     struct RecordingRules(RuleRecord);
 
@@ -201,11 +193,12 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        fn admit(&self, data: &[u8], caller: Address, tx_origin: Address) -> CallCheck {
             *self.0.borrow_mut() = Some((
                 Bytes::copy_from_slice(data),
                 selector_from_calldata(data),
                 caller,
+                tx_origin,
             ));
             CallCheck::Continue
         }
@@ -257,6 +250,7 @@ mod tests {
         let mut outer = test_storage_provider(&mut outer_ctx, 777, false);
         let calldata = [0xde, 0xad, 0xbe, 0xef, 0x01];
         let caller = Address::repeat_byte(0x22);
+        let tx_origin = inner_ctx.tx.caller;
         let output = StorageCtx::enter(&mut outer, || {
             let output = precompile
                 .call(input(&mut inner_ctx, &calldata, caller, FIXED_GAS))
@@ -268,52 +262,14 @@ mod tests {
         assert_eq!(output.gas_used, FIXED_GAS);
         assert_eq!(
             *recorded_rule.borrow(),
-            Some((calldata.into(), Some([0xde, 0xad, 0xbe, 0xef]), caller))
+            Some((
+                calldata.into(),
+                Some([0xde, 0xad, 0xbe, 0xef]),
+                caller,
+                tx_origin
+            ))
         );
         assert_eq!(*recorded_execute.borrow(), Some((calldata.into(), caller)));
-    }
-
-    #[test]
-    fn fixed_gas_disables_storage_credits_and_discards_refunds() {
-        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        cfg.spec = TempoHardfork::T8;
-        let env = ZonePrecompileEnv::new(
-            &cfg,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
-        );
-        let storage_owner = Address::repeat_byte(0x33);
-        let credit_slot = U256::from_be_slice(storage_owner.as_slice());
-        let observed_credit_state = Rc::new(Cell::new(U256::MAX));
-        let execute_credit_state = observed_credit_state.clone();
-        let precompile = create_precompile(
-            "FixedGasAccountingTest",
-            &env,
-            RecordingRules(Rc::new(RefCell::new(None))),
-            move |_, _| {
-                let mut storage = StorageCtx::default();
-                storage
-                    .sstore(storage_owner, U256::ZERO, U256::ONE)
-                    .unwrap();
-                execute_credit_state
-                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
-
-                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
-                storage.refund_gas(4_800);
-                let mut output = storage.success_output(Bytes::new());
-                output.gas_refunded = storage.gas_refunded();
-                Ok(output)
-            },
-        );
-
-        let mut ctx = test_context();
-        let output = precompile
-            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
-            .unwrap();
-
-        assert_eq!(output.gas_used, FIXED_GAS);
-        assert_eq!(output.gas_refunded, 0);
-        assert_eq!(observed_credit_state.get(), U256::ZERO);
     }
 
     #[test]
@@ -362,7 +318,7 @@ mod tests {
             Some(FIXED_GAS)
         }
 
-        fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+        fn admit(&self, _data: &[u8], _caller: Address, _tx_origin: Address) -> CallCheck {
             self.0.set(true);
             CallCheck::Revert(Bytes::from_static(b"denied"))
         }

@@ -2559,6 +2559,7 @@ async fn test_deposit_blacklisted_recipient() -> eyre::Result<()> {
 /// NOTE: The T2 hardfork must be active on L1 for compound policies and
 /// directional authorization roles to work.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

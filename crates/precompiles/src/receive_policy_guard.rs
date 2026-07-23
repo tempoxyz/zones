@@ -26,7 +26,7 @@ impl CallRules for ReceivePolicyGuardRules {
             .then_some(TIP20_FIXED_TRANSFER_GAS)
     }
 
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address, _tx_origin: Address) -> CallCheck {
         if selector_from_calldata(data) != Some(IReceivePolicyGuard::balanceOfCall::SELECTOR) {
             return CallCheck::Continue;
         }
@@ -119,7 +119,7 @@ mod tests {
         caller: Address,
     ) {
         assert!(matches!(
-            rules.admit(&balance_call(receipt), caller),
+            rules.admit(&balance_call(receipt), caller, caller),
             CallCheck::Continue
         ));
     }
@@ -130,7 +130,7 @@ mod tests {
         caller: Address,
     ) {
         assert!(matches!(
-            rules.admit(&balance_call(receipt), caller),
+            rules.admit(&balance_call(receipt), caller, caller),
             CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
         ));
     }
@@ -180,9 +180,12 @@ mod tests {
         }
         .abi_encode();
 
-        assert!(matches!(rules.admit(&claim, OUTSIDER), CallCheck::Continue));
         assert!(matches!(
-            rules.admit(&malformed, OUTSIDER),
+            rules.admit(&claim, OUTSIDER, OUTSIDER),
+            CallCheck::Continue
+        ));
+        assert!(matches!(
+            rules.admit(&malformed, OUTSIDER, OUTSIDER),
             CallCheck::Continue
         ));
     }

@@ -23,7 +23,7 @@ impl<P> NonceRules<P> {
 }
 
 impl<P: L1StorageReader> CallRules for NonceRules<P> {
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+    fn admit(&self, data: &[u8], caller: Address, _tx_origin: Address) -> CallCheck {
         let Ok(call) = INonce::INonceCalls::abi_decode(data) else {
             // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
@@ -71,13 +71,13 @@ mod tests {
         StorageCtx::enter(&mut storage, || {
             for caller in [owner, sequencer] {
                 assert!(matches!(
-                    rules.admit(&call.abi_encode(), caller),
+                    rules.admit(&call.abi_encode(), caller, caller),
                     CallCheck::Continue
                 ));
             }
             for caller in [outsider, intermediary] {
                 assert!(matches!(
-                    rules.admit(&call.abi_encode(), caller),
+                    rules.admit(&call.abi_encode(), caller, caller),
                     CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
                 ));
             }

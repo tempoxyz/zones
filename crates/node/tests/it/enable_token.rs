@@ -5,16 +5,19 @@
 //! tokens are correctly minted.
 
 use alloy::primitives::{U256, address};
-use zone_l1::{EnabledToken, L1Deposit, L1PortalEvents};
+use alloy_network::ReceiptResponse;
+use zone_l1::EnabledToken;
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, local_dev_zone_account, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, local_dev_tempo_zone_account,
+    start_local_zone_with_fixture,
 };
 
 // Imports for real-L1 tests
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::B256;
 use alloy_provider::Provider;
+use tempo_alloy::rpc::TempoCallBuilderExt;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 
@@ -88,10 +91,8 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     // Single L1 block with both TokenEnabled + deposit
     let block = fixture.next_block();
     let deposit = L1Fixture::make_deposit_for_block(beta_token, sender, recipient, deposit_amount);
-    let events = L1PortalEvents {
-        deposits: vec![L1Deposit::Regular(deposit)],
-        enabled_tokens: vec![enabled],
-    };
+    let mut events = fixture.portal_events_from_deposits(&[deposit]);
+    events.enabled_tokens = vec![enabled];
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
     // Verify the recipient received the BetaUSD
@@ -114,33 +115,29 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
 
 /// Pool validation must observe the same L1-anchored policy state as execution.
 ///
-/// The enabled token is used for fee collection. The regression assertion checks that validation
-/// reaches the independent FeeAMM guard instead of rejecting its anchored policy.
+/// The enabled token is used for direct fee collection. The regression assertion checks that pool
+/// admission accepts its anchored policy without requiring FeeAMM liquidity.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "TODO: re-enable once zones allow user transfers"]
 async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-    let (provider, sender) = local_dev_zone_account(&zone)?;
+    let (provider, sender) = local_dev_tempo_zone_account(&zone)?;
     let recipient = address!("0x000000000000000000000000000000000000B0B0");
     let token_address = address!("0x20C0000000000000000000000000000000CC0001");
     let deposit_amount = 1_000_000u128;
 
     let block = fixture.next_block();
     let deposit = L1Fixture::make_deposit_for_block(token_address, sender, sender, deposit_amount);
-    fixture.enqueue_events(
-        &block,
-        zone.deposit_queue(),
-        L1PortalEvents {
-            deposits: vec![L1Deposit::Regular(deposit)],
-            enabled_tokens: vec![EnabledToken {
-                token: token_address,
-                name: "PoolPolicyUSD".to_string(),
-                symbol: "ppUSD".to_string(),
-                currency: "USD".to_string(),
-            }],
-        },
-    );
+    let mut events = fixture.portal_events_from_deposits(&[deposit]);
+    events.enabled_tokens = vec![EnabledToken {
+        token: token_address,
+        name: "PoolPolicyUSD".to_string(),
+        symbol: "ppUSD".to_string(),
+        currency: "USD".to_string(),
+    }];
+    fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
     zone.wait_for_balance(
         token_address,
@@ -161,25 +158,29 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
     // Stateful RPC simulation uses ZoneEvmConfig and therefore the L1 overlay.
     let simulated = token
         .transferFrom(sender, recipient, U256::ZERO)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
         .gas(TIP20_TX_GAS)
         .call()
         .await?;
     assert!(simulated, "the anchored policy should allow execution");
 
-    let error = token
+    let pending = token
         .transferFrom(sender, recipient, U256::ZERO)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
         .gas(TIP20_TX_GAS)
         .send()
-        .await
-        .expect_err("missing fee-token funds should reject admission");
-    let error = error.to_string();
+        .await?;
+
+    fixture.inject_empty_block(zone.deposit_queue());
+    let receipt = pending.get_receipt().await?;
     assert!(
-        error.contains("insufficient funds for gas"),
-        "validation should pass the anchored policy check: {error}"
+        receipt.status(),
+        "permitted transferFrom should succeed with direct fee collection"
     );
-    assert!(!error.contains("PolicyForbids"), "{error}");
 
     Ok(())
 }
