@@ -162,7 +162,7 @@ jobs:
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
           INPUT_DRAIN_TIMEOUT: "300"
           INPUT_SEED: ""
-          INPUT_TEMPO_REF: 436f6cf069a0c8aafa9a3a197ffa17488b5f1e81
+          INPUT_TEMPO_REF: a55a6395567f529f03fa88bc457584fa8ed89af8
           INPUT_TXGEN_REF: 03046937d67245d41c121ca840d7add4d95c9d73
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
