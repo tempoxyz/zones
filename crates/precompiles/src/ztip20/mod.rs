@@ -13,13 +13,14 @@ use alloy_sol_types::{SolCall, SolError};
 use tempo_precompiles::{
     dispatch::selector_from_calldata,
     tip20::{IRolesAuth, ITIP20},
+    zone_factory::ZonePortalStorage as ZonePortal,
 };
 use tempo_zone_contracts::Unauthorized;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     execution::{CallCheck, CallRuleError, CallRules},
-    storage::{Handler, L1State, L1StorageReader},
+    storage::{L1State, L1StorageReader, ReadWith},
 };
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
@@ -118,8 +119,8 @@ impl<P: L1StorageReader> TIP20Rules<P> {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        self.l1
-            .read_portal(|portal| portal.is_sequencer[caller].read())
+        ZonePortal::new(self.l1.portal()).is_sequencer[caller]
+            .read_with(&self.l1)
             .map_err(CallRuleError::Tempo)
     }
 }
@@ -134,10 +135,9 @@ mod tests {
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
         PATH_USD_ADDRESS,
-        storage::StorageCtx,
+        storage::{Handler, StorageCtx},
         test_util::TIP20Setup,
         tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
-        zone_factory::ZonePortalStorage as ZonePortal,
     };
     use tempo_zone_contracts::Unauthorized;
 
@@ -172,7 +172,7 @@ mod tests {
         bob: Address,
         spender: Address,
         sequencer: Address,
-        l1: L1State<MockL1Reader>,
+        l1_reader: MockL1Reader,
         precompile: DynPrecompile,
     }
 
@@ -185,13 +185,16 @@ mod tests {
             let spender = address!("0x00000000000000000000000000000000000000a4");
             let issuer = address!("0x00000000000000000000000000000000000000a5");
             let sequencer = address!("0x00000000000000000000000000000000000000a6");
-            let l1 = L1State::new(MockL1Reader::default(), PORTAL_ADDRESS);
+            let l1_reader = MockL1Reader::default();
+            l1_reader.seed_portal(PORTAL_ADDRESS, |portal| {
+                portal.is_sequencer[sequencer].write(true)
+            })?;
+            let l1 = L1State::new(l1_reader.clone(), PORTAL_ADDRESS);
             let mut ctx = test_context();
 
             {
                 let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
                 StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                    ZonePortal::new(l1.portal()).is_sequencer[sequencer].write(true)?;
                     TIP20Setup::path_usd(admin)
                         .with_issuer(admin)
                         .with_issuer(issuer)
@@ -206,7 +209,7 @@ mod tests {
             }
 
             let env = test_env(&ctx);
-            let precompile = crate::create_tip20_precompile(token, &env, l1.clone());
+            let precompile = crate::create_tip20_precompile(token, &env, l1);
 
             Ok(Self {
                 ctx,
@@ -215,7 +218,7 @@ mod tests {
                 bob,
                 spender,
                 sequencer,
-                l1,
+                l1_reader,
                 precompile,
             })
         }
@@ -262,15 +265,17 @@ mod tests {
         let spender = Address::repeat_byte(0x22);
         let sequencer = Address::repeat_byte(0x33);
         let outsider = Address::repeat_byte(0x44);
-        let rules = rules();
+        let reader = MockL1Reader::default();
+        reader
+            .seed_portal(PORTAL_ADDRESS, |portal| {
+                portal.is_sequencer[sequencer].write(true)
+            })
+            .unwrap();
+        let rules = TIP20Rules::new(L1State::new(reader, PORTAL_ADDRESS));
         let mut ctx = test_context();
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
         StorageCtx::enter(&mut storage, || {
-            ZonePortal::new(rules.l1.portal()).is_sequencer[sequencer]
-                .write(true)
-                .unwrap();
-
             let balance = ITIP20::balanceOfCall { account: owner };
             assert_allowed(&rules, balance.clone(), owner);
             assert_allowed(&rules, balance.clone(), sequencer);
@@ -313,14 +318,10 @@ mod tests {
                 .is_revert()
         );
 
-        {
-            let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
-            StorageCtx::enter(&mut storage, || {
-                let mut portal = ZonePortal::new(harness.l1.portal());
-                portal.is_sequencer[harness.sequencer].write(false)?;
-                portal.is_sequencer[next_sequencer].write(true)
-            })?;
-        }
+        harness.l1_reader.seed_portal(PORTAL_ADDRESS, |portal| {
+            portal.is_sequencer[harness.sequencer].write(false)?;
+            portal.is_sequencer[next_sequencer].write(true)
+        })?;
 
         assert!(
             harness

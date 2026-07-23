@@ -1,15 +1,32 @@
 //! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
 //! and the native `TempoState` precompile.
 
-use alloc::{rc::Rc, string::String};
+use alloc::{
+    rc::Rc,
+    string::{String, ToString},
+};
 use core::{cell::Cell, fmt};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use revm::{context::result::AnyError, precompile::PrecompileError};
-use tempo_precompiles::zone_factory::ZonePortalStorage as ZonePortal;
+use tempo_precompiles::error::TempoPrecompileError;
 use thiserror::Error;
 
+use crate::tempo_state::TempoState;
+
 pub(crate) use tempo_precompiles::storage::*;
+
+/// Explicitly reads a typed slot from a caller-provided storage backend.
+pub(crate) trait ReadWith<T: Storable> {
+    fn read_with<S: StorageOps>(&self, storage: &S) -> tempo_precompiles::Result<T>;
+}
+
+impl<T: Storable> ReadWith<T> for Slot<T> {
+    fn read_with<S: StorageOps>(&self, storage: &S) -> tempo_precompiles::Result<T> {
+        let ctx = self.offset().map_or(LayoutCtx::FULL, LayoutCtx::packed);
+        T::load(storage, self.slot(), ctx)
+    }
+}
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
@@ -49,7 +66,7 @@ pub struct L1State<P> {
     anchor: Rc<Cell<Option<u64>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
-    /// ZonePortal whose storage is mirrored into this execution context.
+    /// ZonePortal read through the L1 provider by explicit storage operations.
     portal_address: Address,
 }
 
@@ -76,16 +93,6 @@ impl<P> L1State<P> {
     /// Returns the configured ZonePortal address.
     pub const fn portal(&self) -> Address {
         self.portal_address
-    }
-
-    /// Executes an explicit L1 read using the canonical ZonePortal storage handlers.
-    ///
-    /// Reads require an active [`StorageCtx`] and resolve through the L1 database overlay.
-    pub(crate) fn read_portal<T>(
-        &self,
-        read: impl FnOnce(&ZonePortal) -> tempo_precompiles::Result<T>,
-    ) -> tempo_precompiles::Result<T> {
-        read(&ZonePortal::new(self.portal_address))
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
@@ -125,6 +132,24 @@ impl<P: L1StorageReader> L1State<P> {
     ) -> Result<B256, L1StateError> {
         self.set_anchor(block_number)?;
         self.provider.read_l1_storage(account, slot, block_number)
+    }
+}
+
+impl<P: L1StorageReader> StorageOps for L1State<P> {
+    fn load(&self, slot: U256) -> tempo_precompiles::Result<U256> {
+        let anchor = match self.get_anchor() {
+            Some(anchor) => anchor,
+            None => TempoState::new().tempo_block_number.read()?,
+        };
+        self.read_l1_storage(self.portal_address, slot.into(), anchor)
+            .map(Into::into)
+            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))
+    }
+
+    fn store(&mut self, _slot: U256, _value: U256) -> tempo_precompiles::Result<()> {
+        Err(TempoPrecompileError::Fatal(
+            "L1 portal storage is read-only".into(),
+        ))
     }
 }
 

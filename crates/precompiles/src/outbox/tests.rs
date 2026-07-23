@@ -31,6 +31,7 @@ struct Harness {
     ctx: TestContext,
     precompile: DynPrecompile,
     l1: L1State<MockL1Reader>,
+    l1_reader: MockL1Reader,
     token: Address,
 }
 
@@ -38,17 +39,18 @@ impl Harness {
     fn new() -> eyre::Result<Self> {
         let mut ctx = test_context();
         let token = tempo_precompiles::PATH_USD_ADDRESS;
-        let l1 = L1State::new(MockL1Reader::default(), PORTAL);
+        let l1_reader = MockL1Reader::default();
+        l1_reader.seed_portal(PORTAL, |portal| {
+            portal.is_sequencer[SEQUENCER].write(true)?;
+            let mut token_config = portal.token_configs[token].read()?;
+            token_config.enabled = true;
+            token_config.deposits_active = true;
+            portal.token_configs[token].write(token_config)
+        })?;
+        let l1 = L1State::new(l1_reader.clone(), PORTAL);
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-                let mut portal = ZonePortal::new(l1.portal());
-                portal.is_sequencer[SEQUENCER].write(true)?;
-                let mut token_config = portal.token_configs[token].read()?;
-                token_config.enabled = true;
-                token_config.deposits_active = true;
-                portal.token_configs[token].write(token_config)?;
-
                 ZoneOutbox::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
                     .with_issuer(ALICE)
@@ -69,6 +71,7 @@ impl Harness {
             ctx,
             precompile,
             l1,
+            l1_reader,
             token,
         })
     }
@@ -167,15 +170,8 @@ impl Harness {
         )
     }
 
-    fn with_portal<T>(
-        &mut self,
-        f: impl FnOnce(&mut ZonePortal) -> TempoResult<T>,
-    ) -> eyre::Result<T> {
-        let l1 = self.l1.clone();
-        let mut storage = test_storage_provider(&mut self.ctx, u64::MAX, false);
-        Ok(StorageCtx::enter(&mut storage, || {
-            f(&mut ZonePortal::new(l1.portal()))
-        })?)
+    fn with_portal<T>(&self, f: impl FnOnce(&mut ZonePortal) -> TempoResult<T>) -> eyre::Result<T> {
+        Ok(self.l1_reader.seed_portal(self.l1.portal(), f)?)
     }
 
     fn set_modes(&mut self, access_enforced: bool, gateway_enforced: bool) -> eyre::Result<()> {

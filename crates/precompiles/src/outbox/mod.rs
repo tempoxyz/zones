@@ -12,6 +12,7 @@ use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{ContractStorage, Handler, Mapping},
     tip20::{ITIP20, TIP20Error, TIP20Token},
+    zone_factory::ZonePortalStorage as ZonePortal,
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
@@ -25,7 +26,7 @@ use zone_primitives::constants::{
 use crate::{
     ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
-    storage::{L1State, L1StorageReader},
+    storage::{L1State, L1StorageReader, ReadWith},
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
@@ -58,9 +59,8 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        if caller != Address::ZERO
-            && !l1.read_portal(|portal| portal.is_sequencer[caller].read())?
-        {
+        let portal = ZonePortal::new(l1.portal());
+        if caller != Address::ZERO && !portal.is_sequencer[caller].read_with(l1)? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -73,26 +73,20 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        if !l1
-            .read_portal(|portal| portal.token_configs[token].read())?
-            .enabled
-        {
+        let portal = ZonePortal::new(l1.portal());
+        if !portal.token_configs[token].enabled.read_with(l1)? {
             return Err(ZonePortalError::token_not_enabled().into());
         }
 
-        let (access_enforced, gateway_enforced) = l1.read_portal(|portal| {
-            Ok((
-                portal.is_access_enforced.read()?,
-                portal.is_gateway_enforced.read()?,
-            ))
-        })?;
+        let access_enforced = portal.is_access_enforced.read_with(l1)?;
+        let gateway_enforced = portal.is_gateway_enforced.read_with(l1)?;
 
         if gas_limit == 0 {
             if !access_enforced && !gateway_enforced {
                 return Ok(());
             }
 
-            let role = l1.read_portal(|portal| portal.role[to].read())?;
+            let role = portal.role[to].read_with(l1)?;
             if gateway_enforced && role == IZonePortal::Role::CallbackGateway as u8 {
                 return Err(ZonePortalError::invalid_callback_target().into());
             }
@@ -100,8 +94,7 @@ impl ZoneOutbox {
                 return Err(ZonePortalError::account_not_allowed(to).into());
             }
         } else if gateway_enforced
-            && l1.read_portal(|portal| portal.role[to].read())?
-                != IZonePortal::Role::CallbackGateway as u8
+            && portal.role[to].read_with(l1)? != IZonePortal::Role::CallbackGateway as u8
         {
             return Err(ZonePortalError::invalid_callback_target().into());
         }

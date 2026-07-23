@@ -8,6 +8,7 @@ use std::{
 use tempo_precompiles::{
     storage::{Handler, PrecompileStorageProvider, StorageCtx, hashmap::HashMapStorageProvider},
     tip403_registry::{CompoundPolicyData, PolicyData, TIP403Registry},
+    zone_factory::ZonePortalStorage as ZonePortal,
 };
 
 pub type L1Slot = (Address, B256, u64);
@@ -63,6 +64,15 @@ impl MockL1Reader {
 
     pub fn storage_requests(&self) -> Vec<L1Slot> {
         self.storage_requests.lock().unwrap().clone()
+    }
+
+    pub fn seed_portal<T>(
+        &self,
+        address: Address,
+        seed: impl FnOnce(&mut ZonePortal) -> tempo_precompiles::Result<T>,
+    ) -> tempo_precompiles::Result<T> {
+        let mut storage = self.registry_storage.lock().unwrap();
+        StorageCtx::enter(&mut *storage, || seed(&mut ZonePortal::new(address)))
     }
 
     pub fn seed_simple_policy(
