@@ -25,7 +25,10 @@
 
 use std::{collections::BTreeMap, fmt};
 
-use crate::abi::{self, BlockTransition, DepositQueueTransition, IZoneOutbox, ZonePortal};
+use crate::{
+    abi::{self, BlockTransition, DepositQueueTransition, IZoneOutbox, ZonePortal},
+    attestation::{AttestationStore, SettlementAttestation, SettlementCertificate},
+};
 use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -33,7 +36,7 @@ use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain, sol};
+use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain};
 use eyre::{OptionExt as _, Result};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
@@ -159,23 +162,6 @@ struct SettlementAttestationInput<'a> {
     verifier_config: &'a Bytes,
 }
 
-sol! {
-    struct SettlementAttestation {
-        uint32 zoneId;
-        uint64 sequencerSetVersion;
-        uint256 zoneHeight;
-        uint256 withdrawalBatchIndex;
-        address verifier;
-        uint64 tempoBlockNumber;
-        uint64 anchorBlockNumber;
-        bytes32 anchorBlockHash;
-        bytes32 blockTransitionHash;
-        bytes32 depositQueueTransitionHash;
-        bytes32 withdrawalQueueHash;
-        bytes32 verifierConfigHash;
-    }
-}
-
 /// One L2 withdrawal batch finalized by `ZoneOutbox`.
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizedBatch {
@@ -207,6 +193,8 @@ pub struct BatchSubmitter {
     l1_fetch_concurrency: usize,
     /// EIP-2935 history and safety-margin limits used for anchor decisions.
     anchor_config: BatchAnchorConfig,
+    /// Signatures from followers attesting to the batch.
+    attestation_store: Option<AttestationStore>,
     /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
@@ -351,10 +339,16 @@ impl BatchSubmitter {
             signer,
             l1_fetch_concurrency: 16,
             anchor_config,
+            attestation_store: None,
             ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
                 DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
             ))),
         }
+    }
+
+    /// Attach the shared store populated by leader and follower settlement signatures.
+    pub fn set_attestation_store(&mut self, store: Option<AttestationStore>) {
+        self.attestation_store = store;
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
@@ -396,36 +390,72 @@ impl BatchSubmitter {
             nextDepositNumber: batch.next_deposit_number,
         };
 
-        let (anchor_mode, current_l1_block) =
-            self.resolve_anchor_mode(batch.tempo_block_number).await?;
-        let recent_tempo_block_number = anchor_mode.recent_block_number();
-        let anchor_block_number = anchor_mode.anchor_block_number(batch.tempo_block_number);
-        let anchor_block_hash = self
-            .l1_provider
-            .get_block_by_number(anchor_block_number.into())
-            .await?
-            .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
-            .header
-            .hash;
-
-        let signer = self
-            .signer
-            .as_ref()
-            .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
         let verifier_config = Bytes::new();
-        let signature = self
-            .sign_settlement_attestation(
-                signer,
-                SettlementAttestationInput {
-                    batch,
-                    anchor_block_number,
-                    anchor_block_hash,
-                    block_transition: &block_transition,
-                    deposit_transition: &deposit_transition,
-                    verifier_config: &verifier_config,
-                },
-            )
-            .await?;
+        let (certificate, anchor_mode, current_l1_block) =
+            if let Some(store) = &self.attestation_store {
+                let set_version_call = self.portal.sequencerSetVersion();
+                let threshold_call = self.portal.sequencerThreshold();
+                let (set_version, threshold) =
+                    tokio::try_join!(set_version_call.call(), threshold_call.call())?;
+                let threshold = threshold as usize;
+                eyre::ensure!(threshold > 0, "portal sequencer threshold is zero");
+                info!(
+                    zone_height = batch.zone_height,
+                    threshold, "Waiting for settlement quorum"
+                );
+                let certificate = store
+                    .wait_for_settlement(batch.zone_height, threshold)
+                    .await;
+                let anchor_mode = match self
+                    .validate_certificate(batch, batch.zone_height, set_version, &certificate)
+                    .await
+                {
+                    Ok(anchor_mode) => anchor_mode,
+                    Err(err) => {
+                        store.remove_settlement(batch.zone_height, certificate.digest);
+                        return Err(err);
+                    }
+                };
+                let current_l1_block = self.l1_provider.get_block_number().await?;
+                (Some(certificate), anchor_mode, current_l1_block)
+            } else {
+                let (anchor_mode, current_l1_block) =
+                    self.resolve_anchor_mode(batch.tempo_block_number).await?;
+                (None, anchor_mode, current_l1_block)
+            };
+        let recent_tempo_block_number = anchor_mode.recent_block_number();
+
+        let signatures = if let Some(certificate) = &certificate {
+            certificate.signatures.clone()
+        } else {
+            // Legacy mode, where the 1-of-1 sequencer will self-sign the attestation
+            let anchor_block_number = anchor_mode.anchor_block_number(batch.tempo_block_number);
+            let anchor_block_hash = self
+                .l1_provider
+                .get_block_by_number(anchor_block_number.into())
+                .await?
+                .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
+                .header
+                .hash;
+            let signer = self
+                .signer
+                .as_ref()
+                .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
+            vec![
+                self.sign_settlement_attestation(
+                    signer,
+                    SettlementAttestationInput {
+                        batch,
+                        anchor_block_number,
+                        anchor_block_hash,
+                        block_transition: &block_transition,
+                        deposit_transition: &deposit_transition,
+                        verifier_config: &verifier_config,
+                    },
+                )
+                .await?,
+            ]
+        };
 
         info!(
             anchor_mode = %anchor_mode,
@@ -447,7 +477,7 @@ impl BatchSubmitter {
                 verifier_config,
                 Bytes::new(),
                 U256::from(batch.zone_height),
-                vec![signature],
+                signatures,
             )
             .nonce_key(SUBMIT_BATCH_NONCE_KEY)
             .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
@@ -489,6 +519,10 @@ impl BatchSubmitter {
         }
 
         let event = self.decode_batch_submitted(receipt.logs())?;
+
+        if let (Some(store), Some(_)) = (&self.attestation_store, &certificate) {
+            store.remove_submitted(batch.zone_height);
+        }
 
         info!(
             %tx_hash,
@@ -576,6 +610,126 @@ impl BatchSubmitter {
             .ok_or_else(|| {
                 eyre::eyre!("confirmed submitBatch receipt is missing the BatchSubmitted event")
             })
+    }
+
+    /// Validate that a collected certificate commits to the exact calldata this submitter will
+    /// send, and derive the anchor mode from the signed statement instead of recomputing it.
+    async fn validate_certificate(
+        &self,
+        batch: &BatchData,
+        zone_height: u64,
+        set_version: u64,
+        certificate: &SettlementCertificate,
+    ) -> Result<AnchorMode> {
+        if certificate.height != zone_height {
+            return Err(eyre::eyre!(
+                "settlement certificate height {} does not match batch height {zone_height}",
+                certificate.height
+            ));
+        }
+        let attestation = &certificate.attestation;
+
+        let zone_id_call = self.portal.zoneId();
+        let withdrawal_index_call = self.portal.withdrawalBatchIndex();
+        let verifier_call = self.portal.verifier();
+        let (zone_id, withdrawal_index, verifier) = tokio::try_join!(
+            zone_id_call.call(),
+            withdrawal_index_call.call(),
+            verifier_call.call(),
+        )?;
+
+        let expected_block_transition_hash = alloy_primitives::keccak256(
+            (batch.prev_block_hash, batch.next_block_hash).abi_encode(),
+        );
+        let expected_deposit_transition_hash = alloy_primitives::keccak256(
+            (
+                batch.prev_processed_deposit_hash,
+                batch.next_processed_deposit_hash,
+                batch.prev_deposit_number,
+                batch.next_deposit_number,
+            )
+                .abi_encode(),
+        );
+
+        // Run a bunch of checks to verify that whats in the attestation certificate is exactly what
+        // we expect. `submitBatch` will revert if any of these are wrong, so we should catch it early.
+        eyre::ensure!(attestation.zoneId == zone_id, "certificate zone ID changed");
+        eyre::ensure!(
+            attestation.sequencerSetVersion == set_version,
+            "certificate signer-set version changed"
+        );
+        eyre::ensure!(
+            attestation.zoneHeight == U256::from(zone_height),
+            "certificate zone height changed"
+        );
+        eyre::ensure!(
+            attestation.withdrawalBatchIndex == U256::from(withdrawal_index.saturating_add(1)),
+            "certificate withdrawal batch index changed"
+        );
+        eyre::ensure!(
+            attestation.verifier == verifier,
+            "certificate verifier changed"
+        );
+        eyre::ensure!(
+            attestation.tempoBlockNumber == batch.tempo_block_number,
+            "certificate Tempo block changed"
+        );
+        eyre::ensure!(
+            attestation.blockTransitionHash == expected_block_transition_hash,
+            "certificate block transition changed"
+        );
+        eyre::ensure!(
+            attestation.depositQueueTransitionHash == expected_deposit_transition_hash,
+            "certificate deposit transition changed"
+        );
+        eyre::ensure!(
+            attestation.withdrawalQueueHash == batch.withdrawal_queue_hash,
+            "certificate withdrawal queue hash changed"
+        );
+        eyre::ensure!(
+            attestation.verifierConfigHash == alloy_primitives::keccak256(Bytes::new()),
+            "certificate verifier config changed"
+        );
+
+        let current_l1_block = self.l1_provider.get_block_number().await?;
+        eyre::ensure!(
+            attestation.anchorBlockNumber < current_l1_block,
+            "certificate anchor block is not yet available through EIP-2935"
+        );
+        eyre::ensure!(
+            current_l1_block.saturating_sub(attestation.anchorBlockNumber)
+                < self.anchor_config.history_window(),
+            "certificate anchor block fell outside the EIP-2935 history window"
+        );
+
+        let anchor = self
+            .l1_provider
+            .get_block_by_number(attestation.anchorBlockNumber.into())
+            .await?
+            .ok_or_eyre(format!(
+                "missing certified L1 anchor block {}",
+                attestation.anchorBlockNumber
+            ))?;
+        eyre::ensure!(
+            anchor.header.hash == attestation.anchorBlockHash,
+            "certificate anchor hash changed"
+        );
+
+        if attestation.anchorBlockNumber == batch.tempo_block_number {
+            Ok(AnchorMode::Direct)
+        } else {
+            eyre::ensure!(
+                attestation.anchorBlockNumber > batch.tempo_block_number,
+                "certificate ancestry anchor does not follow its Tempo block"
+            );
+            let ancestry_headers = self
+                .fetch_ancestry_headers(batch.tempo_block_number, attestation.anchorBlockNumber)
+                .await?;
+            Ok(AnchorMode::Ancestry {
+                anchor_block: attestation.anchorBlockNumber,
+                ancestry_headers,
+            })
+        }
     }
 
     /// Resolve the anchor mode for the given `tempo_block_number`.

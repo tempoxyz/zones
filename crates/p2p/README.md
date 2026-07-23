@@ -42,6 +42,7 @@ the configuration shape:
 
 ```toml
 zone_id = 7
+sequencer_set_version = 1
 leader_ed25519_public_key = "0xleader..."
 
 [[nodes]]
@@ -95,8 +96,10 @@ Add these arguments to the node's normal command:
 --sequencer.role leader
 ```
 
-Use each node's own key files and listener address. The secp256k1 key is loaded
-and validated now but will only be used once zone-block quorum signing is wired.
+Use each node's own key files and listener address. Followers use their individual
+secp256k1 keys to sign settlement attestations after importing and validating blocks.
+This key is independent from the shared `--sequencer-key`; reusing that shared key
+would collapse several nodes into one recoverable quorum identity.
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
 

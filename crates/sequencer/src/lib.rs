@@ -16,6 +16,7 @@ pub mod abi {
     pub use tempo_zone_contracts::*;
 }
 
+pub mod attestation;
 mod encryption_key;
 mod metrics;
 pub mod monitor;
@@ -24,6 +25,7 @@ mod rpc;
 pub mod settlement;
 pub mod withdrawals;
 
+pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
 pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
@@ -69,6 +71,8 @@ pub struct ZoneSequencerConfig {
     pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
+    /// Shared P2P attestation store used for quorum batch submission.
+    pub attestation_store: Option<AttestationStore>,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -128,6 +132,7 @@ pub async fn spawn_zone_sequencer(
         batch_interval_blocks: config.batch_interval_blocks,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
+        attestation_store: config.attestation_store,
     };
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(

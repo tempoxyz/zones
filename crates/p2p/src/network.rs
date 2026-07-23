@@ -17,6 +17,10 @@ pub(crate) const BACKFILL_REQUEST_CHANNEL: u64 = 1;
 pub(crate) const BACKFILL_RESPONSE_CHANNEL: u64 = 2;
 /// Follower-to-leader raw transaction forwarding channel.
 pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
+/// Leader-to-follower proposed settlement statement channel.
+pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
+/// Follower-to-leader settlement signature channel.
+pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
 pub(crate) const BLOCK_BACKLOG: usize = 128;
 pub(crate) const TRANSACTION_BACKLOG: usize = 1_024;
 
@@ -139,6 +143,11 @@ pub(crate) fn backfill_response_quota() -> Quota {
 
 pub(crate) fn transaction_quota() -> Quota {
     Quota::per_second(NZU32!(1024))
+}
+
+/// ACKs are small fixed-shape EIP-712 statements plus one secp256k1 signature.
+pub(crate) fn settlement_quota() -> Quota {
+    Quota::per_second(NZU32!(8))
 }
 
 #[cfg(test)]

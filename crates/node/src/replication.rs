@@ -2,6 +2,7 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
+use alloy_provider::DynProvider;
 use alloy_rlp::Decodable as _;
 use alloy_rpc_types_engine::ForkchoiceState;
 use futures::{StreamExt as _, stream::BoxStream};
@@ -9,13 +10,59 @@ use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::{ConsensusEngineHandle, PayloadTypes as _};
 use reth_primitives_traits::SealedBlock;
 use reth_provider::HeaderProvider;
-use reth_storage_api::{BlockNumReader, BlockReader};
-use std::{collections::BTreeMap, time::Duration};
+use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
+use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader};
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 use zone_p2p::{P2pCommand, P2pEvent, Role};
 use zone_payload::ZonePayloadTypes;
+use zone_sequencer::{
+    BatchAnchorConfig,
+    attestation::{
+        AttestationDomain, AttestationStore, SettlementAttestation, SignedSettlementAttestation,
+    },
+};
+
+use alloy_signer_local::PrivateKeySigner;
+use eyre::{OptionExt as _, WrapErr as _};
+
+use crate::settlement_attestation::build_settlement_attestation;
+
+/// Shared signing and L1-validation context for settlement attestations.
+#[derive(Clone)]
+pub(crate) struct AttestationContext {
+    pub(crate) domain: AttestationDomain,
+    pub(crate) signer: PrivateKeySigner,
+    pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+    pub(crate) store: Option<AttestationStore>,
+    pub(crate) l1_provider: DynProvider<TempoNetwork>,
+    pub(crate) anchor_config: BatchAnchorConfig,
+}
+
+impl AttestationContext {
+    pub(crate) fn new(
+        domain: AttestationDomain,
+        signer: PrivateKeySigner,
+        addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+        store: Option<AttestationStore>,
+        l1_provider: DynProvider<TempoNetwork>,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
+        Self {
+            domain,
+            signer,
+            addresses,
+            store,
+            l1_provider,
+            anchor_config,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PersistedTip {
@@ -343,32 +390,44 @@ pub(crate) async fn run_block_sync<P>(
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    attestation: AttestationContext,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
         + HeaderProvider<Header = TempoHeader>
+        + ReceiptProvider
         + Clone
         + Send
         + Sync
         + 'static,
 {
     match role {
-        Role::Leader => run_leader_backfill_server(provider, events, commands).await,
-        Role::Follower => run_follower_block_sync(provider, engine, events, commands).await,
+        Role::Leader => run_leader_backfill_server(provider, events, commands, attestation).await,
+        Role::Follower => {
+            run_follower_block_sync(provider, engine, events, commands, attestation).await
+        }
     }
 }
 
-/// Serve follower backfill requests without ever requesting or importing peer blocks.
+/// Leader will serve follower backfill requests (without ever requesting or importing peer blocks).
 async fn run_leader_backfill_server<P>(
     provider: P,
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    attestation: AttestationContext,
 ) where
-    P: BlockNumReader + BlockReader<Block = Block> + Clone + Send + Sync + 'static,
+    P: BlockNumReader
+        + BlockReader<Block = Block>
+        + HeaderProvider<Header = TempoHeader>
+        + ReceiptProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     let (backfill_requests, backfill_request_rx) = mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
     let mut backfill_server = BackfillServerTask(tokio::spawn(serve_backfill_requests(
-        provider,
+        provider.clone(),
         commands,
         backfill_request_rx,
     )));
@@ -387,10 +446,40 @@ async fn run_leader_backfill_server<P>(
                             tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
                         }
                     }
+                    P2pEvent::SettlementSignatureReceived { follower, signature } => {
+                        let result = async {
+                            let signed = SignedSettlementAttestation::decode(&signature)?;
+                            let signer = signed.recover_signer(attestation.domain)?;
+                            let expected_signer = attestation.addresses.get(&follower).copied()
+                                .ok_or_eyre("unknown follower identity")?;
+                            eyre::ensure!(signer == expected_signer, "settlement signer does not match authenticated peer");
+                            let height: u64 = signed
+                                .attestation
+                                .zoneHeight
+                                .try_into()
+                                .wrap_err("settlement height does not fit in u64")?;
+                            let expected = build_settlement_attestation(
+                                &provider,
+                                height,
+                                &attestation,
+                                Some((signed.attestation.anchorBlockNumber, signed.attestation.anchorBlockHash)),
+                            ).await?.ok_or_eyre("signed block is not a batch boundary")?;
+                            eyre::ensure!(signed.attestation == expected, "settlement signature does not match leader state");
+                            let (_, signatures) = attestation.store.as_ref()
+                                .expect("leader must have an attestation store")
+                                .insert_settlement(attestation.domain, signer, signed);
+                            Ok::<_, eyre::Report>((height, signer, signatures))
+                        }.await;
+                        match result {
+                            Ok((height, signer, signatures)) => info!(target: "zone::p2p", %follower, %signer, height, signatures, "Stored follower settlement signature"),
+                            Err(err) => tracing::warn!(target: "zone::p2p", %follower, %err, "Rejected follower settlement signature"),
+                        }
+                    }
                     P2pEvent::BlockReceived { .. }
                     | P2pEvent::BackfillBlockReceived { .. }
                     | P2pEvent::BackfillCompleted { .. }
-                    | P2pEvent::TransactionReceived { .. } => {
+                    | P2pEvent::TransactionReceived { .. }
+                    | P2pEvent::SettlementProposalReceived { .. } => {
                         // A leader never follows peer chain heads. Keeping this explicit ensures
                         // ZoneEngine remains the sole writer of the leader's canonical head.
                         debug!(target: "zone::p2p", "Ignoring peer block sync event on serve-only leader");
@@ -414,10 +503,12 @@ async fn run_follower_block_sync<P>(
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    attestation: AttestationContext,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
         + HeaderProvider<Header = TempoHeader>
+        + ReceiptProvider
         + Clone
         + Send
         + Sync
@@ -453,6 +544,38 @@ async fn run_follower_block_sync<P>(
                 };
                 match event {
                     P2pEvent::Started { .. } => {}
+                    P2pEvent::SettlementProposalReceived { leader, proposal } => {
+                        let result = async {
+                            let proposal = SettlementAttestation::decode(&proposal)?;
+                            let height: u64 = proposal
+                                .zoneHeight
+                                .try_into()
+                                .wrap_err("settlement height does not fit in u64")?;
+                            let expected = build_settlement_attestation(
+                                &provider,
+                                height,
+                                &attestation,
+                                Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
+                            ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
+                            eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
+
+                            let signed = SignedSettlementAttestation::sign(
+                                proposal,
+                                attestation.domain,
+                                &attestation.signer,
+                            )?;
+
+                            // Return the signed settlement attestation back to the leader
+                            commands.send(P2pCommand::SendSettlementSignature(signed.encode()))
+                                .await
+                                .wrap_err("P2P command channel closed")?;
+                            Ok::<_, eyre::Report>(height)
+                        }.await;
+                        match result {
+                            Ok(height) => info!(target: "zone::p2p", %leader, height, "Signed settlement proposal"),
+                            Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
+                        }
+                    }
                     P2pEvent::BackfillRequested { peer, request_id, start } => {
                         if let Err(err) = backfill_requests.try_send(BackfillRequest { peer, request_id, start }) {
                             tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
@@ -522,6 +645,9 @@ async fn run_follower_block_sync<P>(
                     }
                     P2pEvent::TransactionReceived { .. } => {
                         debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
+                    }
+                    P2pEvent::SettlementSignatureReceived { .. } => {
+                        debug!(target: "zone::p2p", "Ignoring leader-only attestation event on follower");
                     }
                 }
             }
