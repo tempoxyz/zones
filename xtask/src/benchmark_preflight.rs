@@ -2560,7 +2560,7 @@ mod tests {
         for source in [
             "../neobank/l1-onramp.yml",
             "../neobank/zone-flow.yml",
-            "../neobank/scenario-fragments.yml",
+            "../neobank/neobank-scenario-fragments.yml",
             "../neobank/encrypted-deposit-scenario.yml",
             "../neobank/private-withdrawal-funding-scenario.yml",
             "../neobank/private-withdrawal-scenario.yml",
@@ -3118,7 +3118,7 @@ mod tests {
         );
 
         let fragments: Value = serde_yaml::from_str(
-            &fs::read_to_string(output.join("scenario-fragments.yml")).unwrap(),
+            &fs::read_to_string(output.join("neobank-scenario-fragments.yml")).unwrap(),
         )
         .unwrap();
         assert_eq!(
@@ -3697,7 +3697,7 @@ mod tests {
         for source in [
             "../neobank/l1-onramp.yml",
             "../neobank/zone-flow.yml",
-            "../neobank/scenario-fragments.yml",
+            "../neobank/neobank-scenario-fragments.yml",
             "../neobank/encrypted-deposit-scenario.yml",
             "../neobank/private-withdrawal-funding-scenario.yml",
             "../neobank/private-withdrawal-scenario.yml",
@@ -3716,6 +3716,15 @@ mod tests {
             render_document(source, &destination, &replacements, false).unwrap();
         }
 
+        // A later generic preflight refresh rewrites its roundtrip fragment
+        // library and bridge ABIs in the runtime output directory. Neobank
+        // scenarios must keep resolving their separately named assets.
+        fs::copy(
+            Path::new(SOURCE_DIR).join("scenario-fragments.yml"),
+            output.join("scenario-fragments.yml"),
+        )
+        .unwrap();
+
         let txgen_abis = output.join("txgen/abis");
         fs::create_dir_all(&txgen_abis).unwrap();
         for name in ["tip20.json", "zone-outbox.json"] {
@@ -3731,11 +3740,18 @@ mod tests {
             "earn-contribution-controller.json",
             "earn-router.json",
             "earn-vault.json",
-            "zone-inbox.json",
-            "zone-portal.json",
+            "neobank-zone-inbox.json",
+            "neobank-zone-portal.json",
         ] {
             fs::copy(
                 Path::new(SOURCE_DIR).join("../neobank/abis").join(name),
+                fixture_abis.join(name),
+            )
+            .unwrap();
+        }
+        for name in ["zone-inbox.json", "zone-portal.json"] {
+            fs::copy(
+                Path::new(SOURCE_DIR).join("abis").join(name),
                 fixture_abis.join(name),
             )
             .unwrap();

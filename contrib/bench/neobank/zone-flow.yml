@@ -15,7 +15,7 @@ accounts:
 artifacts:
   TIP20: txgen/abis/tip20.json
   ZoneOutbox: txgen/abis/zone-outbox.json
-  ZoneInbox: abis/zone-inbox.json
+  ZoneInbox: abis/neobank-zone-inbox.json
   EarnRouter: abis/earn-router.json
 
 setup: { steps: [] }

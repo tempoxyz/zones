@@ -1,7 +1,7 @@
 version: 1
 
 include:
-  - ./scenario-fragments.yml
+  - ./neobank-scenario-fragments.yml
 
 chains:
   l1:

@@ -621,7 +621,7 @@ seed_zone_admission_balances() {
     mkdir -p "$seed_dir"
     cp "$ZONES_BENCH_OUTPUT/l1-onramp.yml" \
         "$ZONES_BENCH_OUTPUT/zone-flow.yml" \
-        "$ZONES_BENCH_OUTPUT/scenario-fragments.yml" \
+        "$ZONES_BENCH_OUTPUT/neobank-scenario-fragments.yml" \
         "$seed_dir/"
     cp -R "$ZONES_BENCH_OUTPUT/abis" "$ZONES_BENCH_OUTPUT/txgen" "$seed_dir/"
     sed \
@@ -747,7 +747,7 @@ esac
 account_end=$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))
 control_account_end=$((10#$ZONES_BENCH_CONTROL_ACCOUNT_INDEX + 1))
 sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
-render_sources=(l1-onramp.yml zone-flow.yml scenario-fragments.yml "$scenario_file")
+render_sources=(l1-onramp.yml zone-flow.yml neobank-scenario-fragments.yml "$scenario_file")
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
     render_sources+=(rewards-position-scenario.yml rewards-funding-scenario.yml)
 elif [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ]]; then
@@ -1177,7 +1177,7 @@ if (( withdrawals_per_journey > 0 )); then
     python3 "$bench_dir/collect-withdrawal-blocks.py" \
         --rpc-url "$l1_measurement_rpc" \
         --portal "$L1_PORTAL_ADDRESS" \
-        --portal-abi "$bench_dir/neobank/abis/zone-portal.json" \
+        --portal-abi "$bench_dir/neobank/abis/neobank-zone-portal.json" \
         --from-block "$l1_measurement_start_block" \
         --to-block "$l1_measurement_end_block" \
         --expected-withdrawals "$expected_withdrawals" \

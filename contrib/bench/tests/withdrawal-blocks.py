@@ -186,7 +186,7 @@ class WithdrawalBlocksTest(unittest.TestCase):
             "--portal",
             PORTAL,
             "--portal-abi",
-            str(ROOT / "contrib/bench/neobank/abis/zone-portal.json"),
+            str(ROOT / "contrib/bench/neobank/abis/neobank-zone-portal.json"),
             "--from-block",
             "100",
             "--to-block",

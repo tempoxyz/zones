@@ -14,7 +14,7 @@ accounts:
 
 artifacts:
   TIP20: txgen/abis/tip20.json
-  ZonePortal: abis/zone-portal.json
+  ZonePortal: abis/neobank-zone-portal.json
   EarnRouter: abis/earn-router.json
   EarnContributionController: abis/earn-contribution-controller.json
   EarnVault: abis/earn-vault.json
