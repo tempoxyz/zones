@@ -159,7 +159,8 @@ terminal Zone bounce-back event. `rewards-position-scenario.yml` and
 pathUSD backing outside measurement. `rewards-redemption-scenario.yml` measures
 two sequential partial redemptions and both exact encrypted pathUSD returns.
 All scenarios
-compose shared, receipt-correlated boundaries from `scenario-fragments.yml`.
+compose shared, receipt-correlated boundaries from
+`neobank-scenario-fragments.yml`.
 `l1-onramp.yml` and `zone-flow.yml` contain the underlying transaction templates
 and remain separate from the generic roundtrip assets.
 

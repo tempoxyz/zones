@@ -114,12 +114,25 @@ class FixtureHandler(BaseHTTPRequestHandler):
             else:
                 result = None
         elif method == "eth_getTransactionByHash":
-            result = {
-                "hash": params[0],
-                "to": PORTAL,
-                "gas": "0x2dc6c0",
-                "input": "0x91aa3f04" + "00" * 64,
-            }
+            if params[0] == TX_1:
+                result = {
+                    "hash": TX_1,
+                    "to": PORTAL,
+                    "gas": "0x2dc6c0",
+                    "input": "0x91aa3f04" + "00" * 64,
+                }
+            else:
+                result = {
+                    "hash": params[0],
+                    "gas": "0x2dc6c0",
+                    "calls": [
+                        {
+                            "to": PORTAL,
+                            "value": "0x0",
+                            "input": "0x91aa3f04" + "00" * 64,
+                        }
+                    ],
+                }
         elif method == "eth_getBlockByNumber":
             if params[0] == "0x64":
                 result = {

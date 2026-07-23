@@ -101,6 +101,35 @@ def normalized_hex(value: Any, field: str, size: int | None = None) -> str:
     return normalized
 
 
+def transaction_call(transaction: dict[str, Any]) -> tuple[str, str]:
+    """Return the call target and calldata for Ethereum or Tempo AA RPC shapes."""
+    if transaction.get("to") is not None:
+        target = transaction.get("to")
+        calldata = transaction.get("input")
+        if calldata is None:
+            calldata = transaction.get("data")
+        return (
+            normalized_hex(target, "transaction.to", 20),
+            normalized_hex(calldata, "transaction.input"),
+        )
+
+    calls = transaction.get("calls")
+    if not isinstance(calls, list) or len(calls) != 1:
+        raise RpcError(
+            "transaction must contain one top-level call or one Tempo AA call"
+        )
+    call = calls[0]
+    if not isinstance(call, dict):
+        raise RpcError("transaction.calls[0] is not an object")
+    calldata = call.get("input")
+    if calldata is None:
+        calldata = call.get("data")
+    return (
+        normalized_hex(call.get("to"), "transaction.calls[0].to", 20),
+        normalized_hex(calldata, "transaction.calls[0].input"),
+    )
+
+
 def percentile(values: list[int], fraction: float) -> int:
     """Return a nearest-rank percentile over a non-empty integer sample."""
     if not values:
@@ -466,10 +495,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         transaction = rpc.call("eth_getTransactionByHash", [tx_hash])
         if not isinstance(transaction, dict):
             raise RpcError(f"missing transaction body for {tx_hash}")
-        transaction_to = normalized_hex(transaction.get("to"), "transaction.to", 20)
-        transaction_input = normalized_hex(
-            transaction.get("input"), "transaction.input"
-        )
+        transaction_to, transaction_input = transaction_call(transaction)
         transaction_gas_limit = parse_quantity(
             transaction.get("gas"), "transaction.gas"
         )
