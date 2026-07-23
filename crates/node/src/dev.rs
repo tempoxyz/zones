@@ -8,10 +8,11 @@
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, ReceiptResponse as _};
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes, TxKind};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::SolEvent;
+use alloy_sol_types::{SolCall, SolEvent};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZoneFactory};
@@ -96,8 +97,18 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     }
     let factory_address = native_zone_factory(&l1_rpc_url, wallet).await?;
 
-    let factory = ZoneFactory::new(factory_address, &provider);
-    let factory_owner = factory.owner().call().await?;
+    let owner_call = ZoneFactory::ownerCall {};
+    let owner_output = provider
+        .call(
+            TransactionRequest {
+                to: Some(TxKind::Call(factory_address)),
+                input: Bytes::from(owner_call.abi_encode()).into(),
+                ..Default::default()
+            }
+            .into(),
+        )
+        .await?;
+    let factory_owner = ZoneFactory::ownerCall::abi_decode_returns(&owner_output)?._0;
     eyre::ensure!(
         factory_owner == dev_address,
         "ZoneFactory owner is {factory_owner}, but the configured dev key resolves to \
@@ -114,8 +125,8 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .inner
         .inner;
 
-    let receipt = factory
-        .createZone(ZoneFactory::CreateZoneParams {
+    let create_zone = ZoneFactory::createZoneCall {
+        params: ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
             accessMode: !is_access_open,
             gatewayMode: is_gateway_enforced,
@@ -125,8 +136,17 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             sequencers: vec![dev_address],
             threshold: 1,
             rpcUrl: rpc_url,
-        })
-        .send()
+        },
+    };
+    let receipt = provider
+        .send_transaction(
+            TransactionRequest {
+                to: Some(TxKind::Call(factory_address)),
+                input: Bytes::from(create_zone.abi_encode()).into(),
+                ..Default::default()
+            }
+            .into(),
+        )
         .await?
         .get_receipt()
         .await?;

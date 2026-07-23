@@ -1,4 +1,10 @@
-use alloy::{primitives::Address, providers::ProviderBuilder};
+use alloy::{
+    network::TransactionBuilder,
+    primitives::{Address, Bytes, TxKind, U256},
+    providers::{Provider, ProviderBuilder},
+    rpc::types::TransactionRequest,
+    sol_types::SolCall,
+};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
 use tempo_zone_contracts::{ZONE_MESSENGER_ADDRESS, ZoneFactory};
@@ -28,16 +34,32 @@ impl ZoneInfoCmd {
             .connect(&self.l1_rpc_url)
             .await?;
 
-        let factory = ZoneFactory::new(self.zone_factory, &provider);
-
         let zone_id = if self.identifier.starts_with("0x") {
             // Look up by portal address — scan all zones
             let portal: Address = self.identifier.parse()?;
-            let next_zone_id = factory.nextZoneId().call().await?;
+            let call = ZoneFactory::nextZoneIdCall {};
+            let output = provider
+                .call(
+                    TransactionRequest::default()
+                        .with_kind(TxKind::Call(self.zone_factory))
+                        .input(Bytes::from(call.abi_encode()).into())
+                        .into(),
+                )
+                .await?;
+            let next_zone_id = ZoneFactory::nextZoneIdCall::abi_decode_returns(&output)?._0;
 
             let mut found = None;
             for id in 1..next_zone_id {
-                let info = factory.zones(id).call().await?;
+                let call = ZoneFactory::zonesCall { id };
+                let output = provider
+                    .call(
+                        TransactionRequest::default()
+                            .with_kind(TxKind::Call(self.zone_factory))
+                            .input(Bytes::from(call.abi_encode()).into())
+                            .into(),
+                    )
+                    .await?;
+                let info = ZoneFactory::zonesCall::abi_decode_returns(&output)?.info;
                 if info.portal == portal {
                     found = Some(id);
                     break;
@@ -50,7 +72,16 @@ impl ZoneInfoCmd {
                 .map_err(|_| eyre!("expected a zone ID (integer) or portal address (0x...)"))?
         };
 
-        let info = factory.zones(zone_id).call().await?;
+        let call = ZoneFactory::zonesCall { id: zone_id };
+        let output = provider
+            .call(
+                TransactionRequest::default()
+                    .with_kind(TxKind::Call(self.zone_factory))
+                    .input(Bytes::from(call.abi_encode()).into())
+                    .into(),
+            )
+            .await?;
+        let info = ZoneFactory::zonesCall::abi_decode_returns(&output)?.info;
         if info.portal == Address::ZERO {
             return Err(eyre!("zone {zone_id} does not exist"));
         }
