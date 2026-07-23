@@ -49,7 +49,7 @@ impl ZoneInbox {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
-                            self.advance_tempo(l1, l1.portal(), call)
+                            self.advance_tempo(l1, l1.portal(), msg_sender, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },

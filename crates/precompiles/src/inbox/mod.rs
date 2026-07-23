@@ -20,10 +20,10 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256, keccak256};
-use alloy_sol_types::{SolCall, SolError, SolValue};
+use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, StorageCtx},
+    storage::{Handler, Mapping, StorageCtx, StorageOps},
     tip20::{ITIP20, TIP20Token},
 };
 use tempo_precompiles_macros::contract;
@@ -38,7 +38,7 @@ use zone_primitives::constants::{
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
     ecies::{ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, hkdf_info, hkdf_sha256},
-    execution::{CallCheck, CallRules},
+    execution::NoCallRules,
     outbox::ZoneOutbox,
     storage::{L1State, L1StorageReader},
     tempo_state::TempoState,
@@ -47,19 +47,6 @@ use crate::{
 
 /// ABI selector for the block-opening `advanceTempo` system call.
 pub const ADVANCE_TEMPO_SELECTOR: [u8; 4] = IZoneInbox::advanceTempoCall::SELECTOR;
-
-/// Reject ordinary callers before dispatch can select an L1 anchor or perform any L1 read.
-struct InboxCallRules;
-
-impl CallRules for InboxCallRules {
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        if !caller.is_zero() && data.starts_with(&ADVANCE_TEMPO_SELECTOR) {
-            return CallCheck::Revert(IZoneInbox::OnlySequencer {}.abi_encode().into());
-        }
-
-        CallCheck::Continue
-    }
-}
 
 /// Zone-side bridge Inbox state and deposit-processing logic.
 #[contract(addr = ZONE_INBOX_ADDRESS)]
@@ -83,20 +70,22 @@ impl ZoneInbox {
     where
         P: L1StorageReader,
     {
-        crate::execution::create_precompile(
-            "ZoneInbox",
-            env,
-            InboxCallRules,
-            move |data, caller| Self::new().call(&l1, data, caller),
-        )
+        crate::execution::create_precompile("ZoneInbox", env, NoCallRules, move |data, caller| {
+            Self::new().call(&l1, data, caller)
+        })
     }
 
     fn advance_tempo<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
         portal: Address,
+        caller: Address,
         call: IZoneInbox::advanceTempoCall,
     ) -> ZoneResult<()> {
+        if !caller.is_zero() {
+            return Err(ZoneInboxError::only_sequencer().into());
+        }
+
         let deposit_count = u64::try_from(call.deposits.len())
             .map_err(|_| TempoPrecompileError::under_overflow())?;
         let deposits = decode_deposits(call.deposits)?;
@@ -275,11 +264,9 @@ impl ZoneInbox {
         if self.try_mint(deposit.token, recipient, deposit.amount)? {
             self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {
-            let previous = self.refunds[deposit.token][recipient].read()?;
-            let Some(refund) = previous.checked_add(deposit.amount) else {
-                return Err(TempoPrecompileError::under_overflow().into());
-            };
-            self.refunds[deposit.token][recipient].write(refund)?;
+            let previous = self.refunds[deposit.token][recipient]
+                .slot()
+                .sinc(U256::from(deposit.amount))?;
             self.emit_event(deposit.withdrawal_bounce_back_pending_event(recipient))?;
         }
         Ok(())
