@@ -54,9 +54,9 @@ use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
     RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
-    account_keychain::AccountKeychain, error::Result as TempoResult, nonce::NonceManager,
-    receive_policy_guard::ReceivePolicyGuard, storage::actions::StorageActions,
-    tip20::is_tip20_prefix,
+    TIP20_CHANNEL_RESERVE_ADDRESS, account_keychain::AccountKeychain, error::Result as TempoResult,
+    nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
+    storage::actions::StorageActions, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -118,6 +118,7 @@ where
             Some(ZoneTokenFactory::create(&env))
         });
         precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
+        precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
         let fee_env = env.clone();
         precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, move |_| {
             Some(create_zone_fee_manager_precompile(&fee_env))
