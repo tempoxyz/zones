@@ -468,7 +468,7 @@ fragments:
           abi: ZoneInbox
           event: WithdrawalBounceBackProcessed
           where:
-            fallbackRecipient: { param: fallback_recipient }
+            zoneFallbackRecipient: { param: fallback_recipient }
             token: { param: input_token }
             amount: { param: amount }
           max_block_range: 1000
