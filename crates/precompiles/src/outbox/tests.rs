@@ -299,6 +299,7 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
                 keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
                 ANCHOR
             ),
+            (PORTAL, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ANCHOR),
             (
                 PORTAL,
                 harness
@@ -307,7 +308,6 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
                     .into(),
                 ANCHOR,
             ),
-            (PORTAL, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ANCHOR),
             (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
         ]
     );
