@@ -18,6 +18,7 @@ const TIP403_MUTATING_SELECTORS: &[[u8; 4]] = &[
     ITIP403Registry::modifyPolicyBlacklistCall::SELECTOR,
     ITIP403Registry::createCompoundPolicyCall::SELECTOR,
     ITIP403Registry::setReceivePolicyCall::SELECTOR,
+    ITIP403Registry::migrateTransferPolicyIdsCall::SELECTOR,
 ];
 
 alloy_sol_types::sol! {
@@ -120,6 +121,19 @@ mod tests {
                 CallCheck::Revert(data) if data == ReadOnlyRegistry {}.abi_encode()
             ));
         }
+    }
+
+    #[test]
+    fn transfer_policy_migration_is_rejected_by_admission() {
+        let call = ITIP403Registry::migrateTransferPolicyIdsCall {
+            tokens: vec![Address::repeat_byte(0x20)],
+        }
+        .abi_encode();
+
+        assert!(matches!(
+            Tip403Rules.admit(&call, CALLER),
+            CallCheck::Revert(data) if data == ReadOnlyRegistry {}.abi_encode()
+        ));
     }
 
     #[test]

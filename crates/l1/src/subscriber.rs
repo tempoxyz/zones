@@ -15,6 +15,12 @@ fn cache_invalidation_address(address: Address, topic0: Option<&B256>) -> Option
     .then_some(TIP403_REGISTRY_ADDRESS)
 }
 
+fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Address> {
+    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+
+    (topic0 == Some(&TokenEnabled::SIGNATURE_HASH)).then_some(TIP403_REGISTRY_ADDRESS)
+}
+
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
@@ -284,7 +290,7 @@ impl L1Subscriber {
             next_block = self.sync_finalized_once(l1_provider, next_block).await?;
         }
 
-        eyre::bail!("L1 head notification stream ended")
+        Err(eyre::eyre!("L1 head notification stream ended"))
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -424,6 +430,11 @@ impl L1Subscriber {
 
                 if address == portal_address {
                     invalidated.insert(address);
+                    if let Some(address) =
+                        portal_event_cache_invalidation_address(log.topics().first())
+                    {
+                        invalidated.insert(address);
+                    }
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
@@ -562,5 +573,14 @@ mod tests {
             cache_invalidation_address(token, Some(&TransferPolicyUpdate::SIGNATURE_HASH)),
             Some(TIP403_REGISTRY_ADDRESS)
         );
+    }
+
+    #[test]
+    fn token_enabled_events_invalidate_the_registry() {
+        assert_eq!(
+            portal_event_cache_invalidation_address(Some(&TokenEnabled::SIGNATURE_HASH)),
+            Some(TIP403_REGISTRY_ADDRESS)
+        );
+        assert_eq!(portal_event_cache_invalidation_address(None), None);
     }
 }

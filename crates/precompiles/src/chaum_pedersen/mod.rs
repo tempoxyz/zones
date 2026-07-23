@@ -8,14 +8,12 @@
 //!
 //! Uses the NCC-audited [`k256`] crate (v0.13.4) for secp256k1 operations.
 
-use alloc::vec::Vec;
-
 mod dispatch;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Address, address};
+use alloy_primitives::{Address, Keccak256, address};
 use k256::{
-    AffinePoint, ProjectivePoint, Scalar,
+    AffinePoint, FieldBytes, ProjectivePoint, Scalar,
     elliptic_curve::{
         ops::Reduce,
         sec1::{FromEncodedPoint, ToEncodedPoint},
@@ -136,7 +134,8 @@ impl ChaumPedersenVerify {
 
 /// Recover a secp256k1 affine point from compressed form (x coordinate + y parity).
 ///
-/// `y_parity` follows SEC1: `0x02` for even y, `0x03` for odd y.
+/// `y_parity` follows SEC1: `0x02` for even y, `0x03` for odd y. `0x05` Compact encoding for even
+/// points is also accepted.
 pub fn recover_point(x_bytes: &[u8; 32], y_parity: u8) -> Option<AffinePoint> {
     let mut encoded = [0u8; 33];
     encoded[0] = y_parity;
@@ -160,16 +159,20 @@ pub fn challenge_hash(
 ) -> Scalar {
     let g_affine = AffinePoint::from(ProjectivePoint::GENERATOR);
 
-    let mut preimage = Vec::with_capacity(6 * 65); // 6 uncompressed secp256k1 points
-    preimage.extend_from_slice(g_affine.to_encoded_point(false).as_bytes());
-    preimage.extend_from_slice(ephemeral_pub.to_encoded_point(false).as_bytes());
-    preimage.extend_from_slice(sequencer_pub.to_encoded_point(false).as_bytes());
-    preimage.extend_from_slice(shared_secret.to_encoded_point(false).as_bytes());
-    preimage.extend_from_slice(r1.to_encoded_point(false).as_bytes());
-    preimage.extend_from_slice(r2.to_encoded_point(false).as_bytes());
+    let mut hasher = Keccak256::new();
+    for point in [
+        &g_affine,
+        ephemeral_pub,
+        sequencer_pub,
+        shared_secret,
+        r1,
+        r2,
+    ] {
+        hasher.update(point.to_encoded_point(false).as_bytes());
+    }
 
-    let hash = alloy_primitives::keccak256(&preimage);
-    <Scalar as Reduce<k256::U256>>::reduce_bytes(&hash.0.into())
+    let hash = hasher.finalize();
+    <Scalar as Reduce<k256::U256>>::reduce_bytes(FieldBytes::from_slice(&hash.0))
 }
 
 #[cfg(test)]
