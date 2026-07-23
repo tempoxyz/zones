@@ -1,7 +1,7 @@
 [
   {
     "type": "function",
-    "name": "shareSupply",
+    "name": "totalEarnShares",
     "stateMutability": "view",
     "inputs": [],
     "outputs": [
@@ -17,7 +17,7 @@
     "stateMutability": "view",
     "inputs": [
       {
-        "name": "shares",
+        "name": "earnShares",
         "type": "uint256"
       }
     ],
@@ -34,12 +34,16 @@
     "stateMutability": "nonpayable",
     "inputs": [
       {
-        "name": "shares",
+        "name": "earnShares",
         "type": "uint256"
       },
       {
         "name": "receiver",
         "type": "address"
+      },
+      {
+        "name": "minAssets",
+        "type": "uint256"
       }
     ],
     "outputs": [

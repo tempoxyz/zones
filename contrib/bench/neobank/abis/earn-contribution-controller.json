@@ -9,13 +9,17 @@
         "type": "address"
       },
       {
-        "name": "requested",
+        "name": "requestedAssets",
+        "type": "uint256"
+      },
+      {
+        "name": "maxEarnShareSupply",
         "type": "uint256"
       }
     ],
     "outputs": [
       {
-        "name": "funded",
+        "name": "fundedAssets",
         "type": "uint256"
       }
     ]
@@ -31,12 +35,12 @@
         "indexed": true
       },
       {
-        "name": "requested",
+        "name": "requestedAssets",
         "type": "uint256",
         "indexed": false
       },
       {
-        "name": "funded",
+        "name": "fundedAssets",
         "type": "uint256",
         "indexed": false
       }

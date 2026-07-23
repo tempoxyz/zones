@@ -15,9 +15,9 @@ accounts:
 artifacts:
   TIP20: txgen/abis/tip20.json
   ZonePortal: abis/zone-portal.json
-  ZoneGateway: abis/zone-gateway.json
-  VaultRewards: abis/vault-rewards.json
-  VaultAdapter: abis/vault-adapter.json
+  EarnRouter: abis/earn-router.json
+  EarnContributionController: abis/earn-contribution-controller.json
+  EarnVault: abis/earn-vault.json
 
 setup: { steps: [] }
 
@@ -60,10 +60,11 @@ templates:
     fee_token: "__PATHUSD__"
     call:
       to: "__REWARDS__"
-      abi: VaultRewards
-      function: "fund(address,uint256)"
+      abi: EarnContributionController
+      function: "fund(address,uint256,uint256)"
       args:
         - { var: account.address }
         - "__REWARD_FUND_AMOUNT__"
+        - "__REWARD_MAX_EARN_SHARE_SUPPLY__"
 
 mix: []

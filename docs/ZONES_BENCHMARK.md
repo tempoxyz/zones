@@ -871,8 +871,7 @@ completed 1,000/1,000 with no failures or timeouts at 13.332 journeys/s, with
 12.540 s p50 and 15.208 s p95 journey latency in
 [run 29978880031](https://github.com/tempoxyz/zones/actions/runs/29978880031).
 The corresponding report is published under the
-[`zones-roundtrip`](https://pr-127-tempo-apps-internal-perf.tempo-dev.workers.dev/scenarios/zones-roundtrip)
-scenario.
+`zones-roundtrip` scenario.
 
 This is a public repository, and a `pull_request` run evaluates the workflow
 definition from the PR. The GitHub repository or organization policy must
@@ -897,12 +896,11 @@ validator B for aggregate queries; unlike the independent deposit pipeline, it
 does not spread L1 submissions across both validators.
 
 Scenario mode writes the journey and per-step latency JSON report and publishes
-the same finalized measured report to ClickHouse when `CLICKHOUSE_URL`,
-`CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD` Actions secrets are available to
-this repository. Without them, the workflow retains the JSON report only;
-credentials remain in the process environment, while txgen receives only the
-credential-free endpoint and non-secret run/ref metadata. Local runs omit the
-ClickHouse destination unless those variables are set. The workflow combines
+the same finalized measured report to ClickHouse. GitHub Actions scenario runs
+require `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD`; local
+runs retain JSON-only behavior unless those variables are set. Credentials
+remain in the process environment, while txgen receives only the
+credential-free endpoint and non-secret run/ref metadata. The workflow combines
 the JSON report with the rendered scenario to publish a scenario-native results
 page. It reports completed journeys per second,
 aggregate and per-chain successful submit-step TPS, completed-journey latency,

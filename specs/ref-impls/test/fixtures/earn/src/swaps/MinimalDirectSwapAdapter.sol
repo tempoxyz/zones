@@ -1,53 +1,65 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.30;
 
-import { IDirectSwapV2 } from "../interfaces/IDirectSwapV2.sol";
-import { IERC20Like } from "../interfaces/IERC20Like.sol";
-import { IStableSwap } from "../interfaces/IStableSwap.sol";
+import { IERC20Like } from "../interfaces/external/IERC20Like.sol";
+import { ISwapAdapter } from "../interfaces/periphery/ISwapAdapter.sol";
 
-contract BridgeStableSwapAdapter is IStableSwap {
-    address public immutable directSwap;
+interface ITokenAuthority {
+    function unwrap(address stablecoin, uint256 amount) external;
+    function wrap(address stablecoin, address receiver, uint256 amount) external;
+}
+
+/// @notice Minimal 1:1 swap override for two stablecoins backed by one reserve token.
+/// @dev Only the immutable EarnRouter may call this adapter. Controller role revocation
+///      and EarnVault override rotation provide the emergency response path.
+contract MinimalDirectSwapAdapter is ISwapAdapter {
+    address public immutable earnRouter;
+    address public immutable tokenAuthority;
+    address public immutable reserveToken;
     address public immutable tokenA;
     address public immutable tokenB;
 
     error InsufficientOutput();
     error InvalidToken();
+    error NotEarnRouter();
     error SameToken();
     error TokenCallFailed();
     error TokenCallFalse();
     error ZeroAddress();
     error ZeroAmount();
 
-    constructor(address directSwap_, address tokenA_, address tokenB_) {
-        if (directSwap_ == address(0) || tokenA_ == address(0) || tokenB_ == address(0)) revert ZeroAddress();
+    constructor(address earnRouter_, address tokenAuthority_, address reserveToken_, address tokenA_, address tokenB_) {
+        if (
+            earnRouter_ == address(0) || tokenAuthority_ == address(0) || reserveToken_ == address(0)
+                || tokenA_ == address(0) || tokenB_ == address(0)
+        ) revert ZeroAddress();
         if (tokenA_ == tokenB_) revert SameToken();
 
-        directSwap = directSwap_;
+        earnRouter = earnRouter_;
+        tokenAuthority = tokenAuthority_;
+        reserveToken = reserveToken_;
         tokenA = tokenA_;
         tokenB = tokenB_;
+
+        _safeApprove(tokenA_, tokenAuthority_, type(uint256).max);
+        _safeApprove(tokenB_, tokenAuthority_, type(uint256).max);
+        _safeApprove(reserveToken_, tokenAuthority_, type(uint256).max);
     }
 
     function swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, address receiver, uint256 minAmountOut)
         external
         returns (uint256 amountOut)
     {
+        if (msg.sender != earnRouter) revert NotEarnRouter();
         if (amountIn == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
-
+        if (minAmountOut > amountIn) revert InsufficientOutput();
         _validatePair(tokenIn, tokenOut);
-        uint256 beforeBalance = IERC20Like(tokenOut).balanceOf(address(this));
 
         _safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
-        _safeApprove(tokenIn, directSwap, 0);
-        _safeApprove(tokenIn, directSwap, amountIn);
-        IDirectSwapV2(directSwap).swapExactIn(tokenIn, tokenOut, amountIn);
-
-        uint256 afterBalance = IERC20Like(tokenOut).balanceOf(address(this));
-        if (afterBalance < beforeBalance) revert InsufficientOutput();
-        amountOut = afterBalance - beforeBalance;
-        if (amountOut == 0 || amountOut < minAmountOut) revert InsufficientOutput();
-
-        _safeTransfer(tokenOut, receiver, amountOut);
+        ITokenAuthority(tokenAuthority).unwrap(tokenIn, amountIn);
+        ITokenAuthority(tokenAuthority).wrap(tokenOut, receiver, amountIn);
+        return amountIn;
     }
 
     function _validatePair(address tokenIn, address tokenOut) internal view {
@@ -58,10 +70,6 @@ contract BridgeStableSwapAdapter is IStableSwap {
 
     function _safeApprove(address token, address spender, uint256 value) internal {
         _callOptionalReturn(token, abi.encodeWithSelector(IERC20Like.approve.selector, spender, value));
-    }
-
-    function _safeTransfer(address token, address to, uint256 value) internal {
-        _callOptionalReturn(token, abi.encodeWithSelector(IERC20Like.transfer.selector, to, value));
     }
 
     function _safeTransferFrom(address token, address from, address to, uint256 value) internal {

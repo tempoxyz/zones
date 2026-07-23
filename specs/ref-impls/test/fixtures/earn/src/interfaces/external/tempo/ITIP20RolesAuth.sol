@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 pragma solidity >=0.8.13 <0.9.0;
 
-interface ITIP20RolesAuthErr {
+interface ITIP20RolesAuthErrors {
     error Unauthorized();
 }
 
-interface ITIP20RolesAuth is ITIP20RolesAuthErr {
+interface ITIP20RolesAuth is ITIP20RolesAuthErrors {
     event RoleMembershipUpdated(bytes32 indexed role, address indexed account, address indexed sender, bool hasRole);
     event RoleAdminUpdated(bytes32 indexed role, bytes32 indexed newAdminRole, address indexed sender);
 

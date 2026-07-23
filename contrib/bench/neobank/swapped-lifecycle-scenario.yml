@@ -72,7 +72,7 @@ scenario:
         recipient: { var: account.address }
         output_token: "__DLUSD__"
         fee_token: "__DLUSD__"
-        amount: { var: earn_deposit.callback.args.shares }
+        amount: { var: earn_deposit.callback.args.earnShares }
         min_vault_assets: __EARN_REDEEM_AMOUNT__
         min_output_amount: __EARN_REDEEM_AMOUNT__
         action_id: { var: earn_redeem_action_id }

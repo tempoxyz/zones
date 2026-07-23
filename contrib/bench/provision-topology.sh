@@ -33,6 +33,7 @@ readonly LOCALNET_SIGNING_SECRET="tempo-localnet-signing-key-secret"
 
 provision_succeeded=0
 provision_pid_file=""
+provision_secret_files=()
 
 die() {
     echo "error: $*" >&2
@@ -245,6 +246,9 @@ stop_stale_listener() {
 provision_on_exit() {
     local status=$?
     trap - EXIT INT TERM
+    if (( ${#provision_secret_files[@]} > 0 )); then
+        rm -f -- "${provision_secret_files[@]}"
+    fi
     if (( provision_succeeded == 0 )) && [[ -n "$provision_pid_file" ]]; then
         cleanup_pid_file "$provision_pid_file"
     fi
@@ -332,6 +336,46 @@ wait_for_zone_enabled_token() {
     die "timed out waiting for Zone to enable token $token"
 }
 
+wait_for_neobank_enforcement() {
+    local zone_rpc="$1"
+    local timeout="$2"
+    local earn_router="$3"
+    shift 3
+    local -a allowed_accounts=("$@")
+    local deadline=$((SECONDS + timeout))
+    local access_enforced gateway_open router_allowed account account_allowed
+    local all_accounts_allowed
+
+    while (( SECONDS < deadline )); do
+        access_enforced="$(cast call "$ZONE_CONFIG" 'isAccessEnforced()(bool)' \
+            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
+        gateway_open="$(cast call "$ZONE_CONFIG" 'isGatewayOpen()(bool)' \
+            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
+        router_allowed="$(cast call "$ZONE_CONFIG" 'isZoneGateway(address)(bool)' "$earn_router" \
+            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
+
+        if [[ "$access_enforced" == "true" && "$gateway_open" == "false" &&
+            "$router_allowed" == "true" ]]; then
+            all_accounts_allowed=true
+            for account in "${allowed_accounts[@]}"; do
+                account_allowed="$(cast call "$ZONE_CONFIG" 'isAllowedAccount(address)(bool)' "$account" \
+                    --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
+                if [[ "$account_allowed" != "true" ]]; then
+                    all_accounts_allowed=false
+                    break
+                fi
+            done
+            [[ "$all_accounts_allowed" == "true" ]] && return 0
+        fi
+        sleep 1
+    done
+
+    die "timed out waiting for the Zone to ingest neobank enforcement \
+(access_enforced=${access_enforced:-unavailable}, gateway_open=${gateway_open:-unavailable}, \
+earn_router=${earn_router}, router_allowed=${router_allowed:-unavailable}, \
+last_account=${account:-unavailable}, account_allowed=${account_allowed:-unavailable})"
+}
+
 verify_neobank_token_topology() {
     local l1_rpc="$1"
     local portal="$2"
@@ -368,20 +412,28 @@ verify_neobank_fixture_topology() {
     local expected_owner="$3"
     local expected_asset="$4"
     local expected_swap_mechanism="$5"
-    local field address code vault engine adapter rewards gateway dlusd
-    local swap_mechanism default_swapper route_swapper route_override stablecoin_dex
+    local field address code vault engine earn_factory earn_vault earn_fees earn_router
+    local contribution_controller earn_share dlusd pathusd bridge_wallet
+    local swap_mechanism route_swapper route_override stablecoin_dex
     local direct_swap simple_swap swap_adapter controller handler auth_registry reserve_ledger
-    local observed_adapter observed_asset observed_owner observed_engine observed_vault observed
+    local observed observed_asset observed_owner observed_engine observed_vault
+    local observed_earn_vault observed_earn_share observed_earn_fees
+    local earn_vault_implementation earn_fees_implementation
     local zero_address="0x0000000000000000000000000000000000000000"
+    local tip20_factory="0x20FC000000000000000000000000000000000000"
 
     vault="$(jq -er '.vault' "$metadata")"
     engine="$(jq -er '.engine' "$metadata")"
-    adapter="$(jq -er '.vaultAdapter' "$metadata")"
-    rewards="$(jq -er '.rewards' "$metadata")"
-    gateway="$(jq -er '.gateway' "$metadata")"
+    earn_factory="$(jq -er '.earnFactory' "$metadata")"
+    earn_vault="$(jq -er '.earnVault' "$metadata")"
+    earn_fees="$(jq -er '.earnFees' "$metadata")"
+    earn_router="$(jq -er '.earnRouter' "$metadata")"
+    contribution_controller="$(jq -er '.contributionController' "$metadata")"
+    earn_share="$(jq -er '.earnShare' "$metadata")"
+    bridge_wallet="$(jq -er '.bridgeWallet' "$metadata")"
     dlusd="$(jq -er '.dlusd' "$metadata")"
+    pathusd="$(jq -er '.pathusd' "$metadata")"
     swap_mechanism="$(jq -er '.swapMechanism' "$metadata")"
-    default_swapper="$(jq -er '.defaultSwapper' "$metadata")"
     route_swapper="$(jq -r '.routeSwapper // empty' "$metadata")"
     route_override="$(jq -er \
         '.routeOverride | if type == "boolean" then tostring else error("routeOverride must be boolean") end' \
@@ -390,31 +442,78 @@ verify_neobank_fixture_topology() {
     [[ "$swap_mechanism" == "$expected_swap_mechanism" ]] \
         || die "fixture swap mechanism $swap_mechanism does not match requested $expected_swap_mechanism"
 
-    for field in vault engine adapter rewards gateway default_swapper; do
+    for field in \
+        vault engine earn_factory earn_vault earn_fees earn_router \
+        contribution_controller bridge_wallet
+    do
         address="${!field}"
         code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
         [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
     done
 
-    observed_engine="$(cast call "$adapter" 'engine()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_asset="$(cast call "$vault" 'asset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed_asset,,}" == "${expected_asset,,}" ]] ||
+        die "ERC-4626 fixture asset does not match pathUSD"
+
+    observed_engine="$(cast call "$earn_vault" 'engine()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_asset="$(cast call "$earn_vault" 'asset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_earn_share="$(cast call "$earn_vault" 'earnShare()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_earn_fees="$(cast call "$earn_vault" 'earnFees()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_owner="$(cast call "$earn_vault" 'operator()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed_engine,,}" == "${engine,,}" ]] ||
+        die "EarnVault engine does not match fixture metadata"
+    [[ "${observed_asset,,}" == "${expected_asset,,}" ]] ||
+        die "EarnVault asset does not match pathUSD"
+    [[ "${observed_earn_share,,}" == "${earn_share,,}" ]] ||
+        die "EarnVault EarnShare does not match fixture metadata"
+    [[ "${observed_earn_fees,,}" == "${earn_fees,,}" ]] ||
+        die "EarnVault EarnFees does not match fixture metadata"
+    [[ "${observed_owner,,}" == "${expected_owner,,}" ]] ||
+        die "EarnVault operator does not match the benchmark control account"
+
     observed_vault="$(cast call "$engine" 'vault()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-    observed_adapter="$(cast call "$rewards" 'adapter()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-    observed_asset="$(cast call "$rewards" 'asset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-    observed_owner="$(cast call "$rewards" 'owner()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-    [[ "${observed_engine,,}" == "${engine,,}" ]] || die "VaultAdapter engine does not match fixture metadata"
-    [[ "${observed_vault,,}" == "${vault,,}" ]] || die "ERC4626Engine vault does not match fixture metadata"
-    [[ "${observed_adapter,,}" == "${adapter,,}" ]] || die "VaultRewards adapter does not match fixture metadata"
-    [[ "${observed_asset,,}" == "${expected_asset,,}" ]] || die "VaultRewards asset does not match PathUSD"
-    [[ "${observed_owner,,}" == "${expected_owner,,}" ]] || die "VaultRewards owner does not match the benchmark control account"
+    observed_earn_vault="$(cast call "$engine" 'earnVault()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_asset="$(cast call "$engine" 'asset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed_vault,,}" == "${vault,,}" ]] ||
+        die "ERC4626Engine vault does not match fixture metadata"
+    [[ "${observed_earn_vault,,}" == "${earn_vault,,}" ]] ||
+        die "ERC4626Engine EarnVault does not match fixture metadata"
+    [[ "${observed_asset,,}" == "${expected_asset,,}" ]] ||
+        die "ERC4626Engine asset does not match pathUSD"
 
-    observed="$(cast call "$gateway" 'defaultSwapper()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-    [[ "${observed,,}" == "${default_swapper,,}" ]] \
-        || die "Gateway default swapper does not match fixture metadata"
-    observed="$(cast call "$default_swapper" 'stablecoinDex()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-    [[ "${observed,,}" == "${stablecoin_dex,,}" ]] \
-        || die "default swap adapter does not use the configured StablecoinDEX"
+    observed_earn_vault="$(cast call "$contribution_controller" 'earnVault()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_asset="$(cast call "$contribution_controller" 'asset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_owner="$(cast call "$contribution_controller" 'owner()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed_earn_vault,,}" == "${earn_vault,,}" ]] ||
+        die "EarnContributionController EarnVault does not match fixture metadata"
+    [[ "${observed_asset,,}" == "${expected_asset,,}" ]] ||
+        die "EarnContributionController asset does not match pathUSD"
+    [[ "${observed_owner,,}" == "${expected_owner,,}" ]] ||
+        die "EarnContributionController owner does not match the benchmark control account"
 
-    observed="$(cast call "$gateway" 'depositSwapperFor(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_earn_vault="$(cast call "$earn_fees" 'earnVault()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed_earn_share="$(cast call "$earn_fees" 'earnShare()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed_earn_vault,,}" == "${earn_vault,,}" ]] ||
+        die "EarnFees EarnVault does not match fixture metadata"
+    [[ "${observed_earn_share,,}" == "${earn_share,,}" ]] ||
+        die "EarnFees EarnShare does not match fixture metadata"
+
+    [[ "$(cast call "$earn_router" 'supportsFlow(uint8)(bool)' 0 --rpc-url "$l1_rpc" | awk '{print $1}')" == "true" ]] ||
+        die "EarnRouter does not support deposit callbacks"
+    [[ "$(cast call "$earn_router" 'supportsFlow(uint8)(bool)' 1 --rpc-url "$l1_rpc" | awk '{print $1}')" == "true" ]] ||
+        die "EarnRouter does not support redeem callbacks"
+
+    observed="$(cast call "$earn_factory" 'tip20Factory()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${tip20_factory,,}" ]] ||
+        die "EarnFactory TIP-20 factory does not match the canonical precompile"
+    earn_vault_implementation="$(cast call "$earn_factory" 'earnVaultImplementation()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    earn_fees_implementation="$(cast call "$earn_factory" 'earnFeesImplementation()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    for address in "$earn_vault_implementation" "$earn_fees_implementation"; do
+        code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
+        [[ "$code" != "0x" ]] || die "EarnFactory implementation has no code at $address"
+    done
+
+    observed="$(cast call "$earn_vault" 'depositSwapOverride(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
     if [[ "$route_override" == "true" ]]; then
         [[ -n "$route_swapper" ]] || die "$swap_mechanism metadata is missing routeSwapper"
         [[ "${observed,,}" == "${route_swapper,,}" ]] \
@@ -424,7 +523,7 @@ verify_neobank_fixture_topology() {
         [[ "${observed,,}" == "${zero_address,,}" ]] \
             || die "DLUSD deposit route unexpectedly overrides the default swapper"
     fi
-    observed="$(cast call "$gateway" 'redeemSwapperFor(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
+    observed="$(cast call "$earn_vault" 'redeemSwapOverride(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
     if [[ "$route_override" == "true" ]]; then
         [[ "${observed,,}" == "${route_swapper,,}" ]] \
             || die "DLUSD redeem route does not use the configured route swapper"
@@ -451,6 +550,10 @@ verify_neobank_fixture_topology() {
             done
             observed="$(cast call "$swap_adapter" 'directSwap()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "${observed,,}" == "${direct_swap,,}" ]] || die "Bridge swap adapter does not use DirectSwap"
+            observed="$(cast call "$swap_adapter" 'tokenA()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${dlusd,,}" ]] || die "Bridge swap adapter tokenA does not match DLUSD"
+            observed="$(cast call "$swap_adapter" 'tokenB()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${pathusd,,}" ]] || die "Bridge swap adapter tokenB does not match pathUSD"
             observed="$(cast call "$direct_swap" 'STABLECOIN_HANDLER_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "${observed,,}" == "${handler,,}" ]] || die "DirectSwap does not use the TIP20 handler"
             observed="$(cast call "$direct_swap" 'RESERVE_LEDGER_TOKEN_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
@@ -462,20 +565,38 @@ verify_neobank_fixture_topology() {
             [[ "$route_override" == "true" ]] || die "simple swap requires a DLUSD route override"
             simple_swap="$(jq -er '.simpleSwap' "$metadata")"
             swap_adapter="$(jq -er '.swapAdapter' "$metadata")"
+            controller="$(jq -er '.tip20Controller' "$metadata")"
+            reserve_ledger="$(jq -er '.reserveLedger' "$metadata")"
             [[ "${swap_adapter,,}" == "${route_swapper,,}" ]] \
                 || die "simple routeSwapper and swapAdapter metadata differ"
-            for field in simple_swap swap_adapter; do
+            for field in simple_swap swap_adapter controller reserve_ledger; do
                 address="${!field}"
                 code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
                 [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
             done
-            observed="$(cast call "$swap_adapter" 'directSwap()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${simple_swap,,}" ]] \
-                || die "Bridge swap adapter does not use the simple swap fixture"
+            [[ "${simple_swap,,}" == "${swap_adapter,,}" ]] ||
+                die "minimal swap metadata addresses differ"
+            observed="$(cast call "$swap_adapter" 'earnRouter()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${earn_router,,}" ]] ||
+                die "MinimalDirectSwapAdapter EarnRouter does not match fixture metadata"
+            observed="$(cast call "$swap_adapter" 'tokenAuthority()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${controller,,}" ]] ||
+                die "MinimalDirectSwapAdapter token authority does not match fixture metadata"
+            observed="$(cast call "$swap_adapter" 'reserveToken()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${reserve_ledger,,}" ]] ||
+                die "MinimalDirectSwapAdapter reserve token does not match fixture metadata"
+            observed="$(cast call "$swap_adapter" 'tokenA()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${dlusd,,}" ]] ||
+                die "MinimalDirectSwapAdapter tokenA does not match DLUSD"
+            observed="$(cast call "$swap_adapter" 'tokenB()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${pathusd,,}" ]] ||
+                die "MinimalDirectSwapAdapter tokenB does not match pathUSD"
             ;;
         stablecoin-dex)
             [[ "$route_override" == "false" ]] \
-                || die "stablecoin-dex must use the Gateway default swapper"
+                || die "stablecoin-dex must use EarnRouter's built-in swap path"
+            [[ "${stablecoin_dex,,}" == "0xdec0000000000000000000000000000000000000" ]] ||
+                die "stablecoin-dex metadata does not match EarnRouter's canonical precompile"
             ;;
         *)
             die "unsupported fixture swap mechanism in metadata: $swap_mechanism"
@@ -503,6 +624,7 @@ provision_up() {
     require_command curl
     require_command jq
     require_command lsof
+    require_command mktemp
     require_command taskset
 
     [[ -n "${ZONES_BENCH_MNEMONIC_FILE:-}" ]] || die "ZONES_BENCH_MNEMONIC_FILE must be set"
@@ -535,10 +657,10 @@ provision_up() {
     local bloat_balance="${ZONES_BENCH_BLOAT_BALANCE:-18446744073709551615}"
     local rpc_timeout="${ZONES_BENCH_RPC_TIMEOUT_SECS:-300}"
     local zone_timeout="${ZONES_BENCH_ZONE_TIMEOUT_SECS:-300}"
-    local swap_mechanism="${ZONES_BENCH_SWAP_MECHANISM:-direct-swap}"
+    local swap_mechanism="${ZONES_BENCH_SWAP_MECHANISM:-simple}"
     local recipient_mode="${ZONES_BENCH_RECIPIENT_MODE:-existing}"
     local swap_liquidity="${ZONES_BENCH_SWAP_LIQUIDITY:-10000000000}"
-    local count="${ZONES_BENCH_COUNT:-1000}"
+    local count="${ZONES_BENCH_COUNT:-100}"
     local max_concurrent="${ZONES_BENCH_MAX_CONCURRENT:-12}"
     local withdrawal_amount="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
     local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
@@ -558,7 +680,7 @@ provision_up() {
     esac
     if [[ "$profile" == "neobank" ]]; then
         case "$neobank_preset" in
-            direct-lifecycle|encrypted-deposit|private-withdrawal|rewards-redemption|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle) ;;
+            direct-lifecycle|encrypted-deposit|private-withdrawal|rewards-redemption|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle|swapped-redemption) ;;
             *) die "unsupported neobank preset for provisioning: $neobank_preset" ;;
         esac
     fi
@@ -638,6 +760,13 @@ provision_up() {
         direct-swap|simple|stablecoin-dex) ;;
         *) die "ZONES_BENCH_SWAP_MECHANISM must be direct-swap, simple, or stablecoin-dex" ;;
     esac
+    if [[ "$swap_mechanism" == direct-swap ]]; then
+        case "$neobank_preset" in
+            full-journey|slippage-bounce|swapped-lifecycle|swapped-redemption)
+                die "direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
+                ;;
+        esac
+    fi
     case "$recipient_mode" in
         existing|random) ;;
         *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
@@ -662,6 +791,23 @@ provision_up() {
                     required_swap_uses="$max_concurrent"
                 fi
                 ;;
+            swapped-redemption)
+                local setup_journeys_per_account setup_position_uses
+                setup_journeys_per_account=$(((count + accounts - 1) / accounts))
+                setup_position_uses=$((accounts * setup_journeys_per_account))
+                if [[ "$swap_mechanism" == direct-swap ]]; then
+                    local callback_reservation callbacks_per_batch setup_batch_uses
+                    callback_reservation=$((1750000 + callback_gas_limit))
+                    callbacks_per_batch=$(((withdrawal_max_batch_gas - 500000) / callback_reservation))
+                    (( callbacks_per_batch > 0 )) || callbacks_per_batch=1
+                    setup_batch_uses=$((callbacks_per_batch * setup_journeys_per_account))
+                    required_swap_uses="$max_concurrent"
+                    (( setup_batch_uses <= required_swap_uses )) ||
+                        required_swap_uses="$setup_batch_uses"
+                else
+                    required_swap_uses="$setup_position_uses"
+                fi
+                ;;
             slippage-bounce) required_swap_uses=1 ;;
         esac
         (( required_swap_uses == 0 || swap_liquidity / withdrawal_amount >= required_swap_uses )) \
@@ -673,11 +819,18 @@ provision_up() {
         || die "ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS must be between 1 and 30000000"
     (( withdrawal_max_batch_gas <= l1_general_gas_limit )) \
         || die "ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS cannot exceed ZONES_BENCH_L1_GENERAL_GAS_LIMIT"
-    local planned_singleton_withdrawal_gas=1750000
-    if [[ "$profile" == neobank ]]; then
-        planned_singleton_withdrawal_gas=$((500000 + 1750000 + callback_gas_limit))
+    local planned_singleton_withdrawal_gas=0
+    if [[ "$profile" == generic && "${ZONES_BENCH_PHASE:-roundtrip}" == roundtrip ]]; then
+        planned_singleton_withdrawal_gas=1750000
+    elif [[ "$profile" == neobank ]]; then
+        case "$neobank_preset" in
+            encrypted-deposit) ;;
+            private-withdrawal) planned_singleton_withdrawal_gas=1750000 ;;
+            *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + callback_gas_limit)) ;;
+        esac
     fi
-    (( planned_singleton_withdrawal_gas <= l1_general_gas_limit )) \
+    (( planned_singleton_withdrawal_gas == 0 ||
+       planned_singleton_withdrawal_gas <= l1_general_gas_limit )) \
         || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT cannot fit a withdrawal planned at $planned_singleton_withdrawal_gas gas"
     (( withdrawal_max_in_flight_batches > 0 )) \
         || die "ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES must be greater than zero"
@@ -746,6 +899,21 @@ provision_up() {
     owner_address="$(derive_address "$mnemonic_file" 0)"
     admin_address="$(derive_address "$mnemonic_file" 3)"
     sequencer_address="$(derive_address "$mnemonic_file" 4)"
+    local -a neobank_allowed_accounts=()
+    local neobank_allowed_accounts_file=""
+    if [[ "$profile" == neobank ]]; then
+        neobank_allowed_accounts+=("$owner_address")
+        local account_index account_address
+        for ((account_index = account_start; account_index < account_start + accounts; account_index++)); do
+            account_address="$(derive_address "$mnemonic_file" "$account_index")"
+            neobank_allowed_accounts+=("$account_address")
+        done
+        neobank_allowed_accounts_file="$(mktemp \
+            "${RUNNER_TEMP:-/tmp}/zones-neobank-allowed-accounts.XXXXXX")"
+        chmod 600 "$neobank_allowed_accounts_file"
+        provision_secret_files+=("$neobank_allowed_accounts_file")
+        printf '%s\n' "${neobank_allowed_accounts[@]}" >"$neobank_allowed_accounts_file"
+    fi
 
     mkdir -p "$zone_db" "$zone_dir"
 
@@ -842,18 +1010,27 @@ provision_up() {
     if [[ "$profile" == "neobank" ]]; then
         case "$neobank_preset" in
             direct-lifecycle|rewards-redemption|third-party-recipient) zone_token="$PATH_USD" ;;
-            encrypted-deposit|full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle) zone_token="$DLUSD" ;;
+            encrypted-deposit|full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle|swapped-redemption) zone_token="$DLUSD" ;;
         esac
     fi
 
     echo "creating a Zone through the canonical factory"
-    ZONE_FACTORY_OWNER_KEY="$owner_key" "$ZONES_XTASK_BIN" create-zone \
-        --output "$zone_dir" \
-        --l1-rpc-url "$l1_a_rpc" \
-        --zone-factory "$ZONE_FACTORY" \
-        --initial-token "$zone_token" \
-        --admin "$admin_address" \
+    local -a create_zone_args=(
+        --output "$zone_dir"
+        --l1-rpc-url "$l1_a_rpc"
+        --zone-factory "$ZONE_FACTORY"
+        --initial-token "$zone_token"
+        --admin "$admin_address"
         --sequencer "$sequencer_address"
+    )
+    if [[ "$profile" == neobank ]]; then
+        create_zone_args+=(--access-mode --allowed-accounts-file "$neobank_allowed_accounts_file")
+    fi
+    ZONE_FACTORY_OWNER_KEY="$owner_key" "$ZONES_XTASK_BIN" create-zone "${create_zone_args[@]}"
+    if [[ -n "$neobank_allowed_accounts_file" ]]; then
+        rm -f -- "$neobank_allowed_accounts_file"
+        provision_secret_files=()
+    fi
 
     local zone_json="$zone_dir/zone.json"
     local zone_genesis="$zone_dir/genesis.json"
@@ -936,6 +1113,10 @@ provision_up() {
     wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_token" "$zone_timeout"
     if [[ "$profile" == "neobank" ]]; then
         wait_for_zone_enabled_token "$zone_rpc" "$(jq -er '.earnToken' "$fixture_metadata")" "$zone_timeout"
+        neobank_allowed_accounts+=("$(jq -er '.bridgeWallet' "$fixture_metadata")")
+        wait_for_neobank_enforcement \
+            "$zone_rpc" "$zone_timeout" "$(jq -er '.earnRouter' "$fixture_metadata")" \
+            "${neobank_allowed_accounts[@]}"
     fi
     local queried_zone_chain_id
     queried_zone_chain_id="$(hex_to_dec "$(rpc "$zone_rpc" eth_chainId)")"
@@ -987,6 +1168,9 @@ provision_up() {
             ZONES_BENCH_DLUSD "$DLUSD"
             ZONES_BENCH_PATHUSD "$PATH_USD"
             ZONES_BENCH_EARN_TOKEN "$(jq -er '.earnToken' "$fixture_metadata")"
+            ZONES_BENCH_EARN_ROUTER "$(jq -er '.earnRouter' "$fixture_metadata")"
+            ZONES_BENCH_EARN_VAULT "$(jq -er '.earnVault' "$fixture_metadata")"
+            ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER "$(jq -er '.contributionController' "$fixture_metadata")"
             ZONES_BENCH_GATEWAY "$(jq -er '.gateway' "$fixture_metadata")"
             ZONES_BENCH_BRIDGE_WALLET "$(jq -er '.bridgeWallet' "$fixture_metadata")"
             ZONES_BENCH_DEFAULT_SWAPPER "$(jq -er '.defaultSwapper' "$fixture_metadata")"

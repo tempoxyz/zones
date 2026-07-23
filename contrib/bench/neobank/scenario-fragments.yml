@@ -139,24 +139,31 @@ fragments:
             call:
               args:
                 - { param: input_token }
-                - "__GATEWAY__"
+                - "__EARN_ROUTER__"
                 - { param: amount }
                 - { param: action_id }
                 - __CALLBACK_GAS_LIMIT__
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
-                      - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                      - "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)"
                     values:
                       - flow: 0
+                        earnVault: "__EARN_VAULT__"
+                        destination: 0
                         outputToken: "__EARN_TOKEN__"
-                        keyIndex: { var: encryption.keyIndex }
-                        encrypted: { var: encryption.encrypted }
                         minVaultAssets: { param: min_vault_assets }
-                        minVaultShares: { param: min_vault_shares }
+                        minEarnShares: { param: min_vault_shares }
                         minOutputAmount: 0
                         actionId: { param: action_id }
-                        refundRecipient: { param: refund_recipient }
+                        destinationData:
+                          abi_encode:
+                            types:
+                              - "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)"
+                            values:
+                              - keyIndex: { var: encryption.keyIndex }
+                                encrypted: { var: encryption.encrypted }
+                                refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
       - wait_receipt:
@@ -176,7 +183,7 @@ fragments:
           where:
             sender: { param: sender_address }
             token: { param: input_token }
-            to: "__GATEWAY__"
+            to: "__EARN_ROUTER__"
             amount: { param: amount }
             memo: { param: action_id }
             gasLimit: __CALLBACK_GAS_LIMIT__
@@ -190,7 +197,7 @@ fragments:
           abi: ZonePortal
           event: WithdrawalProcessed
           where:
-            to: "__GATEWAY__"
+            to: "__EARN_ROUTER__"
             senderTag:
               keccak256_packed:
                 types: [address, bytes32]
@@ -203,11 +210,12 @@ fragments:
       - wait_log:
           chain: l1
           transaction_hash: { var: withdrawal_processed.transaction_hash }
-          address: "__GATEWAY__"
-          abi: ZoneGateway
+          address: "__EARN_ROUTER__"
+          abi: EarnRouter
           event: EarnDeposit
           where:
             actionId: { param: action_id }
+            earnVault: "__EARN_VAULT__"
             inputToken: { param: input_token }
             inputAmount: { param: amount }
         save: callback
@@ -216,10 +224,10 @@ fragments:
         with:
           from_block: { var: zone_before.block_number }
           deposit_hash: { var: callback.args.zoneDepositHash }
-          sender: "__GATEWAY__"
+          sender: "__EARN_ROUTER__"
           recipient: { param: recipient }
           token: "__EARN_TOKEN__"
-          amount: { var: callback.args.shares }
+          amount: { var: callback.args.earnShares }
           memo: { param: action_id }
 
   earn-redeem-and-return:
@@ -265,24 +273,31 @@ fragments:
             call:
               args:
                 - "__EARN_TOKEN__"
-                - "__GATEWAY__"
+                - "__EARN_ROUTER__"
                 - { param: amount }
                 - { param: action_id }
                 - __CALLBACK_GAS_LIMIT__
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
-                      - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                      - "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)"
                     values:
                       - flow: 1
+                        earnVault: "__EARN_VAULT__"
+                        destination: 0
                         outputToken: { param: output_token }
-                        keyIndex: { var: encryption.keyIndex }
-                        encrypted: { var: encryption.encrypted }
                         minVaultAssets: { param: min_vault_assets }
-                        minVaultShares: 0
+                        minEarnShares: 0
                         minOutputAmount: { param: min_output_amount }
                         actionId: { param: action_id }
-                        refundRecipient: { param: refund_recipient }
+                        destinationData:
+                          abi_encode:
+                            types:
+                              - "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)"
+                            values:
+                              - keyIndex: { var: encryption.keyIndex }
+                                encrypted: { var: encryption.encrypted }
+                                refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
       - wait_receipt:
@@ -302,7 +317,7 @@ fragments:
           where:
             sender: { param: sender_address }
             token: "__EARN_TOKEN__"
-            to: "__GATEWAY__"
+            to: "__EARN_ROUTER__"
             amount: { param: amount }
             memo: { param: action_id }
             gasLimit: __CALLBACK_GAS_LIMIT__
@@ -316,7 +331,7 @@ fragments:
           abi: ZonePortal
           event: WithdrawalProcessed
           where:
-            to: "__GATEWAY__"
+            to: "__EARN_ROUTER__"
             senderTag:
               keccak256_packed:
                 types: [address, bytes32]
@@ -329,20 +344,21 @@ fragments:
       - wait_log:
           chain: l1
           transaction_hash: { var: withdrawal_processed.transaction_hash }
-          address: "__GATEWAY__"
-          abi: ZoneGateway
+          address: "__EARN_ROUTER__"
+          abi: EarnRouter
           event: EarnRedeem
           where:
             actionId: { param: action_id }
+            earnVault: "__EARN_VAULT__"
             outputToken: { param: output_token }
-            shares: { param: amount }
+            earnShares: { param: amount }
         save: callback
       - use: wait-encrypted-zone-deposit
         as: zone_return
         with:
           from_block: { var: zone_before.block_number }
           deposit_hash: { var: callback.args.zoneDepositHash }
-          sender: "__GATEWAY__"
+          sender: "__EARN_ROUTER__"
           recipient: { param: recipient }
           token: { param: output_token }
           amount: { var: callback.args.outputAmount }
@@ -389,24 +405,31 @@ fragments:
             call:
               args:
                 - { param: input_token }
-                - "__GATEWAY__"
+                - "__EARN_ROUTER__"
                 - { param: amount }
                 - { param: action_id }
                 - __CALLBACK_GAS_LIMIT__
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
-                      - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
+                      - "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)"
                     values:
                       - flow: 0
+                        earnVault: "__EARN_VAULT__"
+                        destination: 0
                         outputToken: "__EARN_TOKEN__"
-                        keyIndex: { var: encryption.keyIndex }
-                        encrypted: { var: encryption.encrypted }
                         minVaultAssets: "340282366920938463463374607431768211455"
-                        minVaultShares: { param: amount }
+                        minEarnShares: { param: amount }
                         minOutputAmount: 0
                         actionId: { param: action_id }
-                        refundRecipient: { param: refund_recipient }
+                        destinationData:
+                          abi_encode:
+                            types:
+                              - "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)"
+                            values:
+                              - keyIndex: { var: encryption.keyIndex }
+                                encrypted: { var: encryption.encrypted }
+                                refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
       - wait_receipt:
@@ -426,7 +449,7 @@ fragments:
           where:
             sender: { param: sender_address }
             token: { param: input_token }
-            to: "__GATEWAY__"
+            to: "__EARN_ROUTER__"
             amount: { param: amount }
             memo: { param: action_id }
             gasLimit: __CALLBACK_GAS_LIMIT__
@@ -440,7 +463,7 @@ fragments:
           abi: ZonePortal
           event: WithdrawalProcessed
           where:
-            to: "__GATEWAY__"
+            to: "__EARN_ROUTER__"
             senderTag:
               keccak256_packed:
                 types: [address, bytes32]

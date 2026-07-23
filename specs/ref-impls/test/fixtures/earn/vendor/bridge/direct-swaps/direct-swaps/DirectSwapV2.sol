@@ -15,7 +15,7 @@ import {
 } from "../utils/DirectSwapErrorsAndEvents.sol";
 import { Swap } from "../utils/DirectSwapErrorsAndEvents.sol";
 import { DirectSwapTransientStorageLib } from "../utils/DirectSwapStorage.sol";
-import { IDirectSwapV2 } from "../../../../src/interfaces/IDirectSwapV2.sol";
+import { IDirectSwapV2 } from "../../../../src/demo/bridge/IDirectSwapV2.sol";
 import { IAuthRegistry } from "auth-registry/src/IAuthRegistry.sol";
 import { IERC20 } from "openzeppelin-contracts/token/ERC20/IERC20.sol";
 import { IERC20Metadata } from "openzeppelin-contracts/token/ERC20/extensions/IERC20Metadata.sol";

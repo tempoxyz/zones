@@ -58,6 +58,11 @@ pub(crate) struct CreateZone {
     #[arg(long = "allowed-account")]
     allowed_accounts: Vec<Address>,
 
+    /// Mode-0600 file containing one allowed account per line. Entries are merged with
+    /// `--allowed-account` but are not copied into zone.json.
+    #[arg(long)]
+    allowed_accounts_file: Option<PathBuf>,
+
     /// Sequencer address that will operate the zone. Repeat for a
     /// multi-sequencer set; the first address is the leader.
     ///
@@ -133,6 +138,13 @@ impl CreateZone {
                 self.threshold
             ));
         }
+
+        let mut allowed_accounts = self.allowed_accounts.clone();
+        if let Some(path) = self.allowed_accounts_file.as_deref() {
+            allowed_accounts.extend(read_private_address_file(path)?);
+        }
+        allowed_accounts.sort_unstable();
+        allowed_accounts.dedup();
 
         let key_str = self
             .private_key
@@ -230,7 +242,7 @@ impl CreateZone {
                 initialToken: self.initial_token,
                 accessMode: self.access_mode,
                 gatewayMode: self.gateway_mode,
-                allowedAccounts: self.allowed_accounts.clone(),
+                allowedAccounts: allowed_accounts.clone(),
                 zoneGateways: self.zone_gateways.clone(),
                 admin: self.admin,
                 sequencers: vec![leader],
@@ -307,6 +319,12 @@ impl CreateZone {
         genesis_cmd.run().await?;
 
         // Write zone.json with deployment metadata for downstream tooling (e.g. `just zone-up`).
+        let allowed_accounts_redacted = self.allowed_accounts_file.is_some();
+        let serialized_allowed_accounts = if allowed_accounts_redacted {
+            Vec::new()
+        } else {
+            allowed_accounts.iter().map(ToString::to_string).collect()
+        };
         let zone_json = serde_json::json!({
             "zoneId": zone_id,
             "chainId": chain_id,
@@ -316,7 +334,9 @@ impl CreateZone {
             "accessMode": self.access_mode,
             "gatewayMode": self.gateway_mode,
             "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "allowedAccounts": self.allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "allowedAccounts": serialized_allowed_accounts,
+            "allowedAccountCount": allowed_accounts.len(),
+            "allowedAccountsRedacted": allowed_accounts_redacted,
             "admin": format!("{}", self.admin),
             "sequencer": format!("{leader}"),
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -357,5 +377,103 @@ impl CreateZone {
         println!("  Zone metadata written to: {}", zone_json_path.display());
 
         Ok(())
+    }
+}
+
+fn read_private_address_file(path: &std::path::Path) -> eyre::Result<Vec<Address>> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = std::fs::symlink_metadata(path).wrap_err_with(|| {
+        format!(
+            "failed reading allowed-accounts metadata from {}",
+            path.display()
+        )
+    })?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "allowed-accounts file must be a regular, non-symlink file: {}",
+        path.display()
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o077 == 0,
+        "allowed-accounts file must not be accessible by group or other users: {}",
+        path.display()
+    );
+
+    let contents = std::fs::read_to_string(path)
+        .wrap_err_with(|| format!("failed reading allowed accounts from {}", path.display()))?;
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let value = line.trim();
+            (!value.is_empty() && !value.starts_with('#')).then_some((index + 1, value))
+        })
+        .map(|(line, value)| {
+            value.parse::<Address>().wrap_err_with(|| {
+                format!(
+                    "invalid allowed account in {} at line {line}",
+                    path.display()
+                )
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt as _,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn private_file(contents: &str, mode: u32) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "zones-create-zone-allowed-accounts-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::write(&path, contents).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+        path
+    }
+
+    #[test]
+    fn private_allowed_accounts_file_parses_entries() {
+        let path = private_file(
+            "\n# benchmark accounts\n0x0000000000000000000000000000000000000001\n\
+             0x0000000000000000000000000000000000000002\n",
+            0o600,
+        );
+        let accounts = read_private_address_file(&path).unwrap();
+        fs::remove_file(path).unwrap();
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(
+            accounts[0],
+            "0x0000000000000000000000000000000000000001"
+                .parse::<Address>()
+                .unwrap()
+        );
+        assert_eq!(
+            accounts[1],
+            "0x0000000000000000000000000000000000000002"
+                .parse::<Address>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn allowed_accounts_file_rejects_group_readable_permissions() {
+        let path = private_file("0x0000000000000000000000000000000000000001\n", 0o640);
+        let result = read_private_address_file(&path);
+        fs::remove_file(path).unwrap();
+
+        assert!(result.is_err());
     }
 }

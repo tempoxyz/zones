@@ -207,6 +207,10 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long)]
     deposit_amount: u128,
 
+    /// Additional one-off setup deposit required from every benchmark account.
+    #[arg(long, default_value_t = 0)]
+    admission_seed_amount: u128,
+
     /// Amount transferred by each ordinary Zone TIP-20 activity transaction.
     #[arg(long)]
     activity_amount: u128,
@@ -356,6 +360,7 @@ struct PreflightReport {
     activity_fee_bump: u128,
     activity_max_fee_per_gas: u128,
     transactions_per_account: u64,
+    admission_seed_amount: u128,
     sponsored_approval_rounds: u64,
     bootstrap_deposit_amount: u128,
     bootstrap_minimum_deposit_amount: String,
@@ -828,6 +833,7 @@ impl BenchmarkPreflight {
         let tx_count = U256::from(self.transactions_per_account);
         let portal_allowance_required = U256::from(self.deposit_amount)
             .checked_mul(tx_count)
+            .and_then(|value| value.checked_add(U256::from(self.admission_seed_amount)))
             .ok_or_else(|| eyre!("deposit allowance requirement overflowed U256"))?;
         let withdrawal_debit = U256::from(self.withdrawal_amount)
             .checked_add(U256::from(withdrawal_fee))
@@ -938,6 +944,7 @@ impl BenchmarkPreflight {
             self.no_approval_setup,
             self.transactions_per_account,
             self.deposit_amount,
+            self.admission_seed_amount,
             deposit_fee,
             self.activity_amount,
             self.withdrawal_amount,
@@ -1041,6 +1048,7 @@ impl BenchmarkPreflight {
             activity_fee_bump,
             activity_max_fee_per_gas,
             transactions_per_account: self.transactions_per_account,
+            admission_seed_amount: self.admission_seed_amount,
             sponsored_approval_rounds: self.sponsored_approval_rounds,
             bootstrap_deposit_amount: self.bootstrap_deposit_amount,
             bootstrap_minimum_deposit_amount: bootstrap_minimum_deposit_amount.to_string(),
@@ -1090,6 +1098,7 @@ impl BenchmarkPreflight {
         println!("  Zone max fee:       {zone_max_fee_per_gas}");
         println!("  Approval fee bump: {approval_fee_bump}");
         println!("  Activity fee bump: {activity_fee_bump}");
+        println!("  Admission seed:     {}", self.admission_seed_amount);
         println!(
             "  Sponsored approval rounds: {}",
             self.sponsored_approval_rounds
@@ -1214,6 +1223,7 @@ fn validate_account_capacity(
     no_approval_setup: bool,
     transactions_per_account: u64,
     deposit_amount: u128,
+    admission_seed_amount: u128,
     deposit_fee: u128,
     activity_amount: u128,
     withdrawal_amount: u128,
@@ -1288,6 +1298,15 @@ fn validate_account_capacity(
             let required = U256::from(deposit_amount)
                 .checked_add(l1_tx_fee)
                 .and_then(|value| value.checked_mul(count))
+                .and_then(|value| {
+                    if admission_seed_amount == 0 {
+                        Some(value)
+                    } else {
+                        U256::from(admission_seed_amount)
+                            .checked_add(l1_tx_fee)
+                            .and_then(|seed| value.checked_add(seed))
+                    }
+                })
                 .and_then(|value| {
                     value.checked_add(if portal_needs_setup && !no_approval_setup {
                         l1_approval_fee
@@ -2076,6 +2095,47 @@ mod tests {
     }
 
     #[test]
+    fn admission_seed_reserves_principal_and_an_extra_l1_transaction_fee() {
+        let l1_max_fee_per_gas = 100_000_000_000;
+        let deposit_gas_limit = 2_000_000;
+        let deposit_fee = calc_gas_balance_spending(deposit_gas_limit, l1_max_fee_per_gas);
+        let required = U256::from(10_u64) + deposit_fee + U256::from(1_u64) + deposit_fee;
+        let mut account = fixture_account(7, U256::ZERO);
+        account.portal_allowance = U256::from(11_u64);
+        account.l1_balance = required - U256::from(1_u64);
+
+        let validate = |account: &AccountState| {
+            validate_account_capacity(
+                std::slice::from_ref(account),
+                CheckPhase::Deposit,
+                true,
+                1,
+                10,
+                1,
+                0,
+                1,
+                1,
+                0,
+                U256::from(11_u64),
+                U256::ZERO,
+                l1_max_fee_per_gas,
+                1,
+                1,
+                1,
+                1,
+                deposit_gas_limit,
+                1,
+                1,
+                1,
+            )
+        };
+        assert!(validate(&account).is_err());
+
+        account.l1_balance = required;
+        validate(&account).unwrap();
+    }
+
+    #[test]
     fn derives_expected_account_range_without_serializing_mnemonic() {
         let signers = derive_signers(TEST_MNEMONIC, 2, 4).unwrap();
         assert_eq!(signers.len(), 2);
@@ -2111,6 +2171,7 @@ mod tests {
             activity_fee_bump: 1,
             activity_max_fee_per_gas: 2,
             transactions_per_account: 1,
+            admission_seed_amount: 0,
             sponsored_approval_rounds: 1,
             bootstrap_deposit_amount: 10,
             bootstrap_minimum_deposit_amount: "10".into(),
@@ -2437,8 +2498,12 @@ mod tests {
                 Value::from("0x2000000000000000000000000000000000000003"),
             ),
             (
-                "__GATEWAY__".into(),
+                "__EARN_ROUTER__".into(),
                 Value::from("0x3000000000000000000000000000000000000001"),
+            ),
+            (
+                "__EARN_VAULT__".into(),
+                Value::from("0x3000000000000000000000000000000000000004"),
             ),
             (
                 "__BRIDGE_WALLET__".into(),
@@ -2468,7 +2533,19 @@ mod tests {
                 "__REWARD_POSITION_PER_ACCOUNT__".into(),
                 Value::from(1_000_u64),
             ),
+            (
+                "__SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT__".into(),
+                Value::from(3_000_u64),
+            ),
+            (
+                "__SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT__".into(),
+                Value::from(2_000_u64),
+            ),
             ("__REWARD_FUND_AMOUNT__".into(), Value::from(10_000_u64)),
+            (
+                "__REWARD_MAX_EARN_SHARE_SUPPLY__".into(),
+                Value::from(100_000_u64),
+            ),
             (
                 "__REWARD_FUND_GAS_LIMIT__".into(),
                 Value::from(5_000_000_u64),
@@ -2489,6 +2566,8 @@ mod tests {
             "../neobank/private-withdrawal-scenario.yml",
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
+            "../neobank/swapped-redemption-position-scenario.yml",
+            "../neobank/swapped-redemption-scenario.yml",
             "../neobank/direct-lifecycle-scenario.yml",
             "../neobank/third-party-recipient-scenario.yml",
             "../neobank/slippage-bounce-scenario.yml",
@@ -2720,7 +2799,7 @@ mod tests {
         assert_eq!(steps[4]["with"]["fee_token"], replacements["__DLUSD__"]);
         assert_eq!(
             steps[4]["with"]["amount"]["var"],
-            "earn_deposit.callback.args.shares"
+            "earn_deposit.callback.args.earnShares"
         );
         assert_eq!(
             steps[7]["wait_receipt"]["transaction_hash"]["var"],
@@ -2752,6 +2831,77 @@ mod tests {
             "0x2000000000000000000000000000000000000001"
         );
 
+        let swapped_redemption_position: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("swapped-redemption-position-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let swapped_redemption_position_steps = swapped_redemption_position["scenario"]["steps"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(swapped_redemption_position_steps.len(), 2);
+        assert_eq!(
+            swapped_redemption_position["scenario"]["name"],
+            "neobank-swapped-redemption-position-setup"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[0]["use"],
+            "encrypted-zone-entry"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[0]["with"]["token"],
+            "0x2000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[0]["with"]["fee_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[0]["with"]["amount"],
+            3_000
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[1]["use"],
+            "earn-deposit-and-return"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[1]["with"]["input_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[1]["with"]["fee_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            swapped_redemption_position_steps[1]["with"]["amount"],
+            2_000
+        );
+
+        let swapped_redemption: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("swapped-redemption-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        let swapped_redemption_steps = swapped_redemption["scenario"]["steps"]
+            .as_sequence()
+            .unwrap();
+        assert_eq!(
+            swapped_redemption["scenario"]["name"],
+            "neobank-swapped-redemption"
+        );
+        assert_eq!(swapped_redemption_steps.len(), 1);
+        let swapped_redeem = &swapped_redemption_steps[0];
+        assert_eq!(swapped_redeem["use"], "earn-redeem-and-return");
+        assert_eq!(
+            swapped_redeem["with"]["output_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
+        assert_eq!(
+            swapped_redeem["with"]["fee_token"],
+            "0x2000000000000000000000000000000000000001"
+        );
+        for field in ["amount", "min_vault_assets", "min_output_amount"] {
+            assert_eq!(swapped_redeem["with"][field], 100);
+        }
+
         let direct: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("direct-lifecycle-scenario.yml")).unwrap(),
         )
@@ -2781,7 +2931,7 @@ mod tests {
         );
         assert_eq!(
             direct_steps[2]["with"]["amount"]["var"],
-            "earn_deposit.callback.args.shares"
+            "earn_deposit.callback.args.earnShares"
         );
 
         let third_party: Value = serde_yaml::from_str(
@@ -2872,7 +3022,7 @@ mod tests {
         );
         assert_eq!(
             third_party_redeem["with"]["amount"]["var"],
-            "earn_deposit.callback.args.shares"
+            "earn_deposit.callback.args.earnShares"
         );
         for field in ["fallback_recipient", "refund_recipient"] {
             assert_eq!(
@@ -2922,9 +3072,13 @@ mod tests {
         assert_eq!(reward_funding_steps[0]["submit"]["await"], "receipt");
         assert_eq!(reward_funding_steps[1]["submit"]["await"], "receipt");
         assert_eq!(reward_funding_steps[2]["wait_log"]["event"], "Funded");
-        for field in ["requested", "funded"] {
+        for field in ["requestedAssets", "fundedAssets"] {
             assert_eq!(reward_funding_steps[2]["wait_log"]["where"][field], 10_000);
         }
+        assert_eq!(
+            reward_funding_steps[1]["submit"]["with"]["call"]["args"][2],
+            100_000
+        );
 
         let reward_redemption: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("rewards-redemption-scenario.yml")).unwrap(),
@@ -2978,7 +3132,7 @@ mod tests {
         );
         assert_eq!(
             fragments["fragments"]["earn-deposit-and-return"]["steps"][8]["with"]["amount"]["var"],
-            "callback.args.shares"
+            "callback.args.earnShares"
         );
         assert_eq!(
             fragments["fragments"]["earn-redeem-and-return"]["steps"][8]["with"]["amount"]["var"],
@@ -3007,7 +3161,7 @@ mod tests {
             bounce_callback["minVaultAssets"],
             "340282366920938463463374607431768211455"
         );
-        assert_eq!(bounce_callback["minVaultShares"]["param"], "amount");
+        assert_eq!(bounce_callback["minEarnShares"]["param"], "amount");
         assert_eq!(
             bounce_fragment["steps"][6]["wait_log"]["where"]["callbackSuccess"],
             false
@@ -3030,17 +3184,25 @@ mod tests {
         ] {
             let encoded = &fragments["fragments"][fragment]["steps"][3]["submit"]["with"]["call"]["args"]
                 [6]["abi_encode"];
-            assert!(
-                encoded["types"][0]
-                    .as_str()
-                    .is_some_and(|value| value.starts_with("tuple(uint8 flow,")),
-                "missing dynamically encoded callback for {fragment}"
+            assert_eq!(
+                encoded["types"][0],
+                "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)",
+                "wrong canonical EarnRouter callback tuple for {fragment}"
             );
             assert_eq!(encoded["values"][0]["flow"], flow);
             assert_eq!(encoded["values"][0]["actionId"]["param"], "action_id");
             assert_eq!(
-                encoded["values"][0]["encrypted"]["var"],
+                encoded["values"][0]["earnVault"],
+                "0x3000000000000000000000000000000000000004"
+            );
+            assert_eq!(
+                encoded["values"][0]["destinationData"]["abi_encode"]["values"][0]["encrypted"]["var"],
                 "encryption.encrypted"
+            );
+            assert_eq!(
+                encoded["values"][0]["destinationData"]["abi_encode"]["types"][0],
+                "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)",
+                "wrong canonical EarnRouter ZoneReturn tuple for {fragment}"
             );
         }
         assert_eq!(
@@ -3473,8 +3635,12 @@ mod tests {
                 Value::from("0x2000000000000000000000000000000000000003"),
             ),
             (
-                "__GATEWAY__".into(),
+                "__EARN_ROUTER__".into(),
                 Value::from("0x3000000000000000000000000000000000000001"),
+            ),
+            (
+                "__EARN_VAULT__".into(),
+                Value::from("0x3000000000000000000000000000000000000004"),
             ),
             (
                 "__BRIDGE_WALLET__".into(),
@@ -3504,7 +3670,19 @@ mod tests {
                 "__REWARD_POSITION_PER_ACCOUNT__".into(),
                 Value::from(1_000_u64),
             ),
+            (
+                "__SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT__".into(),
+                Value::from(3_000_u64),
+            ),
+            (
+                "__SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT__".into(),
+                Value::from(2_000_u64),
+            ),
             ("__REWARD_FUND_AMOUNT__".into(), Value::from(10_000_u64)),
+            (
+                "__REWARD_MAX_EARN_SHARE_SUPPLY__".into(),
+                Value::from(100_000_u64),
+            ),
             (
                 "__REWARD_FUND_GAS_LIMIT__".into(),
                 Value::from(5_000_000_u64),
@@ -3525,6 +3703,8 @@ mod tests {
             "../neobank/private-withdrawal-scenario.yml",
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
+            "../neobank/swapped-redemption-position-scenario.yml",
+            "../neobank/swapped-redemption-scenario.yml",
             "../neobank/direct-lifecycle-scenario.yml",
             "../neobank/third-party-recipient-scenario.yml",
             "../neobank/slippage-bounce-scenario.yml",
@@ -3548,9 +3728,9 @@ mod tests {
         let fixture_abis = output.join("abis");
         fs::create_dir_all(&fixture_abis).unwrap();
         for name in [
-            "vault-adapter.json",
-            "vault-rewards.json",
-            "zone-gateway.json",
+            "earn-contribution-controller.json",
+            "earn-router.json",
+            "earn-vault.json",
             "zone-inbox.json",
             "zone-portal.json",
         ] {
@@ -3567,6 +3747,8 @@ mod tests {
             ("private-withdrawal-scenario.yml", 5),
             ("private-flow-scenario.yml", 30),
             ("swapped-lifecycle-scenario.yml", 23),
+            ("swapped-redemption-position-scenario.yml", 14),
+            ("swapped-redemption-scenario.yml", 9),
             ("direct-lifecycle-scenario.yml", 23),
             ("third-party-recipient-scenario.yml", 28),
             ("slippage-bounce-scenario.yml", 14),

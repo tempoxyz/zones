@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import { ITIP20 } from "../../../src/interfaces/ITIP20.sol";
+import { ITIP20 } from "../../../src/interfaces/external/tempo/ITIP20.sol";
 
 /// @title ReserveStore
 /// @notice A minimal contract to hold reserve ledger tokens for a specific stablecoin

@@ -17,6 +17,7 @@ on:
           - neobank-third-party-recipient
           - neobank-direct-lifecycle
           - neobank-swapped-lifecycle
+          - neobank-swapped-redemption
           - roundtrip
           - deposit
       accounts:
@@ -28,7 +29,7 @@ on:
         description: Number of measured transactions, or complete journeys for a scenario.
         type: string
         required: true
-        default: "1000"
+        default: "100"
       tps:
         description: Target phase TPS, or journey starts per second for a scenario.
         type: string
@@ -73,7 +74,7 @@ on:
         description: L1 swap implementation used by the neobank fixture.
         type: choice
         required: true
-        default: direct-swap
+        default: simple
         options:
           - direct-swap
           - simple
@@ -159,8 +160,10 @@ on:
     paths:
       - ".github/workflows/zones-benchmark.yml"
       - "contrib/bench/**"
+      - "crates/node/**"
       - "docs/NEOBANK_PRIVATE_ZONE_BENCHMARK.md"
       - "docs/ZONES_BENCHMARK.md"
+      - "specs/ref-impls/**"
       - "xtask/**"
 
 permissions:
@@ -256,7 +259,7 @@ jobs:
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
-          INPUT_COUNT: ${{ inputs.count || '1000' }}
+          INPUT_COUNT: ${{ inputs.count || '100' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '12' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
@@ -265,7 +268,7 @@ jobs:
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
           INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
-          INPUT_SWAP_MECHANISM: ${{ inputs.swap-mechanism || 'direct-swap' }}
+          INPUT_SWAP_MECHANISM: ${{ inputs.swap-mechanism || 'simple' }}
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
           INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '10000000' }}
           INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
@@ -332,6 +335,11 @@ jobs:
               neobank_preset=swapped-lifecycle
               leases_per_journey=1
               ;;
+            neobank-swapped-redemption)
+              phase=neobank-e2e
+              neobank_preset=swapped-redemption
+              leases_per_journey=1
+              ;;
             roundtrip|deposit)
               phase="$requested_phase"
               neobank_preset=none
@@ -383,6 +391,14 @@ jobs:
             direct-swap|simple|stablecoin-dex) ;;
             *) echo "::error::swap-mechanism must be direct-swap, simple, or stablecoin-dex"; exit 1 ;;
           esac
+          if [ "$INPUT_SWAP_MECHANISM" = direct-swap ]; then
+            case "$neobank_preset" in
+              full-journey|slippage-bounce|swapped-lifecycle|swapped-redemption)
+                echo "::error::direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
+                exit 1
+                ;;
+            esac
+          fi
           case "$INPUT_RECIPIENT_MODE" in
             existing|random) ;;
             *) echo "::error::recipient-mode must be existing or random"; exit 1 ;;
@@ -420,11 +436,15 @@ jobs:
             || { echo "::error::withdrawal-max-batch-gas cannot exceed 30000000"; exit 1; }
           (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
             || { echo "::error::withdrawal-max-batch-gas cannot exceed l1-general-gas-limit"; exit 1; }
-          planned_singleton_withdrawal_gas=1750000
-          if [ "$phase" = neobank-e2e ]; then
-            planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
-          fi
-          (( planned_singleton_withdrawal_gas <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
+          planned_singleton_withdrawal_gas=0
+          case "$phase:$neobank_preset" in
+            roundtrip:*) planned_singleton_withdrawal_gas=1750000 ;;
+            neobank-e2e:private-withdrawal) planned_singleton_withdrawal_gas=1750000 ;;
+            neobank-e2e:encrypted-deposit) ;;
+            neobank-e2e:*) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT)) ;;
+          esac
+          (( planned_singleton_withdrawal_gas == 0 ||
+             planned_singleton_withdrawal_gas <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
             || { echo "::error::l1-general-gas-limit cannot fit a withdrawal planned at $planned_singleton_withdrawal_gas gas"; exit 1; }
           (( 10#$INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES <= 10000 )) \
             || { echo "::error::withdrawal-max-in-flight-batches cannot exceed 10000"; exit 1; }
@@ -478,6 +498,24 @@ jobs:
                   required_swap_uses=$INPUT_COUNT
                 else
                   required_swap_uses=$INPUT_MAX_CONCURRENT
+                fi
+                ;;
+              swapped-redemption)
+                setup_journeys_per_account=$(((INPUT_COUNT + INPUT_ACCOUNTS - 1) / INPUT_ACCOUNTS))
+                setup_position_uses=$((INPUT_ACCOUNTS * setup_journeys_per_account))
+                if [ "$INPUT_SWAP_MECHANISM" = direct-swap ]; then
+                  callback_reservation=$((1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
+                  callbacks_per_batch=$(((10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS - 500000) / callback_reservation))
+                  if (( callbacks_per_batch == 0 )); then
+                    callbacks_per_batch=1
+                  fi
+                  setup_batch_uses=$((callbacks_per_batch * setup_journeys_per_account))
+                  required_swap_uses=$INPUT_MAX_CONCURRENT
+                  if (( setup_batch_uses > required_swap_uses )); then
+                    required_swap_uses=$setup_batch_uses
+                  fi
+                else
+                  required_swap_uses=$setup_position_uses
                 fi
                 ;;
               slippage-bounce) required_swap_uses=1 ;;
@@ -571,6 +609,7 @@ jobs:
       CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
       CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+      ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
       ZONES_BENCH_BUILD_PROFILE: profiling
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
@@ -606,10 +645,6 @@ jobs:
         if: needs.authorize.outputs.phase == 'roundtrip' || needs.authorize.outputs.phase == 'neobank-e2e'
         run: |
           set -euo pipefail
-          if [ -z "$CLICKHOUSE_URL" ] && [ -z "$CLICKHOUSE_USER" ] && [ -z "$CLICKHOUSE_PASSWORD" ]; then
-            echo "ClickHouse Actions secrets are unavailable; retaining the JSON scenario report only"
-            exit 0
-          fi
           for name in CLICKHOUSE_URL CLICKHOUSE_USER CLICKHOUSE_PASSWORD; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is not available to the Zones benchmark workflow"
@@ -624,6 +659,7 @@ jobs:
         run: |
           contrib/bench/tests/l1-snapshot.sh
           contrib/bench/tests/scenario-reporting.sh
+          python3 contrib/bench/tests/withdrawal-blocks.py
 
       - name: Check out pinned Tempo L1
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -739,14 +775,20 @@ jobs:
         run: |
           set -euo pipefail
           forge build --root specs/ref-impls
-          test -s specs/ref-impls/out/ClosedLoopZoneGateway.sol/ClosedLoopZoneGateway.json
-          test -s specs/ref-impls/out/VaultAdapter.sol/VaultAdapter.json
-          test -s specs/ref-impls/out/VaultRewards.sol/VaultRewards.json
+          test -s specs/ref-impls/out/EarnRouter.sol/EarnRouter.json
+          test -s specs/ref-impls/out/EarnVault.sol/EarnVault.json
+          test -s specs/ref-impls/out/EarnFees.sol/EarnFees.json
+          test -s specs/ref-impls/out/EarnFactory.sol/EarnFactory.json
+          test -s specs/ref-impls/out/EarnContributionController.sol/EarnContributionController.json
+          test -s specs/ref-impls/out/ERC4626Engine.sol/ERC4626Engine.json
+          test -s specs/ref-impls/out/Simple4626Vault.sol/Simple4626Vault.json
+          test -s specs/ref-impls/out/BridgeDirectSwapAdapter.sol/BridgeDirectSwapAdapter.json
+          test -s specs/ref-impls/out/MinimalDirectSwapAdapter.sol/MinimalDirectSwapAdapter.json
           test -s specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json
           test -s specs/ref-impls/out/TIP20Controller.sol/TIP20Controller.json
-          test -s specs/ref-impls/out/BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter.json
-          test -s specs/ref-impls/out/SimpleDirectSwapFixture.sol/SimpleDirectSwapFixture.json
-          test -s specs/ref-impls/out/TempoStablecoinDexStableSwapAdapter.sol/TempoStablecoinDexStableSwapAdapter.json
+          test -s specs/ref-impls/out/TIP20DirectSwapHandler.sol/TIP20DirectSwapHandler.json
+          test -s specs/ref-impls/out/AuthRegistry.sol/AuthRegistry.json
+          test -s specs/ref-impls/out/ERC1967Proxy.sol/ERC1967Proxy.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |
@@ -856,6 +898,14 @@ jobs:
               echo
               echo "> No txgen report was produced. See the benchmark and node logs for the setup or runtime failure."
             } > "$summary"
+          fi
+
+          withdrawal_summary=target/zones-benchmark/withdrawal-blocks.md
+          if [ -s "$withdrawal_summary" ]; then
+            {
+              echo
+              cat "$withdrawal_summary"
+            } >> "$summary"
           fi
 
           unit=Transactions

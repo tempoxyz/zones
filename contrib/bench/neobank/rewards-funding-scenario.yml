@@ -38,6 +38,7 @@ scenario:
             args:
               - { var: control.address }
               - "__REWARD_FUND_AMOUNT__"
+              - "__REWARD_MAX_EARN_SHARE_SUPPLY__"
         await: receipt
       save: funding
 
@@ -46,12 +47,12 @@ scenario:
         transaction_hash: { var: funding.tx_hash }
         sender: { var: funding.sender }
         address: "__REWARDS__"
-        abi: VaultRewards
+        abi: EarnContributionController
         event: Funded
         where:
           funder: { var: control.address }
-          requested: "__REWARD_FUND_AMOUNT__"
-          funded: "__REWARD_FUND_AMOUNT__"
+          requestedAssets: "__REWARD_FUND_AMOUNT__"
+          fundedAssets: "__REWARD_FUND_AMOUNT__"
         max_block_range: 1000
       timeout: 45s
       save: funded

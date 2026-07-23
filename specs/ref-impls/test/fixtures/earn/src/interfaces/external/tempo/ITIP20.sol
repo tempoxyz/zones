@@ -2,9 +2,9 @@
 pragma solidity >=0.8.13 <0.9.0;
 
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-import { ITIP20RolesAuth, ITIP20RolesAuthErr } from "./ITIP20RolesAuth.sol";
+import { ITIP20RolesAuth, ITIP20RolesAuthErrors } from "./ITIP20RolesAuth.sol";
 
-interface ITIP20 is IERC20, ITIP20RolesAuthErr {
+interface ITIP20 is IERC20, ITIP20RolesAuthErrors {
     event Burn(address indexed from, uint256 amount);
     event Mint(address indexed to, uint256 amount);
     event TransferWithMemo(address indexed from, address indexed to, uint256 amount, bytes32 indexed memo);

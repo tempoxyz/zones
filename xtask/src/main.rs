@@ -20,6 +20,7 @@ mod demo_blacklist;
 mod demo_swap_and_deposit;
 mod deploy_neobank_fixtures;
 mod deploy_router;
+mod earn_fixture_lock;
 mod encrypted_deposit;
 mod generate_p2p_key;
 mod generate_zone_genesis;
