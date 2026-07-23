@@ -91,6 +91,7 @@ ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_SAMPLE_INSTANCES="${ZONES_BENCH_SAMPLE_INSTANCES:-10}"
 ZONES_BENCH_PROGRESS_INTERVAL_SECS="${ZONES_BENCH_PROGRESS_INTERVAL_SECS:-10}"
 ZONES_BENCH_APPROVAL_SETUP_TIMEOUT_SECS="${ZONES_BENCH_APPROVAL_SETUP_TIMEOUT_SECS:-40}"
+ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS="${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-120}"
 
 for name in ZONES_BENCH_ACCOUNT_START ZONES_BENCH_SEED; do
     require_uint "$name"
@@ -101,7 +102,8 @@ for name in \
     ZONES_BENCH_ACTIVITY_AMOUNT ZONES_BENCH_WITHDRAWAL_AMOUNT \
     ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT ZONES_BENCH_AUTH_TTL_SECS \
     ZONES_BENCH_AUTH_REFRESH_SECS ZONES_BENCH_SAMPLE_INSTANCES \
-    ZONES_BENCH_PROGRESS_INTERVAL_SECS ZONES_BENCH_APPROVAL_SETUP_TIMEOUT_SECS
+    ZONES_BENCH_PROGRESS_INTERVAL_SECS ZONES_BENCH_APPROVAL_SETUP_TIMEOUT_SECS \
+    ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS
 do
     require_positive_uint "$name"
 done
@@ -210,6 +212,40 @@ run_scenario() {
         command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${command[@]}")
     fi
     "${command[@]}"
+}
+
+read_l1_uint() {
+    local address="$1" signature="$2"
+    shift 2
+    local value
+    value="$(cast call "$address" "$signature" "$@" --rpc-url "$L1_RPC_URL" | awk '{print $1}')"
+    [[ "$value" =~ ^[0-9]+$ ]] || die "could not read $signature from $address"
+    printf '%s\n' "$value"
+}
+
+wait_for_l1_deposit_settlement() {
+    local expected processed started_at elapsed progress_bucket=-1
+
+    expected="$(read_l1_uint "$L1_PORTAL_ADDRESS" 'depositCount()(uint64)')"
+    started_at="$SECONDS"
+    while true; do
+        processed="$(read_l1_uint \
+            "$L1_PORTAL_ADDRESS" 'lastProcessedDepositNumber()(uint64)')"
+        if (( 10#$processed >= 10#$expected )); then
+            echo "bootstrap L1 deposit settlement complete: $processed/$expected"
+            return
+        fi
+
+        elapsed=$((SECONDS - started_at))
+        if (( elapsed >= 10#$ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS )); then
+            die "timed out waiting for bootstrap L1 deposit settlement: $processed/$expected after ${elapsed}s"
+        fi
+        if (( elapsed / 5 > progress_bucket )); then
+            echo "bootstrap L1 deposit settlement: $processed/$expected elapsed=${elapsed}s"
+            progress_bucket=$((elapsed / 5))
+        fi
+        sleep 1
+    done
 }
 
 run_parallel_approval_setup() {
@@ -641,6 +677,10 @@ SEQUENCER_KEY="$sequencer_key" "${fee_cmd[@]}" \
     --tempo-gas-rate 1 \
     --zone-tx-gas-limit 2000000
 unset sequencer_key
+
+# The Zone terminal event proves execution, while the ready-fixture preflight also
+# requires L1 batch finalization to have advanced the portal's processed cursor.
+wait_for_l1_deposit_settlement
 
 # Requery all fees and render measured specs only after the outbox rate is live.
 preflight roundtrip ready
