@@ -686,7 +686,7 @@ fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-            ZoneInbox::new().refunds[PATH_USD_ADDRESS][BOB].write(444)?;
+            ZoneInbox::new().withdrawal_bounce_backs[PATH_USD_ADDRESS][BOB].write(444)?;
             Ok(())
         })?;
     }
@@ -705,7 +705,10 @@ fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
     assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(444));
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-        assert_eq!(ZoneInbox::new().refunds[PATH_USD_ADDRESS][BOB].read()?, 0);
+        assert_eq!(
+            ZoneInbox::new().withdrawal_bounce_backs[PATH_USD_ADDRESS][BOB].read()?,
+            0
+        );
         Ok(())
     })?;
     Ok(())
@@ -746,7 +749,10 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
 
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-        assert_eq!(ZoneInbox::new().refunds[token][BOB].read()?, 555);
+        assert_eq!(
+            ZoneInbox::new().withdrawal_bounce_backs[token][BOB].read()?,
+            555
+        );
         Ok(())
     })?;
     drop(storage);

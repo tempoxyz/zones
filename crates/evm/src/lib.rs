@@ -488,10 +488,27 @@ fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
+    use alloy_rlp::Encodable;
+    use alloy_sol_types::SolCall;
     use reth_chainspec::{EthChainSpec, ForkCondition};
+    use revm::{
+        context::result::ExecutionResult,
+        database::{CacheDB, EmptyDB},
+    };
     use tempo_chainspec::{
         hardfork::TempoHardfork,
         spec::{DEV, MODERATO, TempoHardforks},
+    };
+    use tempo_precompiles::{
+        TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
+    };
+    use tempo_zone_contracts::IZoneInbox;
+    use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
+    use zone_primitives::constants::{
+        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS,
+        ZONE_INBOX_ADDRESS,
     };
 
     #[test]
@@ -511,23 +528,6 @@ mod tests {
 
     #[test]
     fn advance_tempo_keeps_overlay_reads_on_child_anchor() {
-        use alloy_primitives::{B256, Bytes, U256, address, keccak256};
-        use alloy_rlp::Encodable;
-        use alloy_sol_types::SolCall;
-        use revm::{
-            context::result::ExecutionResult,
-            database::{CacheDB, EmptyDB},
-        };
-        use tempo_precompiles::{
-            TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
-        };
-        use tempo_zone_contracts::IZoneInbox;
-        use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-        use zone_primitives::constants::{
-            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS,
-            ZONE_INBOX_ADDRESS,
-        };
-
         const PARENT: u64 = 0;
         const CHILD: u64 = 1;
         let portal = Address::repeat_byte(0x42);

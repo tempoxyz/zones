@@ -40,7 +40,7 @@ impl ZoneInbox {
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     config(call) => view(call, |_| Ok(ZONE_CONFIG_ADDRESS)),
                     refunds(call) => view(call, |call| {
-                        self.refunds[call.token][call.owner].read()
+                        self.withdrawal_bounce_backs[call.token][call.owner].read()
                     }),
                     claimRefund(call) => crate::dispatch::mutate(call, msg_sender, |caller, call| {
                         self.claim_refund(caller, call.token)

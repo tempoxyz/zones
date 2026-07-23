@@ -23,7 +23,7 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
     error::TempoPrecompileError,
-    storage::{Handler, Mapping, StorageCtx, StorageOps},
+    storage::{Handler, Mapping, Slot, StorageCtx, StorageOps},
     tip20::{ITIP20, TIP20Token},
 };
 use tempo_precompiles_macros::contract;
@@ -56,7 +56,7 @@ pub struct ZoneInbox {
     /// Monotonic number of deposits consumed from the L1 queue.
     processed_deposit_number: u64,
     /// Withdrawal bounce-back mints that failed and can be claimed later.
-    refunds: Mapping<Address, Mapping<Address, u128>>,
+    withdrawal_bounce_backs: Mapping<Address, Mapping<Address, u128>>,
 }
 
 impl ZoneInbox {
@@ -268,12 +268,8 @@ impl ZoneInbox {
         if self.try_mint(deposit.token, recipient, deposit.amount)? {
             self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {
-            let refund = &mut self.refunds[deposit.token][recipient];
-            if refund.read()?.checked_add(deposit.amount).is_none() {
-                return Err(TempoPrecompileError::under_overflow().into());
-            }
-            let slot = refund.slot();
-            refund.sinc(slot, U256::from(deposit.amount))?;
+            let slot = self.withdrawal_bounce_backs[deposit.token][recipient].slot();
+            Slot::<U256>::new(slot, self.address).sinc(U256::from(deposit.amount))?;
             self.emit_event(deposit.withdrawal_bounce_back_pending_event(recipient))?;
         }
         Ok(())
@@ -305,8 +301,8 @@ impl ZoneInbox {
     }
 
     fn claim_refund(&mut self, caller: Address, token: Address) -> ZoneResult<u128> {
-        let amount = self.refunds[token][caller].read()?;
-        self.refunds[token][caller].delete()?;
+        let amount = self.withdrawal_bounce_backs[token][caller].read()?;
+        self.withdrawal_bounce_backs[token][caller].delete()?;
         TIP20Token::from_address(token)?.mint(
             ZONE_INBOX_ADDRESS,
             ITIP20::mintCall {
