@@ -24,7 +24,7 @@ use zone_primitives::constants::{
 use crate::{
     ZoneResult,
     ecies::{AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, decode_compressed_public_key},
-    storage::{L1State, L1StorageReader},
+    portal::L1Portal,
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
@@ -52,25 +52,20 @@ impl ZoneOutbox {
         self.__initialize()
     }
 
-    fn ensure_sequencer<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        caller: Address,
-    ) -> ZoneResult<()> {
-        if caller != Address::ZERO && !l1.portal().is_sequencer(caller)? {
+    fn ensure_sequencer(&self, portal: &L1Portal, caller: Address) -> ZoneResult<()> {
+        if caller != Address::ZERO && !portal.is_sequencer(caller)? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
     }
 
-    fn validate_withdrawal_policy<P: L1StorageReader>(
+    fn validate_withdrawal_policy(
         &self,
-        l1: &L1State<P>,
+        portal: &L1Portal,
         token: Address,
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let portal = l1.portal();
         if !portal.is_token_enabled(token)? {
             return Err(ZonePortalError::token_not_enabled().into());
         }
@@ -144,9 +139,9 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn request_withdrawal<P: L1StorageReader>(
+    fn request_withdrawal(
         &mut self,
-        l1: &L1State<P>,
+        portal: &L1Portal,
         caller: Address,
         fee_payer: Address,
         current_tx_hash: B256,
@@ -168,7 +163,7 @@ impl ZoneOutbox {
         if !zone_token.is_initialized()? {
             return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
         }
-        self.validate_withdrawal_policy(l1, call.token, call.to, call.gasLimit)?;
+        self.validate_withdrawal_policy(portal, call.token, call.to, call.gasLimit)?;
         self.enforce_withdrawal_block_cap()?;
 
         // If necessary, validate reveal
@@ -251,13 +246,13 @@ impl ZoneOutbox {
         Ok(recipient)
     }
 
-    fn finalize_withdrawal_batch<P: L1StorageReader>(
+    fn finalize_withdrawal_batch(
         &mut self,
-        l1: &L1State<P>,
+        portal: &L1Portal,
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(portal, caller)?;
         if call.blockNumber != self.storage.block_number() {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }
@@ -303,13 +298,13 @@ impl ZoneOutbox {
         Ok(withdrawal_queue_hash)
     }
 
-    fn set_tempo_gas_rate<P: L1StorageReader>(
+    fn set_tempo_gas_rate(
         &mut self,
-        l1: &L1State<P>,
+        portal: &L1Portal,
         caller: Address,
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(portal, caller)?;
         if call._tempoGasRate > MAX_GAS_FEE_RATE {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
@@ -318,13 +313,13 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn set_max_withdrawals_per_block<P: L1StorageReader>(
+    fn set_max_withdrawals_per_block(
         &mut self,
-        l1: &L1State<P>,
+        portal: &L1Portal,
         caller: Address,
         call: IZoneOutbox::setMaxWithdrawalsPerBlockCall,
     ) -> ZoneResult<()> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(portal, caller)?;
         self.max_withdrawals_per_block
             .write(call._maxWithdrawalsPerBlock)?;
         self.emit_event(ZoneOutboxEvent::max_withdrawals_per_block_updated(
@@ -333,24 +328,20 @@ impl ZoneOutbox {
         Ok(())
     }
 
-    fn pending_withdrawals_count<P: L1StorageReader>(
-        &self,
-        l1: &L1State<P>,
-        caller: Address,
-    ) -> ZoneResult<U256> {
-        self.ensure_sequencer(l1, caller)?;
+    fn pending_withdrawals_count(&self, portal: &L1Portal, caller: Address) -> ZoneResult<U256> {
+        self.ensure_sequencer(portal, caller)?;
         self.pending_withdrawals
             .len()
             .map(U256::from)
             .map_err(Into::into)
     }
 
-    fn get_pending_withdrawals<P: L1StorageReader>(
+    fn get_pending_withdrawals(
         &self,
-        l1: &L1State<P>,
+        portal: &L1Portal,
         caller: Address,
     ) -> ZoneResult<Vec<IZoneOutbox::PendingWithdrawal>> {
-        self.ensure_sequencer(l1, caller)?;
+        self.ensure_sequencer(portal, caller)?;
         let len = self.pending_withdrawals.len()?;
         let mut pending = Vec::with_capacity(len);
         for index in 0..len {
