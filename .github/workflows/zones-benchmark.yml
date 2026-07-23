@@ -7,7 +7,7 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-third-party-recipient
+        default: roundtrip
         options:
           - neobank-encrypted-deposit
           - neobank-private-withdrawal
@@ -23,7 +23,7 @@ on:
         description: Number of benchmark accounts.
         type: string
         required: true
-        default: "200"
+        default: "100"
       count:
         description: Number of measured transactions, or complete journeys for a scenario.
         type: string
@@ -97,7 +97,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_PHASE: neobank-third-party-recipient
+  ZONES_BENCH_DEFAULT_PHASE: roundtrip
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -161,7 +161,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
-          INPUT_ACCOUNTS: ${{ inputs.accounts || '200' }}
+          INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
           INPUT_COUNT: ${{ inputs.count || '100' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
