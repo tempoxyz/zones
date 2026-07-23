@@ -49,7 +49,7 @@ ZONES_BENCH_CONTROL_ACCOUNT_INDEX="${ZONES_BENCH_CONTROL_ACCOUNT_INDEX:-0}"
 ZONES_BENCH_ACCOUNT_START="${ZONES_BENCH_ACCOUNT_START:-16}"
 ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
 ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
-ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-1000}"
+ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-100}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-20}"
 ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-100}"
 ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-2000000}"
@@ -74,6 +74,12 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         expected_base_token="$ZONES_BENCH_PATHUSD"
         leases_per_journey=1
         ;;
+    encrypted-deposit)
+        scenario_file=encrypted-deposit-scenario.yml
+        base_token_label=dlusd
+        expected_base_token="$ZONES_BENCH_DLUSD"
+        leases_per_journey=1
+        ;;
     third-party-recipient)
         scenario_file=third-party-recipient-scenario.yml
         base_token_label=pathusd
@@ -82,6 +88,12 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         ;;
     full-journey)
         scenario_file=private-flow-scenario.yml
+        base_token_label=dlusd
+        expected_base_token="$ZONES_BENCH_DLUSD"
+        leases_per_journey=1
+        ;;
+    private-withdrawal)
+        scenario_file=private-withdrawal-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
@@ -123,6 +135,22 @@ required_accounts=$((10#$ZONES_BENCH_MAX_CONCURRENT * leases_per_journey))
     die "$ZONES_BENCH_NEOBANK_PRESET requires at least $required_accounts accounts for max-concurrent=$ZONES_BENCH_MAX_CONCURRENT"
 account_journeys=$((10#$ZONES_BENCH_COUNT * leases_per_journey))
 journeys_per_account=$(((account_journeys + 10#$ZONES_BENCH_ACCOUNTS - 1) / 10#$ZONES_BENCH_ACCOUNTS))
+
+withdrawal_setup_amount=1
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ]]; then
+    command -v python3 >/dev/null || die "missing python3"
+    withdrawal_setup_amount="$(python3 - \
+        "$journeys_per_account" "$ZONES_BENCH_DEPOSIT_AMOUNT" <<'PY'
+import sys
+
+journeys, deposit = map(int, sys.argv[1:])
+amount = journeys * deposit
+if amount <= 0 or amount > 2**128 - 1:
+    raise SystemExit("private-withdrawal setup amount exceeds uint128")
+print(amount)
+PY
+)"
+fi
 
 # Reward sizing uses arbitrary-precision arithmetic so configured uint128
 # amounts cannot silently wrap in the shell.
@@ -306,7 +334,7 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 preflight_phase() {
-    local phase="$1" fixture="$2"
+    local phase="$1" fixture="$2" require_existing_approvals="${3:-false}"
     local -a command=("${preflight[@]}" --l1-rpc-url "$L1_RPC_URL" --zone-rpc-url "$ZONE_RPC_URL" \
         --token "$ZONES_BENCH_TOKEN" --account-start "$ZONES_BENCH_ACCOUNT_START" \
         --accounts "$ZONES_BENCH_ACCOUNTS" --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
@@ -315,6 +343,7 @@ preflight_phase() {
         --sponsored-approval-rounds 2 \
         --check-phase "$phase" --output "$ZONES_BENCH_OUTPUT")
     [[ -z "$fixture" ]] || command+=(--fixture-state "$fixture")
+    [[ "$require_existing_approvals" != true ]] || command+=(--no-approval-setup)
     "${command[@]}"
 }
 
@@ -376,6 +405,9 @@ stage_end bootstrap
 # sponsor state. Setup approvals themselves are deliberately non-expiring.
 stage_start post_bootstrap_preflight
 preflight_phase bootstrap ""
+jq -e '.deposit_fee == 0 and .bounceback_fee == 0 and .withdrawal_fee == 0' \
+    "$ZONES_BENCH_OUTPUT/preflight.json" >/dev/null ||
+    die "neobank benchmark requires zero deposit, bounceback, and withdrawal fees"
 stage_end post_bootstrap_preflight
 
 # The generic preflight renders one portal approval per user. It is outside timing.
@@ -405,6 +437,8 @@ sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
 render_sources=(l1-onramp.yml zone-flow.yml scenario-fragments.yml "$scenario_file")
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
     render_sources+=(rewards-position-scenario.yml rewards-funding-scenario.yml)
+elif [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ]]; then
+    render_sources+=(private-withdrawal-funding-scenario.yml)
 fi
 rendered_documents=()
 for source in "${render_sources[@]}"; do
@@ -425,6 +459,7 @@ for source in "${render_sources[@]}"; do
         -e "s|__ONRAMP_AMOUNT__|$ZONES_BENCH_DEPOSIT_AMOUNT|g" -e "s|__PRIVATE_TRANSFER_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" \
         -e "s|__EARN_DEPOSIT_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__EARN_REDEEM_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" \
         -e "s|__OFFRAMP_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" -e "s|__CALLBACK_GAS_LIMIT__|$ZONES_BENCH_CALLBACK_GAS_LIMIT|g" \
+        -e "s|__WITHDRAWAL_ONLY_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__WITHDRAWAL_SETUP_AMOUNT__|$withdrawal_setup_amount|g" \
         -e "s|__REWARD_ONRAMP_PER_ACCOUNT__|$reward_onramp_per_account|g" -e "s|__REWARD_POSITION_PER_ACCOUNT__|$reward_position_per_account|g" \
         -e "s|__REWARD_FUND_AMOUNT__|$reward_fund_amount|g" -e "s|__REWARD_FUND_GAS_LIMIT__|$reward_fund_gas_limit|g" \
         -e "s|__REWARD_FIRST_REDEEM_AMOUNT__|$reward_first_redeem_amount|g" -e "s|__REWARD_SECOND_REDEEM_AMOUNT__|$reward_second_redeem_amount|g" \
@@ -450,6 +485,12 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
         [[ -s "$ZONES_BENCH_OUTPUT/${setup}-scenario.rendered.yml" ]] ||
             die "txgen did not render the composed $setup scenario"
     done
+elif [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ]]; then
+    "$txgen_bin" scenario render \
+        --scenario "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-scenario.yml" \
+        --output "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-scenario.rendered.yml"
+    [[ -s "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-scenario.rendered.yml" ]] ||
+        die "txgen did not render the private-withdrawal funding scenario"
 fi
 stage_end render_scenario
 
@@ -463,10 +504,64 @@ for _ in $(seq 1 60); do [[ -f "$secret_dir/zone-auth.json" ]] && break; sleep 1
 [[ -f "$secret_dir/zone-auth.json" ]] || die "timed out creating private Zone auth map"
 stage_end auth_token_map
 
-# Approve both Zone assets before timing. EarnToken needs no user balance for approval;
-# the sequencer sponsors these setup transactions from its untimed bootstrap balance.
-send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
-send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
+# Approvals are untimed. Deposit-only submits no user Zone transaction. The
+# dedicated withdrawal needs only DLUSD; Earn lifecycles approve both assets.
+case "$ZONES_BENCH_NEOBANK_PRESET" in
+    encrypted-deposit) ;;
+    private-withdrawal)
+        send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
+        ;;
+    *)
+        send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
+        send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
+        ;;
+esac
+
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ]]; then
+    python3 - \
+        "$ZONES_BENCH_DEPOSIT_AMOUNT" "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
+        "$zone_fee" "$ZONES_BENCH_COUNT" <<'PY'
+import sys
+
+deposit, withdrawal, zone_fee, journeys = map(int, sys.argv[1:])
+scale = 10**12
+fee_cap = (10_000_000 * (zone_fee + journeys) + scale - 1) // scale
+required = withdrawal + fee_cap
+if deposit < required:
+    raise SystemExit(
+        f"private-withdrawal deposit amount {deposit} cannot cover "
+        f"withdrawal {withdrawal} plus Zone transaction fee cap {fee_cap}"
+    )
+print(
+    "private-withdrawal capacity verified: "
+    f"per-journey deposit={deposit}, required={required}, fee-cap={fee_cap}"
+)
+PY
+
+    stage_start private_withdrawal_funding
+    funding_concurrency="$ZONES_BENCH_MAX_CONCURRENT"
+    if (( 10#$funding_concurrency > 10#$ZONES_BENCH_ACCOUNTS )); then
+        funding_concurrency="$ZONES_BENCH_ACCOUNTS"
+    fi
+    "$txgen_bin" scenario run \
+        --scenario "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-scenario.yml" \
+        --count "$ZONES_BENCH_ACCOUNTS" \
+        --max-in-flight "$funding_concurrency" --max-rpc-in-flight "$funding_concurrency" \
+        --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
+        --seed "$ZONES_BENCH_SEED" \
+        --report "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-report.json"
+    assert_scenario_report \
+        "$ZONES_BENCH_OUTPUT/private-withdrawal-funding-report.json" \
+        "$ZONES_BENCH_ACCOUNTS" "private-withdrawal funding setup"
+    stage_end private_withdrawal_funding
+
+    stage_start private_withdrawal_preflight
+    preflight_phase withdrawal funded true
+    jq -e '.deposit_fee == 0 and .bounceback_fee == 0 and .withdrawal_fee == 0' \
+        "$ZONES_BENCH_OUTPUT/preflight.json" >/dev/null ||
+        die "neobank benchmark requires zero deposit, bounceback, and withdrawal fees"
+    stage_end private_withdrawal_preflight
+fi
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
     control_address="$(cast wallet address \
@@ -591,6 +686,23 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
     stage_end slippage_precondition
 fi
 
+measured_token_balance_before=""
+measured_token_balance_holder=""
+case "$ZONES_BENCH_NEOBANK_PRESET" in
+    encrypted-deposit)
+        measured_token_balance_holder="$L1_PORTAL_ADDRESS"
+        measured_token_balance_before="$(read_l1_uint \
+            "$ZONES_BENCH_DLUSD" 'balanceOf(address)(uint256)' \
+            "$measured_token_balance_holder")"
+        ;;
+    private-withdrawal)
+        measured_token_balance_holder="$ZONES_BENCH_BRIDGE_WALLET"
+        measured_token_balance_before="$(read_l1_uint \
+            "$ZONES_BENCH_DLUSD" 'balanceOf(address)(uint256)' \
+            "$measured_token_balance_holder")"
+        ;;
+esac
+
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
@@ -626,3 +738,30 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
 fi
 
 assert_scenario_report "$ZONES_BENCH_REPORT" "$ZONES_BENCH_COUNT" "private flow"
+
+if [[ -n "$measured_token_balance_before" ]]; then
+    measured_token_balance_after="$(read_l1_uint \
+        "$ZONES_BENCH_DLUSD" 'balanceOf(address)(uint256)' \
+        "$measured_token_balance_holder")"
+    case "$ZONES_BENCH_NEOBANK_PRESET" in
+        encrypted-deposit) measured_balance_amount="$ZONES_BENCH_DEPOSIT_AMOUNT" ;;
+        private-withdrawal) measured_balance_amount="$ZONES_BENCH_WITHDRAWAL_AMOUNT" ;;
+        *) die "unexpected measured balance preset" ;;
+    esac
+    python3 - \
+        "$measured_token_balance_before" "$measured_token_balance_after" \
+        "$ZONES_BENCH_COUNT" "$measured_balance_amount" \
+        "$ZONES_BENCH_NEOBANK_PRESET" <<'PY'
+import sys
+
+before, after, count, amount = map(int, sys.argv[1:5])
+preset = sys.argv[5]
+expected = count * amount
+observed = after - before
+if observed != expected:
+    raise SystemExit(
+        f"{preset} terminal L1 token delta {observed} does not equal {expected}"
+    )
+print(f"{preset} terminal L1 token delta verified: {observed}")
+PY
+fi

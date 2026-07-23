@@ -1,0 +1,100 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: __L1_CHAIN_ID__
+    workload: ./l1-onramp.yml
+
+  zone:
+    network: tempo
+    rpc_url: "${ZONE_PRIVATE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    request_auth:
+      sender_header:
+        name: X-Authorization-Token
+        map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
+        reload_interval: 1s
+    chain_id: __ZONE_CHAIN_ID__
+    workload: ./zone-flow.yml
+
+scenario:
+  name: neobank-private-withdrawal
+  timeout: 10m
+
+  bindings:
+    account:
+      account: { pool: users, select: lease }
+    withdrawal_action_id:
+      bytes32: { random_bytes: 32 }
+
+  steps:
+    - checkpoint: { chain: l1 }
+      save: l1_before_withdrawal
+
+    - submit:
+        chain: zone
+        template: offramp
+        with:
+          from: { var: account.ref }
+          fee_token: "__DLUSD__"
+          call:
+            args:
+              - "__DLUSD__"
+              - "__BRIDGE_WALLET__"
+              - __WITHDRAWAL_ONLY_AMOUNT__
+              - { var: withdrawal_action_id }
+              - 0
+              - { var: account.address }
+              - "0x"
+              - "0x"
+      save: withdrawal
+
+    - wait_receipt:
+        chain: zone
+        transaction_hash: { var: withdrawal.tx_hash }
+        sender: { var: withdrawal.sender }
+      timeout: 45s
+      save: withdrawal_receipt
+
+    - wait_log:
+        chain: zone
+        from_block: { var: withdrawal_receipt.block_number }
+        transaction_hash: { var: withdrawal.tx_hash }
+        sender: { var: withdrawal.sender }
+        address: "__OUTBOX__"
+        abi: ZoneOutbox
+        event: WithdrawalRequested
+        where:
+          sender: { var: account.address }
+          token: "__DLUSD__"
+          to: "__BRIDGE_WALLET__"
+          amount: __WITHDRAWAL_ONLY_AMOUNT__
+          fee: 0
+          memo: { var: withdrawal_action_id }
+          gasLimit: 0
+          data: "0x"
+          revealTo: "0x"
+        max_block_range: 1000
+      timeout: 45s
+      save: withdrawal_requested
+
+    - wait_log:
+        chain: l1
+        from_block: { var: l1_before_withdrawal.block_number }
+        address: "__PORTAL__"
+        abi: ZonePortal
+        event: WithdrawalProcessed
+        where:
+          to: "__BRIDGE_WALLET__"
+          senderTag:
+            keccak256_packed:
+              types: [address, bytes32]
+              values: [{ var: account.address }, { var: withdrawal.tx_hash }]
+          token: "__DLUSD__"
+          amount: __WITHDRAWAL_ONLY_AMOUNT__
+          callbackSuccess: true
+        max_block_range: 1000
+      save: withdrawal_processed

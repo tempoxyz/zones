@@ -82,6 +82,7 @@ fragments:
             sender: { param: sender_address }
             token: { param: token }
           max_block_range: 1000
+        timeout: 45s
         save: enqueued
 
       - use: wait-encrypted-zone-deposit

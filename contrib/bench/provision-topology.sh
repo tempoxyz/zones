@@ -474,7 +474,7 @@ provision_up() {
     esac
     if [[ "$profile" == "neobank" ]]; then
         case "$neobank_preset" in
-            direct-lifecycle|rewards-redemption|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle) ;;
+            direct-lifecycle|encrypted-deposit|private-withdrawal|rewards-redemption|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle) ;;
             *) die "unsupported neobank preset for provisioning: $neobank_preset" ;;
         esac
     fi
@@ -662,7 +662,7 @@ provision_up() {
     if [[ "$profile" == "neobank" ]]; then
         case "$neobank_preset" in
             direct-lifecycle|rewards-redemption|third-party-recipient) zone_token="$PATH_USD" ;;
-            full-journey|slippage-bounce|swapped-lifecycle) zone_token="$DLUSD" ;;
+            encrypted-deposit|full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle) zone_token="$DLUSD" ;;
         esac
     fi
 

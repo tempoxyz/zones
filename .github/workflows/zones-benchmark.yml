@@ -7,8 +7,10 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-rewards-redemption
+        default: neobank-encrypted-deposit
         options:
+          - neobank-encrypted-deposit
+          - neobank-private-withdrawal
           - neobank-rewards-redemption
           - neobank-full-journey
           - neobank-slippage-bounce
@@ -26,7 +28,7 @@ on:
         description: Number of measured transactions, or complete journeys for a scenario.
         type: string
         required: true
-        default: "1000"
+        default: "100"
       tps:
         description: Target phase TPS, or journey starts per second for a scenario.
         type: string
@@ -95,7 +97,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_PHASE: neobank-rewards-redemption
+  ZONES_BENCH_DEFAULT_PHASE: neobank-encrypted-deposit
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -160,7 +162,7 @@ jobs:
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           INPUT_PHASE: ${{ inputs.phase }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
-          INPUT_COUNT: ${{ inputs.count || '1000' }}
+          INPUT_COUNT: ${{ inputs.count || '100' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
           INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
@@ -172,7 +174,7 @@ jobs:
           INPUT_DRAIN_TIMEOUT: "300"
           INPUT_SEED: ""
           INPUT_TEMPO_REF: a55a6395567f529f03fa88bc457584fa8ed89af8
-          INPUT_TXGEN_REF: 03046937d67245d41c121ca840d7add4d95c9d73
+          INPUT_TXGEN_REF: cebfc5661ca713c4c1cf8099d68fde20c7a3b9c0
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
@@ -183,6 +185,16 @@ jobs:
             requested_phase="$ZONES_BENCH_DEFAULT_PHASE"
           fi
           case "$requested_phase" in
+            neobank-encrypted-deposit)
+              phase=neobank-e2e
+              neobank_preset=encrypted-deposit
+              leases_per_journey=1
+              ;;
+            neobank-private-withdrawal)
+              phase=neobank-e2e
+              neobank_preset=private-withdrawal
+              leases_per_journey=1
+              ;;
             neobank-rewards-redemption)
               phase=neobank-e2e
               neobank_preset=rewards-redemption

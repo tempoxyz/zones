@@ -5,7 +5,9 @@ L1 deposit, ordinary Zone activity, and a Zone withdrawal. It also renders a
 production-shaped L1 -> Zone -> L1 scenario that correlates each journey across
 both chains and waits for its deposit and withdrawal to finish. The independent
 phase runner remains available when only one transaction class should be
-measured.
+measured. The neobank profile additionally exposes focused encrypted-deposit
+and private-withdrawal scenarios that provision their own valid starting state
+before measuring one cross-chain direction.
 
 ## Production-shaped benchmark environment
 
@@ -335,12 +337,13 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='03046937d67245d41c121ca840d7add4d95c9d73'
+export TXGEN_REV='cebfc5661ca713c4c1cf8099d68fde20c7a3b9c0'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
 
-That commit is the merge commit for txgen PR #155 on `tempoxyz/txgen:main`.
+That pinned `tempoxyz/txgen:main` revision includes scenario receipt-gas
+publication as well as the encrypted-deposit and callback encoding support.
 
 The paired-manifest and safe-root checks are standalone and do not start nodes
 or build contracts:
@@ -440,10 +443,10 @@ entire bootstrap, preflight, authorization, and measured sequence:
 
 ```bash
 export ZONES_BENCH_SEED='<unique unsigned integer>'
-export ZONES_BENCH_ACCOUNTS=200
-export ZONES_BENCH_COUNT=3000
+export ZONES_BENCH_ACCOUNTS=100
+export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=20
-export ZONES_BENCH_MAX_CONCURRENT=200
+export ZONES_BENCH_MAX_CONCURRENT=100
 export ZONES_BENCH_DEPOSIT_AMOUNT=2000000
 export ZONES_BENCH_ACTIVITY_AMOUNT=1
 export ZONES_BENCH_WITHDRAWAL_AMOUNT=1000000
@@ -679,7 +682,7 @@ configured write RPC. Each job:
    putting the phrase in workflow arguments or artifacts;
 2. restores private writable copies of the two isolated Schelk virgin volumes;
 3. checks out the exact Tempo revision and txgen commit
-   `03046937d67245d41c121ca840d7add4d95c9d73`, then builds Tempo and Zone
+   `cebfc5661ca713c4c1cf8099d68fde20c7a3b9c0`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
@@ -695,13 +698,32 @@ configured write RPC. Each job:
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
 8. for `neobank-e2e`, deploys the checked-in Earn boundary fixtures, configures
-   the closed-loop token and recipient policy, prepares approvals and private
-   RPC authorization, and runs the selected measured scenario;
+   the DirectSwap-backed closed-loop token and recipient policy, prepares
+   approvals and private RPC authorization, and runs the selected measured
+   scenario. The `neobank-private-withdrawal` selection first creates and
+   verifies portal-backed private DLUSD outside measurement;
 9. for `deposit`, runs the independent preflight/generate/bench pipeline; and
 10. renders the JSON report into a Markdown results page on the workflow
    overview, then uploads that page with the rendered benchmark assets,
    host/storage metadata, JSON reports, and node logs before stopping the nodes
    and restoring the benchmark volumes.
+
+The focused neobank dispatch choices use these boundaries and reporting
+routes:
+
+| Workflow phase | Untimed setup | Measured completion | Results route |
+| --- | --- | --- | --- |
+| `neobank-encrypted-deposit` | Fixture deployment and portal approval | Exact Zone `EncryptedDepositProcessed` correlated to the receipt-scoped L1 encrypted deposit | `/scenarios/neobank-encrypted-deposit` |
+| `neobank-private-withdrawal` | Encrypted DLUSD funding for every account and DLUSD outbox approval | Exact L1 `WithdrawalProcessed` correlated to the successful Zone receipt and receipt-scoped `WithdrawalRequested` | `/scenarios/neobank-private-withdrawal` |
+
+The withdrawal setup deposits
+`ceil(count / accounts) * deposit-amount` DLUSD to each account and waits for
+each exact terminal Zone event. Measurement does not begin until those balances
+and allowance checks pass. The measured request uses `gasLimit=0`, empty
+callback data and `revealTo`, the benchmark account as fallback recipient, and
+the Bridge-wallet fixture as the allowlisted L1 recipient. See
+`docs/NEOBANK_PRIVATE_ZONE_BENCHMARK.md` for the complete event keys and local
+commands.
 
 Repeat runs use the pinned Tempo benchmark's commit-and-feature-keyed MinIO
 cache for the `tempo` binary. Cache misses build from source and, when the
@@ -729,13 +751,20 @@ UI or CLI and select the branch/ref to test:
 ```bash
 gh workflow run zones-benchmark.yml \
   --ref '<branch-or-tag>' \
-  -f phase=roundtrip \
-  -f accounts=200 \
-  -f count=3000 \
+  -f phase=neobank-full-journey \
+  -f accounts=100 \
+  -f count=100 \
   -f tps=20 \
-  -f max-concurrent=200 \
+  -f max-concurrent=100 \
   -f state-bloat-gib=1 \
   -f force-bloat=false
+```
+
+For one-direction smoke runs, change only the phase:
+
+```bash
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-encrypted-deposit -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-private-withdrawal -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
 ```
 
 Set `force-bloat=true` only to replace the paired L1 baseline for the selected
@@ -748,12 +777,13 @@ GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
 file exists on the default branch. Before merge, opening, reopening, or pushing
 a commit to a same-repository PR whose cumulative diff touches the workflow,
 `contrib/bench`, `xtask`, or this document runs `neobank-full-journey` with the
-workflow defaults. The authorization job requires both the triggering actor and
-PR author to have repository write access and rejects fork PRs. A newer commit
-cancels an obsolete run for the same PR, while benchmark jobs from different
-PRs and manual dispatches serialize on the shared Schelk host resources. The
-scripts can also be executed directly on the benchmark host while the workflow
-is under review.
+fast validation defaults: 100 accounts, 100 journeys, 20 journey starts per
+second, and 100 maximum in flight. The authorization job requires both the
+triggering actor and PR author to have repository write access and rejects fork
+PRs. A newer commit cancels an obsolete run for the same PR, while benchmark
+jobs from different PRs and manual dispatches serialize on the shared Schelk
+host resources. The scripts can also be executed directly on the benchmark host
+while the workflow is under review.
 
 This is a public repository, and a `pull_request` run evaluates the workflow
 definition from the PR. The GitHub repository or organization policy must
@@ -761,11 +791,14 @@ require approval for outside-collaborator workflows before they can reach a
 self-hosted runner. The same-repository and write-permission checks above are
 defense in depth; they do not replace that GitHub-side policy.
 
-Activity and withdrawal are intentionally not dispatch choices because this
-self-provisioning workflow starts from a fresh pool with no pre-existing Zone
-balance. Run their independent assets manually against a fixture that passes
-`--fixture-state funded`, or select `roundtrip` to create balances within each
-measured journey.
+Generic `activity` and `withdrawal` are intentionally not dispatch choices
+because this self-provisioning workflow starts from a fresh pool with no
+pre-existing Zone balance. Run their independent assets manually against a
+fixture that passes `--fixture-state funded`, or select `roundtrip` to create
+balances within each measured journey. The focused
+`neobank-private-withdrawal` choice is self-contained: it creates encrypted,
+portal-backed DLUSD per account and confirms those deposits outside measurement
+before starting the withdrawal load.
 
 ### Scenario reporting
 

@@ -15,10 +15,18 @@ boundaries:
 5. a DLUSD off-ramp to the bridge-wallet fixture and its exact
    `WithdrawalProcessed` event.
 
-The gateway, vault adapter, rewards controller, engine, Bridge DirectSwap stack, and proxy are the
-Earn boundary fixtures from #750 under
-`specs/ref-impls/test/fixtures/earn`. Foundry builds their artifacts alongside
-the Zone specs; benchmark provisioning never fetches or clones external source.
+Two focused presets reuse the same topology and correlation rules when only
+one bridge direction should be loaded. `encrypted-deposit` measures the first
+boundary independently. `private-withdrawal` prepares portal-backed private
+DLUSD outside measurement, then measures the fifth boundary independently.
+
+The gateway, vault adapter, rewards controller, engine, Bridge DirectSwap stack,
+and proxy are Earn boundary fixtures from #750 and #809 under
+`specs/ref-impls/test/fixtures/earn`. The DirectSwap deployment includes the V2
+swap contract, controller, handler, authorization registry, TIP-20 adapter, and
+reserve ledger used by the L1 callback route. Foundry builds their artifacts
+alongside the Zone specs; benchmark provisioning never fetches or clones
+external source.
 
 ## Topology and policy
 
@@ -26,8 +34,8 @@ Provision the existing two-validator L1 plus authenticated private Zone RPC.
 The local Tempo genesis supplies DLUSD and pathUSD. The neobank profile creates
 EarnToken through the native TIP-20 factory and selects the initial Zone token
 for the requested preset: DLUSD for the full, swapped, and slippage-bounce
-lifecycle flows, or pathUSD for the direct, third-party-recipient, and rewards
-redemption flows. It deploys
+lifecycle flows, encrypted-deposit, and private-withdrawal, or pathUSD for the
+direct, third-party-recipient, and rewards redemption flows. It deploys
 the copied Earn proxy stack outside the measured interval and enables EarnToken
 on the portal. The stable asset not selected by the preset remains L1-only. The
 profile does not replace these assets with ordinary ERC-20 test contracts.
@@ -57,7 +65,12 @@ the full cross-chain timeout.
 ## Rendered assets
 
 `contrib/bench/neobank/private-flow-scenario.yml` describes the complete
-journey. `swapped-lifecycle-scenario.yml` isolates the encrypted DLUSD entry,
+journey. `encrypted-deposit-scenario.yml` isolates an encrypted DLUSD portal
+deposit and its exact L1 enqueue and Zone terminal events.
+`private-withdrawal-funding-scenario.yml` creates portal-backed private DLUSD
+outside measurement, while `private-withdrawal-scenario.yml` measures the
+corresponding outbox request and exact L1 terminal event.
+`swapped-lifecycle-scenario.yml` isolates the encrypted DLUSD entry,
 swapped Earn deposit, and swapped Earn redemption path used by the lifecycle
 load test. `direct-lifecycle-scenario.yml` instead measures an encrypted pathUSD
 entry, a pathUSD vault deposit without a DEX swap, and redemption of the exact
@@ -116,9 +129,89 @@ Set `ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle` before provisioning for the
 swapped stablecoin lifecycle, `third-party-recipient` for the two-user direct
 lifecycle, `slippage-bounce` for the failed-callback return path,
 `rewards-redemption` for the rewarded private-holder redemption path, or
-`full-journey` for the five-boundary journey. The selected preset is recorded
-in the workflow summary and run metadata while the rendered scenario remains
-at the stable results-renderer path.
+`full-journey` for the five-boundary journey. Use `encrypted-deposit` for the
+focused onramp and `private-withdrawal` for the focused off-ramp. The selected
+preset is recorded in the workflow summary and run metadata while the rendered
+scenario remains at the stable results-renderer path.
+
+The fast validation defaults are 100 accounts, 100 complete journeys, 20
+journey starts per second, and at most 100 in flight. Increase those values only
+after the selected preset completes successfully at that scale.
+
+### Focused encrypted-deposit load
+
+The measured boundary starts at the per-journey Zone checkpoint and in-memory
+encryption preparation, submits `ZonePortal.depositEncrypted` on L1, matches the
+receipt-scoped `EncryptedDepositMade`, and ends at the exact
+`EncryptedDepositProcessed` in the Zone. The matcher ties the terminal event to
+the L1 deposit hash, sender, recipient, DLUSD address, net amount, and random
+action ID. Portal approval is setup traffic and is excluded from latency and
+throughput.
+
+Run the focused preset locally against a freshly provisioned neobank topology:
+
+```bash
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/encrypted-deposit-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=encrypted-deposit
+export ZONES_BENCH_ACCOUNTS=100
+export ZONES_BENCH_COUNT=100
+export ZONES_BENCH_TPS=20
+export ZONES_BENCH_MAX_CONCURRENT=100
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
+contrib/bench/run-neobank-private-flow.sh
+```
+
+After the workflow reaches the default branch, the equivalent one-command CI
+invocation is:
+
+```bash
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-encrypted-deposit -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
+```
+
+Published scenario reports use the `neobank-encrypted-deposit` results route.
+
+### Focused private-withdrawal load
+
+This preset first deposits `ceil(count/accounts) * deposit-amount` DLUSD to
+each benchmark account through the encrypted portal path. That funding run,
+portal approval, and user outbox approval are setup traffic. The runner waits
+for the exact terminal Zone deposit events and verifies that each account can
+cover every withdrawal plus its worst-case Zone transaction fee cap before it
+starts measurement.
+
+Each measured journey checkpoints L1, submits the exact eight-argument outbox
+withdrawal with `gasLimit=0`, empty callback data, empty `revealTo`, the leased
+account as fallback recipient, and a random action ID as memo. It then requires
+the successful Zone receipt, its receipt-scoped `WithdrawalRequested`, and the
+exact L1 `WithdrawalProcessed` for the Bridge wallet. The terminal matcher uses
+the sender tag derived from the Zone sender and request transaction hash, plus
+the DLUSD token, amount, recipient, and successful callback flag. The runner
+also verifies the Bridge wallet's aggregate L1 DLUSD increase after the run.
+
+Run it locally with the same fast defaults:
+
+```bash
+export ZONES_BENCH_ENV_FILE=target/zones-benchmark/private-withdrawal-topology.env
+export ZONES_BENCH_PROFILE=neobank
+export ZONES_BENCH_NEOBANK_PRESET=private-withdrawal
+export ZONES_BENCH_ACCOUNTS=100
+export ZONES_BENCH_COUNT=100
+export ZONES_BENCH_TPS=20
+export ZONES_BENCH_MAX_CONCURRENT=100
+contrib/bench/provision-topology.sh up
+source "$ZONES_BENCH_ENV_FILE"
+contrib/bench/run-neobank-private-flow.sh
+```
+
+The equivalent one-command CI invocation is:
+
+```bash
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-private-withdrawal -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
+```
+
+Published scenario reports use the `neobank-private-withdrawal` results route.
 
 To provision and run the direct path independently, use the same preset for
 both commands so provisioning selects pathUSD as the enabled Zone stable asset:
