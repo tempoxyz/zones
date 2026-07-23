@@ -42,6 +42,7 @@ use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use schnellru::{ByLength, LruMap};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
+use tokio::sync::OnceCell;
 use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
@@ -197,6 +198,9 @@ pub struct BatchSubmitter {
     anchor_config: BatchAnchorConfig,
     /// Signatures from followers attesting to the batch.
     attestation_store: Option<AttestationStore>,
+    /// L1 chain ID used by settlement EIP-712 domains. This is immutable for the
+    /// lifetime of the provider, so resolve it once and reuse it for every batch.
+    l1_chain_id: OnceCell<u64>,
     /// Validated, RLP-encoded L1 headers retained across overlapping ancestry
     /// requests. Settlement batches are submitted in order, so later requests
     /// can reuse almost the entire preceding range.
@@ -342,6 +346,7 @@ impl BatchSubmitter {
             l1_fetch_concurrency: 16,
             anchor_config,
             attestation_store: None,
+            l1_chain_id: OnceCell::const_new(),
             ancestry_header_cache: RwLock::new(LruMap::new(ByLength::new(
                 DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY,
             ))),
@@ -351,6 +356,16 @@ impl BatchSubmitter {
     /// Attach the shared store populated by leader and follower settlement signatures.
     pub fn set_attestation_store(&mut self, store: Option<AttestationStore>) {
         self.attestation_store = store;
+    }
+
+    async fn l1_chain_id(&self) -> Result<u64> {
+        let chain_id = self
+            .l1_chain_id
+            .get_or_try_init(|| async {
+                Ok::<_, eyre::Report>(self.l1_provider.get_chain_id().await?)
+            })
+            .await?;
+        Ok(*chain_id)
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
@@ -540,7 +555,7 @@ impl BatchSubmitter {
             signer.address()
         );
         let verifier = self.portal.verifier().call().await?;
-        let chain_id = self.l1_provider.get_chain_id().await?;
+        let chain_id = self.l1_chain_id().await?;
 
         let domain = eip712_domain! {
             name: "ZonePortal",
@@ -1767,6 +1782,20 @@ mod tests {
 
         assert!(matches!(mode, AnchorMode::Direct));
         assert_eq!(current_l1_block, 100);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn l1_chain_id_is_fetched_only_once() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let submitter = BatchSubmitter::new(Address::ZERO, provider);
+
+        asserter.push_success(&1337_u64);
+        assert_eq!(submitter.l1_chain_id().await.unwrap(), 1337);
+        assert_eq!(submitter.l1_chain_id().await.unwrap(), 1337);
         assert!(asserter.read_q().is_empty());
     }
 
