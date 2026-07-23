@@ -7,10 +7,10 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-full-journey
+        default: neobank-rewards-redemption
         options:
-          - neobank-full-journey
           - neobank-rewards-redemption
+          - neobank-full-journey
           - neobank-slippage-bounce
           - neobank-third-party-recipient
           - neobank-direct-lifecycle
@@ -69,7 +69,7 @@ on:
         default: "1000000"
 
   # workflow_dispatch is unavailable until this file reaches the default branch.
-  # Until then, benchmark-harness changes run the complete neobank journey on PR updates.
+  # Until then, benchmark-harness changes run the selected validation preset on PR updates.
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -95,7 +95,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_PHASE: neobank-full-journey
+  ZONES_BENCH_DEFAULT_PHASE: neobank-rewards-redemption
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -329,7 +329,6 @@ jobs:
       ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
       ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
       ZONES_BENCH_GITHUB_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-      ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
       CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
       CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
       CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
@@ -368,6 +367,10 @@ jobs:
         if: needs.authorize.outputs.phase == 'roundtrip' || needs.authorize.outputs.phase == 'neobank-e2e'
         run: |
           set -euo pipefail
+          if [ -z "$CLICKHOUSE_URL" ] && [ -z "$CLICKHOUSE_USER" ] && [ -z "$CLICKHOUSE_PASSWORD" ]; then
+            echo "ClickHouse Actions secrets are unavailable; retaining the JSON scenario report only"
+            exit 0
+          fi
           for name in CLICKHOUSE_URL CLICKHOUSE_USER CLICKHOUSE_PASSWORD; do
             if [ -z "${!name}" ]; then
               echo "::error::$name is not available to the Zones benchmark workflow"

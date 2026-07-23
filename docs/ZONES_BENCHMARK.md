@@ -775,9 +775,9 @@ validator B for aggregate queries; unlike the independent deposit pipeline, it
 does not spread L1 submissions across both validators.
 
 Scenario mode writes the journey and per-step latency JSON report and publishes
-the same finalized measured report to ClickHouse. CI requires the
-`CLICKHOUSE_URL`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD` Actions secrets
-to be available to this repository;
+the same finalized measured report to ClickHouse when `CLICKHOUSE_URL`,
+`CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD` Actions secrets are available to
+this repository. Without them, the workflow retains the JSON report only;
 credentials remain in the process environment, while txgen receives only the
 credential-free endpoint and non-secret run/ref metadata. Local runs omit the
 ClickHouse destination unless those variables are set. The workflow combines
