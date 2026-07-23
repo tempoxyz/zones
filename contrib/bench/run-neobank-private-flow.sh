@@ -389,7 +389,7 @@ send_zone_approval_round() {
 
     {
         printf 'chain_id: %s\n\n' "$zone_chain_id"
-        printf 'gas:\n  max_fee_per_gas: %s\n  max_priority_fee_per_gas: %s\n\n' "$zone_fee" "$zone_fee"
+        printf 'gas:\n  max_fee_per_gas: %s\n  max_priority_fee_per_gas: %s\n\n' "$zone_fee" "$zone_priority_fee"
         printf 'accounts:\n  users:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    range: [%s, %s]\n  sponsor:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    index: %s\n\n' "$ZONES_BENCH_ACCOUNT_START" "$account_end" "$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX"
         printf 'artifacts:\n  TIP20: txgen/abis/tip20.json\n\nsetup:\n  steps:\n'
         for ((index = 0; index < 10#$ZONES_BENCH_ACCOUNTS; index++)); do
@@ -457,8 +457,10 @@ cp contrib/bench/neobank/abis/*.json "$ZONES_BENCH_OUTPUT/abis/"
 zone_id="$(jq -er '.zoneId' "$ZONES_BENCH_OUTPUT/preflight.json")"
 l1_chain_id="$(cast chain-id --rpc-url "$L1_RPC_URL")"
 zone_chain_id="$(cast chain-id --rpc-url "$ZONE_RPC_URL")"
-l1_fee="$(cast gas-price --rpc-url "$L1_RPC_URL")"
-zone_fee="$(cast gas-price --rpc-url "$ZONE_RPC_URL")"
+l1_fee="$(jq -er '.l1MaxFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
+l1_priority_fee="$(jq -er '.l1MaxPriorityFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
+zone_fee="$(jq -er '.zoneMaxFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
+zone_priority_fee="$(jq -er '.zoneMaxPriorityFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
 account_end=$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))
 control_account_end=$((10#$ZONES_BENCH_CONTROL_ACCOUNT_INDEX + 1))
 sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
@@ -478,8 +480,8 @@ for source in "${render_sources[@]}"; do
         -e "s|__ZONE_ID__|$zone_id|g" -e "s|__ACCOUNT_START__|$ZONES_BENCH_ACCOUNT_START|g" -e "s|__ACCOUNT_END__|$account_end|g" \
         -e "s|__CONTROL_ACCOUNT_INDEX__|$ZONES_BENCH_CONTROL_ACCOUNT_INDEX|g" -e "s|__CONTROL_ACCOUNT_END__|$control_account_end|g" \
         -e "s|__SEQUENCER_ACCOUNT_INDEX__|$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX|g" -e "s|__SEQUENCER_ACCOUNT_END__|$sequencer_account_end|g" \
-        -e "s|__L1_MAX_FEE_PER_GAS__|$l1_fee|g" -e "s|__L1_MAX_PRIORITY_FEE_PER_GAS__|$l1_fee|g" \
-        -e "s|__ZONE_MAX_FEE_PER_GAS__|$zone_fee|g" -e "s|__ZONE_MAX_PRIORITY_FEE_PER_GAS__|$zone_fee|g" \
+        -e "s|__L1_MAX_FEE_PER_GAS__|$l1_fee|g" -e "s|__L1_MAX_PRIORITY_FEE_PER_GAS__|$l1_priority_fee|g" \
+        -e "s|__ZONE_MAX_FEE_PER_GAS__|$zone_fee|g" -e "s|__ZONE_MAX_PRIORITY_FEE_PER_GAS__|$zone_priority_fee|g" \
         -e "s|__PORTAL__|$L1_PORTAL_ADDRESS|g" -e "s|__INBOX__|0x1c00000000000000000000000000000000000001|g" -e "s|__OUTBOX__|0x1c00000000000000000000000000000000000002|g" \
         -e "s|__ZONE_TOKEN__|$ZONES_BENCH_TOKEN|g" \
         -e "s|__DLUSD__|$ZONES_BENCH_DLUSD|g" -e "s|__PATHUSD__|$ZONES_BENCH_PATHUSD|g" -e "s|__EARN_TOKEN__|$ZONES_BENCH_EARN_TOKEN|g" \

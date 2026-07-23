@@ -19,7 +19,7 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T7_BASE_FEE_CAP};
 use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::{
@@ -178,7 +178,7 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long)]
     l1_max_fee_per_gas: Option<u128>,
 
-    /// Override L1 maxPriorityFeePerGas (defaults to maxFeePerGas).
+    /// Override L1 maxPriorityFeePerGas (defaults to zero).
     #[arg(long)]
     l1_max_priority_fee_per_gas: Option<u128>,
 
@@ -273,7 +273,9 @@ struct PreflightReport {
     queried_l1_gas_price: u128,
     queried_zone_gas_price: u128,
     l1_max_fee_per_gas: u128,
+    l1_max_priority_fee_per_gas: u128,
     zone_max_fee_per_gas: u128,
+    zone_max_priority_fee_per_gas: u128,
     approval_fee_bump: u128,
     activity_fee_bump: u128,
     activity_max_fee_per_gas: u128,
@@ -613,10 +615,14 @@ impl BenchmarkPreflight {
             withdrawal_fee,
         )?;
 
-        let l1_max_fee_per_gas = self.l1_max_fee_per_gas.unwrap_or(queried_l1_gas_price);
-        let l1_max_priority_fee_per_gas = self
-            .l1_max_priority_fee_per_gas
-            .unwrap_or(l1_max_fee_per_gas);
+        // Tempo T7 adjusts the base fee between blocks. Callback-heavy benchmark traffic can
+        // raise it after preflight, so a cap copied from eth_gasPrice can become inadmissible
+        // before the next scenario transaction is submitted. Keep the rendered cap valid across
+        // T7's full base-fee range while retaining a higher configured or queried value.
+        let l1_max_fee_per_gas = self
+            .l1_max_fee_per_gas
+            .unwrap_or_else(|| default_l1_max_fee_per_gas(queried_l1_gas_price));
+        let l1_max_priority_fee_per_gas = self.l1_max_priority_fee_per_gas.unwrap_or_default();
         // A fresh Zone can return zero from eth_gasPrice before it has ordinary transaction
         // history. Its genesis and public transaction filler still use Tempo's T0 base fee, so
         // never render or budget a zero-fee transaction from that estimate.
@@ -935,7 +941,9 @@ impl BenchmarkPreflight {
             queried_l1_gas_price,
             queried_zone_gas_price,
             l1_max_fee_per_gas,
+            l1_max_priority_fee_per_gas,
             zone_max_fee_per_gas,
+            zone_max_priority_fee_per_gas,
             approval_fee_bump,
             activity_fee_bump,
             activity_max_fee_per_gas,
@@ -1085,6 +1093,10 @@ fn validate_gas_prices(label: &str, max_fee: u128, max_priority: u128) -> eyre::
         "{label} maxPriorityFeePerGas {max_priority} exceeds maxFeePerGas {max_fee}"
     );
     Ok(())
+}
+
+fn default_l1_max_fee_per_gas(queried_gas_price: u128) -> u128 {
+    queried_gas_price.max(u128::from(TEMPO_T7_BASE_FEE_CAP))
 }
 
 fn expiring_fee_caps(
@@ -1871,6 +1883,18 @@ mod tests {
     }
 
     #[test]
+    fn l1_fee_cap_covers_t7_base_fee_movement() {
+        assert_eq!(
+            default_l1_max_fee_per_gas(600_000_000),
+            u128::from(TEMPO_T7_BASE_FEE_CAP)
+        );
+        assert_eq!(
+            default_l1_max_fee_per_gas(u128::from(TEMPO_T7_BASE_FEE_CAP) + 1),
+            u128::from(TEMPO_T7_BASE_FEE_CAP) + 1
+        );
+    }
+
+    #[test]
     fn derives_expected_account_range_without_serializing_mnemonic() {
         let signers = derive_signers(TEST_MNEMONIC, 2, 4).unwrap();
         assert_eq!(signers.len(), 2);
@@ -1898,7 +1922,9 @@ mod tests {
             queried_l1_gas_price: 1,
             queried_zone_gas_price: 1,
             l1_max_fee_per_gas: 1,
+            l1_max_priority_fee_per_gas: 0,
             zone_max_fee_per_gas: 1,
+            zone_max_priority_fee_per_gas: 0,
             approval_fee_bump: 1,
             activity_fee_bump: 1,
             activity_max_fee_per_gas: 2,
@@ -1913,11 +1939,10 @@ mod tests {
             sequencer_account: AccountReport::from(&fixture_account(4, U256::ZERO)),
             accounts: vec![],
         };
-        assert!(
-            !serde_json::to_string(&report)
-                .unwrap()
-                .contains(TEST_MNEMONIC)
-        );
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(serialized["l1MaxPriorityFeePerGas"], 0);
+        assert_eq!(serialized["zoneMaxPriorityFeePerGas"], 0);
+        assert!(!serialized.to_string().contains(TEST_MNEMONIC));
     }
 
     #[test]
@@ -1954,6 +1979,14 @@ mod tests {
         }
         let deposit: Value =
             serde_yaml::from_str(&fs::read_to_string(output.join("deposit.yml")).unwrap()).unwrap();
+        assert_eq!(
+            deposit["gas"]["max_fee_per_gas"].as_u64(),
+            Some(config.l1_max_fee_per_gas as u64)
+        );
+        assert_eq!(
+            deposit["gas"]["max_priority_fee_per_gas"].as_u64(),
+            Some(config.l1_max_priority_fee_per_gas as u64)
+        );
         assert_eq!(deposit["setup"]["steps"].as_sequence().unwrap().len(), 2);
         assert!(
             deposit["setup"]["steps"][0]["tx"]
@@ -2966,7 +2999,7 @@ mod tests {
             withdrawal_amount: 100_000,
             bootstrap_deposit_amount: 10_000_000,
             l1_max_fee_per_gas: 100_000_000_000,
-            l1_max_priority_fee_per_gas: 100_000_000_000,
+            l1_max_priority_fee_per_gas: 0,
             zone_max_fee_per_gas: 200_000_000_000,
             zone_max_priority_fee_per_gas: 200_000_000_000,
             deposit_gas_limit: 2_000_000,
