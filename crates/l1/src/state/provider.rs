@@ -2,7 +2,7 @@
 //!
 //! [`L1StateProvider`] wraps a [`L1StateCache`] and a [`DynProvider<TempoNetwork>`] backed by an
 //! HTTP transport. Reads are served from the in-memory cache when possible. On cache miss the
-//! provider falls back to `eth_getStorageAt` via the shared HTTP provider and writes the result
+//! provider falls back to `eth_getProof` via the shared HTTP provider and writes the result
 //! back into the cache.
 //!
 //! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
@@ -10,7 +10,7 @@
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
 //! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
@@ -248,12 +248,27 @@ impl L1StateProvider {
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
     async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
-        let key = U256::from_be_bytes(slot.0);
         let block_id = BlockId::number(block_number);
-        let value: U256 = self.provider.get_storage_at(address, key).block_id(block_id).await.map_err(|e| {
-            warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
-            eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
-        })?;
+        let proof = self
+            .provider
+            .get_proof(address, vec![slot])
+            .block_id(block_id)
+            .await
+            .map_err(|e| {
+                warn!(%address, %slot, block_number, %e, "eth_getProof RPC call failed");
+                eyre::eyre!(
+                    "eth_getProof failed for address={address} slot={slot} block={block_number}: {e}"
+                )
+            })?;
+        let value = proof
+            .storage_proof
+            .first()
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "eth_getProof returned no storage proof for address={address} slot={slot} block={block_number}"
+                )
+            })?
+            .value;
 
         let result = B256::from(value.to_be_bytes());
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");

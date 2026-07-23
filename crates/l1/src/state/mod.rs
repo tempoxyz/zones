@@ -4,7 +4,7 @@
 //!
 //! - [`L1StateCache`] — a shared in-memory cache of L1 contract storage slots.
 //! - [`L1StateCacheInner`] — the block-versioned cache storage guarded by [`L1StateCache`].
-//! - [`L1StateProvider`] — a cache-first, RPC-fallback reader for `eth_getStorageAt`.
+//! - [`L1StateProvider`] — a cache-first, RPC-fallback reader using `eth_getProof`.
 //!
 //! TIP-20 and TIP-403 policy semantics are evaluated by Tempo's upstream precompiles. This
 //! module only supplies their exact-block raw L1 storage view.
