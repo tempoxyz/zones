@@ -12,8 +12,8 @@ use eyre::{Context as _, ensure, eyre};
 use serde::Serialize;
 use std::{fs, path::PathBuf};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
-use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
-use tempo_precompiles::TIP20_FACTORY_ADDRESS;
+use tempo_contracts::precompiles::{IRolesAuth, IStablecoinDEX, ITIP20, ITIP20Factory};
+use tempo_precompiles::{STABLECOIN_DEX_ADDRESS, TIP20_FACTORY_ADDRESS};
 use tempo_zone_contracts::ZonePortal;
 
 use crate::zone_utils::check;
@@ -121,6 +121,14 @@ alloy::sol! {
         constructor(address directSwap_, address tokenA_, address tokenB_);
     }
 
+    contract FixtureTempoStablecoinDexStableSwapAdapter {
+        constructor(address stablecoinDex_);
+    }
+
+    contract FixtureSimpleDirectSwap {
+        constructor(address tokenA_, address tokenB_);
+    }
+
     contract FixtureClosedLoopZoneGateway {
         constructor(
             address vaultAdapter_,
@@ -133,6 +141,31 @@ alloy::sol! {
 
     contract FixtureVaultRewards {
         constructor(address adapter_, address owner_);
+    }
+}
+
+const EARN_FIXTURE_README: &str =
+    include_str!("../../specs/ref-impls/test/fixtures/earn/README.md");
+const DEFAULT_DEPLOYMENT_GAS_LIMIT: u64 = 30_000_000;
+const DIRECT_SWAP_ABSOLUTE_MAX: u128 = 1_000_000_000_000_000;
+const STABLECOIN_DEX_LIQUIDITY_TICK: i16 = 0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SwapMechanism {
+    #[default]
+    DirectSwap,
+    Simple,
+    StablecoinDex,
+}
+
+impl SwapMechanism {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::DirectSwap => "direct-swap",
+            Self::Simple => "simple",
+            Self::StablecoinDex => "stablecoin-dex",
+        }
     }
 }
 
@@ -162,9 +195,18 @@ pub(crate) struct DeployNeobankFixtures {
     #[arg(long)]
     output: PathBuf,
 
-    /// DLUSD reserve capacity seeded into the Bridge controller outside measurement.
+    /// Untimed per-side liquidity seeded into the selected swap mechanism.
     #[arg(long, default_value_t = 10_000_000_000_u128)]
     liquidity: u128,
+
+    /// L1 swap implementation exercised by the Zone gateway.
+    #[arg(
+        long,
+        env = "ZONES_BENCH_SWAP_MECHANISM",
+        value_enum,
+        default_value_t = SwapMechanism::DirectSwap
+    )]
+    swap_mechanism: SwapMechanism,
 }
 
 #[derive(Serialize)]
@@ -176,12 +218,21 @@ struct FixtureMetadata {
     dlusd: String,
     pathusd: String,
     earn_token: String,
-    direct_swap: String,
-    swap_adapter: String,
-    tip20_controller: String,
-    tip20_handler: String,
-    auth_registry: String,
-    reserve_ledger: String,
+    swap_mechanism: SwapMechanism,
+    default_swapper: String,
+    route_swapper: Option<String>,
+    route_override: bool,
+    stablecoin_dex: String,
+    direct_swap: Option<String>,
+    simple_swap: Option<String>,
+    swap_adapter: Option<String>,
+    tip20_controller: Option<String>,
+    tip20_handler: Option<String>,
+    auth_registry: Option<String>,
+    reserve_ledger: Option<String>,
+    liquidity: u128,
+    liquidity_tick: i16,
+    earn_fixture_revision: &'static str,
     vault: String,
     engine: String,
     vault_adapter: String,
@@ -190,13 +241,20 @@ struct FixtureMetadata {
     bridge_wallet: String,
 }
 
+#[derive(Default)]
+struct SwapSetup {
+    route_swapper: Option<Address>,
+    direct_swap: Option<Address>,
+    simple_swap: Option<Address>,
+    tip20_controller: Option<Address>,
+    tip20_handler: Option<Address>,
+    auth_registry: Option<Address>,
+    reserve_ledger: Option<Address>,
+}
+
 impl DeployNeobankFixtures {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        ensure!(self.liquidity > 0, "--liquidity must be greater than zero");
-        ensure!(
-            self.liquidity < (1_u128 << 96),
-            "--liquidity exceeds the Bridge DirectSwap uint96 transaction limit"
-        );
+        validate_liquidity(self.swap_mechanism, self.liquidity)?;
         let deployer = signer_from_env("FIXTURE_DEPLOYER_KEY")?;
         let deployer_address = deployer.address();
         let portal_admin = signer_from_env("PORTAL_ADMIN_KEY")?;
@@ -225,194 +283,54 @@ impl DeployNeobankFixtures {
         ensure!(messenger != Address::ZERO, "ZonePortal messenger is zero");
         let earn_token =
             create_earn_token(&deployer_provider, deployer_address, self.pathusd).await?;
-        let reserve_ledger =
-            create_reserve_ledger(&deployer_provider, deployer_address, self.pathusd).await?;
-
-        let auth_registry = deploy(
-            &deployer_provider,
-            load_bytecode(&self.specs_out, "AuthRegistry.sol/AuthRegistry")?,
-            "Bridge AuthRegistry",
-        )
-        .await?;
-        let controller_implementation = deploy(
-            &deployer_provider,
-            with_constructor(
-                load_bytecode(&self.specs_out, "TIP20Controller.sol/TIP20Controller")?,
-                FixtureTIP20Controller::constructorCall {
-                    reserveLedgerToken_: reserve_ledger,
-                    disableInitializer_: true,
-                }
-                .abi_encode(),
-            ),
-            "Bridge TIP20Controller implementation",
-        )
-        .await?;
-        let controller = deploy(
-            &deployer_provider,
-            with_constructor(
-                load_bytecode(&self.specs_out, "TestERC1967Proxy.sol/TestERC1967Proxy")?,
-                FixtureTestERC1967Proxy::constructorCall {
-                    implementation: controller_implementation,
-                    initialization: Bytes::from(
-                        BridgeTIP20Controller::initializeCall {
-                            admin: deployer_address,
-                        }
-                        .abi_encode(),
-                    ),
-                }
-                .abi_encode(),
-            ),
-            "Bridge TIP20Controller proxy",
-        )
-        .await?;
-        for (token, label) in [
-            (self.dlusd, "DLUSD"),
-            (self.pathusd, "pathUSD"),
-            (reserve_ledger, "reserve ledger"),
-        ] {
-            let issuer_role = ITIP20::new(token, &deployer_provider)
-                .ISSUER_ROLE()
-                .call()
-                .await
-                .wrap_err_with(|| format!("failed querying {label} issuer role"))?;
-            let receipt = IRolesAuth::new(token, &deployer_provider)
-                .grantRole(issuer_role, controller)
-                .fee_token(self.pathusd)
-                .send()
-                .await
-                .wrap_err_with(|| format!("failed granting Bridge controller {label} issuer role"))?
-                .get_receipt()
-                .await
-                .wrap_err_with(|| {
-                    format!("failed waiting for Bridge controller {label} issuer role")
-                })?;
-            check(
-                &receipt,
-                &format!("grant Bridge controller {label} issuer role"),
-            )?;
-        }
-        let handler = deploy(
+        let default_swapper = deploy(
             &deployer_provider,
             with_constructor(
                 load_bytecode(
                     &self.specs_out,
-                    "TIP20DirectSwapHandler.sol/TIP20DirectSwapHandler",
+                    "TempoStablecoinDexStableSwapAdapter.sol/TempoStablecoinDexStableSwapAdapter",
                 )?,
-                FixtureTIP20DirectSwapHandler::constructorCall {
-                    admin_: deployer_address,
-                    controller_: controller,
-                    reserveLedgerToken_: reserve_ledger,
+                FixtureTempoStablecoinDexStableSwapAdapter::constructorCall {
+                    stablecoinDex_: STABLECOIN_DEX_ADDRESS,
                 }
                 .abi_encode(),
             ),
-            "Bridge TIP20DirectSwapHandler",
+            "TempoStablecoinDexStableSwapAdapter",
         )
         .await?;
-        let controller_contract = BridgeTIP20Controller::new(controller, &deployer_provider);
-        for (role, account, label) in [
-            (
-                controller_contract
-                    .UNWRAPPER_ROLE()
-                    .call()
-                    .await
-                    .wrap_err("failed querying Bridge controller unwrapper role")?,
-                handler,
-                "grant Bridge handler unwrapper role",
-            ),
-            (
-                controller_contract
-                    .BRIDGE_ECOSYSTEM_CONTRACT_ROLE()
-                    .call()
-                    .await
-                    .wrap_err("failed querying Bridge controller ecosystem role")?,
-                deployer_address,
-                "grant Bridge deployer ecosystem role",
-            ),
-        ] {
-            let receipt = IRolesAuth::new(controller, &deployer_provider)
-                .grantRole(role, account)
-                .fee_token(self.pathusd)
-                .send()
-                .await
-                .wrap_err(label)?
-                .get_receipt()
-                .await
-                .wrap_err_with(|| format!("failed waiting to {label}"))?;
-            check(&receipt, label)?;
-        }
-        let direct_swap = deploy(
-            &deployer_provider,
-            with_constructor(
-                load_bytecode(&self.specs_out, "DirectSwapV2.sol/DirectSwapV2")?,
-                FixtureDirectSwapV2::constructorCall {
-                    reserveLedgerToken_: reserve_ledger,
-                    stablecoinHandler_: handler,
-                    transactionLimit_: Uint::<96, 2>::from_limbs([
-                        self.liquidity as u64,
-                        (self.liquidity >> 64) as u64,
-                    ]),
-                    feeRecipient_: deployer_address,
-                    feeBps_: Uint::<256, 4>::ZERO,
-                    authRegistry_: auth_registry,
-                    allowedCallerPolicyId_: 1,
-                }
-                .abi_encode(),
-            ),
-            "Bridge DirectSwapV2",
-        )
-        .await?;
-        let receipt = BridgeDirectSwapHandler::new(handler, &deployer_provider)
-            .setDirectSwapContract(direct_swap)
-            .fee_token(self.pathusd)
-            .send()
-            .await
-            .wrap_err("failed configuring Bridge DirectSwap handler")?
-            .get_receipt()
-            .await
-            .wrap_err("failed waiting to configure Bridge DirectSwap handler")?;
-        check(&receipt, "configure Bridge DirectSwap handler")?;
-        let swap_adapter = deploy(
-            &deployer_provider,
-            with_constructor(
-                load_bytecode(
+        let swap_setup = match self.swap_mechanism {
+            SwapMechanism::DirectSwap => {
+                configure_direct_swap(
+                    &deployer_provider,
                     &self.specs_out,
-                    "BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter",
-                )?,
-                FixtureBridgeStableSwapAdapter::constructorCall {
-                    directSwap_: direct_swap,
-                    tokenA_: self.dlusd,
-                    tokenB_: self.pathusd,
-                }
-                .abi_encode(),
-            ),
-            "BridgeStableSwapAdapter",
-        )
-        .await?;
-        let reserve_capacity = Uint::<256, 4>::from_limbs([
-            self.liquidity as u64,
-            (self.liquidity >> 64) as u64,
-            0,
-            0,
-        ]);
-        let receipt = controller_contract
-            .mintBridgeEcosystem(self.dlusd, deployer_address, reserve_capacity)
-            .fee_token(self.pathusd)
-            .send()
-            .await
-            .wrap_err("failed seeding the Bridge DLUSD reserve")?
-            .get_receipt()
-            .await
-            .wrap_err("failed waiting to seed the Bridge DLUSD reserve")?;
-        check(&receipt, "seed Bridge DLUSD reserve")?;
-        ensure!(
-            controller_contract
-                .getReserveStore(self.dlusd)
-                .call()
-                .await
-                .wrap_err("failed querying the Bridge DLUSD reserve store")?
-                != Address::ZERO,
-            "Bridge DLUSD reserve store was not created"
-        );
+                    deployer_address,
+                    self.dlusd,
+                    self.pathusd,
+                    self.liquidity,
+                )
+                .await?
+            }
+            SwapMechanism::Simple => {
+                configure_simple_swap(
+                    &deployer_provider,
+                    &self.specs_out,
+                    self.dlusd,
+                    self.pathusd,
+                    self.liquidity,
+                )
+                .await?
+            }
+            SwapMechanism::StablecoinDex => {
+                configure_stablecoin_dex(
+                    &deployer_provider,
+                    self.dlusd,
+                    self.pathusd,
+                    self.liquidity,
+                )
+                .await?;
+                SwapSetup::default()
+            }
+        };
         let vault = deploy(
             &deployer_provider,
             with_constructor(
@@ -516,7 +434,7 @@ impl DeployNeobankFixtures {
                 )?,
                 FixtureClosedLoopZoneGateway::constructorCall {
                     vaultAdapter_: vault_adapter,
-                    defaultSwapper_: swap_adapter,
+                    defaultSwapper_: default_swapper,
                     zonePortal_: self.portal,
                     zoneMessenger_: messenger,
                     owner_: deployer_address,
@@ -536,27 +454,29 @@ impl DeployNeobankFixtures {
         )
         .await?;
 
-        let gateway_routes = ClosedLoopZoneGatewayRoutes::new(gateway, &deployer_provider);
-        let receipt = gateway_routes
-            .setDepositRoute(self.dlusd, swap_adapter)
-            .fee_token(self.pathusd)
-            .send()
-            .await
-            .wrap_err("failed to configure DLUSD deposit route")?
-            .get_receipt()
-            .await
-            .wrap_err("failed waiting to configure DLUSD deposit route")?;
-        check(&receipt, "configure DLUSD deposit route")?;
-        let receipt = gateway_routes
-            .setRedeemRoute(self.dlusd, swap_adapter)
-            .fee_token(self.pathusd)
-            .send()
-            .await
-            .wrap_err("failed to configure DLUSD redeem route")?
-            .get_receipt()
-            .await
-            .wrap_err("failed waiting to configure DLUSD redeem route")?;
-        check(&receipt, "configure DLUSD redeem route")?;
+        if let Some(route_swapper) = swap_setup.route_swapper {
+            let gateway_routes = ClosedLoopZoneGatewayRoutes::new(gateway, &deployer_provider);
+            let receipt = gateway_routes
+                .setDepositRoute(self.dlusd, route_swapper)
+                .fee_token(self.pathusd)
+                .send()
+                .await
+                .wrap_err("failed to configure DLUSD deposit route")?
+                .get_receipt()
+                .await
+                .wrap_err("failed waiting to configure DLUSD deposit route")?;
+            check(&receipt, "configure DLUSD deposit route")?;
+            let receipt = gateway_routes
+                .setRedeemRoute(self.dlusd, route_swapper)
+                .fee_token(self.pathusd)
+                .send()
+                .await
+                .wrap_err("failed to configure DLUSD redeem route")?
+                .get_receipt()
+                .await
+                .wrap_err("failed waiting to configure DLUSD redeem route")?;
+            check(&receipt, "configure DLUSD redeem route")?;
+        }
 
         let admin_portal = ZonePortal::new(self.portal, &admin_provider);
         if !admin_portal
@@ -584,12 +504,23 @@ impl DeployNeobankFixtures {
             dlusd: self.dlusd.to_string(),
             pathusd: self.pathusd.to_string(),
             earn_token: earn_token.to_string(),
-            direct_swap: direct_swap.to_string(),
-            swap_adapter: swap_adapter.to_string(),
-            tip20_controller: controller.to_string(),
-            tip20_handler: handler.to_string(),
-            auth_registry: auth_registry.to_string(),
-            reserve_ledger: reserve_ledger.to_string(),
+            swap_mechanism: self.swap_mechanism,
+            default_swapper: default_swapper.to_string(),
+            route_swapper: swap_setup.route_swapper.map(|address| address.to_string()),
+            route_override: swap_setup.route_swapper.is_some(),
+            stablecoin_dex: STABLECOIN_DEX_ADDRESS.to_string(),
+            direct_swap: swap_setup.direct_swap.map(|address| address.to_string()),
+            simple_swap: swap_setup.simple_swap.map(|address| address.to_string()),
+            swap_adapter: swap_setup.route_swapper.map(|address| address.to_string()),
+            tip20_controller: swap_setup
+                .tip20_controller
+                .map(|address| address.to_string()),
+            tip20_handler: swap_setup.tip20_handler.map(|address| address.to_string()),
+            auth_registry: swap_setup.auth_registry.map(|address| address.to_string()),
+            reserve_ledger: swap_setup.reserve_ledger.map(|address| address.to_string()),
+            liquidity: self.liquidity,
+            liquidity_tick: STABLECOIN_DEX_LIQUIDITY_TICK,
+            earn_fixture_revision: earn_fixture_revision()?,
             vault: vault.to_string(),
             engine: engine.to_string(),
             vault_adapter: vault_adapter.to_string(),
@@ -604,6 +535,11 @@ impl DeployNeobankFixtures {
         fs::write(&self.output, serde_json::to_string_pretty(&metadata)?)
             .wrap_err_with(|| format!("failed writing {}", self.output.display()))?;
         println!("Private-Zone benchmark fixtures deployed");
+        println!("  Swap mechanism: {}", self.swap_mechanism.as_str());
+        println!("  Default swapper: {default_swapper}");
+        if let Some(route_swapper) = swap_setup.route_swapper {
+            println!("  Route swapper:   {route_swapper}");
+        }
         println!("  Gateway:       {gateway}");
         println!("  Vault adapter: {vault_adapter}");
         println!("  Rewards:       {rewards}");
@@ -613,6 +549,391 @@ impl DeployNeobankFixtures {
     }
 }
 
+fn validate_liquidity(mechanism: SwapMechanism, liquidity: u128) -> eyre::Result<()> {
+    ensure!(liquidity > 0, "--liquidity must be greater than zero");
+    if mechanism == SwapMechanism::DirectSwap {
+        ensure!(
+            liquidity < (1_u128 << 96),
+            "--liquidity exceeds the Bridge DirectSwap uint96 transaction limit"
+        );
+        ensure!(
+            liquidity <= DIRECT_SWAP_ABSOLUTE_MAX,
+            "--liquidity exceeds the Bridge controller absolute mint limit of {DIRECT_SWAP_ABSOLUTE_MAX}"
+        );
+    }
+    Ok(())
+}
+
+async fn configure_direct_swap<P: Provider<TempoNetwork>>(
+    provider: &P,
+    specs_out: &std::path::Path,
+    deployer: Address,
+    dlusd: Address,
+    pathusd: Address,
+    liquidity: u128,
+) -> eyre::Result<SwapSetup> {
+    let reserve_ledger = create_reserve_ledger(provider, deployer, pathusd).await?;
+    let auth_registry = deploy(
+        provider,
+        load_bytecode(specs_out, "AuthRegistry.sol/AuthRegistry")?,
+        "Bridge AuthRegistry",
+    )
+    .await?;
+    let controller_implementation = deploy(
+        provider,
+        with_constructor(
+            load_bytecode(specs_out, "TIP20Controller.sol/TIP20Controller")?,
+            FixtureTIP20Controller::constructorCall {
+                reserveLedgerToken_: reserve_ledger,
+                disableInitializer_: true,
+            }
+            .abi_encode(),
+        ),
+        "Bridge TIP20Controller implementation",
+    )
+    .await?;
+    let controller = deploy(
+        provider,
+        with_constructor(
+            load_bytecode(specs_out, "TestERC1967Proxy.sol/TestERC1967Proxy")?,
+            FixtureTestERC1967Proxy::constructorCall {
+                implementation: controller_implementation,
+                initialization: Bytes::from(
+                    BridgeTIP20Controller::initializeCall { admin: deployer }.abi_encode(),
+                ),
+            }
+            .abi_encode(),
+        ),
+        "Bridge TIP20Controller proxy",
+    )
+    .await?;
+    for (token, label) in [
+        (dlusd, "DLUSD"),
+        (pathusd, "pathUSD"),
+        (reserve_ledger, "reserve ledger"),
+    ] {
+        let issuer_role = ITIP20::new(token, provider)
+            .ISSUER_ROLE()
+            .call()
+            .await
+            .wrap_err_with(|| format!("failed querying {label} issuer role"))?;
+        let receipt = IRolesAuth::new(token, provider)
+            .grantRole(issuer_role, controller)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed granting Bridge controller {label} issuer role"))?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| {
+                format!("failed waiting for Bridge controller {label} issuer role")
+            })?;
+        check(
+            &receipt,
+            &format!("grant Bridge controller {label} issuer role"),
+        )?;
+    }
+    let handler = deploy(
+        provider,
+        with_constructor(
+            load_bytecode(
+                specs_out,
+                "TIP20DirectSwapHandler.sol/TIP20DirectSwapHandler",
+            )?,
+            FixtureTIP20DirectSwapHandler::constructorCall {
+                admin_: deployer,
+                controller_: controller,
+                reserveLedgerToken_: reserve_ledger,
+            }
+            .abi_encode(),
+        ),
+        "Bridge TIP20DirectSwapHandler",
+    )
+    .await?;
+    let controller_contract = BridgeTIP20Controller::new(controller, provider);
+    for (role, account, label) in [
+        (
+            controller_contract
+                .UNWRAPPER_ROLE()
+                .call()
+                .await
+                .wrap_err("failed querying Bridge controller unwrapper role")?,
+            handler,
+            "grant Bridge handler unwrapper role",
+        ),
+        (
+            controller_contract
+                .BRIDGE_ECOSYSTEM_CONTRACT_ROLE()
+                .call()
+                .await
+                .wrap_err("failed querying Bridge controller ecosystem role")?,
+            deployer,
+            "grant Bridge deployer ecosystem role",
+        ),
+    ] {
+        let receipt = IRolesAuth::new(controller, provider)
+            .grantRole(role, account)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err(label)?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| format!("failed waiting to {label}"))?;
+        check(&receipt, label)?;
+    }
+    let direct_swap = deploy(
+        provider,
+        with_constructor(
+            load_bytecode(specs_out, "DirectSwapV2.sol/DirectSwapV2")?,
+            FixtureDirectSwapV2::constructorCall {
+                reserveLedgerToken_: reserve_ledger,
+                stablecoinHandler_: handler,
+                transactionLimit_: Uint::<96, 2>::from_limbs([
+                    liquidity as u64,
+                    (liquidity >> 64) as u64,
+                ]),
+                feeRecipient_: deployer,
+                feeBps_: Uint::<256, 4>::ZERO,
+                authRegistry_: auth_registry,
+                allowedCallerPolicyId_: 1,
+            }
+            .abi_encode(),
+        ),
+        "Bridge DirectSwapV2",
+    )
+    .await?;
+    let receipt = BridgeDirectSwapHandler::new(handler, provider)
+        .setDirectSwapContract(direct_swap)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed configuring Bridge DirectSwap handler")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting to configure Bridge DirectSwap handler")?;
+    check(&receipt, "configure Bridge DirectSwap handler")?;
+    let route_swapper =
+        deploy_bridge_swap_adapter(provider, specs_out, direct_swap, dlusd, pathusd).await?;
+    let reserve_capacity =
+        Uint::<256, 4>::from_limbs([liquidity as u64, (liquidity >> 64) as u64, 0, 0]);
+    let receipt = controller_contract
+        .mintBridgeEcosystem(dlusd, deployer, reserve_capacity)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed seeding the Bridge DLUSD reserve")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting to seed the Bridge DLUSD reserve")?;
+    check(&receipt, "seed Bridge DLUSD reserve")?;
+    ensure!(
+        controller_contract
+            .getReserveStore(dlusd)
+            .call()
+            .await
+            .wrap_err("failed querying the Bridge DLUSD reserve store")?
+            != Address::ZERO,
+        "Bridge DLUSD reserve store was not created"
+    );
+
+    Ok(SwapSetup {
+        route_swapper: Some(route_swapper),
+        direct_swap: Some(direct_swap),
+        simple_swap: None,
+        tip20_controller: Some(controller),
+        tip20_handler: Some(handler),
+        auth_registry: Some(auth_registry),
+        reserve_ledger: Some(reserve_ledger),
+    })
+}
+
+async fn configure_simple_swap<P: Provider<TempoNetwork>>(
+    provider: &P,
+    specs_out: &std::path::Path,
+    dlusd: Address,
+    pathusd: Address,
+    liquidity: u128,
+) -> eyre::Result<SwapSetup> {
+    let simple_swap = deploy(
+        provider,
+        with_constructor(
+            load_bytecode(
+                specs_out,
+                "SimpleDirectSwapFixture.sol/SimpleDirectSwapFixture",
+            )?,
+            FixtureSimpleDirectSwap::constructorCall {
+                tokenA_: dlusd,
+                tokenB_: pathusd,
+            }
+            .abi_encode(),
+        ),
+        "benchmark-only SimpleDirectSwapFixture",
+    )
+    .await?;
+    let amount = Uint::<256, 4>::from(liquidity);
+    for (token, label) in [(dlusd, "DLUSD"), (pathusd, "pathUSD")] {
+        let receipt = ITIP20::new(token, provider)
+            .transfer(simple_swap, amount)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed funding simple swap with {label}"))?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| format!("failed waiting to fund simple swap with {label}"))?;
+        check(&receipt, &format!("fund simple swap with {label}"))?;
+    }
+    let route_swapper =
+        deploy_bridge_swap_adapter(provider, specs_out, simple_swap, dlusd, pathusd).await?;
+
+    Ok(SwapSetup {
+        route_swapper: Some(route_swapper),
+        simple_swap: Some(simple_swap),
+        ..Default::default()
+    })
+}
+
+async fn deploy_bridge_swap_adapter<P: Provider<TempoNetwork>>(
+    provider: &P,
+    specs_out: &std::path::Path,
+    direct_swap: Address,
+    dlusd: Address,
+    pathusd: Address,
+) -> eyre::Result<Address> {
+    deploy(
+        provider,
+        with_constructor(
+            load_bytecode(
+                specs_out,
+                "BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter",
+            )?,
+            FixtureBridgeStableSwapAdapter::constructorCall {
+                directSwap_: direct_swap,
+                tokenA_: dlusd,
+                tokenB_: pathusd,
+            }
+            .abi_encode(),
+        ),
+        "BridgeStableSwapAdapter",
+    )
+    .await
+}
+
+async fn configure_stablecoin_dex<P: Provider<TempoNetwork>>(
+    provider: &P,
+    dlusd: Address,
+    pathusd: Address,
+    liquidity: u128,
+) -> eyre::Result<()> {
+    let quote_token = ITIP20::new(dlusd, provider)
+        .quoteToken()
+        .call()
+        .await
+        .wrap_err("failed querying DLUSD quote token")?;
+    ensure!(
+        quote_token == pathusd,
+        "DLUSD quote token {quote_token} does not match configured pathUSD {pathusd}"
+    );
+
+    let dex = IStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, provider);
+    let minimum_order = dex
+        .MIN_ORDER_AMOUNT()
+        .call()
+        .await
+        .wrap_err("failed querying StablecoinDEX minimum order amount")?;
+    ensure!(
+        liquidity >= minimum_order,
+        "--liquidity {liquidity} is below the StablecoinDEX minimum order amount {minimum_order}"
+    );
+    let pair_key = dex
+        .pairKey(dlusd, pathusd)
+        .call()
+        .await
+        .wrap_err("failed computing StablecoinDEX DLUSD/pathUSD pair key")?;
+    let orderbook = dex
+        .books(pair_key)
+        .call()
+        .await
+        .wrap_err("failed querying StablecoinDEX DLUSD/pathUSD orderbook")?;
+    if orderbook.base == Address::ZERO {
+        let receipt = dex
+            .createPair(dlusd)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err("failed creating StablecoinDEX DLUSD/pathUSD pair")?
+            .get_receipt()
+            .await
+            .wrap_err("failed waiting for StablecoinDEX DLUSD/pathUSD pair creation")?;
+        check(&receipt, "create StablecoinDEX DLUSD/pathUSD pair")?;
+    } else {
+        ensure!(
+            orderbook.base == dlusd && orderbook.quote == pathusd,
+            "StablecoinDEX pair key resolves to unexpected tokens"
+        );
+    }
+
+    let maximum = Uint::<256, 4>::MAX;
+    let receipt = ITIP20::new(pathusd, provider)
+        .approve(STABLECOIN_DEX_ADDRESS, maximum)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed approving StablecoinDEX pathUSD liquidity")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting for StablecoinDEX pathUSD approval")?;
+    check(&receipt, "approve StablecoinDEX pathUSD liquidity")?;
+    let receipt = dex
+        .place(dlusd, liquidity, true, STABLECOIN_DEX_LIQUIDITY_TICK)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed placing StablecoinDEX DLUSD bid liquidity")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting for StablecoinDEX DLUSD bid liquidity")?;
+    check(&receipt, "place StablecoinDEX DLUSD bid liquidity")?;
+
+    let receipt = ITIP20::new(dlusd, provider)
+        .approve(STABLECOIN_DEX_ADDRESS, maximum)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed approving StablecoinDEX DLUSD liquidity")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting for StablecoinDEX DLUSD approval")?;
+    check(&receipt, "approve StablecoinDEX DLUSD liquidity")?;
+    let receipt = dex
+        .place(dlusd, liquidity, false, STABLECOIN_DEX_LIQUIDITY_TICK)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed placing StablecoinDEX DLUSD ask liquidity")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting for StablecoinDEX DLUSD ask liquidity")?;
+    check(&receipt, "place StablecoinDEX DLUSD ask liquidity")?;
+
+    for (token_in, token_out, label) in [
+        (dlusd, pathusd, "DLUSD to pathUSD"),
+        (pathusd, dlusd, "pathUSD to DLUSD"),
+    ] {
+        let amount_out = dex
+            .quoteSwapExactAmountIn(token_in, token_out, minimum_order)
+            .call()
+            .await
+            .wrap_err_with(|| format!("failed quoting StablecoinDEX {label}"))?;
+        ensure!(
+            amount_out > 0,
+            "StablecoinDEX {label} quote returned zero after seeding liquidity"
+        );
+    }
+    Ok(())
+}
+
 fn signer_from_env(name: &str) -> eyre::Result<PrivateKeySigner> {
     let key =
         std::env::var(name).wrap_err_with(|| format!("{name} must be set in the environment"))?;
@@ -620,6 +941,15 @@ fn signer_from_env(name: &str) -> eyre::Result<PrivateKeySigner> {
         .unwrap_or(&key)
         .parse()
         .wrap_err_with(|| format!("{name} is not a valid private key"))
+}
+
+fn earn_fixture_revision() -> eyre::Result<&'static str> {
+    EARN_FIXTURE_README
+        .split('`')
+        .find(|candidate| {
+            candidate.len() == 40 && candidate.bytes().all(|byte| byte.is_ascii_hexdigit())
+        })
+        .ok_or_else(|| eyre!("Earn fixture README does not contain a pinned commit revision"))
 }
 
 async fn create_earn_token<P: Provider<TempoNetwork>>(
@@ -701,14 +1031,22 @@ async fn deploy<P: Provider<TempoNetwork>>(
     bytecode: Vec<u8>,
     label: &str,
 ) -> eyre::Result<Address> {
+    let gas_limit = std::env::var("ZONES_BENCH_L1_GENERAL_GAS_LIMIT")
+        .unwrap_or_else(|_| DEFAULT_DEPLOYMENT_GAS_LIMIT.to_string())
+        .parse::<u64>()
+        .wrap_err("ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be an unsigned integer")?;
+    ensure!(
+        gas_limit > 0 && gas_limit <= DEFAULT_DEPLOYMENT_GAS_LIMIT,
+        "ZONES_BENCH_L1_GENERAL_GAS_LIMIT must be between 1 and {DEFAULT_DEPLOYMENT_GAS_LIMIT}"
+    );
     let receipt = provider
         .send_transaction(
             TransactionRequest::default()
                 .with_kind(alloy::primitives::TxKind::Create)
                 // Fixture constructors can make contract calls that Tempo's generic
-                // estimator underestimates. Keep this in sync with the #750 E2E
-                // deployer and the benchmark L1 block limit.
-                .with_gas_limit(30_000_000)
+                // estimator underestimates. Use the configured general-transaction
+                // cap so the setup transaction is admissible on the provisioned L1.
+                .with_gas_limit(gas_limit)
                 .input(Bytes::from(bytecode).into())
                 .into(),
         )
@@ -813,6 +1151,16 @@ mod tests {
             .collect()
     }
 
+    fn function_io_shapes(abi: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
+        function_shapes(abi, name)
+            .into_iter()
+            .map(|mut shape| {
+                shape.as_object_mut().unwrap().remove("stateMutability");
+                shape
+            })
+            .collect()
+    }
+
     fn event_shapes(abi: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
         abi.as_array()
             .unwrap()
@@ -866,9 +1214,84 @@ mod tests {
     fn fixture_deployment_uses_native_tip20_addresses() {
         let command = DeployNeobankFixtures::try_parse_from(required_args()).unwrap();
         assert_eq!(command.liquidity, 10_000_000_000);
+        assert_eq!(command.swap_mechanism, SwapMechanism::DirectSwap);
         assert_eq!(
             command.dlusd.to_string(),
             "0x20C0000000000000000000000000000000000001"
+        );
+    }
+
+    #[test]
+    fn fixture_deployment_accepts_each_swap_mechanism() {
+        for (argument, expected) in [
+            ("direct-swap", SwapMechanism::DirectSwap),
+            ("simple", SwapMechanism::Simple),
+            ("stablecoin-dex", SwapMechanism::StablecoinDex),
+        ] {
+            let command = DeployNeobankFixtures::try_parse_from(
+                required_args()
+                    .into_iter()
+                    .chain(["--swap-mechanism", argument]),
+            )
+            .unwrap();
+            assert_eq!(command.swap_mechanism, expected);
+        }
+    }
+
+    #[test]
+    fn direct_swap_liquidity_respects_the_pinned_controller_cap() {
+        validate_liquidity(SwapMechanism::DirectSwap, DIRECT_SWAP_ABSOLUTE_MAX).unwrap();
+        assert!(
+            validate_liquidity(SwapMechanism::DirectSwap, DIRECT_SWAP_ABSOLUTE_MAX + 1).is_err()
+        );
+        validate_liquidity(
+            SwapMechanism::Simple,
+            DIRECT_SWAP_ABSOLUTE_MAX.saturating_add(1),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn fixture_metadata_uses_null_for_unselected_swap_contracts() {
+        let address = "0x0000000000000000000000000000000000000001".to_owned();
+        let metadata = FixtureMetadata {
+            portal: address.clone(),
+            messenger: address.clone(),
+            zone_id: 1,
+            dlusd: address.clone(),
+            pathusd: address.clone(),
+            earn_token: address.clone(),
+            swap_mechanism: SwapMechanism::StablecoinDex,
+            default_swapper: address.clone(),
+            route_swapper: None,
+            route_override: false,
+            stablecoin_dex: STABLECOIN_DEX_ADDRESS.to_string(),
+            direct_swap: None,
+            simple_swap: None,
+            swap_adapter: None,
+            tip20_controller: None,
+            tip20_handler: None,
+            auth_registry: None,
+            reserve_ledger: None,
+            liquidity: 10_000_000_000,
+            liquidity_tick: 0,
+            earn_fixture_revision: earn_fixture_revision().unwrap(),
+            vault: address.clone(),
+            engine: address.clone(),
+            vault_adapter: address.clone(),
+            rewards: address.clone(),
+            gateway: address.clone(),
+            bridge_wallet: address,
+        };
+        let metadata = serde_json::to_value(metadata).unwrap();
+        assert_eq!(metadata["swapMechanism"], "stablecoin-dex");
+        assert_eq!(metadata["routeOverride"], false);
+        assert!(metadata["routeSwapper"].is_null());
+        assert!(metadata["directSwap"].is_null());
+        assert!(metadata["simpleSwap"].is_null());
+        assert_eq!(
+            metadata["stablecoinDex"],
+            STABLECOIN_DEX_ADDRESS.to_string()
         );
     }
 
@@ -899,6 +1322,50 @@ mod tests {
                 "specs/ref-impls/out/BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter.json"
             )
         );
+        assert_eq!(
+            artifact_path(
+                &out,
+                "TempoStablecoinDexStableSwapAdapter.sol/TempoStablecoinDexStableSwapAdapter"
+            ),
+            PathBuf::from(
+                "specs/ref-impls/out/TempoStablecoinDexStableSwapAdapter.sol/TempoStablecoinDexStableSwapAdapter.json"
+            )
+        );
+        assert_eq!(
+            artifact_path(&out, "SimpleDirectSwapFixture.sol/SimpleDirectSwapFixture"),
+            PathBuf::from(
+                "specs/ref-impls/out/SimpleDirectSwapFixture.sol/SimpleDirectSwapFixture.json"
+            )
+        );
+    }
+
+    #[test]
+    fn simple_swap_fixture_matches_the_pinned_direct_swap_interface() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let interface: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join("specs/ref-impls/out/IDirectSwapV2.sol/IDirectSwapV2.json"))
+                .unwrap(),
+        )
+        .unwrap();
+        let fixture: serde_json::Value = serde_json::from_slice(
+            &fs::read(root.join(
+                "specs/ref-impls/out/SimpleDirectSwapFixture.sol/SimpleDirectSwapFixture.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        for function in [
+            "swapExactIn",
+            "swapExactOut",
+            "quoteExactIn",
+            "quoteExactOut",
+        ] {
+            assert_eq!(
+                function_io_shapes(&fixture["abi"], function),
+                function_io_shapes(&interface["abi"], function),
+                "benchmark-only simple swap diverges from {function} in IDirectSwapV2"
+            );
+        }
     }
 
     #[test]

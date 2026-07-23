@@ -27,7 +27,7 @@ templates:
       abi: TIP20
       function: "transfer(address,uint256)"
       args:
-        - { var: recipient.address }
+        - { var: recipient }
         - __ACTIVITY_AMOUNT__
 
 sequences:
@@ -38,9 +38,7 @@ sequences:
           pool: users
           select: random
       recipient:
-        account:
-          pool: users
-          select: random
+        address: __RECIPIENT_GENERATOR__
     steps:
       - name: transfer
         template: tip20_transfer

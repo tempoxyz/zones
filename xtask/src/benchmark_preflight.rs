@@ -34,6 +34,7 @@ const SOURCE_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../contrib/bench/
 const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const AUTH_TOKEN_TTL_SECS: u64 = 300;
+const FRESH_RECIPIENT_START: u32 = 1_000_000;
 alloy::sol! {
     #[sol(rpc)]
     interface ZoneBenchmarkConfig {
@@ -67,6 +68,71 @@ pub(crate) enum FixtureState {
     Ready,
     /// A Zone funded through deposits that have all been confirmed by an L1 batch.
     Funded,
+}
+
+/// Destination-address shape used by rendered activity and withdrawal workloads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum RecipientMode {
+    /// Select destinations from the funded benchmark account pool so state is reused.
+    #[default]
+    Existing,
+    /// Select fresh destination addresses outside the funded account pool.
+    Random,
+}
+
+impl RecipientMode {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Existing => "existing",
+            Self::Random => "random",
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn recipient_account_range(
+    mode: RecipientMode,
+    phase: CheckPhase,
+    account_start: u32,
+    account_end: u32,
+    accounts: u32,
+    transactions_per_account: u64,
+    control_account_index: u32,
+    sequencer_account_index: u32,
+) -> eyre::Result<(u32, u32)> {
+    if mode == RecipientMode::Existing {
+        return Ok((account_start, account_end));
+    }
+
+    ensure!(
+        account_end <= FRESH_RECIPIENT_START,
+        "benchmark account range overlaps the random recipient range"
+    );
+    // Independent activity and withdrawal specs generate scalar random addresses, so they do
+    // not consume the deterministic account pool. A roundtrip leases one pool entry per journey
+    // to thread the same recipient through submission and exact event correlation.
+    let recipient_slots = if phase.roundtrip() {
+        u64::from(accounts)
+            .checked_mul(transactions_per_account)
+            .ok_or_else(|| eyre!("random recipient capacity overflows u64"))?
+    } else {
+        1
+    };
+    let recipient_slots = u32::try_from(recipient_slots)
+        .wrap_err("random recipient capacity exceeds the txgen account-index range")?;
+    let recipient_account_end = FRESH_RECIPIENT_START
+        .checked_add(recipient_slots)
+        .ok_or_else(|| eyre!("random recipient range overflows u32"))?;
+    ensure!(
+        !(FRESH_RECIPIENT_START..recipient_account_end).contains(&control_account_index),
+        "control account index {control_account_index} overlaps the random recipient range"
+    );
+    ensure!(
+        !(FRESH_RECIPIENT_START..recipient_account_end).contains(&sequencer_account_index),
+        "sequencer account index {sequencer_account_index} overlaps the random recipient range"
+    );
+    Ok((FRESH_RECIPIENT_START, recipient_account_end))
 }
 
 impl CheckPhase {
@@ -144,6 +210,15 @@ pub(crate) struct BenchmarkPreflight {
     /// Amount transferred by each ordinary Zone TIP-20 activity transaction.
     #[arg(long)]
     activity_amount: u128,
+
+    /// Select existing benchmark addresses or fresh random activity/withdrawal recipients.
+    #[arg(
+        long,
+        env = "ZONES_BENCH_RECIPIENT_MODE",
+        value_enum,
+        default_value_t = RecipientMode::Existing
+    )]
+    recipient_mode: RecipientMode,
 
     /// Net amount returned to Tempo by each Zone withdrawal request.
     #[arg(long)]
@@ -254,6 +329,7 @@ impl From<&AccountState> for AccountReport {
 struct PreflightReport {
     check_phase: CheckPhase,
     fixture_state: Option<FixtureState>,
+    recipient_mode: RecipientMode,
     l1_chain_id: u64,
     zone_chain_id: u64,
     l1_client_version: String,
@@ -303,6 +379,9 @@ struct RenderConfig {
     portal: Address,
     outbox: Address,
     token: Address,
+    recipient_mode: RecipientMode,
+    recipient_account_start: u32,
+    recipient_account_end: u32,
     deposit_amount: u128,
     activity_amount: u128,
     withdrawal_amount: u128,
@@ -361,6 +440,16 @@ impl BenchmarkPreflight {
             .account_start
             .checked_add(self.accounts)
             .ok_or_else(|| eyre!("benchmark account range overflows u32"))?;
+        let (recipient_account_start, recipient_account_end) = recipient_account_range(
+            self.recipient_mode,
+            self.check_phase,
+            self.account_start,
+            account_end,
+            self.accounts,
+            self.transactions_per_account,
+            self.control_account_index,
+            self.sequencer_account_index,
+        )?;
         ensure!(
             !(self.account_start..account_end).contains(&self.control_account_index),
             "control account index {} overlaps the benchmark pool",
@@ -887,6 +976,9 @@ impl BenchmarkPreflight {
             portal,
             outbox,
             token,
+            recipient_mode: self.recipient_mode,
+            recipient_account_start,
+            recipient_account_end,
             deposit_amount: self.deposit_amount,
             activity_amount: self.activity_amount,
             withdrawal_amount: self.withdrawal_amount,
@@ -922,6 +1014,7 @@ impl BenchmarkPreflight {
         let report = PreflightReport {
             check_phase: self.check_phase,
             fixture_state: self.fixture_state,
+            recipient_mode: self.recipient_mode,
             l1_chain_id,
             zone_chain_id,
             l1_client_version: l1_client_version.clone(),
@@ -986,6 +1079,7 @@ impl BenchmarkPreflight {
         println!("  Portal:            {portal}");
         println!("  Outbox:            {outbox}");
         println!("  Token / fee token: {token}");
+        println!("  Recipient mode:    {}", self.recipient_mode.label());
         println!("  Deposit fee:       {deposit_fee}");
         println!("  Bounceback fee:    {bounceback_fee}");
         println!("  Withdrawal fee:    {withdrawal_fee}");
@@ -1532,6 +1626,38 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
         ("__OUTBOX__".into(), Value::from(config.outbox.to_string())),
         ("__TOKEN__".into(), Value::from(config.token.to_string())),
         (
+            "__RECIPIENT_GENERATOR__".into(),
+            recipient_generator(config.recipient_mode),
+        ),
+        (
+            "__RECIPIENT_POOL__".into(),
+            Value::String(
+                match config.recipient_mode {
+                    RecipientMode::Existing => "users",
+                    RecipientMode::Random => "recipients",
+                }
+                .to_owned(),
+            ),
+        ),
+        (
+            "__RECIPIENT_SELECT__".into(),
+            Value::String(
+                match config.recipient_mode {
+                    RecipientMode::Existing => "random",
+                    RecipientMode::Random => "lease",
+                }
+                .to_owned(),
+            ),
+        ),
+        (
+            "__RECIPIENT_ACCOUNT_START__".into(),
+            Value::from(config.recipient_account_start),
+        ),
+        (
+            "__RECIPIENT_ACCOUNT_END__".into(),
+            Value::from(config.recipient_account_end),
+        ),
+        (
             "__DEPOSIT_AMOUNT__".into(),
             yaml_value(config.deposit_amount),
         ),
@@ -1576,6 +1702,16 @@ fn common_replacements(config: &RenderConfig) -> HashMap<String, Value> {
             Value::from(config.withdrawal_tx_gas_limit),
         ),
     ])
+}
+
+fn recipient_generator(mode: RecipientMode) -> Value {
+    match mode {
+        RecipientMode::Existing => {
+            serde_yaml::from_str("{ pool: { pool: users, select: random } }")
+                .expect("existing recipient generator is valid YAML")
+        }
+        RecipientMode::Random => Value::String("random".to_owned()),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1883,6 +2019,51 @@ mod tests {
     }
 
     #[test]
+    fn recipient_capacity_only_applies_to_random_roundtrips() {
+        assert_eq!(
+            recipient_account_range(
+                RecipientMode::Existing,
+                CheckPhase::Roundtrip,
+                16,
+                116,
+                100,
+                u64::MAX,
+                0,
+                4,
+            )
+            .unwrap(),
+            (16, 116)
+        );
+        assert_eq!(
+            recipient_account_range(
+                RecipientMode::Random,
+                CheckPhase::Activity,
+                16,
+                116,
+                100,
+                u64::MAX,
+                0,
+                4,
+            )
+            .unwrap(),
+            (FRESH_RECIPIENT_START, FRESH_RECIPIENT_START + 1)
+        );
+        assert!(
+            recipient_account_range(
+                RecipientMode::Random,
+                CheckPhase::Roundtrip,
+                16,
+                116,
+                100,
+                u64::MAX,
+                0,
+                4,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn l1_fee_cap_covers_t7_base_fee_movement() {
         assert_eq!(
             default_l1_max_fee_per_gas(600_000_000),
@@ -1903,6 +2084,7 @@ mod tests {
         let report = PreflightReport {
             check_phase: CheckPhase::All,
             fixture_state: Some(FixtureState::Funded),
+            recipient_mode: RecipientMode::Existing,
             l1_chain_id: 1,
             zone_chain_id: 2,
             l1_client_version: "tempo/test".into(),
@@ -1942,6 +2124,7 @@ mod tests {
         let serialized = serde_json::to_value(&report).unwrap();
         assert_eq!(serialized["l1MaxPriorityFeePerGas"], 0);
         assert_eq!(serialized["zoneMaxPriorityFeePerGas"], 0);
+        assert_eq!(serialized["recipientMode"], "existing");
         assert!(!serialized.to_string().contains(TEST_MNEMONIC));
     }
 
@@ -2008,6 +2191,14 @@ mod tests {
             activity["templates"]["tip20_transfer"]["valid_for_secs"],
             25
         );
+        assert_eq!(
+            activity["sequences"]["activity"]["bindings"]["recipient"]["address"]["pool"]["pool"],
+            "users"
+        );
+        assert_eq!(
+            activity["sequences"]["activity"]["bindings"]["recipient"]["address"]["pool"]["select"],
+            "random"
+        );
         let withdrawal: Value =
             serde_yaml::from_str(&fs::read_to_string(output.join("withdrawal.yml")).unwrap())
                 .unwrap();
@@ -2025,6 +2216,10 @@ mod tests {
         assert_eq!(
             withdrawal["templates"]["request_withdrawal"]["call"]["function"],
             "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
+        );
+        assert_eq!(
+            withdrawal["sequences"]["withdrawal"]["bindings"]["recipient"]["address"]["pool"]["pool"],
+            "users"
         );
 
         let bootstrap: Value = serde_yaml::from_str(
@@ -2054,6 +2249,14 @@ mod tests {
         assert_eq!(
             zone_roundtrip["templates"]["request_withdrawal"]["call"]["function"],
             "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
+        );
+        assert_eq!(
+            zone_roundtrip["accounts"]["recipients"]["range"][0],
+            config.account_start
+        );
+        assert_eq!(
+            zone_roundtrip["accounts"]["recipients"]["range"][1],
+            config.account_end
         );
 
         let bootstrap_scenario: Value = serde_yaml::from_str(
@@ -2130,6 +2333,83 @@ mod tests {
             roundtrip_steps[8]["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0],
             "address"
         );
+        assert_eq!(
+            roundtrip_scenario["scenario"]["bindings"]["recipient"]["account"]["pool"],
+            "users"
+        );
+        assert_eq!(
+            roundtrip_scenario["scenario"]["bindings"]["recipient"]["account"]["select"],
+            "random"
+        );
+
+        fs::remove_dir_all(output).unwrap();
+    }
+
+    #[test]
+    fn renders_fresh_recipients_for_activity_and_withdrawal() {
+        let output = temp_output("fresh-recipients");
+        let mut config = local_render_config();
+        config.recipient_mode = RecipientMode::Random;
+        config.recipient_account_start = 1_000_000;
+        config.recipient_account_end = 1_000_002;
+        render_all_specs(&output, &config, false, &[], &[]).unwrap();
+
+        let activity: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("zone-activity.yml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            activity["sequences"]["activity"]["bindings"]["recipient"]["address"],
+            "random"
+        );
+
+        let withdrawal: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("withdrawal.yml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            withdrawal["sequences"]["withdrawal"]["bindings"]["recipient"]["address"],
+            "random"
+        );
+
+        let zone_roundtrip: Value =
+            serde_yaml::from_str(&fs::read_to_string(output.join("zone-roundtrip.yml")).unwrap())
+                .unwrap();
+        assert_eq!(
+            zone_roundtrip["accounts"]["recipients"]["range"][0],
+            config.recipient_account_start
+        );
+        assert_eq!(
+            zone_roundtrip["accounts"]["recipients"]["range"][1],
+            config.recipient_account_end
+        );
+        assert_eq!(
+            zone_roundtrip["sequences"]["withdrawal"]["bindings"]["recipient"]["address"],
+            "random"
+        );
+
+        let roundtrip: Value = serde_yaml::from_str(
+            &fs::read_to_string(output.join("roundtrip-scenario.yml")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            roundtrip["scenario"]["bindings"]["recipient"]["account"]["pool"],
+            "recipients"
+        );
+        assert_eq!(
+            roundtrip["scenario"]["bindings"]["recipient"]["account"]["select"],
+            "lease"
+        );
+        assert_eq!(
+            roundtrip["scenario"]["steps"][2]["submit"]["with"]["call"]["args"][0]["var"],
+            "recipient.address"
+        );
+        assert_eq!(
+            roundtrip["scenario"]["steps"][6]["submit"]["with"]["call"]["args"][1]["var"],
+            "recipient.address"
+        );
+        assert_eq!(
+            roundtrip["scenario"]["steps"][8]["wait_log"]["where"]["to"]["var"],
+            "recipient.address"
+        );
 
         fs::remove_dir_all(output).unwrap();
     }
@@ -2167,6 +2447,10 @@ mod tests {
             (
                 "__REWARDS__".into(),
                 Value::from("0x3000000000000000000000000000000000000003"),
+            ),
+            (
+                "__PRIVATE_TRANSFER_RECIPIENT__".into(),
+                serde_yaml::from_str("{ var: recipient.address }").unwrap(),
             ),
             ("__PRIVATE_TRANSFER_AMOUNT__".into(), Value::from(1_u64)),
             ("__EARN_DEPOSIT_AMOUNT__".into(), Value::from(100_u64)),
@@ -2419,6 +2703,10 @@ mod tests {
         assert_eq!(steps[0]["use"], "encrypted-zone-entry");
         assert_eq!(steps[0]["as"], "onramp");
         assert_eq!(steps[0]["with"]["fee_token"], replacements["__DLUSD__"]);
+        assert_eq!(
+            steps[1]["submit"]["with"]["call"]["args"][0]["var"],
+            "recipient.address"
+        );
         assert_eq!(
             steps[2]["wait_receipt"]["transaction_hash"]["var"],
             "private_transfer.tx_hash"
@@ -2893,7 +3181,7 @@ mod tests {
         assert_eq!(target, config.outbox);
         let call = IZoneOutbox::requestWithdrawalCall::abi_decode(input).unwrap();
         assert_eq!(call.token, config.token);
-        assert_eq!(call.to, sender);
+        assert!(pool_addresses.contains(&call.to));
         assert_eq!(call.amount, config.withdrawal_amount);
         assert_ne!(call.memo, alloy::primitives::B256::ZERO);
         assert_eq!(call.gasLimit, 0);
@@ -2903,6 +3191,53 @@ mod tests {
         let (_, second_input) = only_call(&withdrawals[1]);
         let second_call = IZoneOutbox::requestWithdrawalCall::abi_decode(second_input).unwrap();
         assert_ne!(call.memo, second_call.memo);
+
+        let fresh_output = temp_output("generate-fresh-recipients");
+        let mut fresh_config = config.clone();
+        fresh_config.recipient_mode = RecipientMode::Random;
+        fresh_config.recipient_account_start = 1_000_000;
+        fresh_config.recipient_account_end = 1_000_002;
+        render_all_specs(&fresh_output, &fresh_config, false, &[], &[]).unwrap();
+
+        let fresh_activity = generate(&txgen, &fresh_output.join("zone-activity.yml"));
+        let fresh_activity_destinations = workload_envelopes(&fresh_activity)
+            .iter()
+            .map(|envelope| {
+                let (_, input) = only_call(envelope);
+                ITIP20::transferCall::abi_decode(input).unwrap().to
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fresh_activity_destinations.len(), 2);
+        assert_ne!(
+            fresh_activity_destinations[0],
+            fresh_activity_destinations[1]
+        );
+        assert!(
+            fresh_activity_destinations
+                .iter()
+                .all(|recipient| !pool_addresses.contains(recipient))
+        );
+
+        let fresh_withdrawal = generate(&txgen, &fresh_output.join("withdrawal.yml"));
+        let fresh_withdrawal_destinations = workload_envelopes(&fresh_withdrawal)
+            .iter()
+            .map(|envelope| {
+                let (_, input) = only_call(envelope);
+                IZoneOutbox::requestWithdrawalCall::abi_decode(input)
+                    .unwrap()
+                    .to
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(fresh_withdrawal_destinations.len(), 2);
+        assert_ne!(
+            fresh_withdrawal_destinations[0],
+            fresh_withdrawal_destinations[1]
+        );
+        assert!(
+            fresh_withdrawal_destinations
+                .iter()
+                .all(|recipient| !pool_addresses.contains(recipient))
+        );
 
         let bootstrap = generate(&txgen, &output.join("bootstrap-deposit.yml"));
         assert_setup_approvals(
@@ -2969,6 +3304,19 @@ mod tests {
                 "deposit_to_zone.submission"
             );
 
+            fs::write(fresh_output.join("zone-auth.json"), "{}").unwrap();
+            let fresh_roundtrip_scenario = render_scenario(
+                &txgen,
+                &fresh_output.join("roundtrip-scenario.yml"),
+                &fresh_output.join("roundtrip-scenario.rendered.yml"),
+                &fresh_output,
+            );
+            assert_flattened_scenario(&fresh_roundtrip_scenario, 11);
+            assert_eq!(
+                fresh_roundtrip_scenario["scenario"]["bindings"]["recipient"]["account"]["pool"],
+                "recipients"
+            );
+
             validate_neobank_scenario(&txgen);
         } else if require_scenario_support {
             panic!(
@@ -2980,6 +3328,7 @@ mod tests {
         }
 
         fs::remove_dir_all(output).unwrap();
+        fs::remove_dir_all(fresh_output).unwrap();
     }
 
     fn local_render_config() -> RenderConfig {
@@ -2994,6 +3343,9 @@ mod tests {
             portal: address!("0x0000000000000000000000000000000000001000"),
             outbox: ZONE_OUTBOX_ADDRESS,
             token: address!("0x20c0000000000000000000000000000000000000"),
+            recipient_mode: RecipientMode::Existing,
+            recipient_account_start: 7,
+            recipient_account_end: 9,
             deposit_amount: 1_000_000,
             activity_amount: 1,
             withdrawal_amount: 100_000,
@@ -3131,6 +3483,10 @@ mod tests {
             (
                 "__REWARDS__".into(),
                 Value::from("0x3000000000000000000000000000000000000003"),
+            ),
+            (
+                "__PRIVATE_TRANSFER_RECIPIENT__".into(),
+                serde_yaml::from_str("{ var: recipient.address }").unwrap(),
             ),
             ("__PRIVATE_TRANSFER_AMOUNT__".into(), Value::from(1_u64)),
             ("__EARN_DEPOSIT_AMOUNT__".into(), Value::from(100_u64)),

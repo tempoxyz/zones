@@ -9,6 +9,12 @@ measured. The neobank profile additionally exposes focused encrypted-deposit
 and private-withdrawal scenarios that provision their own valid starting state
 before measuring one cross-chain direction.
 
+The generic and neobank assets are maintained together on the repository's
+`main` line: topology provisioning, preflight, scenario execution, correlation,
+reporting, and workflow dispatch are one benchmark implementation. Running the
+neobank profile does not depend on a stacked benchmark branch or a separately
+provisioned topology.
+
 ## Production-shaped benchmark environment
 
 Do not use Anvil or `tempo-zone dev` for performance results. The checked-in
@@ -396,6 +402,7 @@ cargo run -p tempo-xtask -- benchmark-preflight \
   --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
   --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" \
   --transactions-per-account "$journeys_per_account" \
+  --recipient-mode "${ZONES_BENCH_RECIPIENT_MODE:-existing}" \
   --check-phase bootstrap \
   --fixture-state empty \
   --output target/zones-benchmark
@@ -446,11 +453,12 @@ export ZONES_BENCH_SEED='<unique unsigned integer>'
 export ZONES_BENCH_ACCOUNTS=100
 export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=20
-export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_MAX_CONCURRENT=12
 export ZONES_BENCH_DEPOSIT_AMOUNT=2000000
 export ZONES_BENCH_ACTIVITY_AMOUNT=1
 export ZONES_BENCH_WITHDRAWAL_AMOUNT=1000000
 export ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT=10000000
+export ZONES_BENCH_RECIPIENT_MODE=existing
 
 contrib/bench/run-roundtrip.sh
 ```
@@ -472,6 +480,21 @@ The same monitor fails fast on a dead Zone process, invalid payload, final state
 root mismatch, or panic. A recoverable asynchronous state-root mismatch is
 printed and recorded in `zone-state-root-fallbacks.log`, then left to Reth's
 synchronous verification path.
+
+`ZONES_BENCH_RECIPIENT_MODE` controls destination-state reuse without changing
+the sender pool:
+
+- `existing` selects recipients from the funded benchmark account pool, so
+  repeated transfers and withdrawals exercise already-existing destination
+  accounts.
+- `random` uses fresh, unfunded destinations. Independent activity and
+  withdrawal streams derive seeded random addresses, while the roundtrip
+  scenario leases a distinct deterministic destination for each journey.
+
+The roundtrip threads the selected recipient through its activity transfer,
+withdrawal request, and receipt-scoped event filters, so fresh destinations do
+not weaken exact cross-chain correlation. The random destinations need no
+private keys because the benchmark never spends from them.
 
 The equivalent stages are described below for diagnosis or controlled manual
 execution.
@@ -584,7 +607,8 @@ export ZONES_BENCH_SEED='<unique unsigned integer>'
 export ZONES_BENCH_ACCOUNTS=100
 export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=100
-export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_MAX_CONCURRENT=12
+export ZONES_BENCH_RECIPIENT_MODE=existing
 
 contrib/bench/run-phase.sh deposit
 # or: contrib/bench/run-phase.sh activity
@@ -628,7 +652,9 @@ txgen-tempo generate \
 The rendered spec uses the queried Zone chain ID and pays gas in the configured
 enabled TIP-20. Activity transactions use expiring nonces with a 25-second
 validity window, so they must be streamed into `bench send`; do not generate a
-file for later replay. For production-shaped private submission, generate a
+file for later replay. With `recipient-mode=existing`, the transfer target is a
+reused benchmark account; with `recipient-mode=random`, it is a fresh,
+seed-derived address. For production-shaped private submission, generate a
 sender map from this spec's `users` pool as shown in the roundtrip section.
 
 ```bash
@@ -651,7 +677,9 @@ txgen-tempo generate \
 The workload calls
 `requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)`
 with `gasLimit = 0`, empty callback data, and empty `revealTo`. The Tempo
-recipient and Zone fallback recipient are the selected sender's corresponding
+recipient follows `recipient-mode`: it is selected from the funded benchmark
+pool in `existing` mode and is a fresh, seed-derived unfunded address in
+`random` mode. The Zone fallback remains the selected sender's controlled
 account address. Any outbox approvals are untimed setup traffic.
 
 ```bash
@@ -698,10 +726,10 @@ configured write RPC. Each job:
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
 8. for `neobank-e2e`, deploys the checked-in Earn boundary fixtures, configures
-   the DirectSwap-backed closed-loop token and recipient policy, prepares
-   approvals and private RPC authorization, and runs the selected measured
-   scenario. The `neobank-private-withdrawal` selection first creates and
-   verifies portal-backed private DLUSD outside measurement;
+   the selected swap mechanism and closed-loop token and recipient policy,
+   prepares approvals and private RPC authorization, and runs the selected
+   measured scenario. The `neobank-private-withdrawal` selection first creates
+   and verifies portal-backed private DLUSD outside measurement;
 9. for `deposit`, runs the independent preflight/generate/bench pipeline; and
 10. renders the JSON report into a Markdown results page on the workflow
    overview, then uploads that page with the rendered benchmark assets,
@@ -715,6 +743,37 @@ routes:
 | --- | --- | --- | --- |
 | `neobank-encrypted-deposit` | Fixture deployment and portal approval | Exact Zone `EncryptedDepositProcessed` correlated to the receipt-scoped L1 encrypted deposit | `/scenarios/neobank-encrypted-deposit` |
 | `neobank-private-withdrawal` | Encrypted DLUSD funding for every account and DLUSD outbox approval | Exact L1 `WithdrawalProcessed` correlated to the successful Zone receipt and receipt-scoped `WithdrawalRequested` | `/scenarios/neobank-private-withdrawal` |
+
+### Dispatch configuration
+
+The workflow exposes the load shape and topology controls needed to run the
+same benchmark definition as a smoke test, a sustained load test, or a
+mechanism comparison:
+
+| Controls | Inputs and defaults |
+| --- | --- |
+| Workload | `phase=neobank-full-journey`, `accounts=100`, `count=1000`, `tps=20`, `max-concurrent=12`, and an optional `seed` derived from the workflow run when empty |
+| Transaction amounts | `deposit-amount=2000000`, `activity-amount=1`, `withdrawal-amount=1000000`, and `bootstrap-deposit-amount=10000000` |
+| Route and destination | `swap-mechanism=direct-swap`, `swap-liquidity=10000000000`, `recipient-mode=existing`, and `callback-gas-limit=10000000` |
+| L1 state | `state-bloat-gib=1` and `force-bloat=false` |
+| L1 capacity | `l1-gas-limit=30000000` and `l1-general-gas-limit=30000000` |
+| Withdrawal scheduler | `withdrawal-max-batch-gas=30000000`, `withdrawal-max-in-flight-batches=12`, `zone-batch-interval-blocks=120`, and `withdrawal-poll-interval-secs=5` |
+| Waiting and drain | `step-timeout=10m`, `setup-settlement-timeout-secs=120`, and `drain-timeout=300` |
+
+For scenario phases, `count` is complete journeys and `tps` is journey starts
+per second. For the independent `deposit` phase they are transactions and
+transactions per second. The benchmark-side `max-concurrent` default is 12 for
+every phase and preset. It limits txgen transactions or journeys and is
+independent of `withdrawal-max-in-flight-batches`, which limits the Zone
+withdrawal scheduler's ordered L1 batches; both happen to default to 12.
+`step-timeout` accepts a positive duration ending in
+`ms`, `s`, `m`, or `h`; `drain-timeout=0` is the only supported zero-valued
+timeout and skips the independent phase's final txpool drain. The workflow
+rejects callback gas above 10,000,000, a general L1 limit above the block limit,
+and withdrawal batch or planned callback-transaction gas above the general L1
+transaction limit. Neobank dispatches also reject swap liquidity outside the
+selected mechanism's pinned contract limits or below the selected preset's
+required inventory.
 
 The withdrawal setup deposits
 `ceil(count / accounts) * deposit-amount` DLUSD to each account and waits for
@@ -756,17 +815,36 @@ gh workflow run zones-benchmark.yml \
   -f accounts=100 \
   -f count=100 \
   -f tps=20 \
-  -f max-concurrent=100 \
+  -f max-concurrent=12 \
   -f state-bloat-gib=1 \
-  -f force-bloat=false
+  -f force-bloat=false \
+  -f swap-mechanism=direct-swap \
+  -f swap-liquidity=10000000000 \
+  -f recipient-mode=existing
 ```
 
 For one-direction smoke runs, change only the phase:
 
 ```bash
-gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-encrypted-deposit -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
-gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-private-withdrawal -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-encrypted-deposit -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=12
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-private-withdrawal -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=12
 ```
+
+For an A/B run through the native StablecoinDEX with a fresh ordinary private
+transfer destination, change only the two mechanism inputs:
+
+```bash
+gh workflow run zones-benchmark.yml \
+  --ref '<branch-or-tag>' \
+  -f phase=neobank-full-journey \
+  -f count=100 \
+  -f swap-mechanism=stablecoin-dex \
+  -f recipient-mode=random
+```
+
+To isolate destination-state reuse in the generic route, dispatch two
+otherwise-identical `roundtrip` runs with `recipient-mode=existing` and
+`recipient-mode=random`. The mechanism controls are ignored by generic phases.
 
 Set `force-bloat=true` only to replace the paired L1 baseline for the selected
 configuration. Ordinary dispatches and PR runs default to `false` and reuse a
@@ -778,15 +856,16 @@ GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
 file exists on the default branch. Before merge, opening, reopening, or pushing
 a commit to a same-repository PR whose cumulative diff touches the workflow,
 `contrib/bench`, `xtask`, or this document runs `neobank-full-journey` with
-100 accounts, 1,000 journeys, 20 journey starts per second, and 100 maximum in
+100 accounts, 100 journeys, 20 journey starts per second, and 12 maximum in
 flight. The authorization job requires both the
 triggering actor and PR author to have repository write access and rejects fork
-PRs. A newer commit cancels an obsolete run for the same PR, while benchmark
-jobs from different PRs and manual dispatches serialize on the shared Schelk
-host resources. The scripts can also be executed directly on the benchmark host
-while the workflow is under review.
+PRs. Newer commits do not cancel an in-progress benchmark; another run for the
+same PR queues behind it. Benchmark jobs from different PRs and manual
+dispatches also serialize when the shared Schelk host has no free runner. The
+scripts can be executed directly on the benchmark host while the workflow is
+under review.
 
-For a sustained generic roundtrip, the validated profile is 200 accounts,
+One historical generic roundtrip used 200 accounts,
 1,000 journeys, 20 journey starts per second, and 200 maximum in flight. It
 completed 1,000/1,000 with no failures or timeouts at 13.332 journeys/s, with
 12.540 s p50 and 15.208 s p95 journey latency in

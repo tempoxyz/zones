@@ -14,5 +14,7 @@ in Zones main's `ZoneInfo`. Earn's current minimal interface predates those fiel
 compatibility update, `EarnRouter` cannot decode `ZoneFactory.zones()` against current Zones.
 
 The benchmark also copies Bridge's `DirectSwapV2`, TIP-20 controller and handler, auth registry,
-and Earn's `BridgeStableSwapAdapter` from the same revision. The full-journey and swapped-lifecycle
-presets route DLUSD/pathUSD conversions through that stack; StablecoinDEX is not their swap path.
+and Earn's `BridgeStableSwapAdapter` from the same revision. The selectable `direct-swap` mode
+routes DLUSD/pathUSD conversions through that stack. The `stablecoin-dex` mode uses the copied
+Earn StablecoinDEX adapter with the native Tempo precompile, while `local/SimpleDirectSwapFixture`
+provides the explicitly benchmark-only `simple` mode.

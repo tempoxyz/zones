@@ -8,6 +8,9 @@ accounts:
   users:
     mnemonic: "${ZONES_BENCH_MNEMONIC}"
     range: [__ACCOUNT_START__, __ACCOUNT_END__]
+  recipients:
+    mnemonic: "${ZONES_BENCH_MNEMONIC}"
+    range: [__RECIPIENT_ACCOUNT_START__, __RECIPIENT_ACCOUNT_END__]
   sponsor:
     mnemonic: "${ZONES_BENCH_MNEMONIC}"
     range: [__SEQUENCER_ACCOUNT_INDEX__, __SEQUENCER_ACCOUNT_END__]
@@ -34,7 +37,7 @@ templates:
       abi: TIP20
       function: "transfer(address,uint256)"
       args:
-        - { var: recipient.address }
+        - { var: recipient }
         - __ACTIVITY_AMOUNT__
 
   request_withdrawal:
@@ -48,7 +51,7 @@ templates:
       function: "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
       args:
         - "__TOKEN__"
-        - { var: account.address }
+        - { var: recipient }
         - __WITHDRAWAL_AMOUNT__
         - { random_bytes: 32 }
         - 0
@@ -64,9 +67,7 @@ sequences:
           pool: users
           select: random
       recipient:
-        account:
-          pool: users
-          select: random
+        address: __RECIPIENT_GENERATOR__
     steps:
       - name: transfer
         template: tip20_transfer
@@ -77,6 +78,8 @@ sequences:
         account:
           pool: users
           select: random
+      recipient:
+        address: __RECIPIENT_GENERATOR__
     steps:
       - name: request
         template: request_withdrawal

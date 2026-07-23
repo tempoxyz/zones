@@ -27,7 +27,7 @@ templates:
       function: "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)"
       args:
         - "__TOKEN__"
-        - { var: account.address }
+        - { var: recipient }
         - __WITHDRAWAL_AMOUNT__
         - { var: memo }
         - 0
@@ -42,6 +42,8 @@ sequences:
         account:
           pool: users
           select: random
+      recipient:
+        address: __RECIPIENT_GENERATOR__
       memo:
         bytes32:
           random_bytes: 32

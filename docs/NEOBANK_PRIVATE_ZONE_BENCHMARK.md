@@ -20,13 +20,39 @@ one bridge direction should be loaded. `encrypted-deposit` measures the first
 boundary independently. `private-withdrawal` prepares portal-backed private
 DLUSD outside measurement, then measures the fifth boundary independently.
 
-The gateway, vault adapter, rewards controller, engine, Bridge DirectSwap stack,
-and proxy are Earn boundary fixtures from #750 and #809 under
-`specs/ref-impls/test/fixtures/earn`. The DirectSwap deployment includes the V2
-swap contract, controller, handler, authorization registry, TIP-20 adapter, and
-reserve ledger used by the L1 callback route. Foundry builds their artifacts
-alongside the Zone specs; benchmark provisioning never fetches or clones
-external source.
+The gateway, vault adapter, rewards controller, engine, swap adapters, and proxy
+are Earn boundary fixtures from #750 and #809 under
+`specs/ref-impls/test/fixtures/earn`. Foundry builds their artifacts alongside
+the Zone specs; benchmark provisioning never fetches or clones external
+source. These assets, the generic topology, scenario runtime, reporting, and CI
+workflow are one main-based benchmark implementation rather than a stack of
+benchmark branches.
+
+### Swap mechanism
+
+`ZONES_BENCH_SWAP_MECHANISM` selects the L1 swap path during fixture
+provisioning:
+
+| Value | Provisioned path | Intended comparison |
+| --- | --- | --- |
+| `direct-swap` (default) | The full DirectSwap V2 controller, handler, authorization registry, TIP-20 adapter, reserve ledger, and canonical bridge swap adapter. The gateway installs explicit DLUSD deposit and redeem routes to this adapter. | The complete checked-in DirectSwap boundary fixture. |
+| `simple` | A benchmark-only, funded 1:1 implementation of the canonical three-argument direct-swap interface, wrapped by the canonical bridge swap adapter and installed as the DLUSD route override. | Callback and gateway cost without the full DirectSwap controller stack. This is not a production swap venue. |
+| `stablecoin-dex` | Tempo's native StablecoinDEX at tick zero through the gateway's default StablecoinDEX adapter, with no per-token route override. | The native order-book path and default gateway routing. |
+
+`ZONES_BENCH_SWAP_LIQUIDITY` sets the token-base-unit liquidity provisioned for
+the selected path: DirectSwap reserve capacity, balances held by the simple
+fixture, or bid/ask liquidity in StablecoinDEX. Deployment, approvals, pair
+creation, and liquidity seeding are setup traffic outside measured latency.
+Fixture metadata and the workflow report record the mechanism, adapter and
+route selection, and seeded liquidity.
+
+For `full-journey` and `swapped-lifecycle`, DirectSwap and the simple fixture
+must cover at least `max-concurrent * withdrawal-amount` of transient inventory.
+StablecoinDEX orders are consumed rather than replenished, so each seeded side
+must cover `count * withdrawal-amount`. The slippage-bounce preset needs one
+withdrawal amount. Configuration rejects smaller capacities, DirectSwap
+liquidity above the pinned controller's `1,000,000,000,000,000` mint cap, and
+StablecoinDEX liquidity below its `100,000,000` minimum order size.
 
 ## Topology and policy
 
@@ -48,10 +74,10 @@ off-ramp recipient is the bridge wallet fixture. No authorization map,
 mnemonic, private key, encryption payload, or bearer token belongs in rendered
 output or an uploaded artifact.
 
-Each composable request uses the exact eight-argument withdrawal overload, a
-10,000,000-gas callback budget, an empty `revealTo`, an account fallback
-recipient, and a random action ID used both as the withdrawal memo and callback
-correlation key.
+Each composable request uses the exact eight-argument withdrawal overload, the
+configured callback budget (`10,000,000` gas by default), an empty `revealTo`,
+an account fallback recipient, and a random action ID used both as the
+withdrawal memo and callback correlation key.
 The terminal matcher requires all of: request transaction hash, sender tag,
 queue/deposit hash, action ID, token, recipient, amount, and receipt-scoped
 event. Balance polling is not a completion signal.
@@ -61,6 +87,15 @@ source transaction receipt and `WithdrawalRequested` event. Only a confirmed,
 successful request advances to the longer cross-chain wait. This prevents a
 reverted, expired, or never-included request from occupying a journey slot for
 the full cross-chain timeout.
+
+`ZONES_BENCH_RECIPIENT_MODE=existing|random` controls destination reuse. In the
+closed-loop neobank journey it changes only the ordinary private DLUSD transfer:
+`existing` reuses a benchmark account and `random` targets a fresh, seeded
+unfunded address. Gateway callback targets, bridge-wallet off-ramps, fallback
+and refund recipients, and encrypted lifecycle returns remain controlled
+addresses because the scenario must spend returned assets and preserve the
+closed-loop authorization policy. Generic activity, withdrawal, and roundtrip
+behavior is described in `docs/ZONES_BENCHMARK.md`.
 
 ## Rendered assets
 
@@ -102,8 +137,8 @@ the scenario report or an artifact.
 
 The pinned transaction generator supports the required in-memory encrypted
 deposit preparation and named-tuple ABI encoding. The topology provisioner has
-a `neobank` profile which deploys and seeds the copied Earn stack and Bridge
-`DirectSwapV2`/TIP-20 controller outside the measured interval, enables EarnToken, sets the
+a `neobank` profile which deploys and seeds the copied Earn stack and selected
+swap mechanism outside the measured interval, enables EarnToken, sets the
 bridge rates to zero, waits for Zone token ingestion, and writes only
 non-secret runtime metadata:
 
@@ -111,10 +146,19 @@ non-secret runtime metadata:
 forge build --root specs/ref-impls
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/neobank-topology.env
 export ZONES_BENCH_PROFILE=neobank
-export ZONES_BENCH_NEOBANK_PRESET=direct-lifecycle
+export ZONES_BENCH_NEOBANK_PRESET=full-journey
+export ZONES_BENCH_SWAP_MECHANISM=direct-swap
+export ZONES_BENCH_SWAP_LIQUIDITY=10000000000
+export ZONES_BENCH_RECIPIENT_MODE=existing
 contrib/bench/provision-topology.sh up
 source "$ZONES_BENCH_ENV_FILE"
 ```
+
+Choose `simple` or `stablecoin-dex` before `provision-topology.sh up` to run the
+same scenario through another swap path. The swap mechanism and liquidity are
+deployment-time settings, so an A/B comparison creates a fresh topology for
+each path. Recipient mode is a render-time setting and can change between runs
+against a compatible topology.
 
 The dedicated runner renders the profile assets, prepares account approvals and
 private-RPC authorization in a mode-0700 temporary directory, invokes the
@@ -135,13 +179,17 @@ preset is recorded in the workflow summary and run metadata while the rendered
 scenario remains at the stable results-renderer path.
 
 The default full-journey run uses 100 accounts, 1,000 complete journeys, 20
-journey starts per second, and at most 100 in flight.
+journey starts per second, and at most 12 benchmark journeys in flight. The
+same benchmark-side default applies to every phase and preset. It is independent
+of the Zone withdrawal scheduler's
+`ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES`, which limits ordered L1
+withdrawal batches rather than txgen transactions or journeys.
 
-For sustained runs, use the validated profiles below. Offered load is kept
-above the observed completion rate so the configured in-flight set stays full;
-the observed rate includes ramp-up and drain. Each linked run completed all
-1,000 journeys with no failures or timeouts using the 30,000,000 L1 gas limit
-and 1 GiB L1 state-bloat preset, and published its report to ClickHouse.
+The historical validation runs below used larger in-flight caps than the
+current default of 12. Their observed rates include ramp-up and drain. Each
+linked run completed all 1,000 journeys with no failures or timeouts using the
+30,000,000 L1 gas limit and 1 GiB L1 state-bloat preset, and published its
+report to ClickHouse.
 
 | Preset | Accounts | Journeys | Starts/s | Max in flight | Observed journeys/s | Journey p50 | Journey p95 | Run |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
@@ -173,7 +221,7 @@ export ZONES_BENCH_NEOBANK_PRESET=encrypted-deposit
 export ZONES_BENCH_ACCOUNTS=100
 export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=20
-export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_MAX_CONCURRENT=12
 contrib/bench/provision-topology.sh up
 source "$ZONES_BENCH_ENV_FILE"
 contrib/bench/run-neobank-private-flow.sh
@@ -183,7 +231,7 @@ After the workflow reaches the default branch, the equivalent one-command CI
 invocation is:
 
 ```bash
-gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-encrypted-deposit -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-encrypted-deposit -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=12
 ```
 
 Published scenario reports use the `neobank-encrypted-deposit` results route.
@@ -217,7 +265,7 @@ export ZONES_BENCH_NEOBANK_PRESET=private-withdrawal
 export ZONES_BENCH_ACCOUNTS=100
 export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=20
-export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_MAX_CONCURRENT=12
 contrib/bench/provision-topology.sh up
 source "$ZONES_BENCH_ENV_FILE"
 contrib/bench/run-neobank-private-flow.sh
@@ -226,7 +274,7 @@ contrib/bench/run-neobank-private-flow.sh
 The equivalent one-command CI invocation is:
 
 ```bash
-gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-private-withdrawal -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=100
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-private-withdrawal -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=12
 ```
 
 Published scenario reports use the `neobank-private-withdrawal` results route.
@@ -301,7 +349,7 @@ export ZONES_BENCH_NEOBANK_PRESET=rewards-redemption
 export ZONES_BENCH_ACCOUNTS=100
 export ZONES_BENCH_COUNT=1000
 export ZONES_BENCH_TPS=20
-export ZONES_BENCH_MAX_CONCURRENT=100
+export ZONES_BENCH_MAX_CONCURRENT=12
 contrib/bench/provision-topology.sh up
 source "$ZONES_BENCH_ENV_FILE"
 contrib/bench/run-neobank-private-flow.sh
@@ -331,9 +379,11 @@ latency, and remove the temporary material on exit.
 
 The topology exercises real L1 and Zone nodes, portal deposits, outbox batches,
 authenticated private RPC, and receipt-scoped cross-chain correlation. The
-Bridge controller reserves and the `Simple4626Vault` venue are benchmark fixtures.
-They do not represent final production economics, liquidity, policy
-administration, or a final vault venue.
+Bridge controller reserves, the funded simple swap, and the `Simple4626Vault`
+venue are benchmark fixtures. StablecoinDEX mode uses the native contract and
+canonical adapter, but its tick-zero order-book liquidity is created by
+provisioning. These paths do not represent final production economics,
+liquidity, policy administration, or a final vault venue.
 
 The checked-in rewards fixture is ABI-consistent with its pinned Earn stack and
 uses `fund(address,uint256)`. Current upstream Earn adds a `maxShareSupply`

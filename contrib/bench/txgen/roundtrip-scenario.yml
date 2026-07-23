@@ -34,8 +34,8 @@ scenario:
         select: lease
     recipient:
       account:
-        pool: users
-        select: random
+        pool: __RECIPIENT_POOL__
+        select: __RECIPIENT_SELECT__
 
   steps:
     - checkpoint:
@@ -90,7 +90,7 @@ scenario:
           call:
             args:
               - "__TOKEN__"
-              - { var: account.address }
+              - { var: recipient.address }
               - __WITHDRAWAL_AMOUNT__
               - { random_bytes: 32 }
               - 0
@@ -112,7 +112,7 @@ scenario:
         where:
           sender: { var: account.address }
           token: "__TOKEN__"
-          to: { var: account.address }
+          to: { var: recipient.address }
           amount: __WITHDRAWAL_AMOUNT__
           gasLimit: 0
       save: withdrawal_requested
@@ -124,7 +124,7 @@ scenario:
         abi: ZonePortal
         event: WithdrawalProcessed
         where:
-          to: { var: account.address }
+          to: { var: recipient.address }
           senderTag:
             keccak256_packed:
               types: [address, bytes32]

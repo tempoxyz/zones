@@ -51,7 +51,7 @@ ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
 ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX="${ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX:-4}"
 ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-1000}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-20}"
-ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-100}"
+ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-12}"
 ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-2000000}"
 ZONES_BENCH_ACTIVITY_AMOUNT="${ZONES_BENCH_ACTIVITY_AMOUNT:-1}"
 ZONES_BENCH_WITHDRAWAL_AMOUNT="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
@@ -67,7 +67,13 @@ ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS="${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-120}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
-ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-rewards-redemption}"
+ZONES_BENCH_RECIPIENT_MODE="${ZONES_BENCH_RECIPIENT_MODE:-existing}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-full-journey}"
+case "$ZONES_BENCH_RECIPIENT_MODE" in
+    existing) private_transfer_recipient='{ var: recipient.address }' ;;
+    random) private_transfer_recipient=random ;;
+    *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
+esac
 case "$ZONES_BENCH_NEOBANK_PRESET" in
     direct-lifecycle)
         scenario_file=direct-lifecycle-scenario.yml
@@ -368,6 +374,7 @@ preflight_phase() {
         --accounts "$ZONES_BENCH_ACCOUNTS" --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
         --activity-amount "$ZONES_BENCH_ACTIVITY_AMOUNT" --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
         --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" --transactions-per-account "$journeys_per_account" \
+        --recipient-mode "$ZONES_BENCH_RECIPIENT_MODE" \
         --sponsored-approval-rounds 2 \
         --check-phase "$phase" --output "$ZONES_BENCH_OUTPUT")
     [[ -z "$fixture" ]] || command+=(--fixture-state "$fixture")
@@ -487,6 +494,7 @@ for source in "${render_sources[@]}"; do
         -e "s|__DLUSD__|$ZONES_BENCH_DLUSD|g" -e "s|__PATHUSD__|$ZONES_BENCH_PATHUSD|g" -e "s|__EARN_TOKEN__|$ZONES_BENCH_EARN_TOKEN|g" \
         -e "s|__GATEWAY__|$ZONES_BENCH_GATEWAY|g" -e "s|__BRIDGE_WALLET__|$ZONES_BENCH_BRIDGE_WALLET|g" -e "s|__REWARDS__|$ZONES_BENCH_REWARDS|g" \
         -e "s|__ONRAMP_AMOUNT__|$ZONES_BENCH_DEPOSIT_AMOUNT|g" -e "s|__PRIVATE_TRANSFER_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" \
+        -e "s|__PRIVATE_TRANSFER_RECIPIENT__|$private_transfer_recipient|g" \
         -e "s|__EARN_DEPOSIT_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__EARN_REDEEM_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" \
         -e "s|__OFFRAMP_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" -e "s|__CALLBACK_GAS_LIMIT__|$ZONES_BENCH_CALLBACK_GAS_LIMIT|g" \
         -e "s|__WITHDRAWAL_ONLY_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__WITHDRAWAL_SETUP_AMOUNT__|$withdrawal_setup_amount|g" \

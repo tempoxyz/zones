@@ -38,7 +38,7 @@ on:
         description: Maximum concurrent transactions, or leased journeys for roundtrip.
         type: string
         required: true
-        default: "100"
+        default: "12"
       state-bloat-gib:
         description: Tempo L1 TIP-20 state bloat per validator; never applied to the Zone.
         type: choice
@@ -69,6 +69,88 @@ on:
         type: string
         required: true
         default: "1000000"
+      swap-mechanism:
+        description: L1 swap implementation used by the neobank fixture.
+        type: choice
+        required: true
+        default: direct-swap
+        options:
+          - direct-swap
+          - simple
+          - stablecoin-dex
+      recipient-mode:
+        description: Reuse funded recipients or use fresh recipients where the selected flow permits.
+        type: choice
+        required: true
+        default: existing
+        options:
+          - existing
+          - random
+      bootstrap-deposit-amount:
+        description: Untimed per-account bootstrap deposit amount.
+        type: string
+        required: true
+        default: "10000000"
+      callback-gas-limit:
+        description: L1 callback gas requested by composable withdrawals (maximum 10000000).
+        type: string
+        required: true
+        default: "10000000"
+      swap-liquidity:
+        description: Untimed liquidity seeded into the selected swap mechanism.
+        type: string
+        required: true
+        default: "10000000000"
+      l1-gas-limit:
+        description: Tempo L1 block gas limit.
+        type: string
+        required: true
+        default: "30000000"
+      l1-general-gas-limit:
+        description: Tempo L1 general transaction gas limit.
+        type: string
+        required: true
+        default: "30000000"
+      withdrawal-max-batch-gas:
+        description: Maximum gas reserved by one L1 withdrawal batch.
+        type: string
+        required: true
+        default: "30000000"
+      withdrawal-max-in-flight-batches:
+        description: Maximum ordered L1 withdrawal batches kept in flight.
+        type: string
+        required: true
+        default: "12"
+      zone-batch-interval-blocks:
+        description: Zone blocks between withdrawal batch boundaries.
+        type: string
+        required: true
+        default: "120"
+      withdrawal-poll-interval-secs:
+        description: Seconds between L1 withdrawal-queue polls.
+        type: string
+        required: true
+        default: "5"
+      step-timeout:
+        description: Per-step scenario timeout (for example 10m).
+        type: string
+        required: true
+        default: 10m
+      setup-settlement-timeout-secs:
+        description: Maximum seconds to wait for each untimed setup settlement.
+        type: string
+        required: true
+        default: "120"
+      drain-timeout:
+        description: Seconds to drain submitted transactions; zero disables draining.
+        type: string
+        required: true
+        default: "300"
+      seed:
+        description: Optional unsigned txgen seed; empty derives one from the workflow run.
+        type: string
+        required: false
+        default: ""
 
   # workflow_dispatch is unavailable until this file reaches the default branch.
   # Until then, benchmark-harness changes run the selected validation preset on PR updates.
@@ -87,7 +169,7 @@ permissions:
 
 concurrency:
   group: zones-benchmark-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -122,6 +204,18 @@ jobs:
       bootstrap-deposit-amount: ${{ steps.config.outputs.bootstrap-deposit-amount }}
       activity-amount: ${{ steps.config.outputs.activity-amount }}
       withdrawal-amount: ${{ steps.config.outputs.withdrawal-amount }}
+      swap-mechanism: ${{ steps.config.outputs.swap-mechanism }}
+      recipient-mode: ${{ steps.config.outputs.recipient-mode }}
+      callback-gas-limit: ${{ steps.config.outputs.callback-gas-limit }}
+      swap-liquidity: ${{ steps.config.outputs.swap-liquidity }}
+      l1-gas-limit: ${{ steps.config.outputs.l1-gas-limit }}
+      l1-general-gas-limit: ${{ steps.config.outputs.l1-general-gas-limit }}
+      withdrawal-max-batch-gas: ${{ steps.config.outputs.withdrawal-max-batch-gas }}
+      withdrawal-max-in-flight-batches: ${{ steps.config.outputs.withdrawal-max-in-flight-batches }}
+      zone-batch-interval-blocks: ${{ steps.config.outputs.zone-batch-interval-blocks }}
+      withdrawal-poll-interval-secs: ${{ steps.config.outputs.withdrawal-poll-interval-secs }}
+      step-timeout: ${{ steps.config.outputs.step-timeout }}
+      setup-settlement-timeout-secs: ${{ steps.config.outputs.setup-settlement-timeout-secs }}
       drain-timeout: ${{ steps.config.outputs.drain-timeout }}
       seed: ${{ steps.config.outputs.seed }}
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
@@ -164,15 +258,27 @@ jobs:
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
           INPUT_COUNT: ${{ inputs.count || '1000' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
-          INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '100' }}
+          INPUT_MAX_CONCURRENT: ${{ inputs.max-concurrent || '12' }}
           INPUT_STATE_BLOAT_GIB: ${{ inputs.state-bloat-gib || '1' }}
           INPUT_FORCE_BLOAT: ${{ inputs.force-bloat == true }}
           INPUT_DEPOSIT_AMOUNT: ${{ inputs.deposit-amount || '2000000' }}
-          INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: "10000000"
+          INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
           INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
-          INPUT_DRAIN_TIMEOUT: "300"
-          INPUT_SEED: ""
+          INPUT_SWAP_MECHANISM: ${{ inputs.swap-mechanism || 'direct-swap' }}
+          INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
+          INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '10000000' }}
+          INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
+          INPUT_L1_GAS_LIMIT: ${{ inputs.l1-gas-limit || '30000000' }}
+          INPUT_L1_GENERAL_GAS_LIMIT: ${{ inputs.l1-general-gas-limit || '30000000' }}
+          INPUT_WITHDRAWAL_MAX_BATCH_GAS: ${{ inputs.withdrawal-max-batch-gas || '30000000' }}
+          INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ inputs.withdrawal-max-in-flight-batches || '12' }}
+          INPUT_ZONE_BATCH_INTERVAL_BLOCKS: ${{ inputs.zone-batch-interval-blocks || '120' }}
+          INPUT_WITHDRAWAL_POLL_INTERVAL_SECS: ${{ inputs.withdrawal-poll-interval-secs || '5' }}
+          INPUT_STEP_TIMEOUT: ${{ inputs.step-timeout || '10m' }}
+          INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
+          INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
+          INPUT_SEED: ${{ inputs.seed || '' }}
           INPUT_TEMPO_REF: a55a6395567f529f03fa88bc457584fa8ed89af8
           INPUT_TXGEN_REF: cebfc5661ca713c4c1cf8099d68fde20c7a3b9c0
           RUN_ID: ${{ github.run_id }}
@@ -183,6 +289,7 @@ jobs:
           requested_phase="$INPUT_PHASE"
           if [ "$EVENT_NAME" = pull_request ]; then
             requested_phase="$ZONES_BENCH_DEFAULT_PHASE"
+            INPUT_COUNT=100
           fi
           case "$requested_phase" in
             neobank-encrypted-deposit)
@@ -240,10 +347,19 @@ jobs:
             INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT \
             INPUT_STATE_BLOAT_GIB INPUT_DEPOSIT_AMOUNT INPUT_ACTIVITY_AMOUNT \
             INPUT_WITHDRAWAL_AMOUNT INPUT_BOOTSTRAP_DEPOSIT_AMOUNT \
-            INPUT_DRAIN_TIMEOUT INPUT_SEED
+            INPUT_CALLBACK_GAS_LIMIT INPUT_SWAP_LIQUIDITY \
+            INPUT_L1_GAS_LIMIT INPUT_L1_GENERAL_GAS_LIMIT \
+            INPUT_WITHDRAWAL_MAX_BATCH_GAS INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES \
+            INPUT_ZONE_BATCH_INTERVAL_BLOCKS INPUT_WITHDRAWAL_POLL_INTERVAL_SECS \
+            INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS INPUT_DRAIN_TIMEOUT INPUT_SEED
           do
-            if ! [[ "${!name}" =~ ^[0-9]+$ ]]; then
+            value="${!name}"
+            if ! [[ "$value" =~ ^[0-9]+$ ]]; then
               echo "::error::$name must be an unsigned integer"
+              exit 1
+            fi
+            if (( ${#value} > 18 )); then
+              echo "::error::$name is outside the supported unsigned-integer range"
               exit 1
             fi
           done
@@ -263,13 +379,73 @@ jobs:
               exit 1
             fi
           done
+          case "$INPUT_SWAP_MECHANISM" in
+            direct-swap|simple|stablecoin-dex) ;;
+            *) echo "::error::swap-mechanism must be direct-swap, simple, or stablecoin-dex"; exit 1 ;;
+          esac
+          case "$INPUT_RECIPIENT_MODE" in
+            existing|random) ;;
+            *) echo "::error::recipient-mode must be existing or random"; exit 1 ;;
+          esac
+          if ! [[ "$INPUT_STEP_TIMEOUT" =~ ^([1-9][0-9]*)(ms|s|m|h)$ ]]; then
+            echo "::error::step-timeout must be a positive duration ending in ms, s, m, or h"
+            exit 1
+          fi
+          if (( ${#BASH_REMATCH[1]} > 9 )); then
+            echo "::error::step-timeout magnitude cannot exceed nine digits"
+            exit 1
+          fi
+          for name in \
+            INPUT_CALLBACK_GAS_LIMIT INPUT_SWAP_LIQUIDITY \
+            INPUT_L1_GAS_LIMIT INPUT_L1_GENERAL_GAS_LIMIT \
+            INPUT_WITHDRAWAL_MAX_BATCH_GAS INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES \
+            INPUT_ZONE_BATCH_INTERVAL_BLOCKS INPUT_WITHDRAWAL_POLL_INTERVAL_SECS \
+            INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS
+          do
+            value="${!name}"
+            if (( 10#$value == 0 )); then
+              echo "::error::$name must be greater than zero"
+              exit 1
+            fi
+          done
+          (( 10#$INPUT_CALLBACK_GAS_LIMIT <= 10000000 )) \
+            || { echo "::error::callback-gas-limit cannot exceed the 10000000 protocol cap"; exit 1; }
+          (( 10#$INPUT_L1_GAS_LIMIT <= 30000000 )) \
+            || { echo "::error::l1-gas-limit cannot exceed 30000000"; exit 1; }
+          (( 10#$INPUT_L1_GENERAL_GAS_LIMIT <= 30000000 )) \
+            || { echo "::error::l1-general-gas-limit cannot exceed 30000000"; exit 1; }
+          (( 10#$INPUT_L1_GENERAL_GAS_LIMIT <= 10#$INPUT_L1_GAS_LIMIT )) \
+            || { echo "::error::l1-general-gas-limit cannot exceed l1-gas-limit"; exit 1; }
+          (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 30000000 )) \
+            || { echo "::error::withdrawal-max-batch-gas cannot exceed 30000000"; exit 1; }
+          (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
+            || { echo "::error::withdrawal-max-batch-gas cannot exceed l1-general-gas-limit"; exit 1; }
+          planned_singleton_withdrawal_gas=1750000
+          if [ "$phase" = neobank-e2e ]; then
+            planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
+          fi
+          (( planned_singleton_withdrawal_gas <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
+            || { echo "::error::l1-general-gas-limit cannot fit a withdrawal planned at $planned_singleton_withdrawal_gas gas"; exit 1; }
+          (( 10#$INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES <= 10000 )) \
+            || { echo "::error::withdrawal-max-in-flight-batches cannot exceed 10000"; exit 1; }
+          (( 10#$INPUT_ZONE_BATCH_INTERVAL_BLOCKS <= 1000000 )) \
+            || { echo "::error::zone-batch-interval-blocks cannot exceed 1000000"; exit 1; }
+          (( 10#$INPUT_WITHDRAWAL_POLL_INTERVAL_SECS <= 86400 )) \
+            || { echo "::error::withdrawal-poll-interval-secs cannot exceed 86400"; exit 1; }
+          (( 10#$INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS <= 86400 )) \
+            || { echo "::error::setup-settlement-timeout-secs cannot exceed 86400"; exit 1; }
+          (( 10#$INPUT_DRAIN_TIMEOUT <= 86400 )) \
+            || { echo "::error::drain-timeout cannot exceed 86400"; exit 1; }
           required_accounts=$((10#$INPUT_MAX_CONCURRENT * leases_per_journey))
           if { [ "$phase" = roundtrip ] || [ "$phase" = neobank-e2e ]; } \
             && (( required_accounts > 10#$INPUT_ACCOUNTS )); then
             echo "::error::$requested_phase requires at least $required_accounts accounts for max-concurrent=$INPUT_MAX_CONCURRENT"
             exit 1
           fi
-          case "$INPUT_STATE_BLOAT_GIB" in 0|1|10|100) ;; *) exit 1 ;; esac
+          case "$INPUT_STATE_BLOAT_GIB" in
+            0|1|10|100) ;;
+            *) echo "::error::state-bloat-gib must be 0, 1, 10, or 100"; exit 1 ;;
+          esac
           case "$INPUT_FORCE_BLOAT" in
             true) INPUT_FORCE_BLOAT=1 ;;
             false) INPUT_FORCE_BLOAT=0 ;;
@@ -280,9 +456,36 @@ jobs:
           INPUT_TPS=$((10#$INPUT_TPS))
           INPUT_MAX_CONCURRENT=$((10#$INPUT_MAX_CONCURRENT))
           INPUT_STATE_BLOAT_GIB=$((10#$INPUT_STATE_BLOAT_GIB))
+          swap_liquidity=$((10#$INPUT_SWAP_LIQUIDITY))
+          withdrawal_amount=$((10#$INPUT_WITHDRAWAL_AMOUNT))
           if (( INPUT_ACCOUNTS > 10000 )); then
             echo "::error::accounts cannot exceed the cached funded-account capacity of 10000"
             exit 1
+          fi
+          if [ "$phase" = neobank-e2e ]; then
+            if [ "$INPUT_SWAP_MECHANISM" = direct-swap ] && (( swap_liquidity > 1000000000000000 )); then
+              echo "::error::direct-swap liquidity cannot exceed the Bridge controller absolute mint limit of 1000000000000000"
+              exit 1
+            fi
+            if [ "$INPUT_SWAP_MECHANISM" = stablecoin-dex ] && (( swap_liquidity < 100000000 )); then
+              echo "::error::stablecoin-dex liquidity must be at least its 100000000 minimum order amount"
+              exit 1
+            fi
+            required_swap_uses=0
+            case "$neobank_preset" in
+              full-journey|swapped-lifecycle)
+                if [ "$INPUT_SWAP_MECHANISM" = stablecoin-dex ]; then
+                  required_swap_uses=$INPUT_COUNT
+                else
+                  required_swap_uses=$INPUT_MAX_CONCURRENT
+                fi
+                ;;
+              slippage-bounce) required_swap_uses=1 ;;
+            esac
+            if (( required_swap_uses > 0 && swap_liquidity / withdrawal_amount < required_swap_uses )); then
+              echo "::error::$INPUT_SWAP_MECHANISM liquidity must cover $required_swap_uses swap(s) of withdrawal-amount=$withdrawal_amount for $requested_phase"
+              exit 1
+            fi
           fi
           for name in INPUT_TEMPO_REF INPUT_TXGEN_REF; do
             if ! [[ "${!name}" =~ ^[0-9a-fA-F]{40}$ ]]; then
@@ -305,6 +508,18 @@ jobs:
             echo "bootstrap-deposit-amount=$INPUT_BOOTSTRAP_DEPOSIT_AMOUNT"
             echo "activity-amount=$INPUT_ACTIVITY_AMOUNT"
             echo "withdrawal-amount=$INPUT_WITHDRAWAL_AMOUNT"
+            echo "swap-mechanism=$INPUT_SWAP_MECHANISM"
+            echo "recipient-mode=$INPUT_RECIPIENT_MODE"
+            echo "callback-gas-limit=$INPUT_CALLBACK_GAS_LIMIT"
+            echo "swap-liquidity=$INPUT_SWAP_LIQUIDITY"
+            echo "l1-gas-limit=$INPUT_L1_GAS_LIMIT"
+            echo "l1-general-gas-limit=$INPUT_L1_GENERAL_GAS_LIMIT"
+            echo "withdrawal-max-batch-gas=$INPUT_WITHDRAWAL_MAX_BATCH_GAS"
+            echo "withdrawal-max-in-flight-batches=$INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES"
+            echo "zone-batch-interval-blocks=$INPUT_ZONE_BATCH_INTERVAL_BLOCKS"
+            echo "withdrawal-poll-interval-secs=$INPUT_WITHDRAWAL_POLL_INTERVAL_SECS"
+            echo "step-timeout=$INPUT_STEP_TIMEOUT"
+            echo "setup-settlement-timeout-secs=$INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS"
             echo "drain-timeout=$INPUT_DRAIN_TIMEOUT"
             echo "seed=$INPUT_SEED"
             echo "tempo-ref=$INPUT_TEMPO_REF"
@@ -330,6 +545,18 @@ jobs:
       ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.bootstrap-deposit-amount }}
       ZONES_BENCH_ACTIVITY_AMOUNT: ${{ needs.authorize.outputs.activity-amount }}
       ZONES_BENCH_WITHDRAWAL_AMOUNT: ${{ needs.authorize.outputs.withdrawal-amount }}
+      ZONES_BENCH_SWAP_MECHANISM: ${{ needs.authorize.outputs.swap-mechanism }}
+      ZONES_BENCH_RECIPIENT_MODE: ${{ needs.authorize.outputs.recipient-mode }}
+      ZONES_BENCH_CALLBACK_GAS_LIMIT: ${{ needs.authorize.outputs.callback-gas-limit }}
+      ZONES_BENCH_SWAP_LIQUIDITY: ${{ needs.authorize.outputs.swap-liquidity }}
+      ZONES_BENCH_L1_GAS_LIMIT: ${{ needs.authorize.outputs.l1-gas-limit }}
+      ZONES_BENCH_L1_GENERAL_GAS_LIMIT: ${{ needs.authorize.outputs.l1-general-gas-limit }}
+      ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS: ${{ needs.authorize.outputs.withdrawal-max-batch-gas }}
+      ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ needs.authorize.outputs.withdrawal-max-in-flight-batches }}
+      ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS: ${{ needs.authorize.outputs.zone-batch-interval-blocks }}
+      ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS: ${{ needs.authorize.outputs.withdrawal-poll-interval-secs }}
+      ZONES_BENCH_STEP_TIMEOUT: ${{ needs.authorize.outputs.step-timeout }}
+      ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ needs.authorize.outputs.setup-settlement-timeout-secs }}
       ZONES_BENCH_DRAIN_TIMEOUT: ${{ needs.authorize.outputs.drain-timeout }}
       ZONES_BENCH_SEED: ${{ needs.authorize.outputs.seed }}
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
@@ -518,6 +745,8 @@ jobs:
           test -s specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json
           test -s specs/ref-impls/out/TIP20Controller.sol/TIP20Controller.json
           test -s specs/ref-impls/out/BridgeStableSwapAdapter.sol/BridgeStableSwapAdapter.json
+          test -s specs/ref-impls/out/SimpleDirectSwapFixture.sol/SimpleDirectSwapFixture.json
+          test -s specs/ref-impls/out/TempoStablecoinDexStableSwapAdapter.sol/TempoStablecoinDexStableSwapAdapter.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |
@@ -573,8 +802,6 @@ jobs:
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
           if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
             export ZONES_BENCH_PROFILE=neobank
-            export ZONES_BENCH_L1_GAS_LIMIT=30000000
-            export ZONES_BENCH_L1_GENERAL_GAS_LIMIT=30000000
           fi
           contrib/bench/provision-topology.sh up
           set -a
@@ -648,11 +875,17 @@ jobs:
             echo "- Phase: \`$ZONES_BENCH_PHASE\`"
             if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
               echo "- Neobank preset: \`$ZONES_BENCH_NEOBANK_PRESET\`"
+              echo "- Swap mechanism: \`$ZONES_BENCH_SWAP_MECHANISM\` (setup liquidity \`$ZONES_BENCH_SWAP_LIQUIDITY\`)"
+              echo "- Callback gas limit: \`$ZONES_BENCH_CALLBACK_GAS_LIMIT\`"
             fi
+            echo "- Recipient mode: \`$ZONES_BENCH_RECIPIENT_MODE\`"
             echo "- $unit: \`$ZONES_BENCH_COUNT\`"
             echo "- $rate: \`$ZONES_BENCH_TPS\`"
             echo "- Maximum concurrency: \`$ZONES_BENCH_MAX_CONCURRENT\`"
             echo "- Accounts: \`$ZONES_BENCH_ACCOUNTS\`"
+            echo "- Amounts (deposit / activity / withdrawal / bootstrap): \`$ZONES_BENCH_DEPOSIT_AMOUNT\` / \`$ZONES_BENCH_ACTIVITY_AMOUNT\` / \`$ZONES_BENCH_WITHDRAWAL_AMOUNT\` / \`$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT\`"
+            echo "- Step / setup settlement / drain timeouts: \`$ZONES_BENCH_STEP_TIMEOUT\` / \`${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS}s\` / \`${ZONES_BENCH_DRAIN_TIMEOUT}s\`"
+            echo "- Txgen seed: \`$ZONES_BENCH_SEED\`"
             echo "- Tempo L1 state bloat: \`bloat=$SUMMARY_STATE_BLOAT_GIB\` (\`$((10#$SUMMARY_STATE_BLOAT_GIB * 1000)) MiB\` per validator)"
             echo "- L1 snapshot: \`$snapshot_status\` (key \`${ZONES_BENCH_L1_CACHE_KEY:-unavailable}\`)"
             echo "- Target: \`${ZONES_BENCH_TARGET_ID:-unavailable}\`"
@@ -661,6 +894,7 @@ jobs:
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
+            echo "- Withdrawal scheduler (batch gas / in-flight / Zone blocks / poll): \`$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS\` / \`$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES\` / \`$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS\` / \`${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS}s\`"
           } >> "$summary"
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
 
@@ -682,6 +916,9 @@ jobs:
             --arg targetId "${ZONES_BENCH_TARGET_ID:-}" \
             --arg phase "$ZONES_BENCH_PHASE" \
             --arg neobankPreset "$ZONES_BENCH_NEOBANK_PRESET" \
+            --arg swapMechanism "$ZONES_BENCH_SWAP_MECHANISM" \
+            --arg recipientMode "$ZONES_BENCH_RECIPIENT_MODE" \
+            --arg stepTimeout "$ZONES_BENCH_STEP_TIMEOUT" \
             --arg l1ValidatorACpus "$ZONES_BENCH_L1_A_CPUS" \
             --arg l1ValidatorBCpus "$ZONES_BENCH_L1_B_CPUS" \
             --arg zoneCpus "$ZONES_BENCH_ZONE_CPUS" \
@@ -692,13 +929,27 @@ jobs:
             --arg l1CacheKey "${ZONES_BENCH_L1_CACHE_KEY:-}" \
             --arg l1CacheGeneration "${ZONES_BENCH_L1_CACHE_GENERATION:-}" \
             --argjson l1CacheRebuilt "${ZONES_BENCH_L1_CACHE_REBUILT:-0}" \
+            --argjson forceBloat "$((10#$ZONES_BENCH_FORCE_BLOAT))" \
             --argjson accounts "$((10#$ZONES_BENCH_ACCOUNTS))" \
             --argjson count "$((10#$ZONES_BENCH_COUNT))" \
             --argjson targetRate "$((10#$ZONES_BENCH_TPS))" \
             --argjson maxConcurrent "$((10#$ZONES_BENCH_MAX_CONCURRENT))" \
+            --argjson depositAmount "$((10#$ZONES_BENCH_DEPOSIT_AMOUNT))" \
+            --argjson activityAmount "$((10#$ZONES_BENCH_ACTIVITY_AMOUNT))" \
+            --argjson withdrawalAmount "$((10#$ZONES_BENCH_WITHDRAWAL_AMOUNT))" \
+            --argjson bootstrapDepositAmount "$((10#$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT))" \
+            --argjson callbackGasLimit "$((10#$ZONES_BENCH_CALLBACK_GAS_LIMIT))" \
+            --argjson swapLiquidity "$((10#$ZONES_BENCH_SWAP_LIQUIDITY))" \
+            --argjson setupSettlementTimeoutSecs "$((10#$ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS))" \
+            --argjson drainTimeoutSecs "$((10#$ZONES_BENCH_DRAIN_TIMEOUT))" \
+            --argjson seed "$((10#$ZONES_BENCH_SEED))" \
             --argjson l1StateBloatMiB "$((10#$ZONES_BENCH_BLOAT_GIB * 1000))" \
             --argjson l1BlockGasLimit "${ZONES_BENCH_L1_GAS_LIMIT:-0}" \
             --argjson l1GeneralGasLimit "${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-0}" \
+            --argjson withdrawalMaxBatchGas "$((10#$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS))" \
+            --argjson withdrawalMaxInFlightBatches "$((10#$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES))" \
+            --argjson zoneBatchIntervalBlocks "$((10#$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS))" \
+            --argjson withdrawalPollIntervalSecs "$((10#$ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS))" \
             '{
               zonesRevision: $zonesRevision,
               tempoRevision: $tempoRevision,
@@ -708,10 +959,26 @@ jobs:
               targetId: $targetId,
               phase: $phase,
               neobankPreset: $neobankPreset,
+              swapMechanism: $swapMechanism,
+              recipientMode: $recipientMode,
               accounts: $accounts,
               count: $count,
               targetRate: $targetRate,
               maxConcurrent: $maxConcurrent,
+              amounts: {
+                deposit: $depositAmount,
+                activity: $activityAmount,
+                withdrawal: $withdrawalAmount,
+                bootstrapDeposit: $bootstrapDepositAmount
+              },
+              swapLiquidity: $swapLiquidity,
+              callbackGasLimit: $callbackGasLimit,
+              timeouts: {
+                step: $stepTimeout,
+                setupSettlementSecs: $setupSettlementTimeoutSecs,
+                drainSecs: $drainTimeoutSecs
+              },
+              seed: $seed,
               cpuSets: {
                 l1ValidatorA: $l1ValidatorACpus,
                 l1ValidatorB: $l1ValidatorBCpus,
@@ -726,12 +993,19 @@ jobs:
               l1Snapshot: {
                 key: $l1CacheKey,
                 generation: $l1CacheGeneration,
-                rebuilt: $l1CacheRebuilt
+                rebuilt: $l1CacheRebuilt,
+                forceRebuild: ($forceBloat != 0)
               },
               l1StateBloatMiB: $l1StateBloatMiB,
               zoneStateBloatMiB: 0,
               l1BlockGasLimit: $l1BlockGasLimit,
-              l1GeneralGasLimit: $l1GeneralGasLimit
+              l1GeneralGasLimit: $l1GeneralGasLimit,
+              withdrawalScheduler: {
+                maxBatchGas: $withdrawalMaxBatchGas,
+                maxInFlightBatches: $withdrawalMaxInFlightBatches,
+                zoneBatchIntervalBlocks: $zoneBatchIntervalBlocks,
+                pollIntervalSecs: $withdrawalPollIntervalSecs
+              }
             }' > target/zones-benchmark/run-metadata.json
 
       - name: Collect node logs
@@ -765,6 +1039,7 @@ jobs:
             target/zones-benchmark/${{ needs.authorize.outputs.phase }}/
             target/zones-benchmark/*.json
             target/zones-benchmark/*.md
+            target/zones-benchmark/topology/neobank-fixtures.json
             target/zones-benchmark/node-logs/
             target/zones-benchmark/invalid-block-diagnostics/
           if-no-files-found: warn

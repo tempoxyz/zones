@@ -60,7 +60,7 @@ scenario:
           from: { var: account.ref }
           fee_token: "__DLUSD__"
           call:
-            args: [{ var: recipient.address }, __PRIVATE_TRANSFER_AMOUNT__]
+            args: [__PRIVATE_TRANSFER_RECIPIENT__, __PRIVATE_TRANSFER_AMOUNT__]
       save: private_transfer
 
     - wait_receipt:
