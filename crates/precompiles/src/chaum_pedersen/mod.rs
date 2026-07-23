@@ -19,7 +19,7 @@ use k256::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
-use tempo_precompiles::Precompile as _;
+use tempo_precompiles::{Precompile as _, storage::StorageCtx};
 
 /// Chaum-Pedersen Verify precompile address on Zone L2.
 pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
@@ -74,6 +74,62 @@ impl ChaumPedersenVerify {
             |data, caller| Self.call(data, caller),
         )
     }
+
+    /// Charge the gas cost for Chaum-Pedersen proof verification.
+    pub fn verify_chaum_pedersen_gas() -> tempo_precompiles::Result<()> {
+        StorageCtx::default().deduct_gas(CP_VERIFY_GAS)
+    }
+
+    /// Verify a Chaum-Pedersen DLOG equality proof on secp256k1.
+    ///
+    /// Proves knowledge of scalar `x` such that `pubSeq = x*G` AND `sharedSecret = x*ephemeralPub`.
+    pub(crate) fn verify(
+        ephemeral_pub_x: &[u8; 32],
+        ephemeral_pub_y_parity: u8,
+        shared_secret_x: &[u8; 32],
+        shared_secret_y_parity: u8,
+        sequencer_pub_x: &[u8; 32],
+        sequencer_pub_y_parity: u8,
+        s_bytes: &[u8; 32],
+        c_bytes: &[u8; 32],
+    ) -> bool {
+        // Recover points
+        let Some(ephemeral_pub) = recover_point(ephemeral_pub_x, ephemeral_pub_y_parity) else {
+            return false;
+        };
+        let Some(shared_secret_point) = recover_point(shared_secret_x, shared_secret_y_parity)
+        else {
+            return false;
+        };
+        let Some(sequencer_pub) = recover_point(sequencer_pub_x, sequencer_pub_y_parity) else {
+            return false;
+        };
+
+        // Deserialize proof scalars by reducing modulo the group order.
+        let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&(*s_bytes).into());
+        let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&(*c_bytes).into());
+
+        // R1 = s*G - c*pubSeq
+        let r1 = ProjectivePoint::GENERATOR * s - ProjectivePoint::from(sequencer_pub) * c;
+
+        // R2 = s*ephemeralPub - c*sharedSecretPoint
+        let r2 = ProjectivePoint::from(ephemeral_pub) * s
+            - ProjectivePoint::from(shared_secret_point) * c;
+
+        let r1_affine = AffinePoint::from(r1);
+        let r2_affine = AffinePoint::from(r2);
+
+        // Recompute challenge and compare
+        let c_prime = challenge_hash(
+            &ephemeral_pub,
+            &sequencer_pub,
+            &shared_secret_point,
+            &r1_affine,
+            &r2_affine,
+        );
+
+        c == c_prime
+    }
 }
 
 /// Recover a secp256k1 affine point from compressed form (x coordinate + y parity).
@@ -119,56 +175,6 @@ pub fn challenge_hash(
     <Scalar as Reduce<k256::U256>>::reduce_bytes(FieldBytes::from_slice(&hash.0))
 }
 
-/// Verify a Chaum-Pedersen DLOG equality proof on secp256k1.
-///
-/// Proves knowledge of scalar `x` such that `pubSeq = x*G` AND `sharedSecret = x*ephemeralPub`.
-fn verify_chaum_pedersen(
-    ephemeral_pub_x: &[u8; 32],
-    ephemeral_pub_y_parity: u8,
-    shared_secret_x: &[u8; 32],
-    shared_secret_y_parity: u8,
-    sequencer_pub_x: &[u8; 32],
-    sequencer_pub_y_parity: u8,
-    s_bytes: &[u8; 32],
-    c_bytes: &[u8; 32],
-) -> bool {
-    // Recover points
-    let Some(ephemeral_pub) = recover_point(ephemeral_pub_x, ephemeral_pub_y_parity) else {
-        return false;
-    };
-    let Some(shared_secret_point) = recover_point(shared_secret_x, shared_secret_y_parity) else {
-        return false;
-    };
-    let Some(sequencer_pub) = recover_point(sequencer_pub_x, sequencer_pub_y_parity) else {
-        return false;
-    };
-
-    // Deserialize proof scalars as big-endian bytes and reduce modulo the group order.
-    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(FieldBytes::from_slice(s_bytes));
-    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(FieldBytes::from_slice(c_bytes));
-
-    // R1 = s*G - c*pubSeq
-    let r1 = ProjectivePoint::GENERATOR * s - ProjectivePoint::from(sequencer_pub) * c;
-
-    // R2 = s*ephemeralPub - c*sharedSecretPoint
-    let r2 =
-        ProjectivePoint::from(ephemeral_pub) * s - ProjectivePoint::from(shared_secret_point) * c;
-
-    let r1_affine = AffinePoint::from(r1);
-    let r2_affine = AffinePoint::from(r2);
-
-    // Recompute challenge and compare
-    let c_prime = challenge_hash(
-        &ephemeral_pub,
-        &sequencer_pub,
-        &shared_secret_point,
-        &r1_affine,
-        &r2_affine,
-    );
-
-    c == c_prime
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,7 +214,7 @@ mod tests {
         let ss_enc = shared_secret.to_encoded_point(true);
         let ps_enc = pub_seq.to_encoded_point(true);
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             eph_enc.as_bytes()[0],
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),
@@ -236,7 +242,7 @@ mod tests {
         let ss_enc = shared_secret.to_encoded_point(true);
         let ps_enc = pub_seq.to_encoded_point(true);
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             eph_enc.as_bytes()[0],
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),
@@ -281,7 +287,7 @@ mod tests {
         let ss_enc = shared_secret.to_encoded_point(true);
         let ps_enc = pub_seq.to_encoded_point(true);
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             eph_enc.as_bytes()[0],
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),
@@ -315,7 +321,7 @@ mod tests {
         let ss_enc = shared_secret.to_encoded_point(true);
         let ps_enc = pub_seq.to_encoded_point(true);
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             eph_enc.as_bytes()[0],
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),
@@ -350,7 +356,7 @@ mod tests {
         let ss_parity = ss_enc.as_bytes()[0];
         let flipped_ss_parity = if ss_parity == 0x02 { 0x03 } else { 0x02 };
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             eph_enc.as_bytes()[0],
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),
@@ -385,7 +391,7 @@ mod tests {
         let eph_parity = eph_enc.as_bytes()[0];
         let flipped_eph_parity = if eph_parity == 0x02 { 0x03 } else { 0x02 };
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             flipped_eph_parity,
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),
@@ -415,7 +421,7 @@ mod tests {
         let ss_enc = shared_secret.to_encoded_point(true);
         let ps_enc = pub_seq.to_encoded_point(true);
 
-        let valid = verify_chaum_pedersen(
+        let valid = ChaumPedersenVerify::verify(
             eph_enc.x().unwrap().as_slice().try_into().unwrap(),
             eph_enc.as_bytes()[0],
             ss_enc.x().unwrap().as_slice().try_into().unwrap(),

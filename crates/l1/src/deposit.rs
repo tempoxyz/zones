@@ -120,7 +120,6 @@ impl L1Deposit {
                 }
                 .abi_encode()
                 .into(),
-                rejected: false,
             },
             Self::Encrypted(d) => abi::QueuedDeposit {
                 depositType: abi::DepositType::Encrypted,
@@ -140,7 +139,6 @@ impl L1Deposit {
                 }
                 .abi_encode()
                 .into(),
-                rejected: false,
             },
         }
     }

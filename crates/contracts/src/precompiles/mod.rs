@@ -18,9 +18,8 @@ pub use zone_inbox::*;
 pub use zone_portal::*;
 pub use zone_tx_context::*;
 
-// Address and storage-slot constants the bindings build on. These live in `zone-primitives`
-// (shared with the proof system) and are re-exported here so callers can reach them through the
-// contracts crate, e.g. `tempo_zone_contracts::TEMPO_STATE_ADDRESS`.
+// Address and protocol constants the bindings build on. These live in `zone-primitives` and are
+// re-exported here so callers can reach them through the contracts crate.
 pub use zone_primitives::constants::{
     EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, NO_QUEUE_INDEX, PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ADMIN_SLOT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_GATEWAY_MODE_SLOT,

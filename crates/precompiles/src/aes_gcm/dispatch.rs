@@ -2,16 +2,13 @@
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
-use revm::precompile::{PrecompileHalt, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     Precompile as TempoPrecompile, charge_input_cost, dispatch, storage::StorageCtx,
 };
 use tracing::debug;
 
-use super::{
-    AES_GCM_BASE_GAS, AES_GCM_PER_BYTE_GAS, AesGcmDecrypt, IAesGcmDecrypt, decrypt_aes_gcm,
-    decryptCall, decryptReturn,
-};
+use super::{AesGcmDecrypt, IAesGcmDecrypt, decryptCall, decryptReturn};
 
 impl TempoPrecompile for AesGcmDecrypt {
     fn call(&mut self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
@@ -27,15 +24,14 @@ impl TempoPrecompile for AesGcmDecrypt {
                     decrypt(call) => {
                         debug!(target: "zone::precompile", "AesGcmDecrypt: decrypt");
 
-                        let gas = AES_GCM_BASE_GAS
-                            + AES_GCM_PER_BYTE_GAS
-                                * (call.ciphertext.len() + call.aad.len()) as u64;
-                        let mut storage = StorageCtx::default();
-                        if storage.deduct_gas(gas).is_err() {
-                            return Ok(storage.halt_output(PrecompileHalt::OutOfGas));
+                        let storage = StorageCtx::default();
+                        if let Err(error) =
+                            Self::charge_gas(call.ciphertext.len(), call.aad.len())
+                        {
+                            return storage.error_result(error);
                         }
 
-                        let (plaintext, valid) = decrypt_aes_gcm(
+                        let (plaintext, valid) = Self::decrypt(
                             &call.key.0,
                             &call.nonce.0,
                             &call.ciphertext,

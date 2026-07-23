@@ -2,16 +2,13 @@
 
 use alloy_primitives::Address;
 use alloy_sol_types::SolCall;
-use revm::precompile::{PrecompileHalt, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     Precompile as TempoPrecompile, charge_input_cost, dispatch, storage::StorageCtx,
 };
 use tracing::debug;
 
-use super::{
-    CP_VERIFY_GAS, ChaumPedersenVerify, IChaumPedersenVerify, verify_chaum_pedersen,
-    verifyProofCall,
-};
+use super::{ChaumPedersenVerify, IChaumPedersenVerify, verifyProofCall};
 
 impl TempoPrecompile for ChaumPedersenVerify {
     fn call(&mut self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
@@ -27,12 +24,12 @@ impl TempoPrecompile for ChaumPedersenVerify {
                     verifyProof(call) => {
                         debug!(target: "zone::precompile", "ChaumPedersenVerify: verifyProof");
 
-                        let mut storage = StorageCtx::default();
-                        if storage.deduct_gas(CP_VERIFY_GAS).is_err() {
-                            return Ok(storage.halt_output(PrecompileHalt::OutOfGas));
+                        let storage = StorageCtx::default();
+                        if let Err(error) = Self::verify_chaum_pedersen_gas() {
+                            return storage.error_result(error);
                         }
 
-                        let valid = verify_chaum_pedersen(
+                        let valid = Self::verify(
                             &call.ephemeralPubX.0,
                             call.ephemeralPubYParity,
                             &call.sharedSecret.0,

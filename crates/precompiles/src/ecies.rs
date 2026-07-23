@@ -15,7 +15,7 @@ use k256::{
 use tempo_zone_contracts::Withdrawal;
 
 use crate::{
-    aes_gcm::decrypt_aes_gcm,
+    aes_gcm::AesGcmDecrypt,
     chaum_pedersen::{challenge_hash, recover_point},
 };
 
@@ -147,7 +147,7 @@ pub fn decrypt_deposit(
     let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
     // AES-256-GCM decrypt
-    let (plaintext, valid) = decrypt_aes_gcm(&aes_key, nonce, ciphertext, &[], tag);
+    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, nonce, ciphertext, &[], tag);
     if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
         return None;
     }
@@ -386,7 +386,7 @@ pub fn decrypt_authenticated_withdrawal(
     let info = authenticated_withdrawal_hkdf_info(&eph_pubkey);
     let aes_key = hkdf_sha256(&shared_secret_x, b"authenticated-withdrawal-aes-key", &info);
 
-    let (plaintext, valid) = decrypt_aes_gcm(&aes_key, &nonce, ciphertext, &[], &tag);
+    let (plaintext, valid) = AesGcmDecrypt::decrypt(&aes_key, &nonce, ciphertext, &[], &tag);
     if !valid || plaintext.len() != AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE {
         return None;
     }

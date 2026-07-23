@@ -11,7 +11,7 @@ use alloy_primitives::{Address, Bytes, TxKind};
 use alloy_sol_types::SolCall;
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_primitives::TempoTxEnvelope;
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
+use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 use crate::{auth::AuthContext, types::JsonRpcError};
@@ -116,11 +116,11 @@ fn zone_inbox_refunds_mismatched_owner(
         }
 
         let input = input?;
-        if !input.starts_with(&ZoneInbox::refundsCall::SELECTOR) {
+        if !input.starts_with(&IZoneInbox::refundsCall::SELECTOR) {
             return None;
         }
 
-        let owner = ZoneInbox::refundsCall::abi_decode(input).ok()?.owner;
+        let owner = IZoneInbox::refundsCall::abi_decode(input).ok()?.owner;
         (owner != caller).then_some(owner)
     };
 
@@ -164,7 +164,7 @@ mod tests {
     use alloy_sol_types::SolCall;
     use tempo_alloy::rpc::TempoTransactionRequest;
     use tempo_primitives::transaction::Call;
-    use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox};
+    use tempo_zone_contracts::{IZoneInbox, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS};
 
     use super::{
         enforce_contract_creation, enforce_contract_creation_with_allowlist,
@@ -191,7 +191,7 @@ mod tests {
             inner: TransactionRequest {
                 to: Some(TxKind::Call(ZONE_INBOX_ADDRESS)),
                 input: TransactionInput::new(
-                    ZoneInbox::refundsCall {
+                    IZoneInbox::refundsCall {
                         token: ZONE_TOKEN_ADDRESS,
                         owner,
                     }
@@ -295,7 +295,7 @@ mod tests {
         request.calls.push(Call {
             to: TxKind::Call(ZONE_INBOX_ADDRESS),
             value: U256::ZERO,
-            input: ZoneInbox::refundsCall {
+            input: IZoneInbox::refundsCall {
                 token: ZONE_TOKEN_ADDRESS,
                 owner,
             }

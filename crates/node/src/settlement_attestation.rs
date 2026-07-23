@@ -14,7 +14,7 @@ use reth_provider::HeaderProvider;
 use reth_storage_api::{BlockNumReader, ReceiptProvider};
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{
-    IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZonePortal,
+    IZoneInbox, IZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, info};
@@ -51,9 +51,9 @@ where
     for receipt in receipts {
         for log in receipt.logs() {
             if log.address == ZONE_INBOX_ADDRESS
-                && log.topics().first() == Some(&ZoneInbox::TempoAdvanced::SIGNATURE_HASH)
+                && log.topics().first() == Some(&IZoneInbox::TempoAdvanced::SIGNATURE_HASH)
             {
-                let event = ZoneInbox::TempoAdvanced::decode_log(log)
+                let event = IZoneInbox::TempoAdvanced::decode_log(log)
                     .wrap_err_with(|| format!("invalid TempoAdvanced log in block {number}"))?;
                 anchor_hash = Some(event.tempoBlockHash);
                 tempo_block_number = Some(event.tempoBlockNumber);
