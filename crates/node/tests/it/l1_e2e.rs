@@ -134,7 +134,8 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
 
     // Start zone node connected to real L1 — genesis is patched from the L1's
     // current header so TempoState chain continuity works.
-    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), Address::ZERO).await?;
+    let portal_address = l1.deploy_zone().await?;
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
 
     // Wait for the zone to advance past block 0 (genesis anchor)
     let zone_tempo_number = zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;

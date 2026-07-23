@@ -291,7 +291,7 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
 /// server that exposes the enabled-token snapshot required during node startup.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
 
-async fn spawn_test_l1_rpc() -> eyre::Result<String> {
+async fn spawn_test_l1_rpc(chain_id: u64) -> eyre::Result<String> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let address = listener.local_addr()?;
     let enabled_tokens = Arc::new(vec![PATH_USD_ADDRESS]);
@@ -301,7 +301,7 @@ async fn spawn_test_l1_rpc() -> eyre::Result<String> {
                 return;
             };
             let enabled_tokens = enabled_tokens.clone();
-            tokio::spawn(handle_test_l1_rpc_request(stream, enabled_tokens));
+            tokio::spawn(handle_test_l1_rpc_request(stream, enabled_tokens, chain_id));
         }
     });
     Ok(format!("http://{address}"))
@@ -310,6 +310,7 @@ async fn spawn_test_l1_rpc() -> eyre::Result<String> {
 async fn handle_test_l1_rpc_request(
     mut stream: tokio::net::TcpStream,
     enabled_tokens: Arc<Vec<Address>>,
+    chain_id: u64,
 ) {
     let mut request = Vec::new();
     let mut buf = [0u8; 1024];
@@ -361,7 +362,7 @@ async fn handle_test_l1_rpc_request(
         .and_then(serde_json::Value::as_str)
         .unwrap_or_default();
     let result = match method {
-        "eth_chainId" => serde_json::json!("0x539"),
+        "eth_chainId" => serde_json::json!(format!("0x{chain_id:x}")),
         "eth_blockNumber" => serde_json::json!("0x0"),
         "eth_newBlockFilter" => serde_json::json!("0x1"),
         "eth_getFilterChanges" => serde_json::json!([]),
@@ -1070,7 +1071,7 @@ impl ZoneTestNode {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
         let l1_ws_url = if is_local_dummy_l1 {
-            spawn_test_l1_rpc().await?
+            spawn_test_l1_rpc(1337).await?
         } else {
             l1_ws_url
         };
@@ -3360,94 +3361,7 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
 }
 
 pub(crate) async fn start_chain_id_rpc(chain_id: u64) -> eyre::Result<url::Url> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let local_addr = listener.local_addr()?;
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _peer)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(handle_chain_id_rpc_request(stream, chain_id));
-        }
-    });
-    Ok(format!("http://{local_addr}").parse()?)
-}
-
-async fn handle_chain_id_rpc_request(mut stream: tokio::net::TcpStream, chain_id: u64) {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let mut request = Vec::new();
-    let mut buf = [0u8; 1024];
-    let mut headers_end = None;
-    let mut content_length = 0usize;
-
-    loop {
-        let Ok(read) = stream.read(&mut buf).await else {
-            return;
-        };
-        if read == 0 {
-            return;
-        }
-        request.extend_from_slice(&buf[..read]);
-
-        if headers_end.is_none()
-            && let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-        {
-            headers_end = Some(end + 4);
-            let headers = String::from_utf8_lossy(&request[..end]);
-            content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-        }
-
-        if let Some(end) = headers_end
-            && request.len() >= end + content_length
-        {
-            break;
-        }
-    }
-
-    let body = headers_end
-        .and_then(|end| request.get(end..end + content_length))
-        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let id = body
-        .get("id")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(1));
-    let method = body
-        .get("method")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let body = if method == "eth_chainId" {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": format!("0x{chain_id:x}"),
-        })
-    } else {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": "method not found",
-            },
-        })
-    };
-    let body = body.to_string();
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
+    Ok(spawn_test_l1_rpc(chain_id).await?.parse()?)
 }
 
 /// Seed an existing L1Fixture's cache into a zone node's L1 state cache.
