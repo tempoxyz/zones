@@ -20,7 +20,7 @@ use reth_provider::{BlockNumReader, ChainSpecProvider, HeaderProvider};
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     future::Future,
     net::{SocketAddr, TcpListener},
     num::NonZeroU32,
@@ -2520,6 +2520,8 @@ pub(crate) struct ZoneAccount {
     portal_address: Address,
     /// Whether we've already approved the portal to spend pathUSD on L1.
     l1_portal_approved: bool,
+    /// Tokens already approved for the ZoneOutbox on L2.
+    l2_outbox_approved_tokens: BTreeSet<Address>,
 }
 
 impl ZoneAccount {
@@ -2555,6 +2557,7 @@ impl ZoneAccount {
             l2_provider,
             portal_address,
             l1_portal_approved: false,
+            l2_outbox_approved_tokens: BTreeSet::new(),
         }
     }
 
@@ -2588,6 +2591,7 @@ impl ZoneAccount {
             l2_provider,
             portal_address,
             l1_portal_approved: false,
+            l2_outbox_approved_tokens: BTreeSet::new(),
         }
     }
 
@@ -2960,9 +2964,15 @@ impl ZoneAccount {
     }
 
     /// Approve the ZoneOutbox for a token without submitting a withdrawal.
-    pub(crate) async fn approve_outbox(&self, token: Address) -> eyre::Result<()> {
+    ///
+    /// Reuses a successful max approval for subsequent withdrawals of the same token.
+    pub(crate) async fn approve_outbox(&mut self, token: Address) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
         use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+
+        if self.l2_outbox_approved_tokens.contains(&token) {
+            return Ok(());
+        }
 
         let receipt = ITIP20::new(token, &self.l2_provider)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
@@ -2972,6 +2982,7 @@ impl ZoneAccount {
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "L2 outbox approval failed");
+        self.l2_outbox_approved_tokens.insert(token);
         Ok(())
     }
 }
