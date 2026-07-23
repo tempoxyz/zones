@@ -4,6 +4,10 @@
 # and private-RPC authentication are deliberately outside the scenario measurement.
 set -Eeuo pipefail
 
+bench_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scenario-reporting.sh
+source "$bench_dir/scenario-reporting.sh"
+
 die() { echo "error: $*" >&2; exit 1; }
 need() { [[ -n "${!1:-}" ]] || die "$1 must be set"; }
 uint() { [[ "${!1:-}" =~ ^[0-9]+$ ]] || die "$1 must be an unsigned integer"; }
@@ -62,7 +66,7 @@ ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
-ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-rewards-redemption}"
+ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-full-journey}"
 case "$ZONES_BENCH_NEOBANK_PRESET" in
     direct-lifecycle)
         scenario_file=direct-lifecycle-scenario.yml
@@ -588,9 +592,11 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then
 fi
 
 stage_start private_flow
+scenario_report_args=()
+build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
 "$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
-    --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" --report "$ZONES_BENCH_REPORT"
+    --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" "${scenario_report_args[@]}"
 stage_end private_flow
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "slippage-bounce" ]]; then

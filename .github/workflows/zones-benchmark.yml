@@ -7,14 +7,14 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-rewards-redemption
+        default: neobank-full-journey
         options:
+          - neobank-full-journey
           - neobank-rewards-redemption
           - neobank-slippage-bounce
           - neobank-third-party-recipient
           - neobank-direct-lifecycle
           - neobank-swapped-lifecycle
-          - neobank-full-journey
           - roundtrip
           - deposit
       accounts:
@@ -69,7 +69,7 @@ on:
         default: "1000000"
 
   # workflow_dispatch is unavailable until this file reaches the default branch.
-  # Until then, benchmark-harness changes run the private flow on PR updates.
+  # Until then, benchmark-harness changes run the complete neobank journey on PR updates.
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
@@ -95,7 +95,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_NEOBANK_PRESET: rewards-redemption
+  ZONES_BENCH_DEFAULT_PHASE: neobank-full-journey
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
@@ -180,7 +180,7 @@ jobs:
 
           requested_phase="$INPUT_PHASE"
           if [ "$EVENT_NAME" = pull_request ]; then
-            requested_phase="neobank-$ZONES_BENCH_DEFAULT_NEOBANK_PRESET"
+            requested_phase="$ZONES_BENCH_DEFAULT_PHASE"
           fi
           case "$requested_phase" in
             neobank-rewards-redemption)
@@ -323,7 +323,16 @@ jobs:
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
       ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
       ZONES_BENCH_ZONES_REF: ${{ needs.authorize.outputs.sha }}
+      ZONES_BENCH_GIT_REF: ${{ github.head_ref || github.ref_name }}
       ZONES_BENCH_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      ZONES_BENCH_GITHUB_REPOSITORY: ${{ github.repository }}
+      ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
+      ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
+      ZONES_BENCH_GITHUB_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
+      ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
+      CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
       ZONES_BENCH_BUILD_PROFILE: profiling
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
@@ -355,8 +364,24 @@ jobs:
           set -euo pipefail
           contrib/bench/provision-topology.sh cleanup "$ZONES_BENCH_PID_FILE"
 
-      - name: Test L1 snapshot manifest handling
-        run: contrib/bench/tests/l1-snapshot.sh
+      - name: Configure ClickHouse scenario reporting
+        if: needs.authorize.outputs.phase == 'roundtrip' || needs.authorize.outputs.phase == 'neobank-e2e'
+        run: |
+          set -euo pipefail
+          for name in CLICKHOUSE_URL CLICKHOUSE_USER CLICKHOUSE_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::$name is not available to the Zones benchmark workflow"
+              exit 1
+            fi
+          done
+          echo "::add-mask::$CLICKHOUSE_URL"
+          echo "::add-mask::$CLICKHOUSE_USER"
+          echo "::add-mask::$CLICKHOUSE_PASSWORD"
+
+      - name: Test benchmark shell helpers
+        run: |
+          contrib/bench/tests/l1-snapshot.sh
+          contrib/bench/tests/scenario-reporting.sh
 
       - name: Check out pinned Tempo L1
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

@@ -42,55 +42,15 @@ scenario:
       bytes32: { random_bytes: 32 }
 
   steps:
-    - checkpoint: { chain: zone }
-      save: zone_before_onramp
-
-    - invoke:
-        chain: l1
-        action: prepare_encrypted_deposit
-        with:
-          recipient: { var: account.address }
-          zoneId: __ZONE_ID__
-          portalAddress: "__PORTAL__"
-          memo: { var: onramp_action_id }
-      save: onramp_encryption
-
-    - submit:
-        chain: l1
-        template: encrypted_onramp
-        with:
-          from: { var: account.ref }
-          call:
-            args:
-              - "__DLUSD__"
-              - __ONRAMP_AMOUNT__
-              - { var: onramp_encryption.keyIndex }
-              - { var: onramp_encryption.encrypted }
-              - { var: account.address }
-      save: onramp
-
-    - wait_log:
-        chain: l1
-        transaction_hash: { var: onramp.tx_hash }
-        sender: { var: onramp.sender }
-        address: "__PORTAL__"
-        abi: ZonePortal
-        event: EncryptedDepositMade
-        where:
-          sender: { var: account.address }
-          token: "__DLUSD__"
-        max_block_range: 1000
-      save: onramp_enqueued
-
-    - use: wait-encrypted-zone-deposit
-      as: onramp_processed
+    - use: encrypted-zone-entry
+      as: onramp
       with:
-        from_block: { var: zone_before_onramp.block_number }
-        deposit_hash: { var: onramp_enqueued.args.newCurrentDepositQueueHash }
-        sender: { var: account.address }
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
         recipient: { var: account.address }
         token: "__DLUSD__"
-        amount: { var: onramp_enqueued.args.netAmount }
+        fee_token: "__DLUSD__"
+        amount: __ONRAMP_AMOUNT__
         memo: { var: onramp_action_id }
 
     - submit:
@@ -98,6 +58,7 @@ scenario:
         template: private_transfer
         with:
           from: { var: account.ref }
+          fee_token: "__DLUSD__"
           call:
             args: [{ var: recipient.address }, __PRIVATE_TRANSFER_AMOUNT__]
       save: private_transfer
@@ -106,145 +67,48 @@ scenario:
         chain: zone
         transaction_hash: { var: private_transfer.tx_hash }
         sender: { var: private_transfer.sender }
+      timeout: 45s
       save: private_transfer_receipt
 
-    - checkpoint: { chain: l1 }
-      save: l1_before_earn_deposit
-    - checkpoint: { chain: zone }
-      save: zone_before_earn_deposit
-    - invoke:
-        chain: l1
-        action: prepare_encrypted_deposit
-        with:
-          recipient: { var: account.address }
-          zoneId: __ZONE_ID__
-          portalAddress: "__PORTAL__"
-          memo: { var: earn_deposit_action_id }
-      save: earn_deposit_encryption
-    - submit:
-        chain: zone
-        template: gateway_deposit
-        with:
-          from: { var: account.ref }
-          call:
-            args:
-              - "__DLUSD__"
-              - "__GATEWAY__"
-              - __EARN_DEPOSIT_AMOUNT__
-              - { var: earn_deposit_action_id }
-              - __CALLBACK_GAS_LIMIT__
-              - { var: account.address }
-              - abi_encode:
-                  types:
-                    - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
-                  values:
-                    - flow: 0
-                      outputToken: "__EARN_TOKEN__"
-                      keyIndex: { var: earn_deposit_encryption.keyIndex }
-                      encrypted: { var: earn_deposit_encryption.encrypted }
-                      minVaultAssets: __EARN_DEPOSIT_AMOUNT__
-                      minVaultShares: __EARN_DEPOSIT_AMOUNT__
-                      minOutputAmount: 0
-                      actionId: { var: earn_deposit_action_id }
-                      refundRecipient: { var: account.address }
-              - "0x"
-      save: earn_deposit_request
-
-    - wait_log:
-        chain: l1
-        from_block: { var: l1_before_earn_deposit.block_number }
-        address: "__GATEWAY__"
-        abi: ZoneGateway
-        event: EarnDeposit
-        where:
-          actionId: { var: earn_deposit_action_id }
-          inputToken: "__DLUSD__"
-        max_block_range: 1000
-      save: earn_deposit
-
-    - use: wait-encrypted-zone-deposit
-      as: earn_deposit_processed
+    - use: earn-deposit-and-return
+      as: earn_deposit
       with:
-        from_block: { var: zone_before_earn_deposit.block_number }
-        deposit_hash: { var: earn_deposit.args.zoneDepositHash }
-        sender: "__GATEWAY__"
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
         recipient: { var: account.address }
-        token: "__EARN_TOKEN__"
-        amount: { var: earn_deposit.args.shares }
-        memo: { var: earn_deposit_action_id }
+        input_token: "__DLUSD__"
+        fee_token: "__DLUSD__"
+        amount: __EARN_DEPOSIT_AMOUNT__
+        min_vault_assets: __EARN_DEPOSIT_AMOUNT__
+        min_vault_shares: __EARN_DEPOSIT_AMOUNT__
+        action_id: { var: earn_deposit_action_id }
+        fallback_recipient: { var: account.address }
+        refund_recipient: { var: account.address }
 
-    - checkpoint: { chain: l1 }
-      save: l1_before_earn_redeem
-    - checkpoint: { chain: zone }
-      save: zone_before_earn_redeem
-    - invoke:
-        chain: l1
-        action: prepare_encrypted_deposit
-        with:
-          recipient: { var: account.address }
-          zoneId: __ZONE_ID__
-          portalAddress: "__PORTAL__"
-          memo: { var: earn_redeem_action_id }
-      save: earn_redeem_encryption
-    - submit:
-        chain: zone
-        template: gateway_redeem
-        with:
-          from: { var: account.ref }
-          call:
-            args:
-              - "__EARN_TOKEN__"
-              - "__GATEWAY__"
-              - __EARN_REDEEM_AMOUNT__
-              - { var: earn_redeem_action_id }
-              - __CALLBACK_GAS_LIMIT__
-              - { var: account.address }
-              - abi_encode:
-                  types:
-                    - "tuple(uint8 flow,address outputToken,uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,uint128 minVaultAssets,uint128 minVaultShares,uint128 minOutputAmount,bytes32 actionId,address refundRecipient)"
-                  values:
-                    - flow: 1
-                      outputToken: "__DLUSD__"
-                      keyIndex: { var: earn_redeem_encryption.keyIndex }
-                      encrypted: { var: earn_redeem_encryption.encrypted }
-                      minVaultAssets: __EARN_REDEEM_AMOUNT__
-                      minVaultShares: 0
-                      minOutputAmount: __EARN_REDEEM_AMOUNT__
-                      actionId: { var: earn_redeem_action_id }
-                      refundRecipient: { var: account.address }
-              - "0x"
-      save: earn_redeem_request
-
-    - wait_log:
-        chain: l1
-        from_block: { var: l1_before_earn_redeem.block_number }
-        address: "__GATEWAY__"
-        abi: ZoneGateway
-        event: EarnRedeem
-        where:
-          actionId: { var: earn_redeem_action_id }
-          outputToken: "__DLUSD__"
-        max_block_range: 1000
-      save: earn_redeem
-
-    - use: wait-encrypted-zone-deposit
-      as: earn_redeem_processed
+    - use: earn-redeem-and-return
+      as: earn_redeem
       with:
-        from_block: { var: zone_before_earn_redeem.block_number }
-        deposit_hash: { var: earn_redeem.args.zoneDepositHash }
-        sender: "__GATEWAY__"
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
         recipient: { var: account.address }
-        token: "__DLUSD__"
-        amount: { var: earn_redeem.args.outputAmount }
-        memo: { var: earn_redeem_action_id }
+        output_token: "__DLUSD__"
+        fee_token: "__DLUSD__"
+        amount: { var: earn_deposit.callback.args.shares }
+        min_vault_assets: __EARN_REDEEM_AMOUNT__
+        min_output_amount: __EARN_REDEEM_AMOUNT__
+        action_id: { var: earn_redeem_action_id }
+        fallback_recipient: { var: account.address }
+        refund_recipient: { var: account.address }
 
     - checkpoint: { chain: l1 }
       save: l1_before_offramp
+
     - submit:
         chain: zone
         template: offramp
         with:
           from: { var: account.ref }
+          fee_token: "__DLUSD__"
           call:
             args:
               - "__DLUSD__"
@@ -256,6 +120,35 @@ scenario:
               - "0x"
               - "0x"
       save: offramp
+
+    - wait_receipt:
+        chain: zone
+        transaction_hash: { var: offramp.tx_hash }
+        sender: { var: offramp.sender }
+      timeout: 45s
+      save: offramp_receipt
+
+    - wait_log:
+        chain: zone
+        from_block: { var: offramp_receipt.block_number }
+        transaction_hash: { var: offramp.tx_hash }
+        sender: { var: offramp.sender }
+        address: "__OUTBOX__"
+        abi: ZoneOutbox
+        event: WithdrawalRequested
+        where:
+          sender: { var: account.address }
+          token: "__DLUSD__"
+          to: "__BRIDGE_WALLET__"
+          amount: __OFFRAMP_AMOUNT__
+          fee: 0
+          memo: { var: offramp_action_id }
+          gasLimit: 0
+          data: "0x"
+          revealTo: "0x"
+        max_block_range: 1000
+      timeout: 45s
+      save: offramp_requested
 
     - wait_log:
         chain: l1

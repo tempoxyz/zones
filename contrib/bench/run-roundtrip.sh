@@ -2,6 +2,10 @@
 
 set -Eeuo pipefail
 
+bench_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scenario-reporting.sh
+source "$bench_dir/scenario-reporting.sh"
+
 die() {
     echo "error: $*" >&2
     exit 1
@@ -750,6 +754,8 @@ printf -v progress_success_word '%064d' 1
 monitor_roundtrip_progress &
 progress_pid=$!
 
+scenario_report_args=()
+build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
 scenario_command=(
     "$txgen_bin" scenario run
     --scenario "$ZONES_BENCH_OUTPUT/roundtrip-scenario.yml"
@@ -761,7 +767,7 @@ scenario_command=(
     --step-timeout "$ZONES_BENCH_STEP_TIMEOUT"
     --seed "$ZONES_BENCH_SEED"
     --sample-instances "$ZONES_BENCH_SAMPLE_INSTANCES"
-    --report "$ZONES_BENCH_REPORT"
+    "${scenario_report_args[@]}"
 )
 if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
     scenario_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${scenario_command[@]}")

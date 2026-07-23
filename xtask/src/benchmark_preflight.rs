@@ -2211,10 +2211,44 @@ mod tests {
         )
         .unwrap();
         let steps = scenario["scenario"]["steps"].as_sequence().unwrap();
-        assert!(steps.iter().any(|step| {
-            step["use"] == "wait-encrypted-zone-deposit"
-                && step["with"]["deposit_hash"]["var"] == "earn_deposit.args.zoneDepositHash"
-        }));
+        assert_eq!(steps.len(), 10);
+        assert_eq!(steps[0]["use"], "encrypted-zone-entry");
+        assert_eq!(steps[0]["as"], "onramp");
+        assert_eq!(steps[0]["with"]["fee_token"], replacements["__DLUSD__"]);
+        assert_eq!(
+            steps[2]["wait_receipt"]["transaction_hash"]["var"],
+            "private_transfer.tx_hash"
+        );
+        assert_eq!(steps[2]["timeout"], "45s");
+        assert_eq!(steps[3]["use"], "earn-deposit-and-return");
+        assert_eq!(steps[3]["as"], "earn_deposit");
+        assert_eq!(steps[3]["with"]["fee_token"], replacements["__DLUSD__"]);
+        assert_eq!(steps[4]["use"], "earn-redeem-and-return");
+        assert_eq!(steps[4]["as"], "earn_redeem");
+        assert_eq!(steps[4]["with"]["fee_token"], replacements["__DLUSD__"]);
+        assert_eq!(
+            steps[4]["with"]["amount"]["var"],
+            "earn_deposit.callback.args.shares"
+        );
+        assert_eq!(
+            steps[7]["wait_receipt"]["transaction_hash"]["var"],
+            "offramp.tx_hash"
+        );
+        assert_eq!(steps[7]["timeout"], "45s");
+        assert_eq!(steps[8]["wait_log"]["event"], "WithdrawalRequested");
+        assert_eq!(
+            steps[8]["wait_log"]["from_block"]["var"],
+            "offramp_receipt.block_number"
+        );
+        assert_eq!(
+            steps[8]["wait_log"]["transaction_hash"]["var"],
+            "offramp.tx_hash"
+        );
+        assert_eq!(steps[8]["wait_log"]["where"]["gasLimit"], 0);
+        assert_eq!(steps[8]["wait_log"]["where"]["fee"], 0);
+        assert_eq!(steps[8]["wait_log"]["where"]["data"], "0x");
+        assert_eq!(steps[8]["wait_log"]["where"]["revealTo"], "0x");
+        assert_eq!(steps[9]["wait_log"]["event"], "WithdrawalProcessed");
 
         let swapped: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("swapped-lifecycle-scenario.yml")).unwrap(),
@@ -2498,48 +2532,49 @@ mod tests {
             bounce_fragment["steps"][8]["wait_log"]["event"],
             "WithdrawalBounceBackProcessed"
         );
-        for (flow, token, action) in [
-            (
-                0_u64,
-                "0x2000000000000000000000000000000000000003",
-                "earn_deposit_action_id",
-            ),
-            (
-                1_u64,
-                "0x2000000000000000000000000000000000000001",
-                "earn_redeem_action_id",
-            ),
+        for (fragment, flow) in [
+            ("earn-deposit-and-return", 0_u64),
+            ("earn-redeem-and-return", 1_u64),
         ] {
+            let encoded = &fragments["fragments"][fragment]["steps"][3]["submit"]["with"]["call"]["args"]
+                [6]["abi_encode"];
             assert!(
-                steps.iter().any(|step| {
-                    let args = step["submit"]["with"]["call"]["args"].as_sequence();
-                    let Some(args) = args else {
-                        return false;
-                    };
-                    let Some(encoded) = args.get(6).map(|value| &value["abi_encode"]) else {
-                        return false;
-                    };
-                    encoded["types"][0]
-                        .as_str()
-                        .is_some_and(|value| value.starts_with("tuple(uint8 flow,"))
-                        && encoded["values"][0]["flow"] == flow
-                        && encoded["values"][0]["outputToken"] == token
-                        && encoded["values"][0]["actionId"]["var"] == action
-                        && encoded["values"][0]["encrypted"]["var"]
-                            .as_str()
-                            .is_some_and(|value| value.ends_with("_encryption.encrypted"))
-                }),
-                "missing dynamically encoded callback for flow {flow}"
+                encoded["types"][0]
+                    .as_str()
+                    .is_some_and(|value| value.starts_with("tuple(uint8 flow,")),
+                "missing dynamically encoded callback for {fragment}"
+            );
+            assert_eq!(encoded["values"][0]["flow"], flow);
+            assert_eq!(encoded["values"][0]["actionId"]["param"], "action_id");
+            assert_eq!(
+                encoded["values"][0]["encrypted"]["var"],
+                "encryption.encrypted"
             );
         }
         assert_eq!(
-            steps
-                .iter()
-                .filter(|step| step["invoke"]["action"] == "prepare_encrypted_deposit")
-                .count(),
-            3,
-            "each encrypted terminal deposit must prepare an in-memory payload"
+            fragments["fragments"]["earn-deposit-and-return"]["steps"][3]["submit"]["with"]["call"]
+                ["args"][6]["abi_encode"]["values"][0]["outputToken"],
+            "0x2000000000000000000000000000000000000003"
         );
+        assert_eq!(
+            fragments["fragments"]["earn-redeem-and-return"]["steps"][3]["submit"]["with"]["call"]
+                ["args"][6]["abi_encode"]["values"][0]["outputToken"]["param"],
+            "output_token"
+        );
+        for fragment in [
+            "encrypted-zone-entry",
+            "earn-deposit-and-return",
+            "earn-redeem-and-return",
+        ] {
+            assert!(
+                fragments["fragments"][fragment]["steps"]
+                    .as_sequence()
+                    .unwrap()
+                    .iter()
+                    .any(|step| step["invoke"]["action"] == "prepare_encrypted_deposit"),
+                "{fragment} must prepare its encrypted payload in memory"
+            );
+        }
         assert!(steps.iter().any(|step| {
             step["wait_log"]["event"] == "WithdrawalProcessed"
                 && step["wait_log"]["where"]["senderTag"]["keccak256_packed"]["types"][0]
@@ -2962,7 +2997,7 @@ mod tests {
         }
 
         for (scenario, expected_steps) in [
-            ("private-flow-scenario.yml", 22),
+            ("private-flow-scenario.yml", 30),
             ("swapped-lifecycle-scenario.yml", 23),
             ("direct-lifecycle-scenario.yml", 23),
             ("third-party-recipient-scenario.yml", 28),

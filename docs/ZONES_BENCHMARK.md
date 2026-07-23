@@ -668,11 +668,11 @@ txgen-tempo generate \
 
 ## GitHub workflow
 
-`.github/workflows/zones-benchmark.yml` runs a self-provisioned roundtrip or an
-independent deposit workload on the private `bare-metal-dual-schelk` runner
-class used by Tempo's e2e benchmark. It does not use a GitHub Actions
-environment, a pre-existing Zone, or an externally configured write RPC. Each
-job:
+`.github/workflows/zones-benchmark.yml` runs the self-provisioned generic
+roundtrip, neobank scenarios, or independent deposit workload on the private
+`bare-metal-dual-schelk` runner class used by Tempo's e2e benchmark. It does not
+use a GitHub Actions environment, a pre-existing Zone, or an externally
+configured write RPC. Each job:
 
 1. loads the stable private mnemonic from a mode-0600 file under the runner tool
    cache, generating it once when that runner has no identity file yet, without
@@ -694,8 +694,11 @@ job:
    the nonzero outbox fee, creates the short-lived sender-auth map, confirms
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
-8. for `deposit`, runs the independent preflight/generate/bench pipeline; and
-9. renders the JSON report into a Markdown results page on the workflow
+8. for `neobank-e2e`, deploys the checked-in Earn boundary fixtures, configures
+   the closed-loop token and recipient policy, prepares approvals and private
+   RPC authorization, and runs the selected measured scenario;
+9. for `deposit`, runs the independent preflight/generate/bench pipeline; and
+10. renders the JSON report into a Markdown results page on the workflow
    overview, then uploads that page with the rendered benchmark assets,
    host/storage metadata, JSON reports, and node logs before stopping the nodes
    and restoring the benchmark volumes.
@@ -744,9 +747,9 @@ selected phase.
 GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
 file exists on the default branch. Before merge, opening, reopening, or pushing
 a commit to a same-repository PR whose cumulative diff touches the workflow,
-`contrib/bench`, `xtask`, or this document runs `roundtrip` with the workflow
-defaults. The authorization job requires both the triggering actor and PR
-author to have repository write access and rejects fork PRs. A newer commit
+`contrib/bench`, `xtask`, or this document runs `neobank-full-journey` with the
+workflow defaults. The authorization job requires both the triggering actor and
+PR author to have repository write access and rejects fork PRs. A newer commit
 cancels an obsolete run for the same PR, while benchmark jobs from different
 PRs and manual dispatches serialize on the shared Schelk host resources. The
 scripts can also be executed directly on the benchmark host while the workflow
@@ -764,17 +767,22 @@ balance. Run their independent assets manually against a fixture that passes
 `--fixture-state funded`, or select `roundtrip` to create balances within each
 measured journey.
 
-### Current scenario reporting limits
+### Scenario reporting
 
 The txgen scenario engine accepts one submission URL per named chain. This
 workflow submits measured L1 user transactions through validator A and uses
 validator B for aggregate queries; unlike the independent deposit pipeline, it
 does not spread L1 submissions across both validators.
 
-Scenario mode writes its journey and per-step latency JSON report, but it does
-not scrape the node metric endpoints and has no ClickHouse benchmark reporter.
-The workflow combines that report with the rendered scenario to publish a
-scenario-native results page. It reports completed journeys per second,
+Scenario mode writes the journey and per-step latency JSON report and publishes
+the same finalized measured report to ClickHouse. CI requires the
+`CLICKHOUSE_URL`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD` Actions secrets
+to be available to this repository;
+credentials remain in the process environment, while txgen receives only the
+credential-free endpoint and non-secret run/ref metadata. Local runs omit the
+ClickHouse destination unless those variables are set. The workflow combines
+the JSON report with the rendered scenario to publish a scenario-native results
+page. It reports completed journeys per second,
 aggregate and per-chain successful submit-step TPS, completed-journey latency,
 latency for every measured submit and wait step, and receipt gas metrics grouped
 by chain, input template, and scenario step. These gas figures come from outer
@@ -787,8 +795,8 @@ sums successful submit steps across distinct chains. A submit step ends when
 the RPC accepts the transaction by default, or when a successful receipt arrives
 if the step uses `await: receipt`; receipt and log wait steps report subsequent
 execution and cross-chain progress. Untimed bootstrap and approval setup is
-excluded. The page does not claim the node-metric/ClickHouse reporting available
-to Tempo's existing single-chain benchmark harness.
+excluded. Scenario mode still does not scrape the node metric endpoints used by
+Tempo's existing single-chain benchmark harness.
 
 The pinned txgen scenario runtime currently serializes expiring-nonce activity
 submissions through one internal fee-uniqueness scheduling lane until each RPC

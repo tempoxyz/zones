@@ -48,6 +48,12 @@ The terminal matcher requires all of: request transaction hash, sender tag,
 queue/deposit hash, action ID, token, recipient, amount, and receipt-scoped
 event. Balance polling is not a completion signal.
 
+Every measured Zone withdrawal first waits at most 45 seconds for its exact
+source transaction receipt and `WithdrawalRequested` event. Only a confirmed,
+successful request advances to the longer cross-chain wait. This prevents a
+reverted, expired, or never-included request from occupying a journey slot for
+the full cross-chain timeout.
+
 ## Rendered assets
 
 `contrib/bench/neobank/private-flow-scenario.yml` describes the complete
