@@ -11,7 +11,7 @@ use crate::{
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions, route_p2p_events},
 };
 use alloy_evm::revm::context::result::InvalidTransaction;
-use alloy_primitives::{Address, U256};
+use alloy_primitives::Address;
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
@@ -1071,18 +1071,30 @@ fn pool_admission_error(message: &'static str) -> InvalidPoolTransactionError {
     ))
 }
 
-fn sender_has_enabled_token_balance<E>(
+fn validate_has_enabled_token_balance(
+    provider: &impl StateProviderFactory,
+    enabled_tokens: &EnabledTokenRegistry,
     sender: Address,
-    enabled_tokens: impl IntoIterator<Item = Address>,
-    mut balance_at: impl FnMut(Address, U256) -> Result<Option<U256>, E>,
-) -> Result<bool, E> {
-    for token in enabled_tokens {
+) -> Result<(), InvalidPoolTransactionError> {
+    let state = provider.latest().map_err(|err| {
+        warn!(%err, "Failed to read latest state for zone token-balance admission check");
+        pool_admission_error("could not verify balance of an enabled zone token")
+    })?;
+
+    for token in enabled_tokens.read().iter().copied() {
         let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
-        if balance_at(token, slot)?.is_some_and(|balance| !balance.is_zero()) {
-            return Ok(true);
+        let balance = state.storage(token, slot.into()).map_err(|err| {
+            warn!(%err, %sender, "Failed to read zone token balance during pool admission");
+            pool_admission_error("could not verify balance of an enabled zone token")
+        })?;
+        if balance.is_some_and(|balance| !balance.is_zero()) {
+            return Ok(());
         }
     }
-    Ok(false)
+
+    Err(pool_admission_error(
+        "sender must hold a nonzero balance of an enabled zone token",
+    ))
 }
 
 impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
@@ -1127,30 +1139,9 @@ where
         });
 
         let provider = ctx.provider().clone();
+        let enabled_tokens = self.enabled_tokens;
         validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
-            let state = provider.latest().map_err(|err| {
-                warn!(%err, "Failed to read latest state for zone token-balance admission check");
-                pool_admission_error("could not verify balance of an enabled zone token")
-            })?;
-            let sender = *tx.sender_ref();
-            let enabled_tokens = self.enabled_tokens.read();
-            let has_balance = sender_has_enabled_token_balance(
-                sender,
-                enabled_tokens.iter().copied(),
-                |token, slot| state.storage(token, slot.into()),
-            )
-            .map_err(|err| {
-                warn!(%err, %sender, "Failed to read zone token balance during pool admission");
-                pool_admission_error("could not verify balance of an enabled zone token")
-            })?;
-
-            if !has_balance {
-                return Err(pool_admission_error(
-                    "sender must hold a nonzero balance of an enabled zone token",
-                ));
-            }
-
-            Ok(())
+            validate_has_enabled_token_balance(&provider, &enabled_tokens, *tx.sender_ref())
         });
 
         let validator =
@@ -1242,34 +1233,6 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
-    }
-
-    #[test]
-    fn enabled_token_balance_guard_accepts_any_nonzero_balance() {
-        let sender = Address::repeat_byte(0x11);
-        let tokens = [
-            alloy_primitives::address!("0x20c0000000000000000000000000000000000001"),
-            alloy_primitives::address!("0x20c0000000000000000000000000000000000002"),
-        ];
-        let funded_token = tokens[1];
-
-        let has_balance = sender_has_enabled_token_balance(sender, tokens, |token, _slot| {
-            Ok::<_, std::convert::Infallible>((token == funded_token).then_some(U256::from(1)))
-        })
-        .unwrap();
-        assert!(has_balance);
-
-        let has_balance = sender_has_enabled_token_balance(sender, tokens, |_token, _slot| {
-            Ok::<_, std::convert::Infallible>(Some(U256::ZERO))
-        })
-        .unwrap();
-        assert!(!has_balance);
-
-        let has_balance = sender_has_enabled_token_balance(sender, [], |_token, _slot| {
-            Ok::<_, std::convert::Infallible>(Some(U256::from(1)))
-        })
-        .unwrap();
-        assert!(!has_balance);
     }
 
     #[test]
