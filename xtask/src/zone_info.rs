@@ -46,7 +46,7 @@ impl ZoneInfoCmd {
                         .into(),
                 )
                 .await?;
-            let next_zone_id = ZoneFactory::nextZoneIdCall::abi_decode_returns(&output)?._0;
+            let next_zone_id = ZoneFactory::nextZoneIdCall::abi_decode_returns(&output)?;
 
             let mut found = None;
             for id in 1..next_zone_id {
@@ -59,7 +59,7 @@ impl ZoneInfoCmd {
                             .into(),
                     )
                     .await?;
-                let info = ZoneFactory::zonesCall::abi_decode_returns(&output)?.info;
+                let info = ZoneFactory::zonesCall::abi_decode_returns(&output)?;
                 if info.portal == portal {
                     found = Some(id);
                     break;
@@ -81,7 +81,7 @@ impl ZoneInfoCmd {
                     .into(),
             )
             .await?;
-        let info = ZoneFactory::zonesCall::abi_decode_returns(&output)?.info;
+        let info = ZoneFactory::zonesCall::abi_decode_returns(&output)?;
         if info.portal == Address::ZERO {
             return Err(eyre!("zone {zone_id} does not exist"));
         }

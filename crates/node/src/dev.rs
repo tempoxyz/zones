@@ -108,7 +108,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             .into(),
         )
         .await?;
-    let factory_owner = ZoneFactory::ownerCall::abi_decode_returns(&owner_output)?._0;
+    let factory_owner = ZoneFactory::ownerCall::abi_decode_returns(&owner_output)?;
     eyre::ensure!(
         factory_owner == dev_address,
         "ZoneFactory owner is {factory_owner}, but the configured dev key resolves to \
