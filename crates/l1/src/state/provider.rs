@@ -10,11 +10,13 @@
 //! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
 //! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
 
-use alloy_primitives::{Address, B256};
+use alloy_consensus::BlockHeader;
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
+use alloy_trie::{Nibbles, TrieAccount, proof::verify_proof};
 use eyre::Result;
 use std::num::NonZeroU32;
 use tempo_alloy::TempoNetwork;
@@ -187,8 +189,11 @@ impl L1StateProvider {
             attempt += 1;
             let start = std::time::Instant::now();
             let result = tokio::task::block_in_place(|| {
-                self.runtime_handle
-                    .block_on(self.fetch_slot(address, slot, block_number))
+                self.runtime_handle.block_on(self.fetch_and_verify_slot(
+                    address,
+                    slot,
+                    block_number,
+                ))
             });
             let elapsed = start.elapsed();
 
@@ -236,7 +241,9 @@ impl L1StateProvider {
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
-        let value = self.fetch_slot(address, slot, block_number).await?;
+        let value = self
+            .fetch_and_verify_slot(address, slot, block_number)
+            .await?;
         self.cache.lock().set(address, slot, block_number, value);
         Ok(value)
     }
@@ -248,7 +255,35 @@ impl L1StateProvider {
 
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
     async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
+        let key = U256::from_be_bytes(slot.0);
         let block_id = BlockId::number(block_number);
+        let value: U256 = self.provider.get_storage_at(address, key).block_id(block_id).await.map_err(|e| {
+            warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
+            eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
+        })?;
+
+        let result = B256::from(value.to_be_bytes());
+        debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
+        Ok(result)
+    }
+
+    /// Fetch a single storage slot and verify its EIP-1186 proof against the block state root.
+    async fn fetch_and_verify_slot(
+        &self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256> {
+        let block_id = BlockId::number(block_number);
+        let header = self
+            .provider
+            .get_header(block_id)
+            .await
+            .map_err(|e| {
+                warn!(block_number, %e, "L1 block header RPC call failed");
+                eyre::eyre!("failed to fetch L1 block header at block={block_number}: {e}")
+            })?
+            .ok_or_else(|| eyre::eyre!("L1 block header not found at block={block_number}"))?;
         let proof = self
             .provider
             .get_proof(address, vec![slot])
@@ -260,18 +295,73 @@ impl L1StateProvider {
                     "eth_getProof failed for address={address} slot={slot} block={block_number}: {e}"
                 )
             })?;
-        let value = proof
+
+        if proof.address != address {
+            return Err(eyre::eyre!(
+                "eth_getProof returned proof for address={} instead of address={address}",
+                proof.address
+            ));
+        }
+
+        let storage_proof = proof
             .storage_proof
             .first()
             .ok_or_else(|| {
                 eyre::eyre!(
                     "eth_getProof returned no storage proof for address={address} slot={slot} block={block_number}"
                 )
-            })?
-            .value;
+            })?;
+        if storage_proof.key.as_b256() != slot {
+            return Err(eyre::eyre!(
+                "eth_getProof returned proof for slot={} instead of slot={slot}",
+                storage_proof.key.as_b256()
+            ));
+        }
 
-        let result = B256::from(value.to_be_bytes());
-        debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
+        let account_exists = !(proof.nonce == 0
+            && proof.balance.is_zero()
+            && (proof.storage_hash.is_zero() || proof.storage_hash == alloy_trie::EMPTY_ROOT_HASH)
+            && (proof.code_hash.is_zero() || proof.code_hash == alloy_trie::KECCAK_EMPTY));
+        let storage_root = if account_exists {
+            proof.storage_hash
+        } else {
+            alloy_trie::EMPTY_ROOT_HASH
+        };
+        let account_value = account_exists.then(|| {
+            alloy_rlp::encode(TrieAccount {
+                nonce: proof.nonce,
+                balance: proof.balance,
+                storage_root,
+                code_hash: proof.code_hash,
+            })
+        });
+
+        verify_proof(
+            header.state_root(),
+            Nibbles::unpack(keccak256(address)),
+            account_value,
+            &proof.account_proof,
+        )
+        .map_err(|e| {
+            eyre::eyre!("invalid L1 account proof for address={address} block={block_number}: {e}")
+        })?;
+
+        let storage_value =
+            (!storage_proof.value.is_zero()).then(|| alloy_rlp::encode(storage_proof.value));
+        verify_proof(
+            storage_root,
+            Nibbles::unpack(keccak256(slot)),
+            storage_value,
+            &storage_proof.proof,
+        )
+        .map_err(|e| {
+            eyre::eyre!(
+                "invalid L1 storage proof for address={address} slot={slot} block={block_number}: {e}"
+            )
+        })?;
+
+        let result = B256::from(storage_proof.value.to_be_bytes());
+        debug!(%address, %slot, block_number, %result, "fetched and verified L1 storage slot from RPC");
         Ok(result)
     }
 }

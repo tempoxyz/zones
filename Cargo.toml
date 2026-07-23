@@ -182,6 +182,7 @@ alloy-signer = "2.1.0"
 alloy-signer-local = "2.1.0"
 alloy-sol-types = { version = "1.6.0", default-features = false }
 alloy-transport = "2.1.0"
+alloy-trie = { version = "0.9.5", features = ["ethereum"] }
 
 # commonware
 commonware-codec = "=2026.4.0"

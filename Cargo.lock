@@ -13446,6 +13446,7 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-sol-types",
  "alloy-transport",
+ "alloy-trie",
  "const-hex",
  "derive_more",
  "eyre",
