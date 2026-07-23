@@ -380,7 +380,7 @@ impl CreateZone {
     }
 }
 
-fn read_private_address_file(path: &std::path::Path) -> eyre::Result<Vec<Address>> {
+pub(crate) fn read_private_address_file(path: &std::path::Path) -> eyre::Result<Vec<Address>> {
     use std::os::unix::fs::PermissionsExt as _;
 
     let metadata = std::fs::symlink_metadata(path).wrap_err_with(|| {

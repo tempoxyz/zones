@@ -1024,14 +1024,11 @@ provision_up() {
         --sequencer "$sequencer_address"
     )
     if [[ "$profile" == neobank ]]; then
-        create_zone_args+=(--access-mode --allowed-accounts-file "$neobank_allowed_accounts_file")
+        # Keep createZone below the production 30M block limit. Access starts
+        # closed with an empty allowlist; untimed fixture setup applies the map.
+        create_zone_args+=(--access-mode)
     fi
     ZONE_FACTORY_OWNER_KEY="$owner_key" "$ZONES_XTASK_BIN" create-zone "${create_zone_args[@]}"
-    if [[ -n "$neobank_allowed_accounts_file" ]]; then
-        rm -f -- "$neobank_allowed_accounts_file"
-        provision_secret_files=()
-    fi
-
     local zone_json="$zone_dir/zone.json"
     local zone_genesis="$zone_dir/genesis.json"
     require_file "$zone_json"
@@ -1060,7 +1057,10 @@ provision_up() {
                 --pathusd "$PATH_USD" \
                 --swap-mechanism "$swap_mechanism" \
                 --liquidity "$swap_liquidity" \
+                --allowed-accounts-file "$neobank_allowed_accounts_file" \
                 --output "$fixture_metadata"
+        rm -f -- "$neobank_allowed_accounts_file"
+        provision_secret_files=()
         require_file "$fixture_metadata"
         verify_neobank_fixture_topology \
             "$l1_a_rpc" "$fixture_metadata" "$owner_address" "$PATH_USD" "$swap_mechanism"

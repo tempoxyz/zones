@@ -727,9 +727,11 @@ configured write RPC. Each job:
    deposit -> wait -> activity -> withdrawal -> wait scenario;
 8. for `neobank-e2e`, deploys the checked-in Earn boundary fixtures, configures
    the selected swap mechanism and closed-loop token and recipient policy,
-   prepares approvals and private RPC authorization, and runs the selected
-   measured scenario. The `neobank-private-withdrawal` selection first creates
-   and verifies portal-backed private DLUSD outside measurement;
+   applies the file-backed benchmark account map after the 30M-bounded Zone
+   creation transaction, prepares approvals and private RPC authorization, and
+   runs the selected measured scenario. The `neobank-private-withdrawal`
+   selection first creates and verifies portal-backed private DLUSD outside
+   measurement;
 9. for `deposit`, runs the independent preflight/generate/bench pipeline; and
 10. renders the JSON report into a Markdown results page on the workflow
    overview, then uploads that page with the rendered benchmark assets,

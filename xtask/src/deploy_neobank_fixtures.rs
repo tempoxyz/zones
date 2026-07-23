@@ -17,6 +17,7 @@ use tempo_precompiles::{STABLECOIN_DEX_ADDRESS, TIP20_FACTORY_ADDRESS};
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role as PortalRole};
 
 use crate::{
+    create_zone::read_private_address_file,
     earn_fixture_lock::{earn_fixture_revision, verify_earn_fixture_lock},
     zone_utils::check,
 };
@@ -207,6 +208,10 @@ pub(crate) struct DeployNeobankFixtures {
     #[arg(long)]
     output: PathBuf,
 
+    /// Mode-0600 newline-delimited benchmark account allowlist.
+    #[arg(long)]
+    allowed_accounts_file: PathBuf,
+
     /// Untimed per-side liquidity seeded into the selected swap mechanism.
     #[arg(long, default_value_t = 10_000_000_000_u128)]
     liquidity: u128,
@@ -303,6 +308,13 @@ impl DeployNeobankFixtures {
             .await
             .wrap_err("failed querying ZonePortal zone ID")?;
         ensure!(messenger != Address::ZERO, "ZonePortal messenger is zero");
+        let mut allowed_accounts = read_private_address_file(&self.allowed_accounts_file)?;
+        allowed_accounts.sort_unstable();
+        allowed_accounts.dedup();
+        ensure!(
+            !allowed_accounts.is_empty(),
+            "benchmark account allowlist must not be empty"
+        );
         let admin_portal = ZonePortal::new(self.portal, &admin_provider);
         ensure!(
             admin_portal
@@ -319,7 +331,7 @@ impl DeployNeobankFixtures {
                 .call()
                 .await
                 .wrap_err("failed querying ZonePortal access mode")?,
-            "ZonePortal access enforcement must be enabled with benchmark accounts before deploying fixtures"
+            "ZonePortal access enforcement must be enabled before deploying fixtures"
         );
         ensure!(
             admin_portal
@@ -501,7 +513,8 @@ impl DeployNeobankFixtures {
             "BridgeWalletFixture",
         )
         .await?;
-        let role_assignments = portal_role_assignments(bridge_wallet, earn_router, messenger)?;
+        let role_assignments =
+            portal_role_assignments(&allowed_accounts, bridge_wallet, earn_router, messenger)?;
 
         if let Some(route_swapper) = swap_setup.route_swapper {
             let earn_vault_routes = FixtureEarnVaultRoutes::new(earn_vault, &deployer_provider);
@@ -614,6 +627,7 @@ impl DeployNeobankFixtures {
 }
 
 fn portal_role_assignments(
+    allowed_accounts: &[Address],
     bridge_wallet: Address,
     earn_router: Address,
     messenger: Address,
@@ -635,11 +649,25 @@ fn portal_role_assignments(
         earn_router != messenger,
         "the ZonePortal messenger cannot be assigned the EarnRouter gateway role"
     );
-
-    Ok(vec![
-        (bridge_wallet, PortalRole::Account),
-        (earn_router, PortalRole::CallbackGateway),
-    ])
+    let mut assignments = Vec::with_capacity(allowed_accounts.len() + 2);
+    for account in allowed_accounts {
+        ensure!(
+            *account != Address::ZERO,
+            "the benchmark account allowlist contains the zero address"
+        );
+        ensure!(
+            *account != messenger,
+            "the ZonePortal messenger cannot be assigned the benchmark account role"
+        );
+        ensure!(
+            *account != bridge_wallet && *account != earn_router,
+            "a benchmark account conflicts with a closed-loop fixture role"
+        );
+        assignments.push((*account, PortalRole::Account));
+    }
+    assignments.push((bridge_wallet, PortalRole::Account));
+    assignments.push((earn_router, PortalRole::CallbackGateway));
+    Ok(assignments)
 }
 
 async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
@@ -649,6 +677,10 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
     assignments: &[(Address, PortalRole)],
 ) -> eyre::Result<()> {
     let portal = ZonePortal::new(portal_address, provider);
+    println!(
+        "Configuring {} closed-loop ZonePortal roles...",
+        assignments.len()
+    );
     for (index, (account, expected_role)) in assignments.iter().enumerate() {
         if portal
             .role(*account)
@@ -670,6 +702,13 @@ async fn configure_closed_loop_portal<P: Provider<TempoNetwork>>(
                     format!("failed waiting for ZonePortal role receipt at index {index}")
                 })?;
             check(&receipt, "assign ZonePortal benchmark role")?;
+        }
+        if (index + 1) % 10 == 0 || index + 1 == assignments.len() {
+            println!(
+                "ZonePortal role setup progress: {}/{}",
+                index + 1,
+                assignments.len()
+            );
         }
     }
     for (index, (account, expected_role)) in assignments.iter().enumerate() {
@@ -1414,7 +1453,7 @@ mod tests {
             .collect()
     }
 
-    fn required_args() -> [&'static str; 11] {
+    fn required_args() -> [&'static str; 13] {
         [
             "deploy-neobank-fixtures",
             "--l1-rpc-url",
@@ -1425,6 +1464,8 @@ mod tests {
             "0x20c0000000000000000000000000000000000001",
             "--pathusd",
             "0x20c0000000000000000000000000000000000000",
+            "--allowed-accounts-file",
+            "/tmp/zones-benchmark-allowed-accounts",
             "--output",
             "target/fixtures.json",
         ]
@@ -1453,16 +1494,23 @@ mod tests {
     }
 
     #[test]
-    fn closed_loop_roles_cover_bridge_and_router_only() {
+    fn closed_loop_roles_cover_accounts_bridge_and_router() {
+        let account_a = Address::repeat_byte(0x11);
+        let account_b = Address::repeat_byte(0x22);
         let bridge = Address::repeat_byte(0x33);
         let router = Address::repeat_byte(0x44);
         let messenger = Address::repeat_byte(0x55);
-        let assignments = portal_role_assignments(bridge, router, messenger).unwrap();
-        assert_eq!(assignments.len(), 2);
-        assert_eq!(assignments[0].0, bridge);
+        let assignments =
+            portal_role_assignments(&[account_a, account_b], bridge, router, messenger).unwrap();
+        assert_eq!(assignments.len(), 4);
+        assert_eq!(assignments[0].0, account_a);
         assert_eq!(assignments[0].1 as u8, PortalRole::Account as u8);
-        assert_eq!(assignments[1].0, router);
-        assert_eq!(assignments[1].1 as u8, PortalRole::CallbackGateway as u8);
+        assert_eq!(assignments[1].0, account_b);
+        assert_eq!(assignments[1].1 as u8, PortalRole::Account as u8);
+        assert_eq!(assignments[2].0, bridge);
+        assert_eq!(assignments[2].1 as u8, PortalRole::Account as u8);
+        assert_eq!(assignments[3].0, router);
+        assert_eq!(assignments[3].1 as u8, PortalRole::CallbackGateway as u8);
     }
 
     #[test]
@@ -1470,11 +1518,15 @@ mod tests {
         let bridge = Address::repeat_byte(0x33);
         let router = Address::repeat_byte(0x44);
         let messenger = Address::repeat_byte(0x55);
-        assert!(portal_role_assignments(Address::ZERO, router, messenger).is_err());
-        assert!(portal_role_assignments(bridge, Address::ZERO, messenger).is_err());
-        assert!(portal_role_assignments(bridge, bridge, messenger).is_err());
-        assert!(portal_role_assignments(messenger, router, messenger).is_err());
-        assert!(portal_role_assignments(bridge, messenger, messenger).is_err());
+        assert!(portal_role_assignments(&[], Address::ZERO, router, messenger).is_err());
+        assert!(portal_role_assignments(&[], bridge, Address::ZERO, messenger).is_err());
+        assert!(portal_role_assignments(&[], bridge, bridge, messenger).is_err());
+        assert!(portal_role_assignments(&[], messenger, router, messenger).is_err());
+        assert!(portal_role_assignments(&[], bridge, messenger, messenger).is_err());
+        assert!(portal_role_assignments(&[Address::ZERO], bridge, router, messenger).is_err());
+        assert!(portal_role_assignments(&[messenger], bridge, router, messenger).is_err());
+        assert!(portal_role_assignments(&[bridge], bridge, router, messenger).is_err());
+        assert!(portal_role_assignments(&[router], bridge, router, messenger).is_err());
     }
 
     #[test]

@@ -84,6 +84,13 @@ off-ramp recipient is the bridge wallet fixture. No authorization map,
 mnemonic, private key, encryption payload, or bearer token belongs in rendered
 output or an uploaded artifact.
 
+The Zone is created with access enforcement active and an empty allowlist,
+keeping `createZone` within the production 30M L1 block limit. During untimed
+fixture setup, the portal admin applies the mode-0600 file-backed benchmark
+account map, adds the bridge-wallet and `EarnRouter` roles, and then enables
+gateway enforcement. The temporary map is removed before measurement and is
+never uploaded.
+
 Current Zone transaction-pool admission requires a sender to hold a nonzero
 balance in at least one enabled Zone token. Before untimed Zone approvals, the
 runner therefore executes one 1-unit encrypted onramp per benchmark account and
