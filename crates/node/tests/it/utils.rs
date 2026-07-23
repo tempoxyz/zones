@@ -67,7 +67,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache,
+    L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
 };
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
@@ -364,6 +364,7 @@ async fn handle_test_l1_rpc_request(
     let result = match method {
         "eth_chainId" => serde_json::json!(format!("0x{chain_id:x}")),
         "eth_blockNumber" => serde_json::json!("0x0"),
+        "eth_getCode" => serde_json::json!("0x01"),
         "eth_newBlockFilter" => serde_json::json!("0x1"),
         "eth_getFilterChanges" => serde_json::json!([]),
         "eth_uninstallFilter" => serde_json::json!(true),
@@ -592,6 +593,7 @@ type RpcApiFactory = dyn Fn(zone_node::rpc::PrivateRpcConfig) -> RpcApiFuture + 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
+    enabled_tokens: EnabledTokenRegistry,
     l1_state_cache: L1StateCache,
     l1_block_tracker: L1BlockTracker,
     rpc_api_factory: Arc<RpcApiFactory>,
@@ -669,6 +671,11 @@ impl ZoneTestNode {
     /// Returns a handle to the deposit queue for injecting synthetic L1 blocks.
     pub(crate) fn deposit_queue(&self) -> &DepositQueue {
         &self.deposit_queue
+    }
+
+    /// Returns the enabled-token registry used by pool admission.
+    pub(crate) fn enabled_tokens(&self) -> &EnabledTokenRegistry {
+        &self.enabled_tokens
     }
 
     /// Returns a handle to the L1 state cache for seeding precompile data.
@@ -1122,6 +1129,7 @@ impl ZoneTestNode {
             });
 
         let deposit_queue = zone_node.deposit_queue();
+        let enabled_tokens = zone_node.enabled_tokens();
         let l1_state_cache = zone_node.l1_state_cache();
         let l1_block_tracker = zone_node.l1_block_tracker();
         if is_local_dummy_l1 {
@@ -1180,6 +1188,7 @@ impl ZoneTestNode {
 
         Ok(Self {
             deposit_queue,
+            enabled_tokens,
             http_url,
             l1_state_cache,
             l1_block_tracker,
@@ -3182,6 +3191,7 @@ pub(crate) async fn start_local_zone_with_fixture(
 
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
+        zone.enabled_tokens(),
         Address::ZERO,
         Address::ZERO,
         seed_blocks,
@@ -3260,7 +3270,7 @@ pub(crate) async fn start_local_p2p_pair(
     let _ = std::fs::remove_dir_all(&config_dir);
 
     let chain_id = next_unique_chain_id();
-    let l1_rpc_url = spawn_test_l1_rpc().await?;
+    let l1_rpc_url = spawn_test_l1_rpc(1337).await?;
     let genesis: Genesis = serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)?;
     let signer = l1_dev_signer();
     let leader = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
@@ -3292,6 +3302,7 @@ pub(crate) async fn start_local_p2p_pair(
     for zone in [&leader, &follower] {
         fixture.seed_l1_cache(
             zone.l1_state_cache(),
+            zone.enabled_tokens(),
             Address::ZERO,
             Address::ZERO,
             seed_blocks,
@@ -3370,6 +3381,7 @@ pub(crate) async fn start_chain_id_rpc(chain_id: u64) -> eyre::Result<url::Url> 
 pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, seed_blocks: u64) {
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
+        zone.enabled_tokens(),
         Address::ZERO,
         Address::ZERO,
         seed_blocks,
@@ -3883,7 +3895,13 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
     .await?;
     let fixture = L1Fixture::new();
 
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, sequencer_address, 20);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        zone.enabled_tokens(),
+        Address::ZERO,
+        sequencer_address,
+        20,
+    );
 
     let chain_id = zone_chain_id(&zone).await?;
 
@@ -3983,6 +4001,8 @@ pub(crate) struct L1Fixture {
     last_hash: B256,
     /// Raw L1 caches seeded by this fixture, updated with state implied by injected deposits.
     caches: Mutex<Vec<L1StateCache>>,
+    /// Enabled-token registries kept in sync with injected portal events.
+    enabled_token_registries: Mutex<Vec<EnabledTokenRegistry>>,
 }
 
 impl L1Fixture {
@@ -3999,6 +4019,7 @@ impl L1Fixture {
             next_timestamp: 1_000_000,
             last_hash: genesis_hash,
             caches: Mutex::new(Vec::new()),
+            enabled_token_registries: Mutex::new(Vec::new()),
         }
     }
 
@@ -4011,6 +4032,7 @@ impl L1Fixture {
     pub(crate) fn seed_l1_cache(
         &self,
         cache_handle: &L1StateCache,
+        enabled_tokens: &EnabledTokenRegistry,
         portal_address: Address,
         sequencer: Address,
         num_blocks: u64,
@@ -4079,6 +4101,10 @@ impl L1Fixture {
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         drop(cache);
         self.caches.lock().unwrap().push(cache_handle.clone());
+        self.enabled_token_registries
+            .lock()
+            .unwrap()
+            .push(enabled_tokens.clone());
     }
 
     /// Seed the absence of an address-level TIP-403 receive policy at the current Zone anchor.
@@ -4119,6 +4145,14 @@ impl L1Fixture {
                     ALLOW_ALL_POLICY_ID,
                 );
             }
+        }
+    }
+
+    fn apply_enabled_token_events(&self, tokens: &[EnabledToken]) {
+        for registry in self.enabled_token_registries.lock().unwrap().iter() {
+            registry
+                .write()
+                .extend(tokens.iter().map(|enabled| enabled.token));
         }
     }
 
@@ -4186,6 +4220,7 @@ impl L1Fixture {
     ) {
         let block_number = block.header.inner.number;
         self.seed_enabled_token_policy_state(block_number, &events.enabled_tokens);
+        self.apply_enabled_token_events(&events.enabled_tokens);
         for deposit in &events.deposits {
             if let L1Deposit::Regular(deposit) = deposit {
                 self.seed_no_receive_policy_at(block_number, deposit.to)
@@ -4221,6 +4256,7 @@ impl L1Fixture {
     ) {
         let header = self.next_header();
         self.seed_enabled_token_policy_state(header.inner.number, &tokens);
+        self.apply_enabled_token_events(&tokens);
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,

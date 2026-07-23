@@ -325,6 +325,11 @@ impl ZoneNode {
         self.l1_state_cache.clone()
     }
 
+    /// Returns the shared enabled-token registry.
+    pub fn enabled_tokens(&self) -> EnabledTokenRegistry {
+        self.enabled_tokens.clone()
+    }
+
     /// Returns the L1 block observation tracker.
     pub fn l1_block_tracker(&self) -> L1BlockTracker {
         self.l1_block_tracker.clone()
@@ -686,15 +691,35 @@ where
         block_number: u64,
     ) -> eyre::Result<()> {
         let portal = self.portal_address;
-        let enabled_tokens = ZonePortal::new(portal, l1_provider)
-            .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
+        let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+        let portal_code = l1_provider
+            .get_code_at(portal)
+            .block_id(block_id)
             .await
             .map_err(|err| {
                 eyre::eyre!(
-                    "failed to discover enabled tokens from portal {portal} at L1 block \
-                     {block_number}: {err}"
+                    "failed to check portal {portal} deployment at L1 block {block_number}: {err}"
                 )
             })?;
+        let enabled_tokens = if portal_code.is_empty() {
+            info!(
+                target: "reth::cli",
+                %portal,
+                block_number,
+                "Portal is not deployed at the L1 anchor, starting with an empty enabled-token registry"
+            );
+            Vec::new()
+        } else {
+            ZonePortal::new(portal, l1_provider)
+                .enabled_tokens_at(block_id)
+                .await
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to discover enabled tokens from portal {portal} at L1 block \
+                         {block_number}: {err}"
+                    )
+                })?
+        };
         info!(
             target: "reth::cli",
             count = enabled_tokens.len(),
