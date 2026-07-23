@@ -7,7 +7,7 @@ on:
         description: Benchmark workload to run.
         type: choice
         required: true
-        default: neobank-private-withdrawal
+        default: neobank-rewards-redemption
         options:
           - neobank-encrypted-deposit
           - neobank-private-withdrawal
@@ -97,7 +97,7 @@ env:
   SCCACHE_IDLE_TIMEOUT: "21600"
   ZONES_BENCH_ACCOUNT_START: "16"
   ZONES_BENCH_ACCOUNT_CAPACITY: "10000"
-  ZONES_BENCH_DEFAULT_PHASE: neobank-private-withdrawal
+  ZONES_BENCH_DEFAULT_PHASE: neobank-rewards-redemption
   ZONES_BENCH_TOKEN: "0x20C0000000000000000000000000000000000000"
 
 jobs:
