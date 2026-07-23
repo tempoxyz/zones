@@ -75,7 +75,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
 };
 use tempo_zone_contracts::{
-    DepositType, EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox, ZonePortal,
+    DepositType, EncryptedDepositPayload, IZoneOutbox, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZonePortal,
 };
 use zone_precompiles::ecies::encrypt_deposit;
 
@@ -572,7 +572,7 @@ impl DemoBlacklist {
         if withdraw_amount == 0 {
             println!("  No balance to withdraw — skipping.");
         } else {
-            let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_target);
+            let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_target);
 
             let l1_block_before = l1.get_block_number().await?;
             let receipt = outbox
@@ -680,7 +680,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     portal_addr: Address,
     token: Address,
     to: Address,
-    bounceback_recipient: Address,
+    tempo_refund_recipient: Address,
     amount: u128,
 ) -> eyre::Result<()> {
     let (key, key_index) = portal
@@ -704,7 +704,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     };
 
     let receipt = portal
-        .depositEncrypted(token, amount, key_index, payload, bounceback_recipient)
+        .depositEncrypted(token, amount, key_index, payload, tempo_refund_recipient)
         .send_sync()
         .await
         .wrap_err("depositEncrypted send failed")?;

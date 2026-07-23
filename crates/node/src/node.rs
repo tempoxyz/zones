@@ -34,12 +34,12 @@ use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider};
 use reth_transaction_pool::{
     Pool, TransactionPool as _, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
 use tempo_node::{
@@ -60,7 +60,7 @@ use tracing::{debug, info};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    DepositQueue, L1Subscriber, L1SubscriberConfig, TempoStateExt,
+    DepositQueue, L1Subscriber, L1SubscriberConfig,
     state::{L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
@@ -68,7 +68,9 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
+use zone_sequencer::{
+    BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig, spawn_zone_sequencer,
+};
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
@@ -153,6 +155,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
+    /// Gas and concurrency limits for withdrawal processing transactions.
+    pub withdrawal_batch_limits: WithdrawalBatchLimits,
 }
 
 /// Configuration for the Zone private RPC server extension.
@@ -203,7 +207,7 @@ impl ZoneNode {
     ) -> Self {
         let deposit_queue = DepositQueue::default();
 
-        let l1_state_cache = L1StateCache::new(HashSet::from([portal_address]));
+        let l1_state_cache = L1StateCache::new();
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
@@ -437,14 +441,6 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        let sp = ctx.node.provider().latest()?;
-        let tempo_block_number = sp.tempo_block_number()?;
-        self.l1_config
-            .l1_state_cache
-            .write()
-            .initialize_floor(tempo_block_number);
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
-
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
@@ -739,6 +735,7 @@ where
             l1_rpc_url,
             retry_connection_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
+            withdrawal_batch_limits: config.withdrawal_batch_limits,
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             tempo_state_address: TEMPO_STATE_ADDRESS,
@@ -912,6 +909,7 @@ where
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let runtime_handle = tokio::runtime::Handle::current();
+        let portal_address = self.l1_state_provider_config.portal_address;
         let l1_provider = L1StateProvider::new(
             self.l1_state_provider_config.clone(),
             self.l1_state_cache,
@@ -923,7 +921,12 @@ where
         let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)
             .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
         // Keep the Zone chain settings and use the parent L1 schedule for Tempo hardforks.
-        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), tempo_chain_spec, l1_provider);
+        let evm_config = ZoneEvmConfig::new(
+            ctx.chain_spec(),
+            tempo_chain_spec,
+            l1_provider,
+            portal_address,
+        );
         info!(target: "reth::cli", "Zone EVM initialized with L1-backed Tempo precompiles");
 
         Ok(evm_config)
@@ -1011,6 +1014,8 @@ where
                 DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
+            // Zones collect the selected fee token directly and never route through FeeAMM.
+            .with_disable_fee_amm_check(true)
         });
         let protocol_pool = Pool::new(
             validator,

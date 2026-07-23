@@ -29,7 +29,7 @@ struct EncryptedDepositFixture {
     token: String,
     sender: String,
     amount: u128,
-    bounceback_recipient: String,
+    tempo_refund_recipient: String,
     key_index: u64,
     encrypted: EncryptedDepositPayloadFixture,
 }
@@ -103,7 +103,7 @@ impl EncryptedDepositFixture {
             sender: parse_fixture_address(&self.sender),
             amount: self.amount,
             fee: 0,
-            bounceback_recipient: parse_fixture_address(&self.bounceback_recipient),
+            tempo_refund_recipient: parse_fixture_address(&self.tempo_refund_recipient),
             key_index: U256::from(self.key_index),
             ephemeral_pubkey_x: parse_fixture_b256(&self.encrypted.ephemeral_pubkey_x),
             ephemeral_pubkey_y_parity: self.encrypted.ephemeral_pubkey_y_parity,
@@ -148,7 +148,7 @@ fn test_subscriber(
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
             genesis_tempo_block_number,
-            l1_state_cache: crate::L1StateCache::new(HashSet::from([portal_address])),
+            l1_state_cache: crate::L1StateCache::new(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
         },
@@ -421,30 +421,41 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
     );
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
+    let stable_account = address!("0x0000000000000000000000000000000000000ABC");
+    let stable_slot = B256::with_last_byte(3);
+    let stable_value = B256::with_last_byte(4);
     subscriber
         .config
         .l1_state_cache
-        .write()
+        .lock()
+        .invalidate_and_set_anchor(9, []);
+    subscriber
+        .config
+        .l1_state_cache
+        .lock()
         .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
+    subscriber
+        .config
+        .l1_state_cache
+        .lock()
+        .set(stable_account, stable_slot, 10, stable_value);
 
-    let hash_10 = B256::with_last_byte(10);
-    subscriber.update_l1_state_anchor(10, hash_10, &HashSet::new());
+    subscriber.update_l1_state_anchor(10, &HashSet::new());
     assert_eq!(
         subscriber
             .config
             .l1_state_cache
-            .read()
+            .lock()
             .get(TIP403_REGISTRY_ADDRESS, slot, 10),
         Some(value)
     );
 
-    subscriber.update_l1_state_anchor(
-        11,
-        B256::with_last_byte(11),
-        &HashSet::from([TIP403_REGISTRY_ADDRESS]),
+    subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
+    let mut cache = subscriber.config.l1_state_cache.lock();
+    assert_eq!(
+        cache.get(stable_account, stable_slot, 11),
+        Some(stable_value)
     );
-    let cache = subscriber.config.l1_state_cache.read();
-    assert_eq!(cache.anchor().number, 11);
     assert_eq!(cache.get(TIP403_REGISTRY_ADDRESS, slot, 11), None);
 }
 
@@ -636,7 +647,7 @@ fn test_deposit_queue_hash_chain() {
         to: address!("0x0000000000000000000000000000000000000002"),
         amount: 1000,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
         memo: B256::ZERO,
     });
 
@@ -658,7 +669,7 @@ fn test_deposit_queue_hash_chain() {
         to: address!("0x0000000000000000000000000000000000000004"),
         amount: 2000,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000003"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000003"),
         memo: B256::ZERO,
     });
 
@@ -676,7 +687,7 @@ fn test_process_deposits_transition() {
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000,
             fee: 0,
-            bounceback_recipient: address!("0x0000000000000000000000000000000000000001"),
+            tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         }),
         L1Deposit::Regular(Deposit {
@@ -685,7 +696,7 @@ fn test_process_deposits_transition() {
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 2000,
             fee: 0,
-            bounceback_recipient: address!("0x0000000000000000000000000000000000000003"),
+            tempo_refund_recipient: address!("0x0000000000000000000000000000000000000003"),
             memo: B256::ZERO,
         }),
     ];
@@ -717,7 +728,7 @@ fn test_queue_and_process_deposits_hashes_match() {
         to: address!("0x0000000000000000000000000000000000000002"),
         amount: 500,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
         memo: FixedBytes::from([0xABu8; 32]),
     })];
 
@@ -741,7 +752,7 @@ fn test_drain_returns_block_grouped_deposits() {
         to: address!("0x0000000000000000000000000000000000000002"),
         amount: 100,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
         memo: B256::ZERO,
     });
 
@@ -751,7 +762,7 @@ fn test_drain_returns_block_grouped_deposits() {
         to: address!("0x0000000000000000000000000000000000000004"),
         amount: 200,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000003"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000003"),
         memo: B256::ZERO,
     });
 
@@ -787,7 +798,7 @@ fn test_encrypted_deposit_hash_chain() {
         token: encrypted.token,
         sender: encrypted.sender,
         amount: encrypted.amount,
-        bouncebackRecipient: encrypted.bounceback_recipient,
+        tempoRefundRecipient: encrypted.tempo_refund_recipient,
         keyIndex: encrypted.key_index,
         encrypted: abi::EncryptedDepositPayload {
             ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
@@ -833,7 +844,7 @@ fn test_mixed_deposit_hash_chain() {
         to: recipient,
         amount: 500_000,
         fee: 0,
-        bounceback_recipient: sender,
+        tempo_refund_recipient: sender,
         memo: B256::ZERO,
     };
 
@@ -842,7 +853,7 @@ fn test_mixed_deposit_hash_chain() {
         sender,
         amount: 300_000,
         fee: 0,
-        bounceback_recipient: sender,
+        tempo_refund_recipient: sender,
         key_index: U256::from(1u64),
         ephemeral_pubkey_x: B256::with_last_byte(0xBB),
         ephemeral_pubkey_y_parity: 0x03,
@@ -867,7 +878,7 @@ fn test_mixed_deposit_hash_chain() {
                 sender: regular.sender,
                 to: regular.to,
                 amount: regular.amount,
-                bouncebackRecipient: regular.bounceback_recipient,
+                tempoRefundRecipient: regular.tempo_refund_recipient,
                 memo: regular.memo,
             },
             B256::ZERO,
@@ -882,7 +893,7 @@ fn test_mixed_deposit_hash_chain() {
                 token: encrypted.token,
                 sender: encrypted.sender,
                 amount: encrypted.amount,
-                bouncebackRecipient: encrypted.bounceback_recipient,
+                tempoRefundRecipient: encrypted.tempo_refund_recipient,
                 keyIndex: encrypted.key_index,
                 encrypted: abi::EncryptedDepositPayload {
                     ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
@@ -911,7 +922,7 @@ fn test_enqueue_and_transition_consistency() {
         sender,
         amount: 750_000,
         fee: 0,
-        bounceback_recipient: sender,
+        tempo_refund_recipient: sender,
         key_index: U256::from(2u64),
         ephemeral_pubkey_x: B256::with_last_byte(0xCC),
         ephemeral_pubkey_y_parity: 0x02,
@@ -968,7 +979,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
             sender,
             amount: 1_000_000,
             fee: 0,
-            bounceback_recipient: sender,
+            tempo_refund_recipient: sender,
             key_index: U256::ZERO,
             ephemeral_pubkey_x: encrypted.eph_pub_x,
             ephemeral_pubkey_y_parity: encrypted.eph_pub_y_parity,
@@ -1189,7 +1200,7 @@ fn test_purge_rolls_back_deposit_hash() {
         to: address!("0x0000000000000000000000000000000000000002"),
         amount: 100,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
         memo: B256::ZERO,
     });
     assert!(matches!(
@@ -1205,7 +1216,7 @@ fn test_purge_rolls_back_deposit_hash() {
         to: address!("0x0000000000000000000000000000000000000004"),
         amount: 200,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000003"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000003"),
         memo: B256::ZERO,
     });
     assert!(matches!(
@@ -1235,7 +1246,7 @@ fn make_deposit(amount: u128) -> L1Deposit {
         to: address!("0x0000000000000000000000000000000000000002"),
         amount,
         fee: 0,
-        bounceback_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
         memo: B256::ZERO,
     })
 }

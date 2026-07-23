@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
@@ -20,8 +21,11 @@ import {
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_ENFORCEMENT_MODES_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
+    PORTAL_ROLE_SLOT,
+    Role,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
@@ -39,6 +43,7 @@ import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLi
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
 import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
@@ -185,7 +190,52 @@ contract ReentrantWithdrawalReceiver is IWithdrawalReceiver {
 
 }
 
+/// @dev Keeps the twelve-argument portal initializer encoder out of the already-large proxy test.
+contract ZonePortalInitializationForwarder {
+
+    function initialize(
+        address target,
+        uint32 id,
+        address initialToken,
+        address portalMessenger,
+        address portalAdmin,
+        address sequencer,
+        address portalVerifier
+    )
+        external
+    {
+        address[] memory accounts = new address[](2);
+        accounts[0] = portalAdmin;
+        accounts[1] = sequencer;
+        address[] memory gateways = new address[](1);
+        gateways[0] = portalMessenger;
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
+
+        ZonePortal(target)
+            .initialize(
+                id,
+                initialToken,
+                true,
+                true,
+                accounts,
+                gateways,
+                portalMessenger,
+                portalAdmin,
+                sequencers,
+                1,
+                portalVerifier,
+                ""
+            );
+    }
+
+}
+
 contract ZonePortalProxyStorageTest is Test {
+
+    function _emptyAddresses() internal pure returns (address[] memory values) {
+        values = new address[](0);
+    }
 
     function test_initialize_revertsOnImplementationAddress() public {
         ZonePortal implementation = new ZonePortal();
@@ -200,6 +250,10 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 1,
                 makeAddr("initial token"),
+                true,
+                true,
+                _emptyAddresses(),
+                _emptyAddresses(),
                 ZONE_MESSENGER_ADDRESS,
                 makeAddr("admin"),
                 sequencers,
@@ -211,6 +265,18 @@ contract ZonePortalProxyStorageTest is Test {
 
     function test_proxyMetadataIsReadFromPortalStorage() public {
         address initialToken = makeAddr("initial token");
+        address[] memory tokens = new address[](1);
+        tokens[0] = initialToken;
+        vm.mockCallRevert(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encodeWithSignature("UnexpectedMigration()")
+        );
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
+            abi.encode(true, uint64(1))
+        );
         vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
         );
@@ -220,7 +286,6 @@ contract ZonePortalProxyStorageTest is Test {
         vm.mockCall(
             initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
         );
-
         ZonePortal implementation = new ZonePortal();
         assertNotEq(address(this), ZONE_FACTORY_ADDRESS, "logic deployer must differ from factory");
 
@@ -231,21 +296,17 @@ contract ZonePortalProxyStorageTest is Test {
         );
         vm.etch(proxyA, runtime);
         vm.etch(proxyB, runtime);
+        ZonePortalInitializationForwarder forwarder = new ZonePortalInitializationForwarder();
+        vm.etch(ZONE_FACTORY_ADDRESS, address(forwarder).code);
 
         address messengerA = makeAddr("messenger A");
         address messengerB = makeAddr("messenger B");
         address verifierA = makeAddr("verifier A");
         address verifierB = makeAddr("verifier B");
-        address[] memory sequencersA = new address[](1);
-        sequencersA[0] = makeAddr("sequencer A");
-        vm.prank(makeAddr("not factory"));
-        vm.expectRevert(IZonePortal.NotFactory.selector);
-        ZonePortal(proxyA)
-            .initialize(
-                1, initialToken, messengerA, makeAddr("admin A"), sequencersA, 1, verifierA, ""
-            );
+        _expectNotFactoryRevert(proxyA, initialToken, messengerA, verifierA);
 
         vm.startPrank(ZONE_FACTORY_ADDRESS);
+        _expectInitializationEvents(proxyA, messengerA);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA);
         _initializePortal(proxyB, initialToken, 2, messengerB, verifierB);
 
@@ -265,6 +326,100 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyB).blockHash(), bytes32(0));
     }
 
+    function _expectNotFactoryRevert(
+        address proxy,
+        address initialToken,
+        address portalMessenger,
+        address portalVerifier
+    )
+        internal
+    {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer A");
+        address[] memory noAccounts = new address[](0);
+        address[] memory noGateways = new address[](0);
+        address portalAdmin = makeAddr("admin A");
+        vm.prank(makeAddr("not factory"));
+        vm.expectRevert(IZonePortal.NotFactory.selector);
+        ZonePortal(proxy)
+            .initialize(
+                1,
+                initialToken,
+                true,
+                true,
+                noAccounts,
+                noGateways,
+                portalMessenger,
+                portalAdmin,
+                sequencers,
+                1,
+                portalVerifier,
+                ""
+            );
+    }
+
+    function _expectInitializationEvents(address proxy, address portalMessenger) internal {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer 1");
+        vm.expectEmit(false, false, false, true, proxy);
+        emit IZonePortal.EnforcementModesUpdated(true, true);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.SequencerSetUpdated(0, 1, sequencers);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(portalMessenger, Role.None, Role.CallbackGateway);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(makeAddr("admin 1"), Role.None, Role.Account);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(makeAddr("sequencer 1"), Role.None, Role.Account);
+    }
+
+    function test_initializeRevertsIfTokenPolicyBindingIsNotSet() public {
+        address initialToken = makeAddr("unmigrated initial token");
+        address[] memory tokens = new address[](1);
+        tokens[0] = initialToken;
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(0)
+        );
+        vm.mockCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
+            abi.encode(false, uint64(1))
+        );
+        vm.expectCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
+        );
+        vm.expectCall(
+            StdPrecompiles.TIP403_REGISTRY_ADDRESS,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (initialToken)),
+            2
+        );
+
+        ZonePortal portal = new ZonePortal();
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer");
+        vm.prank(ZONE_FACTORY_ADDRESS);
+        vm.expectRevert(IZonePortal.TokenTransferPolicyNotSet.selector);
+        address[] memory noAccounts = new address[](0);
+        address[] memory noGateways = new address[](0);
+        portal.initialize(
+            1,
+            initialToken,
+            true,
+            true,
+            noAccounts,
+            noGateways,
+            makeAddr("messenger"),
+            makeAddr("admin"),
+            sequencers,
+            1,
+            makeAddr("verifier"),
+            ""
+        );
+    }
+
     function _initializePortal(
         address target,
         address initialToken,
@@ -274,19 +429,27 @@ contract ZonePortalProxyStorageTest is Test {
     )
         internal
     {
-        address[] memory sequencers = new address[](1);
-        sequencers[0] = makeAddr(string.concat("sequencer ", vm.toString(id)));
-        ZonePortal(target)
+        ZonePortalInitializationForwarder(ZONE_FACTORY_ADDRESS)
             .initialize(
+                target,
                 id,
                 initialToken,
                 portalMessenger,
                 makeAddr(string.concat("admin ", vm.toString(id))),
-                sequencers,
-                1,
-                portalVerifier,
-                ""
+                makeAddr(string.concat("sequencer ", vm.toString(id))),
+                portalVerifier
             );
+    }
+
+    function _proxyAccounts(uint32 id) internal returns (address[] memory accounts) {
+        accounts = new address[](2);
+        accounts[0] = makeAddr(string.concat("admin ", vm.toString(id)));
+        accounts[1] = makeAddr(string.concat("sequencer ", vm.toString(id)));
+    }
+
+    function _proxyGateways(address gateway) internal pure returns (address[] memory gateways) {
+        gateways = new address[](1);
+        gateways[0] = gateway;
     }
 
     function _assertTip1091Storage(address target, address initialSequencer) internal view {
@@ -451,7 +614,7 @@ contract ZonePortalTest is BaseTest {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory callbackData
     )
         internal
@@ -465,7 +628,7 @@ contract ZonePortalTest is BaseTest {
             amount: amount,
             memo: memo,
             gasLimit: gasLimit,
-            fallbackNonce: uint64(uint160(fallbackRecipient)),
+            fallbackNonce: uint64(uint160(zoneFallbackRecipient)),
             callbackData: callbackData,
             encryptedSender: ""
         });
@@ -695,6 +858,67 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
     }
 
+    function test_enableToken_migratesPolicyBinding() public {
+        address token = address(token1);
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        bytes[] memory lookupResults = new bytes[](2);
+        lookupResults[0] = abi.encode(false, uint64(1));
+        lookupResults[1] = abi.encode(true, uint64(1));
+        vm.mockCalls(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token)),
+            lookupResults
+        );
+        vm.mockCall(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encode(1)
+        );
+
+        vm.expectCall(
+            _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens))
+        );
+        vm.expectCall(
+            _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token)), 2
+        );
+
+        vm.prank(admin);
+        portal.enableToken(token);
+
+        assertTrue(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_skipsMigrationIfPolicyBindingIsSet() public {
+        address token = address(token1);
+        address[] memory tokens = new address[](1);
+        tokens[0] = token;
+        _mockTokenPolicyMigration(token, true);
+        vm.mockCallRevert(
+            _TIP403REGISTRY,
+            abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
+            abi.encodeWithSignature("UnexpectedMigration()")
+        );
+
+        vm.expectCall(
+            _TIP403REGISTRY, abi.encodeCall(ITIP403Registry.tokenTransferPolicyId, (token))
+        );
+
+        vm.prank(admin);
+        portal.enableToken(token);
+
+        assertTrue(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_revertsIfPolicyBindingIsNotSet() public {
+        address token = address(token1);
+        _mockTokenPolicyMigration(token, false);
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.TokenTransferPolicyNotSet.selector);
+        portal.enableToken(token);
+    }
+
     function test_sequencerGovernance_revertsIfAdmin() public {
         // Inverse of test_tokenGovernance_revertsIfNotAdmin: the admin role must
         // not be able to perform any sequencer-only action. Locks in the
@@ -858,9 +1082,198 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.pendingAdmin(), address(0));
     }
 
+    function test_setZoneGateway_supportsLegacyAndReplacementTogether() public {
+        address replacement = makeAddr("replacement gateway");
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(replacement, Role.None, Role.CallbackGateway);
+        vm.prank(admin);
+        portal.setGateway(replacement, true);
+
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
+
+        vm.prank(admin);
+        portal.setGateway(address(zoneGateway), false);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.None));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
+    }
+
+    function test_setPortalRole_changesAccountToCallbackGatewayAtomically() public {
+        vm.prank(admin);
+        portal.setRole(alice, Role.CallbackGateway);
+        assertEq(uint8(portal.role(alice)), uint8(Role.CallbackGateway));
+    }
+
+    function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setGateway(address(0), true);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.CallbackGateway));
+        portal.setGateway(address(0), false);
+        vm.stopPrank();
+
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
+    }
+
+    function test_setZoneGateway_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setGateway(makeAddr("replacement gateway"), true);
+    }
+
+    function test_setAccessMode_opensAndReclosesWithoutDiscardingMembership() public {
+        address outsider = makeAddr("mutable mode outsider");
+        address stagedAccount = makeAddr("staged account");
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.EnforcementModesUpdated(false, true);
+        vm.prank(admin);
+        portal.setAccessMode(false);
+
+        vm.prank(admin);
+        portal.setRole(stagedAccount, Role.Account);
+
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(outsider, 2);
+        vm.startPrank(outsider);
+        pathUSD.approve(address(portal), 2);
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        portal.setAccessMode(true);
+
+        assertTrue(portal.isAccessEnforced());
+        assertEq(uint8(portal.role(stagedAccount)), uint8(Role.Account));
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+    }
+
+    function test_setGatewayMode_makesGatewayMembershipInertWhileOpen() public {
+        address gateway = makeAddr("mutable mode gateway");
+
+        vm.prank(admin);
+        portal.setRole(gateway, Role.CallbackGateway);
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(gateway, 2);
+        vm.startPrank(gateway);
+        pathUSD.approve(address(portal), 2);
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+        vm.stopPrank();
+
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.EnforcementModesUpdated(true, false);
+        vm.prank(admin);
+        portal.setGatewayMode(false);
+
+        assertEq(uint8(portal.role(gateway)), uint8(Role.CallbackGateway));
+        vm.prank(gateway);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, gateway));
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+    }
+
+    function test_setModes_revertIfNotAdmin() public {
+        vm.startPrank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setAccessMode(false);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setGatewayMode(false);
+        vm.stopPrank();
+    }
+
+    function test_setAllowedAccount_enablesAndDisablesMembership() public {
+        address account = makeAddr("managed account");
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(account, Role.None, Role.Account);
+        vm.prank(admin);
+        portal.setAllowedAccount(account, true);
+        assertEq(uint8(portal.role(account)), uint8(Role.Account));
+
+        vm.prank(admin);
+        portal.setAllowedAccount(account, false);
+        assertEq(uint8(portal.role(account)), uint8(Role.None));
+    }
+
+    function test_setPortalRole_changesCallbackGatewayToAccountAtomically() public {
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.Account));
+    }
+
+    function test_setAllowedAccount_revertsForMessenger() public {
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
+        portal.setAllowedAccount(address(messenger), true);
+    }
+
+    function test_setPortalRole_eventIncludesold() public {
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(address(zoneGateway), Role.CallbackGateway, Role.Account);
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
+    }
+
+    function test_setAllowedAccount_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setAllowedAccount(address(0), true);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.Account));
+        portal.setAllowedAccount(address(0), false);
+        vm.stopPrank();
+
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
+    }
+
+    function test_setAllowedAccount_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setAllowedAccount(makeAddr("managed account"), true);
+    }
     /*//////////////////////////////////////////////////////////////
                          DEPOSIT TESTS (L1 -> ZONE)
     //////////////////////////////////////////////////////////////*/
+
+    function test_deposit_revertsForUnallowedCaller() public {
+        address outsider = makeAddr("outsider");
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+    }
+
+    function test_deposit_allowsUnlistedZoneRecipient() public {
+        address outsider = makeAddr("outsider");
+        assertEq(uint8(portal.role(outsider)), uint8(Role.None));
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1);
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), alice);
+        vm.stopPrank();
+
+        assertEq(pathUSD.balanceOf(address(portal)), 1);
+    }
+
+    function test_deposit_allowsCallbackGateway() public {
+        pathUSD.mint(address(zoneGateway), 1);
+
+        vm.startPrank(address(zoneGateway));
+        pathUSD.approve(address(portal), 1);
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+        vm.stopPrank();
+
+        assertEq(pathUSD.balanceOf(address(portal)), 1);
+    }
+
+    function test_deposit_revertsForUnallowedBouncebackRecipient() public {
+        address outsider = makeAddr("outsider");
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), outsider);
+    }
 
     function test_deposit_updatesHashChain() public {
         uint128 depositAmount = 1000e6;
@@ -1554,7 +1967,20 @@ contract ZonePortalTest is BaseTest {
                      CALLBACK & BOUNCE-BACK TESTS
     //////////////////////////////////////////////////////////////*/
 
+    function _callbackData(GatewayFlow flow) internal view returns (bytes memory) {
+        return _callbackData(flow, alice, 0);
+    }
+
+    function _openPortalModes() internal {
+        vm.startPrank(admin);
+        portal.setAccessMode(false);
+        portal.setGatewayMode(false);
+        vm.stopPrank();
+    }
+
     function test_withdrawal_withCallback() public {
+        _openPortalModes();
+
         // Fund portal
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
@@ -1607,90 +2033,112 @@ contract ZonePortalTest is BaseTest {
         assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
     }
 
-    function test_withdrawal_bounceBackOnRevert() public {
-        // Fund portal
-        uint128 depositAmount = 1000e6;
-        vm.startPrank(alice);
-        pathUSD.approve(address(portal), depositAmount);
-        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
-        vm.stopPrank();
-
-        bytes32 depositHashBefore = portal.currentDepositQueueHash();
-
-        // Set receiver to revert
-        withdrawalReceiver.setShouldRevert(true);
-
-        // Create withdrawal with callback
-        Withdrawal memory w = _withdrawal(
-            address(pathUSD),
-            alice,
-            address(withdrawalReceiver),
-            500e6,
-            bytes32(0),
-            5_000_000,
-            alice,
-            ""
+    function _callbackData(
+        GatewayFlow flow,
+        address tempoRefundRecipient,
+        uint128 minOutputAmount
+    )
+        internal
+        view
+        returns (bytes memory)
+    {
+        return abi.encode(
+            GatewayCallbackData({
+                flow: flow,
+                outputToken: address(pathUSD),
+                keyIndex: 0,
+                encrypted: _makeEncryptedPayload(),
+                minVaultAssets: 0,
+                minVaultShares: 0,
+                minOutputAmount: minOutputAmount,
+                actionId: bytes32(0),
+                tempoRefundRecipient: tempoRefundRecipient
+            })
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
-
-        // Advance a block so the history precompile can return a hash
-        vm.roll(block.number + 1);
-
-        // Submit batch
-        _submitBatch(
-            portal,
-            uint64(block.number - 1),
-            0,
-            BlockTransition({
-                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
-            }),
-            DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: depositHashBefore,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
-            wHash,
-            "",
-            ""
-        );
-
-        // Process withdrawal - should bounce back
-        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
-
-        // Receiver should NOT have funds (they stayed in portal)
-        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 0);
-
-        // Deposit hash should have changed (bounce-back added a deposit)
-        assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
     }
 
-    function test_withdrawal_bounceBackOnWrongSelector() public {
-        // Fund portal
-        uint128 depositAmount = 1000e6;
-        vm.startPrank(alice);
-        pathUSD.approve(address(portal), depositAmount);
-        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
-        vm.stopPrank();
+    function _unsupportedFlowCallback() internal view returns (bytes memory data) {
+        data = _callbackData(GatewayFlow.Deposit);
+        assembly {
+            mstore(add(data, 0x40), 2)
+        }
+    }
 
-        bytes32 depositHashBefore = portal.currentDepositQueueHash();
-
-        // Set receiver to return wrong selector
-        withdrawalReceiver.setShouldAccept(false);
-
-        Withdrawal memory w = _withdrawal(
-            address(pathUSD),
-            alice,
-            address(withdrawalReceiver),
-            500e6,
+    function test_zoneGateway_rejectsUnauthorizedMessenger() public {
+        vm.expectRevert(MockZoneGateway.UnauthorizedMessenger.selector);
+        zoneGateway.onWithdrawalReceived(
+            testZoneId,
+            address(portal),
             bytes32(0),
-            5_000_000,
-            alice,
-            ""
+            address(pathUSD),
+            1,
+            _callbackData(GatewayFlow.Deposit)
         );
-        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+    }
 
-        // Advance a block so the history precompile can return a hash
+    function test_zoneGateway_rejectsWhenNoLongerRegistered() public {
+        vm.prank(admin);
+        portal.setGateway(address(zoneGateway), false);
+
+        vm.prank(address(messenger));
+        vm.expectRevert(MockZoneGateway.UnregisteredGateway.selector);
+        zoneGateway.onWithdrawalReceived(
+            testZoneId,
+            address(portal),
+            bytes32(0),
+            address(pathUSD),
+            1,
+            _callbackData(GatewayFlow.Deposit)
+        );
+    }
+
+    function test_zoneGateway_rejectsMalformedCallback() public {
+        vm.prank(address(messenger));
+        vm.expectRevert();
+        zoneGateway.onWithdrawalReceived(
+            testZoneId, address(portal), bytes32(0), address(pathUSD), 1, hex"01"
+        );
+    }
+
+    function test_zoneGateway_rejectsUnsupportedFlow() public {
+        vm.prank(address(messenger));
+        vm.expectRevert();
+        zoneGateway.onWithdrawalReceived(
+            testZoneId, address(portal), bytes32(0), address(pathUSD), 1, _unsupportedFlowCallback()
+        );
+    }
+
+    function test_zoneGateway_rejectsUnallowedPayloadBounceback() public {
+        address outsider = makeAddr("gateway bounceback outsider");
+        vm.prank(address(messenger));
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        zoneGateway.onWithdrawalReceived(
+            testZoneId,
+            address(portal),
+            bytes32(0),
+            address(pathUSD),
+            1,
+            _callbackData(GatewayFlow.Deposit, outsider, 0)
+        );
+    }
+
+    function test_zoneGateway_enforcesMinOutputAmount() public {
+        vm.prank(address(messenger));
+        vm.expectRevert(
+            abi.encodeWithSelector(MockZoneGateway.InsufficientOutputAmount.selector, 1, 2)
+        );
+        zoneGateway.onWithdrawalReceived(
+            testZoneId,
+            address(portal),
+            bytes32(0),
+            address(pathUSD),
+            1,
+            _callbackData(GatewayFlow.Redeem, alice, 2)
+        );
+    }
+
+    function _enqueueWithdrawal(Withdrawal memory withdrawal) internal {
+        bytes32 withdrawalHash = keccak256(abi.encode(withdrawal, EMPTY_SENTINEL));
         vm.roll(block.number + 1);
 
         _submitBatch(
@@ -1698,25 +2146,195 @@ contract ZonePortalTest is BaseTest {
             uint64(block.number - 1),
             0,
             BlockTransition({
-                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("callback state")
             }),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: depositHashBefore,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
-            wHash,
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: portal.currentDepositQueueHash(),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalHash,
             "",
             ""
         );
+    }
 
-        // Process withdrawal - should bounce back due to wrong selector
-        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+    function _fundCallbackWithdrawal(uint128 amount) internal {
+        _setEncKeyWithPoP(ENC_KEY_1);
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), amount);
+        portal.deposit(address(pathUSD), alice, amount, bytes32("callback funds"), alice);
+        vm.stopPrank();
+    }
 
-        // Funds should still be in portal (bounce-back)
-        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 0);
-        assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
+    function test_callbackWithdrawal_returnsFundsAndChangesDepositQueue() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
+
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(zoneGateway),
+            amount,
+            bytes32(0),
+            2_000_000,
+            alice,
+            _callbackData(GatewayFlow.Deposit)
+        );
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertEq(pathUSD.balanceOf(address(zoneGateway)), 0);
+        assertEq(pathUSD.balanceOf(address(portal)), amount);
+    }
+
+    function test_callbackWithdrawal_failureBouncesAndAdvancesQueue() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        zoneGateway.setReturnToZone(false);
+
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(zoneGateway),
+            amount,
+            bytes32(0),
+            2_000_000,
+            alice,
+            _callbackData(GatewayFlow.Redeem)
+        );
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(pathUSD.balanceOf(address(zoneGateway)), 0);
+        assertEq(pathUSD.balanceOf(address(portal)), amount);
+    }
+
+    function test_callbackWithdrawal_malformedPayloadBouncesAndAdvancesQueue() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(zoneGateway),
+            amount,
+            bytes32(0),
+            2_000_000,
+            alice,
+            hex"01"
+        );
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+    }
+
+    function test_plainWithdrawal_bouncesAndAdvancesForCallbackTarget() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD), alice, address(zoneGateway), amount, bytes32(0), 0, alice, ""
+        );
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(pathUSD.balanceOf(address(zoneGateway)), 0);
+        assertEq(pathUSD.balanceOf(address(portal)), amount);
+    }
+
+    function test_plainWithdrawal_bouncesAndAdvancesWhenRecipientRevoked() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, amount, bytes32(0), 0, alice, "");
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        vm.prank(admin);
+        portal.setAllowedAccount(bob, false);
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(pathUSD.balanceOf(address(portal)), amount);
+    }
+
+    function test_callbackWithdrawal_bouncesAndAdvancesWhenGatewayRevoked() public {
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(zoneGateway),
+            amount,
+            bytes32(0),
+            2_000_000,
+            alice,
+            _callbackData(GatewayFlow.Deposit)
+        );
+        _enqueueWithdrawal(withdrawal);
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+        vm.prank(admin);
+        portal.setGateway(address(zoneGateway), false);
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(pathUSD.balanceOf(address(zoneGateway)), 0);
+        assertEq(pathUSD.balanceOf(address(portal)), amount);
+    }
+
+    function test_depositBounceBack_parksRefundWhenRecipientRevoked() public {
+        vm.fee(0);
+        uint128 amount = 500e6;
+        _fundCallbackWithdrawal(amount);
+        Withdrawal memory withdrawal = Withdrawal({
+            token: address(pathUSD),
+            senderTag: keccak256(abi.encodePacked(address(0), bytes32(0))),
+            to: alice,
+            amount: amount,
+            memo: bytes32(0),
+            gasLimit: 0,
+            fallbackNonce: 0,
+            callbackData: "",
+            encryptedSender: ""
+        });
+        _enqueueWithdrawal(withdrawal);
+        vm.prank(admin);
+        portal.setAllowedAccount(alice, false);
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        assertEq(portal.refunds(address(pathUSD), alice), amount);
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, alice));
+        portal.claimRefund(address(pathUSD));
+
+        vm.prank(admin);
+        portal.setAllowedAccount(alice, true);
+        vm.prank(alice);
+        assertEq(portal.claimRefund(address(pathUSD)), amount);
     }
 
     function test_withdrawal_bounceBackOnTransferRevert_noCallback() public {
@@ -1862,6 +2480,8 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_processWithdrawal_revertsOnSequencerCallbackReentrancy() public {
+        _openPortalModes();
+
         ReentrantWithdrawalReceiver receiver = new ReentrantWithdrawalReceiver();
 
         uint128 depositAmount = 1000e6;
@@ -2450,9 +3070,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHash = portal.currentDepositQueueHash();
 
         // Create withdrawal with gasLimit = 0
-        Withdrawal memory w = _withdrawal(
-            address(pathUSD), alice, address(successfulReceiver), 500e6, bytes32(0), 0, alice, ""
-        );
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -2473,17 +3092,20 @@ contract ZonePortalTest is BaseTest {
         );
 
         uint256 callCountBefore = successfulReceiver.callCount();
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
 
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         // Funds should be transferred
-        assertEq(pathUSD.balanceOf(address(successfulReceiver)), 500e6);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + 500e6);
 
         // But callback should NOT have been called
         assertEq(successfulReceiver.callCount(), callCountBefore);
     }
 
     function test_withdrawal_nonZeroGasLimit_callbackExecuted() public {
+        _openPortalModes();
+
         // Fund portal
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
@@ -2585,7 +3207,7 @@ contract ZonePortalTest is BaseTest {
             sender: address(portal),
             to: bob,
             amount: 500e6,
-            bouncebackRecipient: address(0),
+            tempoRefundRecipient: address(0),
             memo: bytes32(0)
         });
         bytes32 expectedHash =
@@ -2681,7 +3303,7 @@ contract ZonePortalTest is BaseTest {
                     sender: alice,
                     to: bob,
                     amount: netAmount,
-                    bouncebackRecipient: bob,
+                    tempoRefundRecipient: bob,
                     memo: bytes32("test")
                 }),
                 bytes32(0)
@@ -3049,7 +3671,7 @@ contract ZonePortalTest is BaseTest {
             token: address(pathUSD),
             sender: alice,
             amount: netAmount,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -3115,7 +3737,7 @@ contract ZonePortalTest is BaseTest {
             token: address(pathUSD),
             sender: alice,
             amount: netAmount,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -3361,6 +3983,8 @@ contract ZonePortalTest is BaseTest {
     ///        slot 17: zoneHeight
     ///        slot 18: _sequencers.length
     ///        slot 19: isSequencer mapping
+    ///        slot 20: role mapping
+    ///        slot 21: account/gateway enforcement booleans [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -3455,6 +4079,17 @@ contract ZonePortalTest is BaseTest {
         assertEq(
             uint256(vm.load(address(portal), isSequencerSlot)), 1, "slot 19: membership mismatch"
         );
+
+        // --- Slot 20: role mapping ---
+        bytes32 gatewaySlot = keccak256(abi.encode(address(zoneGateway), uint256(PORTAL_ROLE_SLOT)));
+        assertEq(
+            uint256(vm.load(address(portal), gatewaySlot)),
+            uint256(Role.CallbackGateway),
+            "slot 20: gateway role mismatch"
+        );
+
+        bytes32 modeSlot = vm.load(address(portal), PORTAL_ENFORCEMENT_MODES_SLOT);
+        assertEq(uint16(uint256(modeSlot)), 0x0101, "slot 21: enforcement modes mismatch");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
@@ -3807,7 +4442,7 @@ contract ZonePortalTest is BaseTest {
                 sender: alice,
                 to: bob,
                 amount: amount - portal.calculateDepositFee(),
-                bouncebackRecipient: bob,
+                tempoRefundRecipient: bob,
                 memo: bytes32("memo")
             });
             assertEq(depositHash, DepositQueueLib.enqueue(bytes32(0), depositData));
@@ -3831,7 +4466,7 @@ contract ZonePortalTest is BaseTest {
                 sender: alice,
                 to: bob,
                 amount: amount - portal.calculateDepositFee(),
-                bouncebackRecipient: bob,
+                tempoRefundRecipient: bob,
                 memo: memo
             });
             expectedHash = DepositQueueLib.enqueue(expectedHash, depositData);

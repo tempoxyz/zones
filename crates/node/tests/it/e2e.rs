@@ -17,8 +17,8 @@ use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
-    ZoneInbox, ZoneOutbox,
+    IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS, ZoneInbox,
 };
 use zone_l1::ChainTempoStateExt;
 
@@ -580,7 +580,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let zone_outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let zone_outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
 
     let initial_batch_index = zone_outbox.lastBatch().call().await?.withdrawalBatchIndex;
     // Local test nodes finalize empty batches every eight zone blocks.
@@ -701,7 +701,7 @@ async fn submit_withdrawal(
     dev_address: Address,
     amount: u128,
 ) -> eyre::Result<u64> {
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
     let pending = outbox
         .requestWithdrawal(
             PATH_USD_ADDRESS,
@@ -736,7 +736,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
     let deposit_amount: u128 = 2_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
@@ -858,7 +858,7 @@ async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
         .await?
         .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
     let finalize_call =
-        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+        IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
     assert_eq!(
         finalize_call.count,
         U256::from(1),
@@ -880,7 +880,7 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 2_000_000);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
@@ -977,7 +977,7 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
         .await?
         .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
     let finalize_call =
-        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+        IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
     assert_eq!(
         finalize_call.count,
         U256::from(2),
@@ -995,7 +995,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
     // Local test nodes finalize empty batches every eight zone blocks.
     const BATCH_INTERVAL_BLOCKS: u64 = 8;
@@ -1125,7 +1125,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
         .await?
         .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
     let finalize_call =
-        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+        IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
     assert_eq!(finalize_call.count, U256::from(1));
 
     Ok(())
@@ -1134,7 +1134,7 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
 /// Submit a signed L2 withdrawal request with an over-cap callback gas limit.
 ///
 /// This exercises the RPC transaction path: the transaction is accepted into a
-/// zone block, reverts in `ZoneOutbox`, and does not enter the pending
+/// zone block, reverts in `IZoneOutbox`, and does not enter the pending
 /// withdrawal queue.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result<()> {
@@ -1143,7 +1143,7 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let deposit_amount: u128 = 1_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);

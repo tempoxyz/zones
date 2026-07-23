@@ -47,7 +47,9 @@ use tokio::{
 };
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneConfig, ZonePortal,
+};
 use zone_rpc::{
     auth::AuthContext,
     types::{
@@ -138,6 +140,7 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::PrivateRpcConfig,
     l1_provider: DynProvider<TempoNetwork>,
+    zone_provider: DynProvider<TempoNetwork>,
     tempo_state: tempo_zone_contracts::TempoState::TempoStateInstance<
         DynProvider<TempoNetwork>,
         TempoNetwork,
@@ -171,11 +174,13 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .await
             .wrap_err("failed to connect private RPC zone provider")?
             .erased();
-        let tempo_state = tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider);
+        let tempo_state =
+            tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
         let rpc = Self {
             eth,
             config,
             l1_provider,
+            zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -265,6 +270,30 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             );
         }
         Ok(sequencers)
+    }
+
+    async fn zone_is_access_enforced(&self) -> Result<bool, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Ok(false);
+        }
+
+        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
+            .isAccessEnforced()
+            .call()
+            .await
+            .map_err(internal)
+    }
+
+    async fn zone_is_gateway_open(&self) -> Result<bool, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Ok(true);
+        }
+
+        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
+            .isGatewayOpen()
+            .call()
+            .await
+            .map_err(internal)
     }
 
     async fn enforce_authorized(
@@ -794,6 +823,8 @@ where
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
             let sequencers = self.zone_sequencers().await?;
+            let is_access_enforced = self.zone_is_access_enforced().await?;
+            let is_gateway_open = self.zone_is_gateway_open().await?;
             let tempo_block_number = self
                 .tempo_state
                 .tempoBlockNumber()
@@ -802,6 +833,8 @@ where
                 .map_err(internal)?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
+                is_access_enforced,
+                is_gateway_open,
                 zone_tokens,
                 sequencers,
                 chain_id: U64::from(self.config.chain_id),

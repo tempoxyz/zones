@@ -25,7 +25,7 @@
 
 use std::{collections::BTreeMap, fmt};
 
-use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
+use crate::abi::{self, BlockTransition, DepositQueueTransition, IZoneOutbox, ZonePortal};
 use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -34,7 +34,7 @@ use alloy_rlp::Encodable;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolCall, SolEvent, SolStruct, SolValue, eip712_domain, sol};
-use eyre::Result;
+use eyre::{OptionExt as _, Result};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use schnellru::{ByLength, LruMap};
@@ -404,13 +404,14 @@ impl BatchSubmitter {
             .l1_provider
             .get_block_by_number(anchor_block_number.into())
             .await?
-            .ok_or_else(|| eyre::eyre!("L1 anchor block {anchor_block_number} not found"))?
+            .ok_or_eyre(format!("L1 anchor block {anchor_block_number} not found"))?
             .header
             .hash;
 
-        let signer = self.signer.as_ref().ok_or_else(|| {
-            eyre::eyre!("TIP-1091 batch submission requires the local sequencer signer")
-        })?;
+        let signer = self
+            .signer
+            .as_ref()
+            .ok_or_eyre("TIP-1091 batch submission requires the local sequencer signer")?;
         let verifier_config = Bytes::new();
         let signature = self
             .sign_settlement_attestation(
@@ -449,6 +450,8 @@ impl BatchSubmitter {
                 vec![signature],
             )
             .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+            .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+            .max_priority_fee_per_gas(0)
             .send()
             .await?;
 
@@ -843,7 +846,7 @@ impl BatchSubmitter {
         }
 
         // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
-        let outbox = ZoneOutbox::new(outbox_address, zone_provider.clone());
+        let outbox = IZoneOutbox::new(outbox_address, zone_provider.clone());
         let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
         for portal_slot in head..tail {
             if !events.contains_key(&portal_slot) {
@@ -1035,7 +1038,7 @@ struct RequestedWithdrawalLog {
     tx_index: u64,
     log_index: u64,
     tx_hash: B256,
-    event: abi::ZoneOutbox::WithdrawalRequested,
+    event: abi::IZoneOutbox::WithdrawalRequested,
 }
 
 #[derive(Debug, Clone)]
@@ -1053,7 +1056,7 @@ struct FinalizedBatchLog {
 /// This includes zero-withdrawal batches because they still advance the L2
 /// withdrawal batch index and therefore require a matching L1 `submitBatch`.
 pub(crate) async fn fetch_finalized_batch_boundaries(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<u64>> {
@@ -1086,7 +1089,7 @@ pub(crate) async fn fetch_finalized_batch_boundaries(
 /// the immediately preceding batch boundary so the off-chain processor can
 /// service the portal queue.
 pub(crate) async fn fetch_finalized_batch(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
@@ -1142,7 +1145,7 @@ pub(crate) async fn fetch_finalized_batch(
             )
         })?;
     let encrypted_senders =
-        abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
+        abi::IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
             .map_err(|err| {
                 eyre::eyre!(
                     "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
@@ -1187,7 +1190,7 @@ pub(crate) async fn fetch_finalized_batch(
 
 /// Fetch `WithdrawalRequested` events for one portal queue slot.
 pub(crate) async fn fetch_slot_withdrawals(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
@@ -1198,7 +1201,7 @@ pub(crate) async fn fetch_slot_withdrawals(
 }
 
 async fn fetch_requested_withdrawal_logs(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<RequestedWithdrawalLog>> {
@@ -1230,7 +1233,7 @@ async fn fetch_requested_withdrawal_logs(
 }
 
 async fn fetch_finalized_batch_logs(
-    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    outbox: &IZoneOutbox::IZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<FinalizedBatchLog>> {

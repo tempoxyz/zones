@@ -4,8 +4,10 @@ pragma solidity ^0.8.13;
 import {
     IZoneConfig,
     IZonePortal,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT
 } from "../../src/interfaces/IZone.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
@@ -39,10 +41,23 @@ contract ZoneConfigTest is BaseTest {
         config = new ZoneConfig(address(portal), address(tempoState));
 
         _syncSequencer(sequencer);
+        _syncPortalSlot(PORTAL_ACCESS_MODE_SLOT);
         _syncTokenConfig(address(pathUSD));
+        _syncAllowedAccount(alice);
+        _syncZoneGateway(address(zoneGateway));
     }
 
     function _syncPortalSlot(bytes32 slot) internal {
+        tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
+    }
+
+    function _syncAllowedAccount(address account) internal {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
+    }
+
+    function _syncZoneGateway(address gateway) internal {
+        bytes32 slot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
         tempoState.setMockStorageValue(address(portal), slot, vm.load(address(portal), slot));
     }
 
@@ -97,6 +112,38 @@ contract ZoneConfigTest is BaseTest {
     function test_isEnabledToken_trueAndFalse() public view {
         assertTrue(config.isEnabledToken(address(pathUSD)));
         assertFalse(config.isEnabledToken(address(token1)));
+    }
+
+    function test_closedLoopMembershipAndGatewayAreIndependent() public view {
+        assertTrue(config.isAccessEnforced());
+        assertFalse(config.isGatewayOpen());
+        assertTrue(config.isAllowedAccount(alice));
+        assertFalse(config.isZoneGateway(alice));
+        assertTrue(config.isZoneGateway(address(zoneGateway)));
+        assertFalse(config.isAllowedAccount(address(zoneGateway)));
+    }
+
+    function test_openModeBypassesAccountMembershipButNotGatewayState() public {
+        tempoState.setMockStorageValue(
+            address(portal), PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1 << 8))
+        );
+
+        address outsider = makeAddr("open mode outsider");
+        assertFalse(config.isAccessEnforced());
+        assertTrue(config.isAllowedAccount(outsider));
+        assertTrue(config.isAllowedAccount(address(zoneGateway)));
+        assertTrue(config.isZoneGateway(address(zoneGateway)));
+        assertFalse(config.isZoneGateway(outsider));
+    }
+
+    function test_gatewayModeIsIndependentFromAccessMode() public {
+        tempoState.setMockStorageValue(
+            address(portal), PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1))
+        );
+
+        assertTrue(config.isAccessEnforced());
+        assertTrue(config.isGatewayOpen());
+        assertTrue(config.isZoneGateway(address(zoneGateway)));
     }
 
     /// @notice Verifies reading the sequencer encryption key reverts before any key is set.

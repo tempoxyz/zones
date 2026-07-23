@@ -20,8 +20,10 @@ pub use IZoneTokenFactory::IZoneTokenFactoryErrors as ZoneTokenFactoryError;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Address;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, Precompile as _, TIP20_FACTORY_ADDRESS,
-    tip20::{ISSUER_ROLE, TIP20Token, tip20_slots},
+    PATH_USD_ADDRESS, Precompile as _, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS,
+    storage::StorageKey as _,
+    tip20::{ISSUER_ROLE, TIP20Token},
+    tip403_registry::tip403_registry_slots,
 };
 use tempo_precompiles_macros::contract;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
@@ -79,10 +81,12 @@ impl ZoneTokenFactory {
     ///
     /// The quote token is always set to [`PATH_USD_ADDRESS`].
     pub fn enable_token(&mut self, call: enableTokenCall) -> tempo_precompiles::Result<()> {
-        // Upstream initialization writes the default policy ID, so we cache the L1-anchored value.
-        let l1_policy = self
-            .storage
-            .sload(call.token, tip20_slots::TRANSFER_POLICY_ID)?;
+        // Upstream initialization writes the default policy ID into the L1-mirrored
+        // TIP-403 registry. Cache the anchored value so initialization cannot override it.
+        let binding_slot = call
+            .token
+            .mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
+        let l1_policy = self.storage.sload(TIP403_REGISTRY_ADDRESS, binding_slot)?;
 
         let mut token = TIP20Token::from_address(call.token)?;
         token.initialize(
@@ -94,15 +98,10 @@ impl ZoneTokenFactory {
             ZONE_INBOX_ADDRESS,
         )?;
 
-        // Restore the L1-anchored value while preserving the zone-local fields initialized above.
-        let initialized = self
-            .storage
-            .sload(call.token, tip20_slots::TRANSFER_POLICY_ID)?;
-        self.storage.sstore(
-            call.token,
-            tip20_slots::TRANSFER_POLICY_ID,
-            crate::storage::merge_transfer_policy_id(initialized, l1_policy),
-        )?;
+        // The complete registry word is L1-owned, including both the policy ID and
+        // isSet bit. Restore it so the zone never persists a registry transition.
+        self.storage
+            .sstore(TIP403_REGISTRY_ADDRESS, binding_slot, l1_policy)?;
 
         token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
         token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
@@ -119,31 +118,34 @@ mod tests {
     use tempo_precompiles::storage::{StorageCtx, hashmap::HashMapStorageProvider};
 
     #[test]
-    fn initialization_preserves_anchored_transfer_policy() -> eyre::Result<()> {
+    fn initialization_preserves_registry_binding() -> eyre::Result<()> {
         let token_address = address!("20C0000000000000000000000000000000000999");
-        let policy_id = 7u64;
-        let offset = tip20_slots::TRANSFER_POLICY_ID_OFFSET * 8;
-        let anchored_policy = U256::from(policy_id) << offset;
-        let mut provider = HashMapStorageProvider::new_with_spec(1, TempoHardfork::default());
+        let binding_slot =
+            token_address.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
 
-        StorageCtx::enter(&mut provider, || -> eyre::Result<()> {
-            StorageCtx.sstore(
-                token_address,
-                tip20_slots::TRANSFER_POLICY_ID,
-                anchored_policy,
-            )?;
+        for anchored_policy in [U256::ZERO, U256::from(7) | (U256::ONE << 64)] {
+            let mut provider = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T9);
 
-            ZoneTokenFactory::new().enable_token(enableTokenCall {
-                token: token_address,
-                name: "Zone Token".to_owned(),
-                symbol: "ZONE".to_owned(),
-                currency: "USD".to_owned(),
+            StorageCtx::enter(&mut provider, || -> eyre::Result<()> {
+                StorageCtx.sstore(TIP403_REGISTRY_ADDRESS, binding_slot, anchored_policy)?;
+
+                ZoneTokenFactory::new().enable_token(enableTokenCall {
+                    token: token_address,
+                    name: "Zone Token".to_owned(),
+                    symbol: "ZONE".to_owned(),
+                    currency: "USD".to_owned(),
+                })?;
+
+                assert_eq!(
+                    StorageCtx.sload(TIP403_REGISTRY_ADDRESS, binding_slot)?,
+                    anchored_policy
+                );
+                let token = TIP20Token::from_address(token_address)?;
+                assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
+                Ok(())
             })?;
+        }
 
-            let token = TIP20Token::from_address(token_address)?;
-            assert_eq!(token.transfer_policy_id()?, policy_id);
-            assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
-            Ok(())
-        })
+        Ok(())
     }
 }

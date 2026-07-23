@@ -1124,6 +1124,8 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         zone_info["result"]["zoneId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.zone_id),
     );
+    assert_eq!(zone_info["result"]["isAccessEnforced"], true);
+    assert_eq!(zone_info["result"]["isGatewayOpen"], false);
     assert_eq!(
         zone_info["result"]["zoneTokens"]
             .as_array()

@@ -52,18 +52,36 @@ pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C000000000000000000000
 pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
     address!("0x20Fc000000000000000000000000000000000000");
 
+/// Zone-native fee manager precompile address.
+///
+/// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.
+pub const ZONE_FEE_MANAGER_ADDRESS: Address =
+    address!("0xfeec000000000000000000000000000000000001");
+
 /// Default zone token address (pathUSD TIP-20).
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
 /// ZonePortal storage slot 0: `admin` (address).
 pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
+/// ZonePortal storage slot 6: `_tokenConfigs` mapping.
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
+
 /// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
-pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 19;
-    B256::new(bytes)
-};
+pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
+
+/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
+/// `role` (mapping(address => Role)).
+pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
+
+/// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
+pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
+
+/// Alias used by consumers reading account allowlist enforcement.
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
+
+/// Alias used by consumers reading callback gateway enforcement.
+pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
@@ -71,23 +89,6 @@ pub const PORTAL_IS_SEQUENCER_SLOT: B256 = {
 
 /// ZoneInbox storage slot 0: `processedDepositQueueHash` (bytes32).
 pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
-
-/// ZoneOutbox storage slot 1: `_lastBatch.withdrawalQueueHash` (bytes32).
-///
-/// Slot 0 is packed `(tempoGasRate, nextWithdrawalIndex, withdrawalBatchIndex)`.
-/// The `_lastBatch` struct starts at slot 1 with `withdrawalQueueHash` occupying the full slot.
-pub const ZONE_OUTBOX_LAST_BATCH_HASH_SLOT: U256 = {
-    let mut le = [0u8; 32];
-    le[0] = 1;
-    U256::from_le_bytes(le)
-};
-
-/// ZoneOutbox storage slot 2: `_lastBatch.withdrawalBatchIndex` (uint64, lower 8 bytes).
-pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
-    let mut le = [0u8; 32];
-    le[0] = 2;
-    U256::from_le_bytes(le)
-};
 
 /// Base offset for deriving **mainnet** zone chain IDs.
 ///
