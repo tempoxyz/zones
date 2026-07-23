@@ -199,8 +199,6 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
-        // FIXME: Transfer the fee to the sequencer's fee recipient instead of burning it, and
-        // require that fee recipient to be an allowed account.
         if caller == fee_payer {
             let total = call
                 .amount

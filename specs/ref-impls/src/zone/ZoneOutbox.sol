@@ -294,8 +294,6 @@ contract ZoneOutbox is IZoneOutbox {
             revert TransferFailed();
         }
 
-        // FIXME: Transfer the fee to the sequencer's fee recipient instead of burning it, and
-        // require that fee recipient to be an allowed account.
         // Burn the tokens (they'll be released on Tempo when withdrawal is processed).
         zoneToken.burn(totalBurn);
 
