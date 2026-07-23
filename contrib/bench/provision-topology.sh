@@ -252,26 +252,29 @@ wait_for_zone_configuration() {
     local anchor_block="$2"
     local expected_sequencer="$3"
     local timeout="$4"
-    local deadline=$((SECONDS + timeout)) finalized sequencer enabled
+    local deadline=$((SECONDS + timeout)) finalized is_sequencer enabled
 
     while (( SECONDS < deadline )); do
         finalized="$(cast call "$TEMPO_STATE" 'tempoBlockNumber()(uint64)' \
             --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        sequencer="$(cast call "$ZONE_CONFIG" 'sequencer()(address)' \
+        is_sequencer="$(cast call "$ZONE_CONFIG" 'isSequencer(address)(bool)' "$expected_sequencer" \
             --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
         enabled="$(cast call "$ZONE_CONFIG" 'isEnabledToken(address)(bool)' "$PATH_USD" \
             --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
 
         if [[ "$finalized" =~ ^[0-9]+$ ]] \
             && (( finalized > anchor_block )) \
-            && [[ "${sequencer,,}" == "${expected_sequencer,,}" ]] \
+            && [[ "$is_sequencer" == "true" ]] \
             && [[ "$enabled" == "true" ]]; then
             return 0
         fi
         sleep 1
     done
 
-    die "timed out waiting for the Zone to ingest its portal configuration past L1 anchor $anchor_block"
+    die "timed out waiting for the Zone to ingest its portal configuration past L1 anchor \
+$anchor_block (finalized=${finalized:-unavailable}, \
+expected_sequencer=${expected_sequencer}, is_sequencer=${is_sequencer:-unavailable}, \
+token=${PATH_USD}, enabled=${enabled:-unavailable})"
 }
 
 write_env() {
