@@ -14,6 +14,7 @@ use std::{
     io::Write as _,
     path::{Path, PathBuf},
 };
+use tempo_contracts::precompiles::INITIAL_FACTORY_OWNER;
 use tempo_zone_contracts::{
     ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
 };
@@ -169,44 +170,62 @@ fn install_native_zone_factory(
     artifacts: NativeArtifacts,
 ) -> eyre::Result<()> {
     ensure!(owner != Address::ZERO, "ZoneFactory owner must not be zero");
-    for (name, address) in [
-        ("ZoneFactory", ZONE_FACTORY_ADDRESS),
-        ("ZonePortal implementation", ZONE_PORTAL_IMPL_ADDRESS),
-        ("Verifier", ZONE_VERIFIER_ADDRESS),
-        ("ZoneMessenger", ZONE_MESSENGER_ADDRESS),
-    ] {
-        ensure!(
-            !genesis.alloc.contains_key(&address),
-            "refusing to replace existing genesis allocation for {name} at {address}"
-        );
+    let canonical_factory = native_factory_account(INITIAL_FACTORY_OWNER);
+    let benchmark_factory = native_factory_account(owner);
+    match genesis.alloc.get(&ZONE_FACTORY_ADDRESS) {
+        None => {
+            genesis
+                .alloc
+                .insert(ZONE_FACTORY_ADDRESS, benchmark_factory);
+        }
+        Some(existing) if existing == &benchmark_factory => {}
+        Some(existing) if existing == &canonical_factory => {
+            genesis
+                .alloc
+                .insert(ZONE_FACTORY_ADDRESS, benchmark_factory);
+        }
+        Some(_) => {
+            eyre::bail!(
+                "refusing to replace conflicting ZoneFactory allocation at {ZONE_FACTORY_ADDRESS}"
+            );
+        }
     }
 
+    for (name, address, code) in [
+        (
+            "ZonePortal implementation",
+            ZONE_PORTAL_IMPL_ADDRESS,
+            artifacts.portal,
+        ),
+        ("Verifier", ZONE_VERIFIER_ADDRESS, artifacts.verifier),
+        ("ZoneMessenger", ZONE_MESSENGER_ADDRESS, artifacts.messenger),
+    ] {
+        let expected = GenesisAccount::default()
+            .with_nonce(Some(1))
+            .with_code(Some(code));
+        match genesis.alloc.get(&address) {
+            None => {
+                genesis.alloc.insert(address, expected);
+            }
+            Some(existing) => ensure!(
+                existing == &expected,
+                "refusing to replace conflicting {name} allocation at {address}"
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn native_factory_account(owner: Address) -> GenesisAccount {
     // Native TIP-1091 accounts use the non-empty 0xEF precompile marker. Slot zero packs
     // uint32 nextZoneId, address owner, and the implementation-lock flag.
     let packed_factory_config: U256 =
         U256::ONE | (U256::from_be_slice(owner.as_slice()) << 32_usize);
     let factory_storage =
         BTreeMap::from([(B256::ZERO, B256::from(packed_factory_config.to_be_bytes()))]);
-    genesis.alloc.insert(
-        ZONE_FACTORY_ADDRESS,
-        GenesisAccount::default()
-            .with_nonce(Some(1))
-            .with_code(Some(Bytes::from_static(&[0xef])))
-            .with_storage(Some(factory_storage)),
-    );
-    for (address, code) in [
-        (ZONE_PORTAL_IMPL_ADDRESS, artifacts.portal),
-        (ZONE_VERIFIER_ADDRESS, artifacts.verifier),
-        (ZONE_MESSENGER_ADDRESS, artifacts.messenger),
-    ] {
-        genesis.alloc.insert(
-            address,
-            GenesisAccount::default()
-                .with_nonce(Some(1))
-                .with_code(Some(code)),
-        );
-    }
-    Ok(())
+    GenesisAccount::default()
+        .with_code(Some(Bytes::from_static(&[0xef])))
+        .with_storage(Some(factory_storage))
 }
 
 #[cfg(test)]
@@ -230,7 +249,7 @@ mod tests {
         install_native_zone_factory(&mut genesis, owner, test_artifacts()).unwrap();
 
         let factory = &genesis.alloc[&ZONE_FACTORY_ADDRESS];
-        assert_eq!(factory.nonce, Some(1));
+        assert_eq!(factory.nonce, None);
         assert_eq!(
             factory.code.as_ref().map(|code| code.as_ref()),
             Some(&[0xef][..])
@@ -276,17 +295,79 @@ mod tests {
     }
 
     #[test]
-    fn rejects_existing_protocol_allocations() {
+    fn adapts_tempo_canonical_factory_owner() {
+        let owner = address!("0x0000000000000000000000000000000000001234");
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            ZONE_FACTORY_ADDRESS,
+            native_factory_account(INITIAL_FACTORY_OWNER),
+        );
+        install_native_zone_factory(&mut genesis, owner, test_artifacts()).unwrap();
+
+        assert_eq!(
+            genesis.alloc[&ZONE_FACTORY_ADDRESS],
+            native_factory_account(owner)
+        );
+    }
+
+    #[test]
+    fn accepts_existing_exact_factory_and_shared_runtimes() {
+        let owner = address!("0x0000000000000000000000000000000000001234");
+        let artifacts = test_artifacts();
         let mut genesis = Genesis::default();
         genesis
             .alloc
-            .insert(ZONE_FACTORY_ADDRESS, GenesisAccount::default());
+            .insert(ZONE_FACTORY_ADDRESS, native_factory_account(owner));
+        for (address, code) in [
+            (ZONE_PORTAL_IMPL_ADDRESS, artifacts.portal.clone()),
+            (ZONE_VERIFIER_ADDRESS, artifacts.verifier.clone()),
+            (ZONE_MESSENGER_ADDRESS, artifacts.messenger.clone()),
+        ] {
+            genesis.alloc.insert(
+                address,
+                GenesisAccount::default()
+                    .with_nonce(Some(1))
+                    .with_code(Some(code)),
+            );
+        }
+
+        install_native_zone_factory(&mut genesis, owner, artifacts).unwrap();
+    }
+
+    #[test]
+    fn rejects_conflicting_factory_allocation() {
+        let mut genesis = Genesis::default();
+        let mut conflicting = native_factory_account(INITIAL_FACTORY_OWNER);
+        conflicting.nonce = Some(1);
+        genesis.alloc.insert(ZONE_FACTORY_ADDRESS, conflicting);
         let error = install_native_zone_factory(
             &mut genesis,
             address!("0x0000000000000000000000000000000000001234"),
             test_artifacts(),
         )
         .unwrap_err();
-        assert!(error.to_string().contains("refusing to replace"));
+        assert!(error.to_string().contains("conflicting ZoneFactory"));
+    }
+
+    #[test]
+    fn rejects_conflicting_shared_runtime_allocation() {
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            ZONE_PORTAL_IMPL_ADDRESS,
+            GenesisAccount::default()
+                .with_nonce(Some(1))
+                .with_code(Some(Bytes::from_static(&[0xde, 0xad]))),
+        );
+        let error = install_native_zone_factory(
+            &mut genesis,
+            address!("0x0000000000000000000000000000000000001234"),
+            test_artifacts(),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("conflicting ZonePortal implementation")
+        );
     }
 }
