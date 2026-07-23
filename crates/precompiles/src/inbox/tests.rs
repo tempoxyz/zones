@@ -300,7 +300,7 @@ fn child_anchor_storage_failure_is_fatal_and_rolls_back_checkpoint() -> eyre::Re
 }
 
 #[test]
-fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
+fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let first = Deposit {
         token: PATH_USD_ADDRESS,
@@ -321,7 +321,7 @@ fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
     let tempo_head = keccak256((DepositType::Regular, second, first_hash).abi_encode_params());
     harness.set_queue_hash(tempo_head);
 
-    let output = harness.call(
+    let output = harness.call_atomic(
         Address::ZERO,
         harness
             .advance_call(
@@ -333,17 +333,21 @@ fn queue_head_mismatch_allows_partial_processing() -> eyre::Result<()> {
             )
             .abi_encode(),
     )?;
-    assert!(output.is_success());
+    assert!(output.is_revert());
+    assert_eq!(
+        output.bytes,
+        IZoneInbox::InvalidDepositQueueHash {}.abi_encode()
+    );
 
-    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(100));
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::ZERO);
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-        assert_eq!(TempoState::new().tempo_block_number()?, 1);
+        assert_eq!(TempoState::new().tempo_block_number()?, 0);
         assert_eq!(
             ZoneInbox::new().processed_deposit_queue_hash.read()?,
-            first_hash
+            B256::ZERO
         );
-        assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 1);
+        assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 0);
         Ok(())
     })?;
     Ok(())

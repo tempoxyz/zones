@@ -139,14 +139,18 @@ impl ZoneInbox {
         // bounded prefix of pending deposits. The batch proof validates that hashing the
         // unprocessed suffix from `current_hash` reaches `tempo_current_hash`; requiring equality
         // here would incorrectly forbid partial processing.
-        // A zero portal denotes the explicit no-L1 mode used by local development and offline
+        //
+        // NOTE: A zero portal denotes the explicit no-L1 mode used by local development and offline
         // execution. There is no canonical queue to bind in that mode.
         if !portal.is_zero() {
-            let _tempo_current_hash = l1.read_l1_storage(
+            let tempo_current_hash = l1.read_l1_storage(
                 portal,
                 PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
                 tempo_block_number,
             )?;
+            if tempo_current_hash != current_hash {
+                return Err(ZoneInboxError::invalid_deposit_queue_hash().into());
+            }
         }
 
         // Step 4: Update state
