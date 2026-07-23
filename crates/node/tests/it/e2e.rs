@@ -20,7 +20,7 @@ use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS,
 };
-use zone_l1::ChainTempoStateExt;
+use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
@@ -44,15 +44,30 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     // first block.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    fixture.inject_empty_block(leader.deposit_queue());
+    let anchor = fixture.inject_empty_block(leader.deposit_queue());
     leader.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
+
+    // Receiving the peer block is not enough: the follower must independently
+    // observe its exact L1 anchor before importing it.
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(
+        follower.provider().get_block_number().await?,
+        0,
+        "follower imported a block before observing its L1 anchor"
+    );
+
+    follower.l1_block_tracker().record(anchor)?;
     follower.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
 
     let depositor = address!("0x0000000000000000000000000000000000001234");
     let recipient = address!("0x0000000000000000000000000000000000005678");
     let amount = 1_000_000_u128;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, depositor, recipient, amount);
-    fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
+    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
+    let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
+    follower
+        .l1_block_tracker()
+        .record_with_portal_events(anchor, observed)?;
 
     leader
         .wait_for_balance(
@@ -79,7 +94,11 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let transfer_recipient = address!("0x0000000000000000000000000000000000009abc");
     fixture.seed_no_receive_policy(transfer_recipient)?;
     let sender_deposit = fixture.make_deposit(PATH_USD_ADDRESS, sender, sender, amount);
-    fixture.inject_deposits(leader.deposit_queue(), vec![sender_deposit]);
+    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(sender_deposit.clone())]);
+    let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![sender_deposit]);
+    follower
+        .l1_block_tracker()
+        .record_with_portal_events(anchor, observed)?;
     leader
         .wait_for_balance(
             PATH_USD_ADDRESS,
@@ -127,7 +146,8 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let leader_receipt = tokio::time::timeout(LEADER_INCLUSION_TIMEOUT, async {
         loop {
             let next_block = leader_provider.get_block_number().await? + 1;
-            fixture.inject_empty_block(leader.deposit_queue());
+            let anchor = fixture.inject_empty_block(leader.deposit_queue());
+            follower.l1_block_tracker().record(anchor)?;
             leader
                 .wait_for_block_number(next_block, DEFAULT_TIMEOUT)
                 .await?;
@@ -170,6 +190,154 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
             .await?;
         assert_eq!(balance, U256::from(transfer_amount));
     }
+    Ok(())
+}
+
+/// A follower must enforce a TIP-403 policy change at the *exact* L1 block its
+/// imported zone block is anchored to — never one block late.
+///
+/// Flow:
+/// 1. Zone block 1 (anchor L1#1, pathUSD still allow-all): a deposit funds Alice.
+/// 2. Between blocks, pathUSD's transfer policy switches to a blacklist that
+///    bans Bob as a recipient, effective at L1 block 2.
+/// 3. Zone block 2 (anchor L1#2): Alice's pathUSD transfer is included and
+///    reverts on the leader because policy now resolves at height 2.
+/// 4. The follower imports block 2 — only possible if it, too, reads policy at
+///    height 2 and reproduces the revert, matching the leader's state root.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Result<()> {
+    use alloy_provider::ProviderBuilder;
+    use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+    use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+    use tempo_contracts::precompiles::{
+        ITIP20, ITIP403Registry::PolicyType, TIP_FEE_MANAGER_ADDRESS,
+    };
+
+    use crate::utils::{
+        PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
+        seed_raw_tip403_token_policy,
+    };
+
+    reth_tracing::init_test_tracing();
+
+    let (leader, follower, mut fixture) = start_local_p2p_pair(10).await?;
+
+    // Commonware drops messages for offline peers; wait for the dial/handshake
+    // before producing the first block (mirrors the sibling P2P test).
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // Alice funds the transfer; Bob becomes blacklisted at the next L1 anchor.
+    let alice_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .index(1)?
+        .build()?;
+    let alice = alice_signer.address();
+    let sequencer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?
+        .address();
+    let bob = address!("0x0000000000000000000000000000000000000B0B");
+
+    // --- Block 1: fund Alice while pathUSD is still allow-all (anchor L1#1). ---
+    let deposit_amount: u128 = 1_000_000;
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, alice, alice, deposit_amount);
+    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
+    let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
+    leader
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            alice,
+            U256::from(deposit_amount),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+
+    follower
+        .l1_block_tracker()
+        .record_with_portal_events(anchor, observed)?;
+    follower
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            alice,
+            U256::from(deposit_amount),
+            DEFAULT_TIMEOUT,
+        )
+        .await?;
+    follower.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
+
+    // --- Policy change effective at L1 block 2: blacklist Bob on pathUSD. ---
+    // Seed identically on both nodes, mirroring each node's L1 observer having
+    // made block-2 TIP-403 and TIP-20 storage available before publishing the
+    // anchor. The L1-backed execution database must select these values from
+    // the anchor advanced by the first `advanceTempo` transaction.
+    const BLACKLIST_POLICY_ID: u64 = 7;
+    const POLICY_L1_BLOCK: u64 = 2;
+    let policy_block = fixture.next_block();
+    assert_eq!(policy_block.header.inner.number, POLICY_L1_BLOCK);
+    fixture.seed_no_receive_policy(bob)?;
+    for node in [&leader, &follower] {
+        seed_raw_tip403_policy(
+            node.l1_state_cache(),
+            POLICY_L1_BLOCK,
+            &[PolicySeed::simple(
+                BLACKLIST_POLICY_ID,
+                PolicyType::BLACKLIST,
+                &[
+                    (alice, false),
+                    (bob, true),
+                    (sequencer, false),
+                    (TIP_FEE_MANAGER_ADDRESS, false),
+                ],
+            )],
+        )?;
+        seed_raw_tip403_token_policy(
+            &mut node.l1_state_cache().lock(),
+            POLICY_L1_BLOCK,
+            PATH_USD_ADDRESS,
+            BLACKLIST_POLICY_ID,
+        );
+    }
+
+    // --- Block 2: Alice's transfer is submitted, then the anchoring L1 block is
+    // injected to trigger the build that includes it. ---
+    let alice_provider = ProviderBuilder::new()
+        .wallet(alice_signer)
+        .connect_http(leader.http_url().clone());
+    let tip20 = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
+    let pending = tip20
+        .transfer(bob, U256::from(200_000u128))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+
+    let anchor =
+        reth_primitives_traits::SealedHeader::seal_slow(policy_block.header.clone()).num_hash();
+    fixture.enqueue(&policy_block, leader.deposit_queue(), vec![]);
+    leader.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
+
+    // The leader, resolving policy at height 2, must revert Alice's transfer
+    // (proves the exact-anchor policy behavior and that the tx was included, not dropped).
+    let receipt = pending.get_receipt().await?;
+    assert!(
+        !receipt.status(),
+        "leader should revert the blacklisted transfer in the block anchored at L1#2"
+    );
+
+    // --- The follower must independently reproduce that revert at height 2. ---
+    // If it read policy at height 1 (allow-all) it would replay the transfer as
+    // a success, diverge from the leader's state root, reject the block, and
+    // never reach block 2 — so this import succeeding proves exact-anchor policy reads.
+    follower.l1_block_tracker().record(anchor)?;
+    follower.wait_for_block_number(2, DEFAULT_TIMEOUT).await?;
+
+    // Bob received nothing on the follower: the reverted transfer moved no funds.
+    assert_eq!(
+        follower.balance_of(PATH_USD_ADDRESS, bob).await?,
+        U256::ZERO,
+        "follower must reflect the reverted transfer: Bob received nothing"
+    );
+
     Ok(())
 }
 

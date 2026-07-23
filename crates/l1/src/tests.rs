@@ -1,7 +1,7 @@
 use super::*;
 use crate::abi::DepositType;
 use alloy_consensus::{Header, ReceiptWithBloom};
-use alloy_primitives::{Bloom, FixedBytes, address};
+use alloy_primitives::{Bloom, Bytes, FixedBytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
@@ -149,13 +149,219 @@ fn test_subscriber(
             portal_address,
             genesis_tempo_block_number,
             l1_state_cache: crate::L1StateCache::new(),
+            block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
         },
         local_state,
-        deposit_queue: DepositQueue::default(),
+        deposit_queue: Some(DepositQueue::default()),
         subscriber_metrics: Default::default(),
     }
+}
+
+#[tokio::test]
+async fn l1_block_tracker_waits_for_exact_observation() {
+    let tracker = L1BlockTracker::default();
+    let anchor = NumHash::new(10, B256::with_last_byte(0x10));
+    let waiting = tracker.clone();
+    let waiter = tokio::spawn(async move { waiting.wait_for(anchor).await });
+
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+    tracker.record(anchor).unwrap();
+    waiter.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
+    let tracker = L1BlockTracker::default();
+    let anchor = NumHash::new(10, B256::with_last_byte(0x10));
+    let events = L1PortalEvents::from_deposits(vec![make_deposit(100)]);
+    tracker
+        .record_with_portal_events(anchor, events.clone())
+        .unwrap();
+
+    let observed = tracker.wait_for_portal_events(anchor).await.unwrap();
+    assert_eq!(observed.deposits.len(), 1);
+    assert_eq!(
+        observed.deposits[0].to_abi_queued_deposit(),
+        events.deposits[0].to_abi_queued_deposit()
+    );
+}
+
+#[test]
+fn observed_portal_events_require_complete_advance_tempo_inputs() {
+    let events = L1PortalEvents {
+        deposits: vec![make_deposit(100), make_deposit(200)],
+        enabled_tokens: vec![EnabledToken {
+            token: address!("0x20C0000000000000000000000000000000000001"),
+            name: "Alpha USD".to_owned(),
+            symbol: "aUSD".to_owned(),
+            currency: "USD".to_owned(),
+        }],
+    };
+    let deposits: Vec<_> = events
+        .deposits
+        .iter()
+        .map(L1Deposit::to_abi_queued_deposit)
+        .collect();
+    let enabled_tokens: Vec<_> = events
+        .enabled_tokens
+        .iter()
+        .map(EnabledToken::to_abi)
+        .collect();
+
+    // Rejection is a sequencer decision and does not change the authenticated deposit identity.
+    events
+        .validate_advance_tempo_inputs(&deposits, &enabled_tokens)
+        .unwrap();
+
+    let partial = events
+        .validate_advance_tempo_inputs(&deposits[..1], &enabled_tokens)
+        .unwrap_err();
+    assert!(partial.to_string().contains("deposit count"));
+
+    let mut fabricated = deposits.clone();
+    fabricated[1].depositData = Bytes::from_static(b"fabricated");
+    let fabricated = events
+        .validate_advance_tempo_inputs(&fabricated, &enabled_tokens)
+        .unwrap_err();
+    assert!(fabricated.to_string().contains("deposit 1"));
+
+    let missing_token = events
+        .validate_advance_tempo_inputs(&deposits, &[])
+        .unwrap_err();
+    assert!(missing_token.to_string().contains("token enables"));
+}
+
+#[tokio::test]
+async fn l1_block_tracker_rejects_conflicts_and_missing_heights() {
+    let tracker = L1BlockTracker::default();
+    let block_10 = NumHash::new(10, B256::with_last_byte(0x10));
+    let block_11 = NumHash::new(11, B256::with_last_byte(0x11));
+    tracker.record(block_10).unwrap();
+    tracker.record(block_11).unwrap();
+    tracker.record(block_11).unwrap();
+
+    let conflict = NumHash::new(11, B256::with_last_byte(0xff));
+    assert!(tracker.wait_for(conflict).await.is_err());
+    assert!(
+        tracker
+            .record(NumHash::new(13, B256::with_last_byte(0x13)))
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn l1_block_tracker_prunes_only_consumed_observations() {
+    let tracker = L1BlockTracker::default();
+    for number in 10..=12 {
+        tracker
+            .record(NumHash::new(number, B256::with_last_byte(number as u8)))
+            .unwrap();
+    }
+
+    tracker.prune_through(10);
+    assert_eq!(tracker.observed_hash(10), None);
+    assert_eq!(tracker.observed_hash(11), Some(B256::with_last_byte(11)));
+    assert_eq!(tracker.latest().unwrap().number, 12);
+    assert!(
+        tracker
+            .wait_for(NumHash::new(10, B256::with_last_byte(10)))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
+    let tracker = L1BlockTracker::default();
+    let consumed = 100;
+    tracker.initialize_consumed_through(consumed);
+
+    for number in consumed + 1..=consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS {
+        tracker
+            .record(NumHash::new(number, B256::with_last_byte(number as u8)))
+            .unwrap();
+    }
+
+    let blocked_number = consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS + 1;
+    assert!(!tracker.has_capacity_for(blocked_number));
+    assert_eq!(tracker.next_observation_number(), Some(blocked_number));
+    assert!(
+        tracker
+            .record(NumHash::new(
+                blocked_number,
+                B256::with_last_byte(blocked_number as u8),
+            ))
+            .is_err()
+    );
+
+    let waiting = tracker.clone();
+    let waiter = tokio::spawn(async move { waiting.wait_for_capacity(blocked_number).await });
+    tokio::task::yield_now().await;
+    assert!(!waiter.is_finished());
+
+    tracker.prune_through(consumed + 1);
+    waiter.await.unwrap().unwrap();
+    assert!(tracker.has_capacity_for(blocked_number));
+}
+
+#[test]
+fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
+    let tracker = L1BlockTracker::default();
+    tracker.initialize_consumed_through(10);
+
+    let skipped = tracker
+        .record(NumHash::new(12, B256::with_last_byte(12)))
+        .unwrap_err();
+    assert!(
+        skipped
+            .to_string()
+            .contains("non-contiguous first L1 observation")
+    );
+    assert_eq!(tracker.latest(), None);
+    assert_eq!(tracker.next_observation_number(), Some(11));
+
+    tracker
+        .record(NumHash::new(11, B256::with_last_byte(11)))
+        .unwrap();
+    assert_eq!(tracker.latest().unwrap().number, 11);
+}
+
+#[test]
+fn observer_mode_applies_state_and_records_without_a_deposit_sink() {
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    subscriber.deposit_queue = None;
+    let header = make_test_header(10);
+    let sealed = seal(header);
+    let anchor = sealed.num_hash();
+    let cached_address = address!("0x0000000000000000000000000000000000000ABC");
+    let cached_slot = B256::with_last_byte(1);
+    let cached_value = B256::with_last_byte(2);
+
+    {
+        let mut cache = subscriber.config.l1_state_cache.lock();
+        cache.invalidate_and_set_anchor(9, []);
+        cache.set(cached_address, cached_slot, 9, cached_value);
+    }
+    subscriber.update_l1_state_anchor(10, &HashSet::new());
+    subscriber.config.block_tracker.record(anchor).unwrap();
+
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .lock()
+            .get(cached_address, cached_slot, 10),
+        Some(cached_value)
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.observed_hash(10),
+        Some(anchor.hash)
+    );
+    assert!(subscriber.deposit_queue.is_none());
 }
 
 fn make_test_header(number: u64) -> TempoHeader {
@@ -532,7 +738,11 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         .expect_err("finite trigger stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
 
-    let blocks = subscriber.deposit_queue.drain();
+    let blocks = subscriber
+        .deposit_queue
+        .as_ref()
+        .expect("leader test subscriber has a deposit queue")
+        .drain();
     assert_eq!(
         blocks
             .iter()
@@ -584,7 +794,14 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
         .unwrap();
 
     assert_eq!(next, 11);
-    assert!(subscriber.deposit_queue.drain().is_empty());
+    assert!(
+        subscriber
+            .deposit_queue
+            .as_ref()
+            .expect("leader test subscriber has a deposit queue")
+            .drain()
+            .is_empty()
+    );
     assert!(asserter.read_q().is_empty());
 }
 
