@@ -9,12 +9,12 @@ use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
-        ExecutableTx, GasOutput,
+        ExecutableTx, GasOutput, TxResult,
     },
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
-use reth_revm::Inspector;
+use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
@@ -24,6 +24,29 @@ use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader, tx_context};
 use zone_primitives::constants::ZONE_INBOX_ADDRESS;
 
 use crate::{L1OverlayDB, ZoneEvm};
+
+/// Zone transaction result with metadata identifying the first system transaction of each block.
+#[derive(Debug)]
+pub struct ZoneTxResult<H, T> {
+    inner: EthTxResult<H, T>,
+    is_advance_tempo: bool,
+}
+
+impl<H, T> TxResult for ZoneTxResult<H, T>
+where
+    H: Send + 'static,
+    T: Send + 'static,
+{
+    type HaltReason = H;
+
+    fn result(&self) -> &ResultAndState<Self::HaltReason> {
+        self.inner.result()
+    }
+
+    fn into_result(self) -> ResultAndState<Self::HaltReason> {
+        self.inner.into_result()
+    }
+}
 
 /// Simplified block executor for zone nodes.
 ///
@@ -68,7 +91,7 @@ where
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
     type Evm = ZoneEvm<DB, I, L1>;
-    type Result = EthTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
+    type Result = ZoneTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()
@@ -84,26 +107,8 @@ where
             tempo_tx_env.expiring_nonce_idx = None;
         }
 
-        let is_advance_tempo = is_advance_tempo(recovered.tx());
-        match (self.has_advanced_tempo, is_advance_tempo) {
-            (false, false) => {
-                return Err(BlockValidationError::msg(
-                    "advanceTempo must be the first transaction in a zone block",
-                )
-                .into());
-            }
-            (true, true) => {
-                return Err(BlockValidationError::msg(
-                    "advanceTempo must only execute once per zone block",
-                )
-                .into());
-            }
-            (false, true) => self.has_advanced_tempo = true,
-            (true, false) => {
-                // Non-system calls to this selector take the `(true, false)` path aftehe opening
-                // transaction and execute normally; the Inbox rejects their caller with a revert.
-            }
-        }
+        // ensure `advance_tempo` system transaction is the first in the block.
+        let is_advance_tempo = validate_advance_tempo(self.has_advanced_tempo, recovered.tx())?;
 
         let _tx_context_guard = tx_context::set_current_transaction(
             *recovered.tx().tx_hash(),
@@ -114,11 +119,15 @@ where
             .execute_transaction_without_commit((tx_env, recovered));
 
         self.evm_mut().clear_l1_overlay_state();
-        result
+        Ok(ZoneTxResult {
+            inner: result?,
+            is_advance_tempo,
+        })
     }
 
     fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
-        self.inner.commit_transaction(output)
+        self.has_advanced_tempo |= output.is_advance_tempo;
+        self.inner.commit_transaction(output.inner)
     }
 
     fn finish(
@@ -146,23 +155,91 @@ where
     }
 }
 
-fn is_advance_tempo(tx: &TempoTxEnvelope) -> bool {
-    tx.is_system_tx()
+fn validate_advance_tempo(
+    has_advanced_tempo: bool,
+    tx: &TempoTxEnvelope,
+) -> Result<bool, BlockExecutionError> {
+    let is_advance_tempo = tx.is_system_tx()
         && tx.calls().any(|(kind, input)| {
             kind.to() == Some(&ZONE_INBOX_ADDRESS) && input.starts_with(&ADVANCE_TEMPO_SELECTOR)
-        })
+        });
+
+    match (has_advanced_tempo, is_advance_tempo) {
+        (false, false) => Err(BlockValidationError::msg(
+            "advanceTempo must be the first transaction in a zone block",
+        )
+        .into()),
+        (true, true) => Err(BlockValidationError::msg(
+            "advanceTempo must only execute once per zone block",
+        )
+        .into()),
+        (false, true) | (true, false) => Ok(is_advance_tempo),
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, U256};
+    use super::{ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, validate_advance_tempo};
+
+    use alloy_consensus::{Signed, TxLegacy};
+    use alloy_primitives::{Address, Bytes, U256};
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
         storage::{ContractStorage, Handler, StorageCtx, hashmap::HashMapStorageProvider},
         test_util::TIP20Setup,
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
+    use tempo_primitives::{TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE};
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+
+    fn system_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(
+            TxLegacy {
+                to: to.into(),
+                input,
+                ..Default::default()
+            },
+            TEMPO_SYSTEM_TX_SIGNATURE,
+        ))
+    }
+
+    #[test]
+    fn discarded_advance_tempo_does_not_change_committed_ordering_state() {
+        let advance_tempo = system_tx(
+            ZONE_INBOX_ADDRESS,
+            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
+        );
+        let mut has_advanced_tempo = false;
+
+        // Execution returns the marker but must not mutate committed state.
+        assert!(validate_advance_tempo(has_advanced_tempo, &advance_tempo).unwrap());
+        assert!(!has_advanced_tempo);
+
+        // Only committing the result records the opening transaction.
+        has_advanced_tempo |= validate_advance_tempo(has_advanced_tempo, &advance_tempo).unwrap();
+        assert!(has_advanced_tempo);
+    }
+
+    #[test]
+    fn advance_tempo_ordering_errors_are_reported() {
+        let advance_tempo = system_tx(
+            ZONE_INBOX_ADDRESS,
+            Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
+        );
+        let ordinary = system_tx(Address::ZERO, Bytes::new());
+
+        let missing_first = validate_advance_tempo(false, &ordinary).unwrap_err();
+        assert_eq!(
+            missing_first.to_string(),
+            "advanceTempo must be the first transaction in a zone block"
+        );
+
+        let duplicate = validate_advance_tempo(true, &advance_tempo).unwrap_err();
+        assert_eq!(
+            duplicate.to_string(),
+            "advanceTempo must only execute once per zone block"
+        );
+    }
 
     #[test]
     fn clears_only_prewarming_expiring_nonce_index() {

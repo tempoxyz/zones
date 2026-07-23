@@ -14,7 +14,7 @@ pub mod precompiles;
 mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};
-pub use executor::ZoneBlockExecutor;
+pub use executor::{ZoneBlockExecutor, ZoneTxResult};
 pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
@@ -30,7 +30,6 @@ use crate::{
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
     block::BlockExecutorFactory,
-    eth::EthTxResult,
     precompiles::PrecompilesMap,
     revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
 };
@@ -356,7 +355,7 @@ where
     type ExecutionCtx<'a> = TempoBlockExecutionCtx<'a>;
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
-    type TxExecutionResult = EthTxResult<TempoHaltReason, TempoTxType>;
+    type TxExecutionResult = ZoneTxResult<TempoHaltReason, TempoTxType>;
     type Executor<'a, DB: StateDB, I: Inspector<TempoCtx<L1OverlayDB<DB, L1>>>> =
         ZoneBlockExecutor<'a, DB, I, L1>;
 

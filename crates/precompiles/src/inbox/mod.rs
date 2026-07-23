@@ -268,9 +268,12 @@ impl ZoneInbox {
         if self.try_mint(deposit.token, recipient, deposit.amount)? {
             self.emit_event(deposit.withdrawal_bounce_back_processed_event(recipient))?;
         } else {
-            let previous = self.refunds[deposit.token][recipient]
-                .slot()
-                .sinc(U256::from(deposit.amount))?;
+            let refund = &mut self.refunds[deposit.token][recipient];
+            if refund.read()?.checked_add(deposit.amount).is_none() {
+                return Err(TempoPrecompileError::under_overflow().into());
+            }
+            let slot = refund.slot();
+            refund.sinc(slot, U256::from(deposit.amount))?;
             self.emit_event(deposit.withdrawal_bounce_back_pending_event(recipient))?;
         }
         Ok(())
