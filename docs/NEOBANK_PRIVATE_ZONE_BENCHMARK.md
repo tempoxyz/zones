@@ -134,9 +134,8 @@ focused onramp and `private-withdrawal` for the focused off-ramp. The selected
 preset is recorded in the workflow summary and run metadata while the rendered
 scenario remains at the stable results-renderer path.
 
-The fast validation defaults are 100 accounts, 100 complete journeys, 20
-journey starts per second, and at most 100 in flight. Increase those values only
-after the selected preset completes successfully at that scale.
+The default full-journey run uses 100 accounts, 1,000 complete journeys, 20
+journey starts per second, and at most 100 in flight.
 
 For sustained runs, use the validated profiles below. Offered load is kept
 above the observed completion rate so the configured in-flight set stays full;

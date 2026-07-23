@@ -72,21 +72,19 @@ const PROCESS_DEPOSIT_BOUNCEBACK_ITEM_OVERHEAD_GAS: u64 = 1_250_000;
 /// Default planned gas budget for one `processWithdrawals` transaction.
 ///
 /// This is an operator-side batching limit, not the protocol callback cap. The planner charges the
-/// allowances above against this budget. It currently has the same numeric value as
-/// [`MAX_WITHDRAWAL_GAS_LIMIT`]; a single withdrawal may exceed the budget so it cannot block the
-/// queue.
-pub const DEFAULT_MAX_WITHDRAWAL_BATCH_GAS: u64 = 10_000_000;
+/// allowances above against this budget. A single withdrawal may exceed the budget so it cannot
+/// block the queue.
+pub const DEFAULT_MAX_WITHDRAWAL_BATCH_GAS: u64 = 30_000_000;
 
 /// Largest supported planned gas budget for one `processWithdrawals` transaction.
 ///
-/// Tempo L1 currently caps transaction gas at 30,000,000. Packed batches cannot exceed this
-/// 20,000,000 budget. Oversized singletons bypass the budget, but the protocol callback cap keeps
-/// their maximum planned gas at 12,250,000. Both remain below the L1 limit, avoiding repeated
-/// submission of a transaction that can never be mined.
-pub const MAX_WITHDRAWAL_BATCH_GAS: u64 = 20_000_000;
+/// Tempo L1 currently caps transaction gas at 30,000,000, so packed batches cannot exceed that
+/// budget. Oversized singletons bypass the budget, but the protocol callback cap keeps their
+/// maximum planned gas at 12,250,000.
+pub const MAX_WITHDRAWAL_BATCH_GAS: u64 = 30_000_000;
 
 /// Default maximum number of ordered withdrawal transactions kept in flight.
-pub const DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES: usize = 8;
+pub const DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES: usize = 12;
 
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]

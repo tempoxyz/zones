@@ -372,7 +372,7 @@ pub struct ZoneArgs {
     )]
     pub withdrawal_poll_interval_secs: u64,
 
-    /// Maximum gas reserved by one processWithdrawals transaction, up to 20,000,000. An oversized
+    /// Maximum gas reserved by one processWithdrawals transaction, up to 30,000,000. An oversized
     /// withdrawal is submitted alone.
     #[arg(
         long = "withdrawal-max-batch-gas",

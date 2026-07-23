@@ -777,9 +777,9 @@ selected phase.
 GitHub does not expose a newly introduced `workflow_dispatch` until the workflow
 file exists on the default branch. Before merge, opening, reopening, or pushing
 a commit to a same-repository PR whose cumulative diff touches the workflow,
-`contrib/bench`, `xtask`, or this document runs `neobank-full-journey` with the
-fast validation defaults: 100 accounts, 100 journeys, 20 journey starts per
-second, and 100 maximum in flight. The authorization job requires both the
+`contrib/bench`, `xtask`, or this document runs `neobank-full-journey` with
+100 accounts, 1,000 journeys, 20 journey starts per second, and 100 maximum in
+flight. The authorization job requires both the
 triggering actor and PR author to have repository write access and rejects fork
 PRs. A newer commit cancels an obsolete run for the same PR, while benchmark
 jobs from different PRs and manual dispatches serialize on the shared Schelk
