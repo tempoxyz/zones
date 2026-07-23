@@ -42,7 +42,6 @@ use tempo_contracts::precompiles::{
         IAccountKeychainInstance, KeyRestrictions, SignatureType as KeyInfoSignatureType,
     },
 };
-use tempo_precompiles::zone_factory::zone_portal_slots::{IS_SEQUENCER, TOKEN_CONFIGS};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     storage::{
@@ -52,6 +51,7 @@ use tempo_precompiles::{
         ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
         TIP403Registry, tip403_registry_slots,
     },
+    zone_factory::zone_portal_slots::{IS_SEQUENCER, TOKEN_CONFIGS},
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use tempo_zone_contracts::{ZONE_FACTORY_ADDRESS, ZONE_OUTBOX_ADDRESS};
