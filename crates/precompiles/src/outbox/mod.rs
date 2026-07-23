@@ -20,7 +20,7 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::constants::{
     MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_ENFORCEMENT_MODES_SLOT, PORTAL_IS_SEQUENCER_SLOT,
-    PORTAL_ROLE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT, PORTAL_ROLE_SLOT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -30,7 +30,6 @@ use crate::{
 };
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
-const MAX_GAS_FEE_RATE: u128 = 1_000_000_000_000_000_000;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
 
 #[contract(addr = ZONE_OUTBOX_ADDRESS)]
@@ -333,7 +332,10 @@ impl ZoneOutbox {
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
         self.ensure_sequencer(l1, caller)?;
-        if call._tempoGasRate > MAX_GAS_FEE_RATE {
+        let max_tempo_gas_rate = self
+            .read_portal_slot(l1, PORTAL_MAX_TEMPO_GAS_RATE_SLOT)?
+            .to::<u128>();
+        if call._tempoGasRate > max_tempo_gas_rate {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
         self.tempo_gas_rate.write(call._tempoGasRate)?;

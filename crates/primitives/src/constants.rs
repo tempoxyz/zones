@@ -77,6 +77,9 @@ pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
 /// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
 pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
 
+/// ZonePortal storage slot 22: `maxTempoGasRate` (uint128).
+pub const PORTAL_MAX_TEMPO_GAS_RATE_SLOT: B256 = B256::with_last_byte(22);
+
 /// Alias used by consumers reading account allowlist enforcement.
 pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 

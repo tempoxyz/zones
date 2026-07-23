@@ -358,6 +358,7 @@ interface IZoneTxContext {
 //   slot 19: isSequencer (mapping(address => bool))
 //   slot 20: role (mapping(address => Role))
 //   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
+//   slot 22: maxTempoGasRate (uint128)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -372,6 +373,8 @@ bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
 bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
+bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
+    bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
 bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 
@@ -603,6 +606,7 @@ interface IZonePortal {
         bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
 
     /// @notice Emitted when admin enables a new TIP-20 token for bridging
@@ -719,6 +723,8 @@ interface IZonePortal {
     function pendingAdmin() external view returns (address);
 
     function zoneGasRate() external view returns (uint128);
+
+    function maxTempoGasRate() external view returns (uint128);
 
     function bouncebackGas() external view returns (uint64);
 
@@ -846,11 +852,16 @@ interface IZonePortal {
         view
         returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
+    /// @notice Set zone gas rate. Only callable by admin.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
 
+    /// @notice Set the maximum Tempo gas rate a sequencer may configure on the zone.
+    /// @param _maxTempoGasRate Maximum zone token units per gas unit on Tempo
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external;
+
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
+    /// @dev Only callable by admin.
     /// @param _bouncebackGas Gas amount used in the Tempo-side bounce-back fee calculation
     function setBouncebackGas(uint64 _bouncebackGas) external;
 
@@ -1216,6 +1227,7 @@ interface IZoneOutbox {
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
+    ///      The rate must not exceed the finalized portal maxTempoGasRate.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
@@ -1291,6 +1303,9 @@ interface IZoneConfig {
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
+
+    /// @notice Read the maximum sequencer-configurable Tempo gas rate from L1 ZonePortal.
+    function maxTempoGasRate() external view returns (uint128);
 
     /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
     function isAccessEnforced() external view returns (bool);

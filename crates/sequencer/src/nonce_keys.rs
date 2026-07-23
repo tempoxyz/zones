@@ -17,6 +17,7 @@ pub const SUBMIT_BATCH_NONCE_KEY: U256 = uint!(1_U256);
 /// Nonce key for `processWithdrawals` calls (high throughput, N per batch).
 pub const PROCESS_WITHDRAWAL_NONCE_KEY: U256 = uint!(2_U256);
 
-/// Nonce key for admin operations (`enableToken`, `setZoneGasRate`,
-/// `setSequencerEncryptionKey`, `pauseDeposits`, `resumeDeposits`). Low frequency, shared key.
+/// Nonce key for admin operations (`enableToken`, `setZoneGasRate`, `setMaxTempoGasRate`,
+/// `setBouncebackGas`, `setSequencerEncryptionKey`, `pauseDeposits`, `resumeDeposits`). Low
+/// frequency, shared key.
 pub const ADMIN_OPS_NONCE_KEY: U256 = uint!(3_U256);
