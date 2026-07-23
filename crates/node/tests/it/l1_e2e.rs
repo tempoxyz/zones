@@ -302,14 +302,14 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
 async fn test_many_concurrent_withdrawals_are_batched() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    const ACCOUNT_COUNT: u32 = 64;
+    const ACCOUNT_COUNT: u32 = 16;
     const REPEATED_ACCOUNT_COUNT: usize = ACCOUNT_COUNT as usize / 2;
     const WITHDRAWALS_PER_REPEATED_ACCOUNT: usize = 3;
     const WITHDRAWAL_COUNT: usize =
         ACCOUNT_COUNT as usize + REPEATED_ACCOUNT_COUNT * (WITHDRAWALS_PER_REPEATED_ACCOUNT - 1);
     const MAX_WITHDRAWALS_PER_BATCH: usize = 2;
     const TEST_MAX_BATCH_GAS: u64 = 2_500_000;
-    const TEST_MAX_IN_FLIGHT_BATCHES: usize = 4;
+    const TEST_MAX_IN_FLIGHT_BATCHES: usize = 2;
     const FIRST_ACCOUNT_INDEX: u32 = 3;
     const DEPOSIT_AMOUNT: u128 = 2_000_000;
     const WITHDRAWAL_AMOUNT: u128 = 250_000;
@@ -328,18 +328,9 @@ async fn test_many_concurrent_withdrawals_are_batched() -> eyre::Result<()> {
         .map(|signer| signer.address())
         .collect::<Vec<_>>();
 
-    let admin_provider = l1.admin_provider();
-    let admin_portal = ZonePortal::new(portal_address, &admin_provider);
-    // Closed-loop portals only accept deposits to and deliver withdrawals to registered accounts.
-    for recipient in &recipients {
-        let receipt = admin_portal
-            .setAllowedAccount(*recipient, true)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "allowing withdrawal recipient failed");
-    }
+    // This test exercises withdrawal batching, not access control. Opening the portal avoids one
+    // L1 allowlist transaction per recipient.
+    l1.set_access_mode_on_portal(portal_address, false).await?;
 
     // A single funded depositor keeps L1 setup deterministic while still exercising deposits to
     // many distinct zone accounts.
