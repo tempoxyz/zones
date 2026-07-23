@@ -54,6 +54,8 @@ async fn setup_same_zone_swap_fixture() -> eyre::Result<SameZoneSwapFixture> {
     let router = l1
         .deploy_router_with_dex(factory, STABLECOIN_DEX_ADDRESS)
         .await?;
+    l1.set_portal_gateway_as_admin(portal_address, router)
+        .await?;
 
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
@@ -158,12 +160,15 @@ async fn test_dev_provisioner_replays_initial_token_event() -> eyre::Result<()> 
     let initial_token = l1
         .create_tip20("DevUSD", "dUSD", B256::with_last_byte(0xD0))
         .await?;
+    let dev_address = l1.dev_signer().address();
 
     let provisioned = provision_zone(ProvisionConfig {
         l1_rpc_url: l1.ws_url().to_string(),
         dev_key: l1.dev_signer(),
         factory: None,
         initial_token,
+        zone_gateways: vec![Address::repeat_byte(0x42)],
+        allowed_accounts: vec![dev_address],
         rpc_url: String::new(),
     })
     .await?;
@@ -295,6 +300,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
 ///
 /// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "legacy cross-zone router callbacks are rejected by closed-loop source-return enforcement"]
 async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -422,6 +428,7 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 /// The refund must go to the Tempo refund recipient encoded in the router payload,
 /// not to the encrypted recipient and not to the router contract.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "legacy cross-zone router callbacks are rejected before the target-zone deposit"]
 async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

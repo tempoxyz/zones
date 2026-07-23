@@ -474,7 +474,13 @@ mod tests {
 
     #[test]
     fn dev_is_parsed_by_the_top_level_cli() {
-        let parsed = ZoneCli::try_parse_from(["tempo-zone", "dev"]).unwrap();
+        let parsed = ZoneCli::try_parse_from([
+            "tempo-zone",
+            "dev",
+            "--dev.zone-gateway",
+            "0x0000000000000000000000000000000000000001",
+        ])
+        .unwrap();
         assert!(matches!(parsed, ZoneCli::Dev(_)));
     }
 

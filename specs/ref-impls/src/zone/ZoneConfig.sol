@@ -6,7 +6,9 @@ import {
     IZoneConfig,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT
+    PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT,
+    Role
 } from "../interfaces/IZone.sol";
 
 /// @title ZoneConfig
@@ -109,6 +111,21 @@ contract ZoneConfig is IZoneConfig {
         bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, configSlot);
         // TokenConfig.enabled is the first bool in the struct (lowest byte)
         return uint8(uint256(value) & 0xff) != 0;
+    }
+
+    /// @notice Check account membership in the portal's admin-managed closed-loop allowlist.
+    function isAllowedAccount(address account) external view returns (bool) {
+        bytes32 accountSlot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        return
+            uint256(tempoState.readTempoStorageSlot(tempoPortal, accountSlot))
+                == uint256(Role.Account);
+    }
+
+    /// @notice Check whether an address is a registered callback-only ZoneGateway.
+    function isZoneGateway(address gateway) external view returns (bool) {
+        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
+        return uint256(tempoState.readTempoStorageSlot(tempoPortal, gatewaySlot))
+            == uint256(Role.CallbackGateway);
     }
 
 }

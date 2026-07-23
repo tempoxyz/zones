@@ -98,7 +98,7 @@
 
 A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo through a proof-agnostic verification system.
 
-Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Withdrawals support optional callbacks, making them composable with Tempo contracts and enabling zone-to-zone transfers.
+Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Closed-loop zones restrict deposits, refunds, and plain withdrawals to configured accounts. Callback withdrawals may target only registered ZoneGateway implementations and must synchronously return funds to the same zone.
 
 This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the private RPC interface, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
 
@@ -118,6 +118,8 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
+| Allowed account | An address assigned the portal's `Account` role. It may initiate deposits and receive Tempo-side refunds and plain withdrawals. |
+| ZoneGateway | A callback-only Tempo contract assigned the portal's `CallbackGateway` role. A gateway is never an allowed plain-withdrawal recipient. |
 
 <br>
 
@@ -127,7 +129,7 @@ Each zone is operated by a **sequencer** that collects transactions, produces bl
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
-On Tempo, each zone has a **portal** that locks deposited tokens. When a user deposits, the portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
+On Tempo, each zone has a **portal** that locks deposited tokens. Only allowed accounts may initiate deposits, and refund recipients must also be allowed. Plaintext and encrypted deposit recipients are zone addresses and need not be allowed Tempo accounts. The portal locks the tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
 Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data, and data availability is entrusted to the sequencer. The sequencer has full visibility into zone activity. Privacy protects against public observers on Tempo, not against the sequencer.
 
@@ -175,7 +177,7 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 
 **Admin.**
 
-- Holds governance powers over the zone (token enablement, deposit pause/resume).
+- Holds governance powers over the zone (token enablement, deposit pause/resume, and account and gateway membership).
 - Expected to be a cold key, multisig, or governance contract.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
 - Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
@@ -201,6 +203,7 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `setAllowedAccount(account, allowed)`, `setGateway(account, allowed)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
 | `setSequencerSet(sequencers, threshold)` | [`ZonePortal`](#izoneportal) | **admin** |
@@ -274,7 +277,9 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 |----------|---------|
 | [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 
-The shared `ZoneMessenger` relays withdrawal callbacks for all zones created by the factory. It is separated from the portal so arbitrary callback code does not execute with the fund-owning portal as `msg.sender`.
+The factory's shared `ZoneMessenger` is fixed when each portal is initialized. It is separated from the portal so callback code does not execute with the fund-owning portal as `msg.sender`. Portal roles are managed atomically with `setAllowedAccount(account, allowed)` and `setGateway(account, allowed)`. An account has exactly one of `None`, `Account`, or `CallbackGateway`; the messenger cannot have the `Account` role.
+
+Account and gateway membership is evaluated when each portal or zone-side action executes. Revoked in-flight destinations and gateways bounce back, while revoked refund recipients have funds parked until membership is restored.
 
 ### Zone Predeploys
 
@@ -288,7 +293,7 @@ Each zone has five system contracts deployed at genesis at fixed addresses:
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
-`ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
+`ZoneConfig` reads the sequencer address, token registry, and account roles from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
 ### Zone Token Model
 
@@ -366,10 +371,10 @@ Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, 
 
 ### Regular Deposits
 
-A user deposits by calling `deposit(token, to, amount, memo, tempoRefundRecipient)` on the portal. The portal:
+An allowed account deposits by calling `deposit(token, to, amount, memo, tempoRefundRecipient)` on the portal. The portal:
 
-1. Validates the token is enabled and deposits are active.
-2. Requires `tempoRefundRecipient != address(0)` (reverts `InvalidBouncebackRecipient` otherwise), validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `tempoRefundRecipient` against the token's TIP-403 recipient policy (reverts otherwise).
+1. Requires `msg.sender` and `tempoRefundRecipient` to be allowed accounts. The zone recipient `to` need not be allowed.
+2. Validates the token is enabled and deposits are active, requires `tempoRefundRecipient != address(0)`, validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `tempoRefundRecipient` against the token's TIP-403 recipient policy.
 3. Computes `depositFee` from `zoneGasRate` and checks `amount >= depositFee + currentBouncebackFee`, where `currentBouncebackFee = ceil(bouncebackGas * block.basefee / 1e12)` (reverts `DepositTooSmall` otherwise). This prevents obvious dust deposits that could not pay for an immediate Tempo refund when bounce-back gas is configured.
 4. Transfers `amount` from the user into the portal.
 5. Pays the `depositFee` to the portal admin immediately.
@@ -378,7 +383,7 @@ A user deposits by calling `deposit(token, to, amount, memo, tempoRefundRecipien
 
 The sequencer observes `DepositMade` events and relays deposits to the zone via `ZoneInbox.advanceTempo()`. This function processes deposits in order, minting the zone-side TIP-20 token to each recipient: `mint(deposit.to, deposit.amount)`.
 
-If the zone-side mint reverts (for example, because the recipient is blocked by a TIP-403 policy active on the zone at processing time), the deposit bounces back to `tempoRefundRecipient` on Tempo. See [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back) for the full mechanism. If the sequencer withholds deposits, funds remain locked in the portal with no forced inclusion mechanism.
+If the zone-side mint reverts (for example, because the recipient is blocked by a TIP-403 policy active on the zone at processing time), the deposit bounces back to `tempoRefundRecipient`. See [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back) for the full mechanism. If the sequencer withholds deposits, funds remain locked in the portal with no forced inclusion mechanism.
 
 ```mermaid
 sequenceDiagram
@@ -434,7 +439,7 @@ The encryption scheme is ECIES with secp256k1:
 1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
 2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
-4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, tempoRefundRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `tempoRefundRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Like `deposit()`, `depositEncrypted` requires `tempoRefundRecipient != address(0)` (reverts `InvalidBouncebackRecipient` otherwise), requires it to be authorized by the token's TIP-403 recipient policy, and requires `amount >= depositFee + currentBouncebackFee` (reverts `DepositTooSmall` otherwise).
+4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, tempoRefundRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `tempoRefundRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). The caller and bounce-back recipient MUST be allowed accounts. A registered ZoneGateway is the sole exception to the caller rule: it may call `depositEncrypted` to complete an atomic callback withdrawal, but it still must supply an allowed bounce-back recipient. The decrypted `to` address is not checked against Tempo closed-loop membership. `depositEncrypted` also enforces its fee, encryption-key, payload-shape, and TIP-403 checks.
 
 Before queue insertion, the portal also validates encrypted-payload shape. `depositEncrypted` reverts `InvalidEphemeralPubkey` if the ephemeral public key parity is not `0x02` or `0x03`, or if the X coordinate is not a valid secp256k1 X coordinate. It reverts `InvalidCiphertextLength(actual, expected)` unless `ciphertext.length == 64`, the fixed plaintext size for `(to, memo, padding)`. These are Tempo-side deposit-time reverts: no queue entry is created and no zone-side bounce-back is needed.
 
@@ -506,7 +511,7 @@ sequenceDiagram
 
 Deposits can fail because the zone-side mint reverts (including a TIP-403 policy rejection) or because an encrypted deposit fails onchain decryption verification. To make sure that all cases can be handled without loss of user funds, every deposit carries a `tempoRefundRecipient`: a Tempo address that receives a refund if zone-side processing fails. The sequencer has no discretionary rejection flag: every regular deposit attempts its mint, and every encrypted deposit is verified and then attempts its mint when decryption succeeds.
 
-**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require `tempoRefundRecipient != address(0)` and require it to be authorized by the token's TIP-403 recipient policy. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and the recipient claims them via `claimRefund(token)` (see [Tempo-side refund](#tempo-side-refund) below).
+**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require an allowed `tempoRefundRecipient` and require it to be authorized by the token's TIP-403 recipient policy. Zone recipients are not checked against closed-loop membership. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and may be claimed only by that allowed recipient via `claimRefund(token)`.
 
 **Triggering conditions.** There are two triggering sites:
 
@@ -583,9 +588,39 @@ sequenceDiagram
 
 Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawal on the zone, tokens are burned, and the sequencer eventually processes the withdrawal on Tempo, releasing tokens from the portal.
 
+```mermaid
+flowchart LR
+    subgraph Tempo
+        P["ZonePortal<br/>escrow"]
+        TD["Tempo destination<br/>allowed account or gateway"]
+        TR["tempoRefundRecipient<br/>allowed Tempo account"]
+        PR["Portal refund ledger<br/>parked while revoked"]
+    end
+
+    subgraph Zone
+        O["ZoneOutbox"]
+        I["ZoneInbox"]
+        ZD["Zone deposit recipient<br/>no closed-loop check"]
+        ZF["zoneFallbackRecipient<br/>any non-zero Zone address"]
+    end
+
+    O -->|withdrawal request| P
+    P -->|successful withdrawal| TD
+    P -. failed withdrawal .-> I
+    I -->|mint bounce-back| ZF
+
+    P -->|deposit| I
+    I -->|successful deposit| ZD
+    I -. failed deposit .-> O
+    O -. queue refund .-> P
+    P -->|allowed refund| TR
+    P -. revoked recipient .-> PR
+    PR -->|claim after membership restored| TR
+```
+
 ### Withdrawal Request
 
-A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The outbox requires `zoneFallbackRecipient != address(0)` (reverts with `InvalidFallbackRecipient`) and requires `token` to be enabled (reverts with `TokenNotEnabled`). The outbox does **not** validate `zoneFallbackRecipient` against the token's TIP-403 policy at request time; if the zone-side refund mint is later rejected by the policy, the funds are parked in a per-recipient refund registry on `ZoneInbox` and the recipient claims them via `ZoneInbox.claimRefund(token)` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The token must be enabled, and the `zoneFallbackRecipient` must be non-zero but need not be a Tempo allowed account. For a plain withdrawal (`gasLimit == 0`), `to` must be an allowed account and MUST NOT be a registered ZoneGateway. For a callback withdrawal (`gasLimit > 0`), `to` must be a registered ZoneGateway; it need not and MUST NOT be an allowed account.
 
 Withdrawal requests are bounded before they enter the pending queue. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` or the request reverts with `GasLimitTooHigh`; `data.length` must be less than or equal to `MAX_CALLBACK_DATA_SIZE` (1,024 bytes) or the request reverts with `CallbackDataTooLarge`; and `revealTo`, when non-empty, must be a valid 33-byte compressed secp256k1 public key or the request reverts with `InvalidRevealTo`. The outbox reads the current zone transaction hash from `ZoneTxContext`; if it is zero, the request reverts with `InvalidCurrentTxHash`, because the transaction hash is part of the authenticated-withdrawal sender tag.
 
@@ -594,30 +629,6 @@ The sequencer can additionally configure `maxWithdrawalsPerBlock` on the outbox.
 The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, assigns a monotonically increasing nonzero `uint64 fallbackNonce`, stores `fallbackNonce -> zoneFallbackRecipient`, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender and fallback nonce (zone events are private).
 
 Keeping the recipient in zone state prevents the L1-visible withdrawal and any later bounce-back from revealing the user's private zone address. A monotonic nonce is deterministic under the zone's canonical transaction ordering, including multi-sequencer execution, while remaining collision-free; it reveals only relative withdrawal order and count, not the mapped recipient.
-
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant Z as Zone
-    participant T as Tempo
-
-    U->>Z: ZoneOutbox.requestWithdrawal()
-    Z->>Z: burn tokens, store pending withdrawal
-
-    Z->>Z: ZoneOutbox.finalizeWithdrawalBatch()
-    Z->>T: ZonePortal.submitBatch()
-    T->>T: IVerifier.verify()
-    T->>T: enqueue withdrawalQueueHash
-
-    Z->>T: ZonePortal.processWithdrawals()
-    T->>U: TIP20.transfer(to, amount)
-
-    Note over T: if withdrawal callback
-    T->>T: ZoneMessenger.relayMessage()
-
-    Note over T: if failure
-    T->>T: bounceBack with fallbackNonce via deposit queue
-```
 
 ### Withdrawal Fees
 
@@ -628,7 +639,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     = (50,000 + gasLimit) * tempoGasRate
 ```
 
-`WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional Tempo L1 callback gas. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` (10,000,000), which keeps the outer `processWithdrawals` transaction below the Tempo L1 block gas limit after portal overhead is added. For simple withdrawals with no callback, use `gasLimit = 0`. The fee is charged in the same token being withdrawn and burned with the withdrawal amount on the zone. It is not included in the cross-chain `Withdrawal` data and the portal does not transfer it from escrow. On success, `amount` goes to the recipient. On failure, only `amount` is re-deposited using `fallbackNonce`; the zone resolves the nonce to `zoneFallbackRecipient`.
+`WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional Tempo callback gas. `gasLimit` must be at most `MAX_WITHDRAWAL_GAS_LIMIT` (10,000,000), which keeps the outer `processWithdrawals` transaction below the Tempo L1 block gas limit after portal overhead is added. For simple withdrawals with no callback, use `gasLimit = 0`. The fee is charged in the same token being withdrawn and burned with the withdrawal amount on the zone. It is not included in the cross-chain `Withdrawal` data and the portal does not transfer it from escrow. On success, `amount` goes to the recipient. Failed plain transfers and callbacks re-deposit `amount` using `fallbackNonce`.
 
 `tempoGasRate` lives on the zone-side `ZoneOutbox` (see [Gas Rate Configuration](#gas-rate-configuration)). The outbox reads it at request time and snapshots it onto the queued withdrawal.
 
@@ -658,43 +669,37 @@ When `submitBatch` includes a non-zero `withdrawalQueueHash`, the current `tail`
 
 The sequencer processes ordered withdrawals atomically on Tempo by calling `processWithdrawals(withdrawals, remainingQueue)` on the portal. `remainingQueue` is the queue suffix after the last supplied withdrawal, or `0x00` when the call exhausts the current slot. The portal derives each intermediate queue hash by folding the withdrawals backward from that suffix, then verifies and processes them in order.
 
-The withdrawal is popped unconditionally, regardless of success or failure. If `remainingQueue` is zero (last item in the slot), the slot is set to `EMPTY_SENTINEL` and `head` advances. Otherwise, the slot is updated to `remainingQueue`.
+The portal dequeues before executing the withdrawal, then independently requires `withdrawal.token` to be enabled. Failed callbacks roll back in an external self-call and become bounce-backs, so the dequeue remains committed and cannot block the FIFO. If `remainingQueue` is zero (last item in the slot), processing sets the slot to `EMPTY_SENTINEL` and advances `head`; otherwise it updates the slot to `remainingQueue`.
 
-For simple withdrawals (`gasLimit == 0`), the portal transfers tokens directly to the recipient.
+For a plain withdrawal (`gasLimit == 0`), the portal requires `to` to be an allowed account and not a registered ZoneGateway, then transfers directly. A failed transfer creates a withdrawal bounce-back deposit for the Zone-local `zoneFallbackRecipient`.
 
 ### Withdrawal Callbacks
 
-For withdrawals with `gasLimit > 0`, the portal uses a revertable self-call that transfers the exact withdrawal amount to the shared `ZoneMessenger`, then asks the messenger to relay the callback. The messenger verifies that `msg.sender == zoneFactory.zones(zoneId).portal`, transfers the tokens it received to the recipient, then calls the recipient with the provided `callbackData`. If the transfer, callback, or selector check fails, the self-call reverts, the portal-to-messenger transfer is rolled back, and the outer withdrawal path records a bounce-back.
+For withdrawals with `gasLimit > 0`, `to` must have the portal's `CallbackGateway` role. The withdrawal queue hash is verified and dequeued by `ZonePortal.processWithdrawal` before the callback reaches the messenger. The portal snapshots `currentDepositQueueHash`, transfers exactly `amount` to its fixed `ZoneMessenger`, and asks the messenger to relay the callback. The messenger authenticates the source portal through `ZoneFactory`, independently confirms `to` has that portal role, transfers the funds to the gateway, invokes `onWithdrawalReceived`, and requires the expected selector.
 
-If a legacy or otherwise invalid withdrawal reaches the Tempo queue with `gasLimit > MAX_WITHDRAWAL_GAS_LIMIT`, `processWithdrawals` treats it as a failed callback after dequeueing it and creates a bounce-back deposit. This ensures an over-limit withdrawal cannot permanently block the FIFO queue.
+`ZoneOutbox`, `ZoneMessenger`, and the ZoneGateway each decode the payload. `Flow` permits only `Deposit` and `Redeem`.
 
 Receiving contracts must implement `IWithdrawalReceiver` and return `onWithdrawalReceived.selector` to confirm successful handling. Receivers authenticate the call by checking `msg.sender == ZONE_MESSENGER_ADDRESS` and can use the `sourcePortal` callback argument to identify the originating portal.
 
-This enables composable withdrawals where funds flow directly into Tempo contracts (DEX swaps, staking, cross-zone deposits).
+Callback data is opaque to the zone protocol. The configured ZoneGateway is trusted to allow only deposit and redeem flows and to synchronously deposit the result back into the source zone.
 
-#### SwapAndDepositRouter Callback Payloads
+An over-limit callback withdrawal also bounces back and advances the queue.
 
-`SwapAndDepositRouter` callback data explicitly carries the refund target for the downstream zone deposit:
-
-- Plaintext: `abi.encode(false, tokenOut, targetPortal, recipient, tempoRefundRecipient, memo, minAmountOut)`
-- Encrypted: `abi.encode(true, tokenOut, targetPortal, keyIndex, encryptedPayload, tempoRefundRecipient, minAmountOut)`
-
-The router validates the target portal and token, optionally swaps on Tempo, and then passes `tempoRefundRecipient` through to `ZonePortal.deposit(...)` or `ZonePortal.depositEncrypted(...)`. For encrypted deposits this field is public, matching native `depositEncrypted`; callers that do not want a later Tempo-side refund to identify the encrypted zone recipient should use a controlled refund-specific or stealth address.
+The configured gateway is expected to constrain callbacks to synchronous vault deposit with encrypted receipt-token return and synchronous vault redeem with encrypted asset return. The reference implementation contains only a test mock; production gateway/vault token-conversion behavior is outside this repository. Assets may leave the closed loop only through a plain portal withdrawal to an allowed account, never through a callback.
 
 ### Withdrawal Failures and Bounce-Back
 
-Withdrawals can fail on the Tempo side for several reasons:
+Plain withdrawals can fail on the Tempo side for reasons such as:
 
 - TIP-403 policy restricts the portal or `withdrawal.to`
 - The token is paused
-- The callback reverts (out of gas, logic error)
-- The receiver returns the wrong selector
+- The direct token transfer reverts or returns false
 
 To make sure that all of these cases can be handled without loss of user funds, every user withdrawal carries a nonzero `fallbackNonce`. `ZoneOutbox` privately maps that nonce to the zone address that receives a refund mint if Tempo-side processing fails.
 
-**Validation at withdrawal request time.** `requestWithdrawal(...)` requires `zoneFallbackRecipient != address(0)` and reverts otherwise (`InvalidFallbackRecipient`). The outbox does **not** validate `zoneFallbackRecipient` against the token's TIP-403 policy at request time; if the zone-side refund mint is later rejected by the policy, the funds are parked in a per-recipient refund registry on `ZoneInbox` and the recipient claims them via `claimRefund(token)` (see **Zone-side handling** below).
+**Validation at withdrawal request time.** `requestWithdrawal(...)` requires a non-zero `zoneFallbackRecipient`; it does not apply Tempo closed-loop membership to that Zone address. A plain `to` must be allowed and must not be a registered gateway. A callback `to` must be registered as a gateway.
 
-**Triggering conditions.** When `ZonePortal.processWithdrawals` runs on Tempo and the user-facing transfer or callback fails, the portal calls `_enqueueWithdrawalBounceBack(token, amount, fallbackNonce)`. This constructs an internal `Deposit` with `to = address(uint160(fallbackNonce))`, `tempoRefundRecipient = address(0)` (the sentinel reserved for portal-internal bounce-backs), and appends it to the deposit queue:
+**Triggering conditions.** A failed plain transfer or callback causes `ZonePortal` to enqueue a bounce-back. This constructs an internal `Deposit` with `to = address(uint160(fallbackNonce))`, `tempoRefundRecipient = address(0)`, and appends it to the deposit queue:
 
 ```
 currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDeposit, currentDepositQueueHash))
@@ -702,11 +707,11 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDe
 
 **Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `Regular` deposit with `tempoRefundRecipient == address(0)`, decodes `fallbackNonce` from `to`, and calls `ZoneOutbox.consumeFallbackRecipient(fallbackNonce)`. The outbox returns and deletes the mapped recipient, after which the inbox attempts `IZoneToken.mint(zoneFallbackRecipient, amount)` wrapped in `try/catch`.
 
-If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(zoneFallbackRecipient, token, amount)`. If it reverts (e.g. the zone-side TIP-403 policy forbids `zoneFallbackRecipient`, or the token is paused), the inbox credits `_refunds[token][zoneFallbackRecipient] += amount` and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
+If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(zoneFallbackRecipient, token, amount)`. If it reverts, the inbox credits the Zone-local refund registry and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
 
 The recipient claims the parked funds by calling `ZoneInbox.claimRefund(token)`. The inbox zeroes `_refunds[token][msg.sender]` and calls `IZoneToken.mint(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
-The withdrawal fee is burned on the zone regardless of whether the withdrawal succeeded on Tempo or bounced back.
+The withdrawal fee is burned on the zone regardless of whether the withdrawal succeeds on Tempo or bounces back.
 
 ### Authenticated Withdrawals
 
@@ -739,16 +744,7 @@ For callback withdrawals, `IWithdrawalReceiver.onWithdrawalReceived` receives th
 
 ### Zone-to-Zone Transfers
 
-Zones do not interoperate directly. Zone-to-zone transfers work through composable withdrawals on Tempo.
-
-The sender on Zone A requests a withdrawal with `revealTo` set to Zone B's sequencer public key and `callbackData` that deposits into Zone B's portal. The flow:
-
-1. Zone A processes the withdrawal and submits the batch to Tempo.
-2. `processWithdrawals` on Tempo transfers tokens to Zone B's portal via the messenger callback.
-3. Zone B's sequencer observes the incoming deposit and decrypts `encryptedSender` to learn `(sender, txHash)`.
-4. Zone B verifies `keccak256(sender || txHash) == senderTag`, enabling sender-aware processing.
-
-Sequencer encryption keys are already published (used for encrypted deposits), so no additional infrastructure is needed. This pattern generalizes beyond zone-to-zone: a withdrawal can swap on a Tempo DEX and deposit into another zone in a single composable flow.
+Closed-loop callback withdrawals cannot target another zone portal, router, DEX, staking contract, or arbitrary receiver. A transfer to another zone must first exit through a plain withdrawal to an allowed Tempo account and then enter the destination zone through its independently authorized deposit path. There is no direct callback-based zone-to-zone escape from the closed loop.
 
 <br>
 
@@ -855,7 +851,7 @@ Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorize
 
 Issuers manage policies exclusively on Tempo. When an issuer freezes an address, updates a blacklist, or modifies a whitelist on Tempo, the zone inherits the change the next time `advanceTempo` imports a Tempo block containing the update.
 
-If a TIP-403 policy restricts the portal address or a withdrawal recipient, the withdrawal fails on Tempo and bounces back to the sender's `zoneFallbackRecipient` on the zone (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+If a TIP-403 policy causes a withdrawal transfer to fail, it bounces back to the sender's `zoneFallbackRecipient`.
 
 <br>
 
@@ -1624,9 +1620,17 @@ struct LastBatch {
 ### IZoneFactory
 
 ```solidity
+enum Role {
+    None,
+    Account,
+    CallbackGateway
+}
+
 interface IZoneFactory {
     struct CreateZoneParams {
         address initialToken;
+        address[] allowedAccounts;
+        address[] zoneGateways;
         address admin;
         address[] sequencers;
         uint8 threshold;
@@ -1724,6 +1728,7 @@ interface IZonePortal {
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
+    event RoleUpdated(address indexed account, Role prev, Role next);
 
     error NotSequencer();
     error NotAdmin();
@@ -1763,25 +1768,24 @@ interface IZonePortal {
     function enabledTokenCount() external view returns (uint256);
     function enabledTokenAt(uint256 index) external view returns (address);
 
+    // Closed-loop configuration
+    function role(address account) external view returns (Role);
+    function setAllowedAccount(address account, bool allowed) external; // admin-only
+    function setGateway(address account, bool allowed) external; // admin-only
+
     // Zone RPC endpoint. Published on-chain so clients can discover how to reach the zone.
     event RpcUrlUpdated(string rpcUrl);
     function rpcUrl() external view returns (string memory);
     function setRpcUrl(string calldata rpcUrl) external; // sequencer-only
 
     // Deposits
-    /// @dev Reverts (`InvalidBouncebackRecipient`) if `tempoRefundRecipient == address(0)`.
-    ///      Every user-initiated deposit must carry a usable refund target so that a
-    ///      failed mint can be recovered without stalling the deposit queue. The portal
-    ///      validates the refund target against the token's TIP-403 recipient policy;
-    ///      if the on-Tempo refund transfer later reverts, the funds are parked in the
-    ///      per-recipient refund registry exposed via `refunds(token, owner)` /
-    ///      `claimRefund(token)`.
+    /// @dev Caller and `tempoRefundRecipient` must be allowed accounts. `to` is a zone address.
     function deposit(
         address token, address to, uint128 amount, bytes32 memo, address tempoRefundRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);
-    /// @dev Reverts (`InvalidBouncebackRecipient`) if `tempoRefundRecipient == address(0)`.
-    ///      A ciphertext that fails onchain decryption verification has no well-defined
-    ///      recipient on the zone, so the bounce-back target must always be set.
+    /// @dev Caller and `tempoRefundRecipient` must be allowed accounts, except that a
+    ///      registered ZoneGateway may call this function for a synchronous callback return.
+    ///      The encrypted zone recipient need not be an allowed Tempo account.
     function depositEncrypted(
         address token, uint128 amount, uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted, address tempoRefundRecipient
@@ -1865,6 +1869,8 @@ interface IZoneMessenger {
     ) external;
 }
 ```
+
+The callback payload is opaque to the outbox and messenger and is interpreted by the configured ZoneGateway.
 
 ### IWithdrawalReceiver
 
@@ -2025,7 +2031,8 @@ interface IZoneOutbox {
         address token, uint128 amount, address tempoRefundRecipient
     ) external;
 
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external returns (address zoneFallbackRecipient);
 
     function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders)
         external returns (bytes32 withdrawalQueueHash);
@@ -2040,6 +2047,8 @@ Address: `0x1c00000000000000000000000000000000000003`
 interface IZoneConfig {
     function isSequencer(address account) external view returns (bool);
     function isEnabledToken(address token) external view returns (bool);
+    function isAllowedAccount(address account) external view returns (bool);
+    function isZoneGateway(address gateway) external view returns (bool);
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 }
 ```

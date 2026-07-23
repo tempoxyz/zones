@@ -1,4 +1,4 @@
-//! Demo Flow 3: Cross-Zone Transfer
+//! Closed-loop rejection of a legacy cross-zone router callback.
 
 use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::U256;
@@ -8,7 +8,7 @@ use tempo_zone_contracts::ZONE_TOKEN_ADDRESS;
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Cross-zone transfer via SwapAndDepositRouter:
+/// A legacy cross-zone transfer via SwapAndDepositRouter bounces back:
 ///
 /// 1. Start L1 dev node.
 /// 2. Create zone_a and zone_b through the native factory, then deploy SwapAndDepositRouter.
@@ -16,15 +16,15 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// 4. Alice deposits pathUSD into zone_a.
 /// 5. Spawn sequencers for both zones.
 /// 6. Alice withdraws from zone_a with router callback that deposits into zone_b for Bob.
-/// 7. Verify Bob received the deposit on zone_b.
-/// 8. Verify Alice's zone_a balance decreased.
+/// 7. Verify Bob did not receive a deposit on zone_b.
+/// 8. Verify the portal reported the callback as failed.
 ///
 /// ```text
 ///  Zone A (Alice)       L1 (Router)         Zone B (Bob)
 ///   |--- withdraw 500 -->|                    |
-///   |                    |--- deposit 500 --->|
-///   |                    |                    |
-///   |  ✓ Alice -= 500                  ✓ Bob += 500
+///   |                    |--- deposit 500 -x  |
+///   |<-- bounce queued 500                    |
+///   |  ✓ callback rejected              ✓ Bob unchanged
 /// ```
 ///
 /// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime and router artifacts.
@@ -88,31 +88,25 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
     );
     alice.withdraw_with(args).await?;
 
-    // --- Step 7: Verify Bob received deposit on zone_b ---
+    // --- Step 7: The gateway did not return funds to the source zone, so its cross-zone
+    // callback is rejected. ---
     let cross_timeout = std::time::Duration::from_secs(60);
-    zone_b
-        .wait_for_balance(
-            ZONE_TOKEN_ADDRESS,
-            bob_address,
-            U256::from(cross_amount),
-            cross_timeout,
-        )
-        .await?;
+    l1.wait_for_withdrawal_processed_with_status(
+        portal_a,
+        router,
+        PATH_USD_ADDRESS,
+        cross_amount,
+        false,
+        cross_timeout,
+    )
+    .await?;
 
+    // --- Step 8: Bob receives nothing on zone_b. ---
     let bob_final = zone_b.balance_of(ZONE_TOKEN_ADDRESS, bob_address).await?;
     assert_eq!(
         bob_final,
-        U256::from(cross_amount),
-        "Bob should have received the cross-zone deposit on zone_b"
-    );
-
-    // --- Step 8: Verify Alice's zone_a balance decreased ---
-    let alice_final = zone_a
-        .balance_of(ZONE_TOKEN_ADDRESS, alice.address())
-        .await?;
-    assert!(
-        alice_final <= U256::from(deposit_amount - cross_amount),
-        "Alice's zone_a balance should decrease by at least the cross-zone amount (got {alice_final})"
+        U256::ZERO,
+        "Bob should not receive funds from a callback that does not return to the source zone"
     );
 
     Ok(())

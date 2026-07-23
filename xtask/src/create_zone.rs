@@ -34,9 +34,17 @@ pub(crate) struct CreateZone {
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
-    /// Defaults to pathUSD (0x20C0000000000000000000000000000000000000).
     #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
     initial_token: Address,
+
+    /// Callback-only ZoneGateway implementation. Repeat to support legacy and replacement gateways.
+    #[arg(long = "zone-gateway", required = true)]
+    zone_gateways: Vec<Address>,
+
+    /// Allowed plain-withdrawal/deposit account. Repeat for each member.
+    /// Zone gateways are configured separately and must not be included.
+    #[arg(long = "allowed-account", required = true)]
+    allowed_accounts: Vec<Address>,
 
     /// Sequencer address that will operate the zone.
     #[arg(long)]
@@ -114,6 +122,8 @@ impl CreateZone {
                 sequencers: vec![self.sequencer],
                 threshold: 1,
                 rpcUrl: self.rpc_url.clone(),
+                allowedAccounts: self.allowed_accounts.clone(),
+                zoneGateways: self.zone_gateways.clone(),
             })
             .send_sync()
             .await?;
@@ -169,6 +179,8 @@ impl CreateZone {
             "portal": format!("{portal}"),
             "messenger": format!("{ZONE_MESSENGER_ADDRESS}"),
             "initialToken": format!("{}", self.initial_token),
+            "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "allowedAccounts": self.allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "admin": format!("{}", self.admin),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": anchor_header.inner.number,

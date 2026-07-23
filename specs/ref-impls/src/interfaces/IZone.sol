@@ -8,6 +8,13 @@ address constant ZONE_PORTAL_IMPL_ADDRESS = 0x5AD1000000000000000000000000000000
 address constant ZONE_VERIFIER_ADDRESS = 0x5a56000000000000000000000000000000000000;
 address constant ZONE_MESSENGER_ADDRESS = 0x5A4d000000000000000000000000000000000000;
 
+/// @notice Mutually exclusive authorization role assigned to a Tempo account.
+enum Role {
+    None,
+    Account,
+    CallbackGateway
+}
+
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
@@ -359,6 +366,7 @@ bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
+bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -408,7 +416,9 @@ interface IZoneFactory {
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
 
     struct CreateZoneParams {
-        address initialToken; // first TIP-20 to enable (sequencer can enable more later)
+        address initialToken; // first TIP-20 to enable (admin can enable more later)
+        address[] allowedAccounts; // initial closed-loop account allowlist
+        address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
         address[] sequencers;
         uint8 threshold;
@@ -599,6 +609,7 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotFactory();
+    error NotSelf();
     error AlreadyInitialized();
     error MustDelegateCall();
     error NotPendingAdmin();
@@ -606,7 +617,6 @@ interface IZonePortal {
     error InvalidTempoBlockNumber();
     error CallbackRejected();
     error TransferFailed();
-    error NotSelf();
     error ReentrantWithdrawal();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
@@ -626,10 +636,18 @@ interface IZonePortal {
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
     error InvalidQuorumCertificate();
+    error InvalidCallbackTarget();
+    error CallbackDidNotReturnToZone();
+    error InvalidAllowedAccount();
+    error AccountNotAllowed(address account);
+
+    event RoleUpdated(address indexed account, Role prev, Role next);
 
     function initialize(
         uint32 zoneId,
         address initialToken,
+        address[] calldata allowedAccounts,
+        address[] calldata zoneGateways,
         address messenger,
         address admin,
         address[] calldata sequencers,
@@ -650,6 +668,7 @@ interface IZonePortal {
 
     function zoneId() external view returns (uint32);
 
+    /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
 
     function admin() external view returns (address);
@@ -713,9 +732,8 @@ interface IZonePortal {
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
 
-    /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
+    /// @notice Enable another TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
-    ///      Validates the token is a TIP-20.
     function enableToken(address token) external;
 
     /// @notice Pause deposits for a token. Only callable by admin.
@@ -743,6 +761,15 @@ interface IZonePortal {
 
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
     function acceptAdmin() external;
+
+    /// @notice Return an account's closed-loop portal role.
+    function role(address account) external view returns (Role);
+
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external;
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external;
 
     /// @notice Get the sequencer's current encryption public key for encrypted deposits
     /// @return x The X coordinate of the secp256k1 public key
@@ -1134,7 +1161,9 @@ interface IZoneOutbox {
     function lastFallbackNonce() external view returns (uint64);
 
     /// @notice Resolve and delete a fallback recipient. Only callable by ZoneInbox.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient);
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient);
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory);
@@ -1228,5 +1257,11 @@ interface IZoneConfig {
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
+
+    /// @notice Check closed-loop account membership by reading from L1 ZonePortal.
+    function isAllowedAccount(address account) external view returns (bool);
+
+    /// @notice Check whether an address is a registered callback-only ZoneGateway.
+    function isZoneGateway(address gateway) external view returns (bool);
 
 }

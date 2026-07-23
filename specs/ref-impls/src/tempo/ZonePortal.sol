@@ -15,6 +15,7 @@ import {
     IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
     QueuedDeposit,
+    Role,
     TokenConfig,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
@@ -142,6 +143,7 @@ contract ZonePortal is IZonePortal {
     /// @dev These values must remain in account storage so each delegatecall proxy observes its
     ///      own metadata. Keep them after the established slots read directly by zone contracts.
     uint32 public zoneId;
+    /// @notice Fixed callback messenger assigned during initialization.
     address public messenger;
     address public verifier;
     bool internal _initialized;
@@ -152,6 +154,7 @@ contract ZonePortal is IZonePortal {
     uint256 public zoneHeight;
     address[] internal _sequencers;
     mapping(address => bool) public isSequencer;
+    mapping(address => Role) public role;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -160,6 +163,8 @@ contract ZonePortal is IZonePortal {
     function initialize(
         uint32 _zoneId,
         address _initialToken,
+        address[] calldata _allowedAccounts,
+        address[] calldata _zoneGateways,
         address _messenger,
         address _admin,
         address[] calldata initialSequencers,
@@ -181,6 +186,13 @@ contract ZonePortal is IZonePortal {
         rpcUrl = _rpcUrl;
 
         _replaceSequencerSet(initialSequencers, _threshold, false);
+
+        for (uint256 i; i < _zoneGateways.length; ++i) {
+            _setRole(_zoneGateways[i], Role.CallbackGateway);
+        }
+        for (uint256 i; i < _allowedAccounts.length; ++i) {
+            _setRole(_allowedAccounts[i], Role.Account);
+        }
 
         // Enable the initial token
         _enableTokenInternal(_initialToken);
@@ -330,6 +342,25 @@ contract ZonePortal is IZonePortal {
         emit AdminTransferred(previousAdmin, admin);
     }
 
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        _setRole(account, allowed ? Role.Account : Role.None);
+    }
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external onlyAdmin {
+        _setRole(account, allowed ? Role.CallbackGateway : Role.None);
+    }
+
+    function _setRole(address account, Role next) internal {
+        if (next == Role.Account && account == messenger) {
+            revert InvalidAllowedAccount();
+        }
+        Role prev = role[account];
+        role[account] = next;
+        emit RoleUpdated(account, prev, next);
+    }
+
     /*//////////////////////////////////////////////////////////////
                            QUEUE ACCESSORS
     //////////////////////////////////////////////////////////////*/
@@ -377,8 +408,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
-    /// @dev Irreversible: once enabled, a token cannot be disabled (non-custodial guarantee).
-    ///      Validates the token is a TIP-20.
+    /// @dev Irreversible: once enabled, a token cannot be disabled.
     function enableToken(address _token) external onlyAdmin {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
@@ -592,6 +622,10 @@ contract ZonePortal is IZonePortal {
         if (!cfg.depositsActive) revert DepositsNotActive();
     }
 
+    function _requireAllowed(address account) internal view {
+        if (role[account] != Role.Account) revert AccountNotAllowed(account);
+    }
+
     function _validateDepositPolicy(
         address _token,
         address to,
@@ -658,6 +692,9 @@ contract ZonePortal is IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        // Gateways may deposit callback returns without also being allowed accounts.
+        if (role[msg.sender] != Role.CallbackGateway) _requireAllowed(msg.sender);
+        _requireAllowed(tempoRefundRecipient);
 
         _validateDepositsActive(_token);
         _validateDepositPolicy(_token, to, tempoRefundRecipient);
@@ -711,6 +748,9 @@ contract ZonePortal is IZonePortal {
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        // Gateways may deposit callback returns without also being allowed accounts.
+        if (role[msg.sender] != Role.CallbackGateway) _requireAllowed(msg.sender);
+        _requireAllowed(tempoRefundRecipient);
 
         _validateDepositsActive(_token);
 
@@ -789,6 +829,8 @@ contract ZonePortal is IZonePortal {
     /// @notice Process multiple withdrawals from the queue in a single transaction.
     /// @dev Withdrawals must be supplied in queue order. `remainingQueue` is the queue suffix
     ///      after the last supplied withdrawal, or zero if the batch exhausts the current slot.
+    ///      Plain-transfer and callback failures bounce back without blocking the FIFO.
+    // FIXME(closed-loop-fees): Fix sequencer fees to zero and enforce onchain.
     function processWithdrawals(
         Withdrawal[] calldata withdrawals,
         bytes32 remainingQueue
@@ -832,8 +874,12 @@ contract ZonePortal is IZonePortal {
 
         bool success;
         if (withdrawal.gasLimit == 0) {
-            success = _tryTransfer(_token, withdrawal.to, withdrawal.amount);
+            // Re-check current membership without reverting so an in-flight withdrawal to a
+            // revoked account bounces without blocking the FIFO.
+            success = role[withdrawal.to] == Role.Account
+                && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
+            // Isolate callback effects so failure can be caught without reverting the dequeue.
             try this.deliverWithdrawal(
                 _token,
                 withdrawal.to,
@@ -849,7 +895,6 @@ contract ZonePortal is IZonePortal {
         }
 
         if (!success) {
-            // Callback failed: bounce back to zone (only amount, not fee)
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
         }
         emit WithdrawalProcessed(
@@ -858,10 +903,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Deliver a callback withdrawal in a revertable self-call frame.
-    /// @dev Only callable by this portal. It transfers only the current withdrawal amount to
-    ///      the shared messenger, then asks the messenger to call the target. If delivery
-    ///      fails, this call reverts and rolls back the transfer to the messenger. The outer
-    ///      processWithdrawals catches the revert and records a bounce-back.
+    /// @dev Only callable by this portal. processWithdrawals catches failures and bounces back.
     function deliverWithdrawal(
         address token,
         address target,
@@ -873,12 +915,19 @@ contract ZonePortal is IZonePortal {
         external
         onlySelf
     {
+        if (role[target] != Role.CallbackGateway) revert InvalidCallbackTarget();
+        bytes32 depositQueueHashBefore = currentDepositQueueHash;
+
         if (!ITIP20(token).transfer(messenger, amount)) {
             revert TransferFailed();
         }
 
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
+
+        // This proves only that some deposit was appended. Callback data is opaque; the configured
+        // gateway is trusted to allow only deposit/redeem and deposit the result back into the zone.
+        if (currentDepositQueueHash == depositQueueHashBefore) revert CallbackDidNotReturnToZone();
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
@@ -894,7 +943,8 @@ contract ZonePortal is IZonePortal {
             _tryTransfer(_token, admin, bouncebackFee);
         }
 
-        bool success = _tryTransfer(_token, withdrawal.to, refundAmount);
+        bool success = role[withdrawal.to] == Role.Account
+            && _tryTransfer(_token, withdrawal.to, refundAmount);
 
         if (success) {
             emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);
@@ -905,6 +955,7 @@ contract ZonePortal is IZonePortal {
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
+        _requireAllowed(msg.sender);
         amount = refunds[token][msg.sender];
         refunds[token][msg.sender] = 0;
 

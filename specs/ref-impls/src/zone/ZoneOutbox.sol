@@ -95,7 +95,7 @@ contract ZoneOutbox is IZoneOutbox {
     uint64 public lastFallbackNonce;
 
     /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
-    mapping(uint64 fallbackNonce => address recipient) internal _zoneFallbackRecipients;
+    mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -252,11 +252,17 @@ contract ZoneOutbox is IZoneOutbox {
             revert IZonePortal.TokenNotEnabled();
         }
 
-        _validateGasLimit(gasLimit);
-
-        // Limit callback data size to prevent storage bloat and hash computation abuse
+        // Bound callback data before queueing.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        if (gasLimit == 0) {
+            if (config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
+        } else {
+            _validateGasLimit(gasLimit);
+            if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
         }
 
         _validateRevealTo(revealTo);
@@ -353,10 +359,13 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
     /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
     ///      in zone state. Only ZoneInbox may consume a mapping entry.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient)
+    {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
-        recipient = _zoneFallbackRecipients[fallbackNonce];
-        if (recipient == address(0)) revert InvalidFallbackRecipient();
+        zoneFallbackRecipient = _zoneFallbackRecipients[fallbackNonce];
+        if (zoneFallbackRecipient == address(0)) revert InvalidFallbackRecipient();
         delete _zoneFallbackRecipients[fallbackNonce];
     }
 
