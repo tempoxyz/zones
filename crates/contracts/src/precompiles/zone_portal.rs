@@ -157,6 +157,7 @@ crate::sol! {
 
         event RoleUpdated(address indexed account, Role prev, Role next);
         event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
+        event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
         // -- Errors --
 
@@ -184,6 +185,7 @@ crate::sol! {
         function setRole(address account, Role role) external;
         function setAllowedAccount(address account, bool allowed) external;
         function setGateway(address account, bool allowed) external;
+        function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
         function sequencerThreshold() external view returns (uint8);
