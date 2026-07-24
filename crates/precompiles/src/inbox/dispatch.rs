@@ -36,7 +36,7 @@ impl ZoneInbox {
                     processedDepositNumber(call) => {
                         view(call, |_| self.processed_deposit_number.read())
                     },
-                    tempoPortal(call) => view(call, |_| Ok(l1.portal_address())),
+                    tempoPortal(call) => view(call, |_| Ok(l1.portal())),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     config(call) => view(call, |_| Ok(ZONE_CONFIG_ADDRESS)),
                     refunds(call) => view(call, |call| {
@@ -49,7 +49,7 @@ impl ZoneInbox {
                         if self.storage.is_static() {
                             Ok(self.storage.revert_output(Bytes::new()))
                         } else {
-                            self.advance_tempo(l1, l1.portal_address(), msg_sender, call)
+                            self.advance_tempo(l1, l1.portal(), msg_sender, call)
                                 .encode_precompile_result(0, 0, |()| Bytes::new())
                         }
                     },

@@ -81,7 +81,7 @@ impl<P> L1State<P> {
     }
 
     /// Returns the configured ZonePortal address.
-    pub const fn portal_address(&self) -> Address {
+    pub const fn portal(&self) -> Address {
         self.portal_address
     }
 
