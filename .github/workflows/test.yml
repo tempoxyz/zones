@@ -14,7 +14,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  EARN_REV: aa209ff8b3045d6abdaca1ec4d86048e5fc38f2c
   RUST_BACKTRACE: full
   RUSTC_WRAPPER: "sccache"
 
@@ -34,7 +33,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
-          ref: ${{ env.EARN_REV }}
+          ref: main
           path: earn
           token: ${{ secrets.DEREK_BENCH_TOKEN }}
           persist-credentials: false
@@ -62,6 +61,7 @@ jobs:
         run: |
           echo "forge-sha=$(forge --version | sed -n 's/^Commit SHA: //p')" >> "$GITHUB_OUTPUT"
           echo "specs-tree=$(git rev-parse HEAD:specs/ref-impls)" >> "$GITHUB_OUTPUT"
+          echo "earn-sha=$(git -C earn rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Restore Solidity artifacts
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -70,7 +70,7 @@ jobs:
             earn/cache
             specs/ref-impls/cache
             specs/ref-impls/out
-          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ env.EARN_REV }}
+          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
       - name: Build Solidity artifacts
         run: |
