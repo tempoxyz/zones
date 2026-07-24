@@ -35,7 +35,7 @@ jobs:
           repository: tempoxyz/earn
           ref: main
           path: earn
-          token: ${{ secrets.DEREK_BENCH_TOKEN }}
+          token: ${{ secrets.EARN_DEPLOY_KEY }}
           persist-credentials: false
           submodules: true
       - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
