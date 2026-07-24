@@ -59,7 +59,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         slot: B256,
     ) -> ZoneResult<U256> {
-        let anchor = TempoState::new().tempo_block_number.read()?;
+        let anchor = TempoState::new().anchor()?;
         Ok(l1.read_l1_storage(l1.portal(), slot, anchor)?.into())
     }
 

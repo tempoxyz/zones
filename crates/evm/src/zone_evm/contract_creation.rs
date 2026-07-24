@@ -89,7 +89,7 @@ mod tests {
     use tempo_evm::{TempoBlockEnv, TempoHaltReason};
     use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
-    use zone_precompiles::test_utils::MockL1Reader as TestL1;
+    use zone_precompiles::{L1State, test_utils::MockL1Reader as TestL1};
 
     type TestDb = CacheDB<EmptyDB>;
     type TestAdaptedDb = L1OverlayDB<TestDb, TestL1>;
@@ -128,7 +128,7 @@ mod tests {
         db: TestDb,
         input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv>,
     ) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
-        let db = L1OverlayDB::new(db, TestL1::default(), Address::ZERO);
+        let db = L1OverlayDB::new(db, L1State::authenticated(TestL1::default(), Address::ZERO));
         ZoneEvm::new(TempoEvm::new(db, input))
     }
 

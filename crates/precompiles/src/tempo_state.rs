@@ -5,7 +5,7 @@
 
 use alloc::{format, string::ToString, vec::Vec};
 
-use crate::storage::{L1State, L1StorageReader};
+use crate::storage::{L1State, L1StorageReader, TempoAnchor};
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
@@ -31,10 +31,13 @@ alloy_sol_types::sol! {
 pub struct TempoState {
     tempo_block_hash: B256,
     pub(crate) tempo_block_number: u64,
+    pub(crate) tempo_state_root: B256,
 }
 
 /// Storage slot containing the finalized Tempo block number in Zone state.
 pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
+/// Storage slot containing the finalized Tempo state root in Zone state.
+pub const TEMPO_STATE_ROOT_SLOT: alloy_primitives::U256 = slots::TEMPO_STATE_ROOT;
 
 impl TempoState {
     /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
@@ -64,7 +67,7 @@ impl TempoState {
                 "invalid Tempo genesis header RLP: trailing bytes after header".into(),
             ));
         }
-        self.write_checkpoint(header_rlp, header.number())?;
+        self.write_checkpoint(header_rlp, header.number(), header.state_root())?;
         Ok(())
     }
 
@@ -72,11 +75,21 @@ impl TempoState {
         &mut self,
         header_rlp: &[u8],
         block_number: u64,
+        state_root: B256,
     ) -> tempo_precompiles::Result<B256> {
         let block_hash = keccak256(header_rlp);
         self.tempo_block_hash.write(block_hash)?;
         self.tempo_block_number.write(block_number)?;
+        self.tempo_state_root.write(state_root)?;
         Ok(block_hash)
+    }
+
+    /// Reads the finalized Tempo checkpoint from Zone state.
+    pub(crate) fn anchor(&self) -> tempo_precompiles::Result<TempoAnchor> {
+        Ok(TempoAnchor {
+            block_number: self.tempo_block_number.read()?,
+            state_root: self.tempo_state_root.read()?,
+        })
     }
 
     fn is_system_caller(caller: Address) -> bool {
@@ -134,16 +147,20 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        if let Err(err) = l1.advance_anchor(prev_block_number, header.number()) {
+        if let Err(err) = l1.select_anchor(TempoAnchor {
+            block_number: header.number(),
+            state_root: header.state_root(),
+        }) {
             return self
                 .storage
                 .error_result(TempoPrecompileError::Fatal(err.to_string()));
         }
 
-        let tempo_block_hash = match self.write_checkpoint(&call.header, header.number()) {
-            Ok(hash) => hash,
-            Err(err) => return self.storage.error_result(err),
-        };
+        let tempo_block_hash =
+            match self.write_checkpoint(&call.header, header.number(), header.state_root()) {
+                Ok(hash) => hash,
+                Err(err) => return self.storage.error_result(err),
+            };
         if let Err(err) = self.emit_event(TempoStateAbi::TempoBlockFinalized {
             blockHash: tempo_block_hash,
             blockNumber: header.number(),
@@ -166,11 +183,11 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
+        let anchor = match self.anchor() {
+            Ok(anchor) => anchor,
             Err(err) => return self.storage.error_result(err),
         };
-        let value = l1.read_l1_storage(call.account, call.slot, block_number)?;
+        let value = l1.read_l1_storage(call.account, call.slot, anchor)?;
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
         ))
@@ -187,13 +204,13 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
+        let anchor = match self.anchor() {
+            Ok(anchor) => anchor,
             Err(err) => return self.storage.error_result(err),
         };
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
-            values.push(l1.read_l1_storage(call.account, slot, block_number)?);
+            values.push(l1.read_l1_storage(call.account, slot, anchor)?);
         }
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotsCall::abi_encode_returns(&values).into(),
@@ -217,6 +234,7 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
+                    tempoStateRoot(call) => view(call, |_| self.tempo_state_root.read()),
                     finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
                     readTempoStorageSlot(call) => {
                         self.read_tempo_storage_slot(l1, msg_sender, call)
@@ -255,13 +273,23 @@ mod tests {
         }
 
         fn with_reader(header: &TempoHeader, reader: MockL1Reader) -> eyre::Result<Self> {
+            Self::with_l1(header, L1State::unauthenticated(reader, Address::ZERO))
+        }
+
+        fn with_authenticated_reader(
+            header: &TempoHeader,
+            reader: MockL1Reader,
+        ) -> eyre::Result<Self> {
+            Self::with_l1(header, L1State::authenticated(reader, Address::ZERO))
+        }
+
+        fn with_l1(header: &TempoHeader, l1: L1State<MockL1Reader>) -> eyre::Result<Self> {
             let mut ctx = test_context();
             let encoded = encode_header(header);
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
             drop(storage);
 
-            let l1 = L1State::new(reader, Address::ZERO);
             let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
             Ok(Self {
                 ctx,
@@ -328,6 +356,7 @@ mod tests {
             &mut self,
             expected_hash: B256,
             expected_number: u64,
+            expected_state_root: B256,
         ) -> eyre::Result<()> {
             let block_hash = self.call(
                 Address::ZERO,
@@ -347,6 +376,16 @@ mod tests {
             assert_eq!(
                 TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
                 expected_number
+            );
+
+            let state_root = self.call(
+                Address::ZERO,
+                TempoStateAbi::tempoStateRootCall {}.abi_encode(),
+                true,
+            )?;
+            assert_eq!(
+                TempoStateAbi::tempoStateRootCall::abi_decode_returns(&state_root.bytes)?,
+                expected_state_root
             );
             Ok(())
         }
@@ -413,7 +452,10 @@ mod tests {
         )?;
 
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(harness.l1.get_anchor(), Some(10));
+        assert_eq!(
+            harness.l1.get_anchor().map(|anchor| anchor.block_number),
+            Some(10)
+        );
 
         let child = child_header(genesis_hash, 11);
         assert!(harness.finalize(ZONE_INBOX_ADDRESS, &child, false).is_err());
@@ -425,18 +467,22 @@ mod tests {
         let genesis = child_header(B256::repeat_byte(0xaa), 10);
         let genesis_hash = keccak256(encode_header(&genesis));
         let reader = MockL1Reader::returning(B256::repeat_byte(0x11));
-        let mut harness = TempoStateHarness::with_reader(&genesis, reader.clone())?;
+        let mut harness = TempoStateHarness::with_authenticated_reader(&genesis, reader.clone())?;
 
         let child = child_header(genesis_hash, 11);
         harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(harness.l1.get_anchor(), Some(11));
+        assert_eq!(
+            harness.l1.get_anchor().map(|anchor| anchor.block_number),
+            Some(11)
+        );
         assert!(
             reader
                 .storage_requests()
                 .iter()
                 .all(|request| request.2 == 11)
         );
+        assert_eq!(reader.storage_state_roots(), vec![Some(child.state_root())]);
         Ok(())
     }
 
@@ -444,7 +490,7 @@ mod tests {
     fn initialize_sets_checkpoint() -> eyre::Result<()> {
         let header = child_header(B256::repeat_byte(0xaa), 42);
         let mut harness = TempoStateHarness::new(&header)?;
-        harness.assert_checkpoint(keccak256(encode_header(&header)), 42)
+        harness.assert_checkpoint(keccak256(encode_header(&header)), 42, header.state_root())
     }
 
     #[test]
@@ -456,7 +502,7 @@ mod tests {
 
         let output = harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         assert!(output.is_success());
-        harness.assert_checkpoint(keccak256(encode_header(&child)), 1)
+        harness.assert_checkpoint(keccak256(encode_header(&child)), 1, child.state_root())
     }
 
     #[test]
@@ -467,7 +513,7 @@ mod tests {
         let child = child_header(genesis_hash, 1);
 
         assert!(harness.finalize(Address::ZERO, &child, false)?.is_revert());
-        harness.assert_checkpoint(genesis_hash, genesis.number())
+        harness.assert_checkpoint(genesis_hash, genesis.number(), genesis.state_root())
     }
 
     #[test]
@@ -498,7 +544,7 @@ mod tests {
                 .finalize(ZONE_INBOX_ADDRESS, &child, true)?
                 .is_revert()
         );
-        harness.assert_checkpoint(genesis_hash, genesis.number())
+        harness.assert_checkpoint(genesis_hash, genesis.number(), genesis.state_root())
     }
 
     #[test]
@@ -512,7 +558,7 @@ mod tests {
                 .finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(vec![0xff]), false)?
                 .is_revert()
         );
-        harness.assert_checkpoint(genesis_hash, genesis.number())
+        harness.assert_checkpoint(genesis_hash, genesis.number(), genesis.state_root())
     }
 
     #[test]
@@ -528,7 +574,7 @@ mod tests {
                 .finalize_raw(ZONE_INBOX_ADDRESS, Bytes::from(malformed), false)?
                 .is_revert()
         );
-        harness.assert_checkpoint(genesis_hash, genesis.number())
+        harness.assert_checkpoint(genesis_hash, genesis.number(), genesis.state_root())
     }
 
     #[test]
@@ -543,7 +589,7 @@ mod tests {
                 .finalize(ZONE_INBOX_ADDRESS, &child, false)?
                 .is_revert()
         );
-        harness.assert_checkpoint(genesis_hash, genesis.number())
+        harness.assert_checkpoint(genesis_hash, genesis.number(), genesis.state_root())
     }
 
     #[test]
@@ -558,7 +604,7 @@ mod tests {
                 .finalize(ZONE_INBOX_ADDRESS, &child, false)?
                 .is_revert()
         );
-        harness.assert_checkpoint(genesis_hash, genesis.number())
+        harness.assert_checkpoint(genesis_hash, genesis.number(), genesis.state_root())
     }
 
     #[test]

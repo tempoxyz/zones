@@ -201,10 +201,13 @@ mod tests {
         state::{Account, EvmStorageSlot},
     };
     use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
-    use zone_precompiles::test_utils::MockL1Reader;
+    use zone_precompiles::{L1State, test_utils::MockL1Reader};
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
-        let db = L1OverlayDB::new(EmptyDB::default(), MockL1Reader::default(), Address::ZERO);
+        let db = L1OverlayDB::new(
+            EmptyDB::default(),
+            L1State::authenticated(MockL1Reader::default(), Address::ZERO),
+        );
         ZoneEvm::new(TempoEvm::new(db, EvmEnv::default()))
     }
 

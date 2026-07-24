@@ -20,6 +20,9 @@ contract TempoState is ITempoState {
     /// @notice Block number
     uint64 public tempoBlockNumber;
 
+    /// @notice State root of the current finalized Tempo block
+    bytes32 public tempoStateRoot;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -27,9 +30,10 @@ contract TempoState is ITempoState {
     /// @notice Initialize with genesis Tempo block
     /// @param _genesisHeader RLP-encoded genesis Tempo header
     constructor(bytes memory _genesisHeader) {
-        (,, uint64 blockNumber) = _decodeHeader(_genesisHeader);
+        (, bytes32 stateRoot, uint64 blockNumber) = _decodeHeader(_genesisHeader);
         tempoBlockHash = keccak256(_genesisHeader);
         tempoBlockNumber = blockNumber;
+        tempoStateRoot = stateRoot;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -57,6 +61,7 @@ contract TempoState is ITempoState {
 
         tempoBlockHash = keccak256(header);
         tempoBlockNumber = blockNumber;
+        tempoStateRoot = stateRoot;
 
         emit TempoBlockFinalized(tempoBlockHash, tempoBlockNumber, stateRoot);
     }

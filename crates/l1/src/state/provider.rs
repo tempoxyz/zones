@@ -1,21 +1,21 @@
 //! Cache-first, RPC-fallback provider for reading L1 contract storage slots.
 //!
 //! [`L1StateProvider`] wraps a [`L1StateCache`] and a [`DynProvider<TempoNetwork>`] backed by an
-//! HTTP transport. Reads are served from the in-memory cache when possible. On cache miss the
-//! provider falls back to `eth_getStorageAt` via the shared HTTP provider and writes the result
-//! back into the cache.
+//! HTTP transport. Canonical block execution supplies a trusted L1 state root and resolves cache
+//! misses with `eth_getProof`; standalone simulations retain the unauthenticated
+//! `eth_getStorageAt` path.
 //!
-//! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
-//! ([`L1StateProvider::get_storage_async`]) entry point are provided. The synchronous variant is
-//! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
-//! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
+//! Synchronous entry points are provided for EVM precompiles where async is unavailable. Canonical
+//! Proof fetches and unauthenticated storage fetches use the same retry policy so transient L1
+//! RPC outages stall execution rather than producing divergent state.
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
-use alloy_rpc_types_eth::BlockId;
+use alloy_rpc_types_eth::{BlockId, EIP1186AccountProofResponse};
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
+use reth_trie_common::AccountProof;
 use std::num::NonZeroU32;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
@@ -217,6 +217,84 @@ impl L1StateProvider {
         }
     }
 
+    /// Read and authenticate a storage slot against a trusted L1 state root.
+    pub fn get_storage_with_proof(
+        &self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+        state_root: B256,
+    ) -> Result<B256> {
+        {
+            let mut cache = self.cache.lock();
+            if let Some(value) = cache.get_verified(address, slot, block_number, state_root) {
+                return Ok(value);
+            }
+        }
+
+        warn!(
+            %address,
+            %slot,
+            block_number,
+            %state_root,
+            "verified L1 storage cache miss, fetching proof from RPC"
+        );
+
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let start = std::time::Instant::now();
+            let result = tokio::task::block_in_place(|| {
+                self.runtime_handle.block_on(self.fetch_and_verify_slot(
+                    address,
+                    slot,
+                    block_number,
+                    state_root,
+                ))
+            });
+            let elapsed = start.elapsed();
+
+            match result {
+                Ok(value) => {
+                    self.cache
+                        .lock()
+                        .set_verified(address, slot, block_number, state_root, value);
+                    info!(
+                        %address,
+                        %slot,
+                        block_number,
+                        %state_root,
+                        %value,
+                        ?elapsed,
+                        attempt,
+                        "authenticated L1 storage fetch succeeded"
+                    );
+                    return Ok(value);
+                }
+                Err(proof_err) => {
+                    if self
+                        .max_sync_attempts
+                        .is_some_and(|max_attempts| attempt >= max_attempts.get())
+                    {
+                        return Err(eyre::eyre!(
+                            "authenticated L1 storage fetch failed after {attempt} attempts for address={address} slot={slot} block={block_number} state_root={state_root}: {proof_err}"
+                        ));
+                    }
+                    warn!(
+                        %address,
+                        %slot,
+                        block_number,
+                        %state_root,
+                        %proof_err,
+                        ?elapsed,
+                        attempt,
+                        "authenticated L1 storage fetch failed, retrying"
+                    );
+                }
+            }
+        }
+    }
+
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
@@ -259,6 +337,73 @@ impl L1StateProvider {
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
         Ok(result)
     }
+
+    /// Fetch and verify a single EIP-1186 storage proof against `state_root`.
+    async fn fetch_and_verify_slot(
+        &self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+        state_root: B256,
+    ) -> Result<B256> {
+        let block_id = BlockId::number(block_number);
+        let response = self
+            .provider
+            .get_proof(address, vec![slot])
+            .block_id(block_id)
+            .await
+            .map_err(|e| {
+                warn!(%address, %slot, block_number, %e, "eth_getProof RPC call failed");
+                eyre::eyre!(
+                    "eth_getProof failed for address={address} slot={slot} block={block_number}: {e}"
+                )
+            })?;
+
+        let result = verify_storage_proof(response, address, slot, state_root).map_err(|e| {
+            eyre::eyre!(
+                "eth_getProof verification failed for address={address} slot={slot} block={block_number} state_root={state_root}: {e}"
+            )
+        })?;
+        debug!(
+            %address,
+            %slot,
+            block_number,
+            %state_root,
+            %result,
+            "fetched and verified L1 storage slot proof"
+        );
+        Ok(result)
+    }
+}
+
+fn verify_storage_proof(
+    response: EIP1186AccountProofResponse,
+    address: Address,
+    slot: B256,
+    state_root: B256,
+) -> Result<B256> {
+    eyre::ensure!(
+        response.address == address,
+        "returned address {} does not match requested address {address}",
+        response.address
+    );
+    eyre::ensure!(
+        response.storage_proof.len() == 1,
+        "returned {} storage proofs for one requested slot",
+        response.storage_proof.len()
+    );
+    let storage_proof = &response.storage_proof[0];
+    eyre::ensure!(
+        storage_proof.key.as_b256() == slot,
+        "returned slot {} does not match requested slot {slot}",
+        storage_proof.key.as_b256()
+    );
+    let value = storage_proof.value;
+
+    AccountProof::from_eip1186_proof(response)
+        .verify(state_root)
+        .map_err(|e| eyre::eyre!("{e}"))?;
+    Ok(B256::from(value.to_be_bytes()))
 }
 
 impl L1StorageReader for L1StateProvider {
@@ -267,20 +412,43 @@ impl L1StorageReader for L1StateProvider {
         account: Address,
         slot: B256,
         block_number: u64,
+        state_root: Option<B256>,
     ) -> std::result::Result<B256, L1StateError> {
-        self.get_storage(account, slot, block_number)
-            .map_err(|error| L1StateError::StorageUnavailable {
-                account,
-                slot,
-                block_number,
-                reason: error.to_string(),
-            })
+        let result = match state_root {
+            Some(state_root) => {
+                self.get_storage_with_proof(account, slot, block_number, state_root)
+            }
+            None => self.get_storage(account, slot, block_number),
+        };
+        result.map_err(|error| L1StateError::StorageUnavailable {
+            account,
+            slot,
+            block_number,
+            reason: error.to_string(),
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::constants::{EMPTY_ROOT_HASH, KECCAK_EMPTY};
+    use alloy_rpc_types_eth::EIP1186StorageProof;
+    use alloy_transport::mock::Asserter;
+
+    fn empty_account_response(address: Address, slot: B256) -> EIP1186AccountProofResponse {
+        EIP1186AccountProofResponse {
+            address,
+            code_hash: KECCAK_EMPTY,
+            storage_hash: EMPTY_ROOT_HASH,
+            storage_proof: vec![EIP1186StorageProof {
+                key: slot.into(),
+                value: U256::ZERO,
+                proof: Vec::new(),
+            }],
+            ..Default::default()
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn finite_sync_attempt_limit_returns_diagnostic_error() {
@@ -308,5 +476,102 @@ mod tests {
         let message = err.to_string();
         assert!(message.contains("after 1 attempts"), "{message}");
         assert!(message.contains("block=7"), "{message}");
+    }
+
+    #[test]
+    fn verifies_empty_account_storage_exclusion_proof() {
+        let address = Address::repeat_byte(0x11);
+        let slot = B256::with_last_byte(7);
+        assert_eq!(
+            verify_storage_proof(
+                empty_account_response(address, slot),
+                address,
+                slot,
+                EMPTY_ROOT_HASH,
+            )
+            .unwrap(),
+            B256::ZERO
+        );
+    }
+
+    #[test]
+    fn rejects_proof_bound_to_wrong_root_address_slot_or_value() {
+        let address = Address::repeat_byte(0x11);
+        let slot = B256::with_last_byte(7);
+
+        assert!(
+            verify_storage_proof(
+                empty_account_response(address, slot),
+                address,
+                slot,
+                B256::with_last_byte(1),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_storage_proof(
+                empty_account_response(Address::repeat_byte(0x22), slot),
+                address,
+                slot,
+                EMPTY_ROOT_HASH,
+            )
+            .is_err()
+        );
+        assert!(
+            verify_storage_proof(
+                empty_account_response(address, B256::with_last_byte(8)),
+                address,
+                slot,
+                EMPTY_ROOT_HASH,
+            )
+            .is_err()
+        );
+
+        let mut response = empty_account_response(address, slot);
+        response.storage_proof[0].value = U256::ONE;
+        assert!(verify_storage_proof(response, address, slot, EMPTY_ROOT_HASH).is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn authenticated_and_unauthenticated_cache_entries_are_isolated() {
+        let address = Address::repeat_byte(0x11);
+        let slot = B256::with_last_byte(7);
+        let asserter = Asserter::new();
+        asserter.push_success(&empty_account_response(address, slot));
+        asserter.push_success(&U256::from(9));
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter.clone())
+            .erased();
+        let reader = L1StateProvider::new_raw(
+            L1StateProviderConfig {
+                max_sync_attempts: Some(NonZeroU32::MIN),
+                ..Default::default()
+            },
+            L1StateCache::default(),
+            provider,
+            tokio::runtime::Handle::current(),
+        );
+
+        let proof_reader = reader.clone();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || {
+                proof_reader.get_storage_with_proof(address, slot, 7, EMPTY_ROOT_HASH)
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+            B256::ZERO
+        );
+        let unauthenticated_reader = reader.clone();
+        assert_eq!(
+            tokio::task::spawn_blocking(move || {
+                unauthenticated_reader.get_storage(address, slot, 7)
+            })
+            .await
+            .unwrap()
+            .unwrap(),
+            B256::from(U256::from(9).to_be_bytes())
+        );
+        assert!(asserter.read_q().is_empty());
     }
 }

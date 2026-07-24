@@ -22,7 +22,7 @@
 use alloy_primitives::{Address, B256};
 use derive_more::Deref;
 use parking_lot::Mutex;
-use schnellru::{Limiter, LruMap};
+use schnellru::{ByLength, Limiter, LruMap};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     ops::RangeInclusive,
@@ -69,6 +69,8 @@ impl L1StateCache {
 pub struct L1StateCacheInner {
     /// Bounded per-slot value histories, promoted as a unit on access.
     slots: LruMap<(Address, B256), BTreeMap<u64, B256>, ByVersionCount>,
+    /// Exact values whose EIP-1186 proofs were verified against a trusted state root.
+    verified_slots: LruMap<(Address, B256, u64, B256), B256, ByLength>,
     /// Per-address block heights that prevent reuse across possible mutations.
     invalidations: HashMap<Address, BTreeSet<u64>>,
     /// Total number of retained mutation barriers.
@@ -94,11 +96,38 @@ impl L1StateCacheInner {
     fn with_limits(max_versions: usize, max_invalidations: usize) -> Self {
         Self {
             slots: LruMap::new(ByVersionCount::new(max_versions)),
+            verified_slots: LruMap::new(ByLength::new(max_versions.try_into().unwrap_or(u32::MAX))),
             invalidations: HashMap::new(),
             invalidation_count: 0,
             max_invalidations,
             coverage: 0..=0,
         }
+    }
+
+    /// Returns an exact value previously verified against `state_root`.
+    pub fn get_verified(
+        &mut self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+        state_root: B256,
+    ) -> Option<B256> {
+        self.verified_slots
+            .get(&(address, slot, block_number, state_root))
+            .copied()
+    }
+
+    /// Stores an exact value after its EIP-1186 proof has been verified.
+    pub fn set_verified(
+        &mut self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+        state_root: B256,
+        value: B256,
+    ) {
+        self.verified_slots
+            .insert((address, slot, block_number, state_root), value);
     }
 
     /// Returns the cached value for a storage slot at the given block number.
@@ -162,6 +191,7 @@ impl L1StateCacheInner {
     /// Clears cached state and establishes a new contiguous receipt-coverage baseline.
     fn reset(&mut self, floor: u64) {
         self.slots.clear();
+        self.verified_slots.clear();
         self.invalidations.clear();
         self.invalidation_count = 0;
         self.coverage = floor..=floor;
@@ -302,6 +332,27 @@ mod tests {
     fn get_returns_none_for_missing_slot() {
         let mut cache = L1StateCacheInner::new();
         assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
+    }
+
+    #[test]
+    fn verified_values_are_keyed_by_exact_block_and_state_root() {
+        let mut cache = L1StateCacheInner::new();
+        let slot = B256::with_last_byte(1);
+        let block_number = 7;
+        let state_root = B256::with_last_byte(3);
+        let value = B256::with_last_byte(4);
+
+        cache.set_verified(PORTAL, slot, block_number, state_root, value);
+
+        assert_eq!(
+            cache.get_verified(PORTAL, slot, block_number, state_root),
+            Some(value)
+        );
+        assert_eq!(cache.get_verified(PORTAL, slot, 8, state_root), None);
+        assert_eq!(
+            cache.get_verified(PORTAL, slot, block_number, B256::with_last_byte(6)),
+            None
+        );
     }
 
     #[test]

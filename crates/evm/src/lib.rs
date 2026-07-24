@@ -165,7 +165,8 @@ where
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
+        let l1 = L1State::authenticated(self.l1_reader.clone(), self.portal_address);
+        let db = L1OverlayDB::new(db, l1);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input);
         ZoneEvm::new(self.register_precompiles(evm, l1))
@@ -177,7 +178,8 @@ where
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let db = L1OverlayDB::new(db, self.l1_reader.clone(), self.portal_address);
+        let l1 = L1State::unauthenticated(self.l1_reader.clone(), self.portal_address);
+        let db = L1OverlayDB::new(db, l1);
         let l1 = db.l1_state().clone();
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
         ZoneEvm::new(self.register_precompiles(evm, l1))
@@ -486,7 +488,6 @@ mod tests {
         hardfork::TempoHardfork,
         spec::{DEV, MODERATO, TempoHardforks},
     };
-
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
         let zone = ZoneChainSpec::from(DEV.clone());

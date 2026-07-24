@@ -67,8 +67,8 @@ same block.
 Zone state is fully derived from L1 events. The `advanceTempo` system
 transaction atomically:
 
-- Advances `tempoBlockNumber` and `tempoBlockHash` in the `TempoState`
-  predeploy, anchoring the zone to L1.
+- Advances `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot` in the
+  `TempoState` predeploy, anchoring the zone to L1.
 - Enables newly bridged TIP-20 tokens via the `ZoneTokenFactory` precompile.
 - Processes deposits from the L1 queue — minting zone-side tokens to recipients.
 - Validates the deposit hash chain against the L1 portal's queue hash.
@@ -123,8 +123,10 @@ The zone enforces TIP-403 transfer policies (whitelist, blacklist, compound)
 using Tempo's upstream policy implementation over anchored raw L1 state:
 
 1. **L1StateProvider** — resolves storage slots at an explicit L1 block through
-   the block-versioned `L1StateCache`, falling back to an exact-block L1 RPC
-   read and caching the result.
+   `eth_getProof` during block building and validation. Proofs are requested at
+   the block number persisted by `TempoState` and verified against its persisted
+   state root. Inspector-based RPC tracing retains the block-versioned
+   `eth_getStorageAt` path.
 2. **L1OverlayDB** — composes ordinary zone EVM storage with the raw L1
    reader at the exact finalized block recorded in `TempoState`. TIP-403
    registry state and each token's L1-owned transfer-policy field come from L1;

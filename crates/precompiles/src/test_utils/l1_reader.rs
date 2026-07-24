@@ -20,6 +20,7 @@ pub struct MockL1Reader {
     slots: Shared<HashMap<L1Slot, B256>>,
     registry_storage: Shared<HashMapStorageProvider>,
     storage_requests: Shared<Vec<L1Slot>>,
+    storage_state_roots: Shared<Vec<Option<B256>>>,
     fallback: B256,
     fail_storage: bool,
 }
@@ -30,6 +31,7 @@ impl Default for MockL1Reader {
             slots: Default::default(),
             registry_storage: Arc::new(Mutex::new(HashMapStorageProvider::new(1))),
             storage_requests: Default::default(),
+            storage_state_roots: Default::default(),
             fallback: B256::ZERO,
             fail_storage: false,
         }
@@ -64,6 +66,10 @@ impl MockL1Reader {
 
     pub fn storage_requests(&self) -> Vec<L1Slot> {
         self.storage_requests.lock().unwrap().clone()
+    }
+
+    pub fn storage_state_roots(&self) -> Vec<Option<B256>> {
+        self.storage_state_roots.lock().unwrap().clone()
     }
 
     pub fn seed_active_sequencer(
@@ -155,11 +161,13 @@ impl L1StorageReader for MockL1Reader {
         account: Address,
         slot: B256,
         block_number: u64,
+        state_root: Option<B256>,
     ) -> Result<B256, L1StateError> {
         self.storage_requests
             .lock()
             .unwrap()
             .push((account, slot, block_number));
+        self.storage_state_roots.lock().unwrap().push(state_root);
         if self.fail_storage {
             return Err(L1StateError::StorageUnavailable {
                 account,

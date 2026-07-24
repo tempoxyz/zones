@@ -1007,6 +1007,9 @@ interface ITempoState {
     /// @notice Current finalized Tempo block number
     function tempoBlockNumber() external view returns (uint64);
 
+    /// @notice State root of the current finalized Tempo block
+    function tempoStateRoot() external view returns (bytes32);
+
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
     /// @dev Validates chain continuity (parent hash must match, number must be +1).
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.

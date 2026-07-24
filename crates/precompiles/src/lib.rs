@@ -59,7 +59,7 @@ pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 #[cfg(feature = "std")]
 pub use outbox::ZoneOutbox;
-pub use storage::{L1State, L1StateError, L1StorageReader};
+pub use storage::{L1State, L1StateError, L1StorageReader, TempoAnchor};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};

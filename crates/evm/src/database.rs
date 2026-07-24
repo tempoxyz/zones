@@ -17,8 +17,8 @@ use revm::{
 use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
-    storage::{L1State, L1StateError, L1StorageReader},
-    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
+    storage::{L1State, L1StateError, L1StorageReader, TempoAnchor},
+    tempo_state::{TEMPO_BLOCK_NUMBER_SLOT, TEMPO_STATE_ROOT_SLOT},
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
@@ -30,12 +30,9 @@ pub struct L1OverlayDB<DB, L1> {
 }
 
 impl<DB, L1> L1OverlayDB<DB, L1> {
-    /// Creates an adapter around the caller-provided database.
-    pub fn new(inner: DB, l1: L1, portal_address: Address) -> Self {
-        Self {
-            inner,
-            l1: L1State::new(l1, portal_address),
-        }
+    /// Creates an adapter around the caller-provided database and configured L1 state.
+    pub fn new(inner: DB, l1: L1State<L1>) -> Self {
+        Self { inner, l1 }
     }
 
     /// Returns the original caller-provided database.
@@ -82,7 +79,7 @@ pub enum ZoneDbError<E> {
     /// The selected Zone state contains an invalid Tempo anchor.
     #[error("invalid Tempo anchor (does not fit in u64): {0}")]
     AnchorOverflow(U256),
-    /// Execution-local Tempo L1 state could not be read or advanced consistently.
+    /// Execution-local Tempo L1 state could not be read at one consistent checkpoint.
     #[error(transparent)]
     L1State(#[from] L1StateError),
     /// A transaction attempted to persist mirrored Tempo-owned state.
@@ -102,24 +99,32 @@ impl<E: DBErrorMarker> ZoneDbError<E> {
 }
 
 impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
-    fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
+    fn anchor(&mut self) -> Result<TempoAnchor, ZoneDbError<DB::Error>> {
         if let Some(anchor) = self.l1.get_anchor() {
             return Ok(anchor);
         }
 
-        let value = self
+        let block_number = self
             .inner
             .storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)
             .map_err(ZoneDbError::Inner)?;
-        let anchor = u64::try_from(value).map_err(|_| ZoneDbError::AnchorOverflow(value))?;
-        Ok(anchor)
+        let block_number =
+            u64::try_from(block_number).map_err(|_| ZoneDbError::AnchorOverflow(block_number))?;
+        let state_root = self
+            .inner
+            .storage(TEMPO_STATE_ADDRESS, TEMPO_STATE_ROOT_SLOT)
+            .map_err(ZoneDbError::Inner)?;
+        Ok(TempoAnchor {
+            block_number,
+            state_root: B256::from(state_root),
+        })
     }
 
     fn l1_storage(
         &self,
         address: Address,
         slot: U256,
-        anchor: u64,
+        anchor: TempoAnchor,
     ) -> Result<U256, ZoneDbError<DB::Error>> {
         self.l1
             .read_l1_storage(address, B256::from(slot), anchor)
@@ -205,6 +210,12 @@ mod tests {
             U256::from(anchor),
         )
         .unwrap();
+        db.insert_account_storage(
+            TEMPO_STATE_ADDRESS,
+            TEMPO_STATE_ROOT_SLOT,
+            U256::from_be_bytes(*B256::with_last_byte(anchor as u8)),
+        )
+        .unwrap();
         db
     }
 
@@ -216,18 +227,23 @@ mod tests {
         let l1 = TestL1::default();
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor - 1, U256::from(98));
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, expected);
-        let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
+        let mut db = L1OverlayDB::new(test_db(anchor), L1State::unauthenticated(l1, Address::ZERO));
 
         assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
-        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
+        assert_eq!(
+            db.l1_state().get_anchor().map(|anchor| anchor.block_number),
+            Some(anchor)
+        );
     }
 
     #[test]
-    fn l1_failures_and_read_before_advance_fail_closed() {
+    fn l1_failures_and_conflicting_checkpoints_fail_closed() {
         let anchor = 42;
         let slot = U256::from(7);
-        let mut failing =
-            L1OverlayDB::new(test_db(anchor), TestL1::failing_storage(), Address::ZERO);
+        let mut failing = L1OverlayDB::new(
+            test_db(anchor),
+            L1State::unauthenticated(TestL1::failing_storage(), Address::ZERO),
+        );
         assert!(matches!(
             failing.storage(TIP403_REGISTRY_ADDRESS, slot),
             Err(ZoneDbError::L1State(L1StateError::StorageUnavailable {
@@ -238,13 +254,26 @@ mod tests {
 
         let reader = TestL1::default();
         reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
-        let mut db = L1OverlayDB::new(test_db(anchor), reader.clone(), Address::ZERO);
+        let mut db = L1OverlayDB::new(
+            test_db(anchor),
+            L1State::unauthenticated(reader.clone(), Address::ZERO),
+        );
         let l1 = db.l1_state().clone();
         assert_eq!(
             db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(),
             U256::ONE
         );
-        assert!(l1.advance_anchor(anchor, anchor + 1).is_err());
+        assert!(
+            l1.read_l1_storage(
+                TIP403_REGISTRY_ADDRESS,
+                B256::from(slot),
+                TempoAnchor {
+                    block_number: anchor + 1,
+                    state_root: B256::ZERO,
+                },
+            )
+            .is_err()
+        );
         assert_eq!(reader.storage_requests().len(), 1);
     }
 
@@ -258,7 +287,7 @@ mod tests {
         inner
             .insert_account_storage(TIP403_REGISTRY_ADDRESS, slot, local)
             .unwrap();
-        let mut db = L1OverlayDB::new(inner, l1, Address::ZERO);
+        let mut db = L1OverlayDB::new(inner, L1State::unauthenticated(l1, Address::ZERO));
         let observed = db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap();
         assert_eq!(observed, l1_value);
 
@@ -287,10 +316,13 @@ mod tests {
         let (anchor, slot) = (42, U256::from(7));
         let l1 = TestL1::default();
         l1.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::from(7));
-        let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
+        let mut db = L1OverlayDB::new(test_db(anchor), L1State::unauthenticated(l1, Address::ZERO));
 
         db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap();
-        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
+        assert_eq!(
+            db.l1_state().get_anchor().map(|anchor| anchor.block_number),
+            Some(anchor)
+        );
 
         db.reset_transaction_state();
 
@@ -304,10 +336,34 @@ mod tests {
         let value = U256::from(5);
         let mut inner = test_db(1);
         inner.insert_account_storage(address, slot, value).unwrap();
-        let mut db = L1OverlayDB::new(inner, TestL1::default(), Address::ZERO);
+        let mut db = L1OverlayDB::new(
+            inner,
+            L1State::authenticated(TestL1::default(), Address::ZERO),
+        );
 
         assert_eq!(db.storage(address, slot).unwrap(), value);
         let mut inner: CacheDB<EmptyDB> = db.into_inner();
         assert_eq!(inner.storage(address, slot).unwrap(), value);
+    }
+
+    #[test]
+    fn authenticated_overlay_uses_persisted_state_root() {
+        let anchor = 42;
+        let slot = U256::from(7);
+        let reader = TestL1::default();
+        reader.insert(TIP403_REGISTRY_ADDRESS, slot, anchor, U256::ONE);
+        let mut db = L1OverlayDB::new(
+            test_db(anchor),
+            L1State::authenticated(reader.clone(), Address::ZERO),
+        );
+
+        assert_eq!(
+            db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(),
+            U256::ONE
+        );
+        assert_eq!(
+            reader.storage_state_roots(),
+            vec![Some(B256::with_last_byte(anchor as u8))]
+        );
     }
 }

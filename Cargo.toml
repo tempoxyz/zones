@@ -160,6 +160,7 @@ reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400", features = ["eip1186"] }
 revm = { version = "41.0.0", features = [
   "optional_fee_charge",
 ], default-features = false }

@@ -34,9 +34,10 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
 ///
 /// Applies three patches to the [template](genesis_template):
 ///
-/// 1. **TempoState storage**: `tempoBlockHash` and `tempoBlockNumber` must reflect the
-///    L1 block that serves as the zone's genesis anchor. Without this, `finalizeTempo`
-///    rejects the first L1 block for parent hash mismatch.
+/// 1. **TempoState storage**: `tempoBlockHash`, `tempoBlockNumber`, and `tempoStateRoot` must
+///    reflect the L1 block that serves as the zone's genesis anchor. Without this,
+///    `finalizeTempo` rejects the first L1 block for parent hash mismatch, and authenticated
+///    storage reads cannot be verified.
 ///
 /// 2. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and
 ///    ZoneConfig deployed bytecode as `PUSH32` immutables. The template is compiled with
@@ -73,6 +74,10 @@ pub fn l1_anchored_genesis(
     storage.insert(
         B256::from(tempo_state::slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
         B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
+    );
+    storage.insert(
+        B256::from(tempo_state::slots::TEMPO_STATE_ROOT.to_be_bytes()),
+        l1_header.inner.state_root,
     );
 
     // Patch 2: portal address immutables in ZoneInbox and ZoneConfig.
@@ -184,6 +189,10 @@ mod tests {
         assert_eq!(
             storage[&B256::from(tempo_state::slots::TEMPO_BLOCK_HASH.to_be_bytes())],
             l1_header.hash_slow(),
+        );
+        assert_eq!(
+            storage[&B256::from(tempo_state::slots::TEMPO_STATE_ROOT.to_be_bytes())],
+            l1_header.inner.state_root,
         );
 
         let fee_manager_storage = genesis.alloc[&ZONE_FEE_MANAGER_ADDRESS]
