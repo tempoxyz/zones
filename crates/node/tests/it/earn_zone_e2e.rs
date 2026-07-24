@@ -102,12 +102,6 @@ alloy_sol_types::sol! {
         address refundRecipient;
     }
 
-    struct EarnZoneReturn {
-        uint256 keyIndex;
-        EarnEncryptedDepositPayload encrypted;
-        address refundRecipient;
-    }
-
     struct EarnCallbackData {
         EarnFlow flow;
         address earnVault;
@@ -636,7 +630,8 @@ impl EarnZoneFixture {
             .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
             .await?;
         let action_id = keccak256(encrypted.ciphertext.as_ref());
-        let destination_data = EarnZoneReturn {
+        let destination_data = EarnZoneDelivery {
+            portal: self.portal,
             keyIndex: key_index,
             encrypted: map_encrypted_payload(encrypted),
             refundRecipient: refund_recipient,
