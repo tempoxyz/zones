@@ -20,7 +20,7 @@ use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     execution::{CallCheck, CallRuleError, CallRules},
-    storage::{L1State, L1StorageReader, ReadWith},
+    storage::{L1State, L1StorageReader},
 };
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
@@ -125,8 +125,9 @@ impl<P: L1StorageReader> TIP20Rules<P> {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        ZonePortal::new(self.l1.portal()).is_sequencer[caller]
-            .read_with(&self.l1)
+        let portal = ZonePortal::new(self.l1.portal());
+        self.l1
+            .read_l1(&portal.is_sequencer[caller])
             .map_err(CallRuleError::Tempo)
     }
 }

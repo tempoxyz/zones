@@ -16,15 +16,27 @@ use crate::tempo_state::TempoState;
 
 pub(crate) use tempo_precompiles::storage::*;
 
-/// Explicitly reads a typed slot from a caller-provided storage backend.
-pub(crate) trait ReadWith<T: Storable> {
-    fn read_with<S: StorageOps>(&self, storage: &S) -> tempo_precompiles::Result<T>;
+struct L1Storage<'a, P> {
+    l1: &'a L1State<P>,
+    account: Address,
 }
 
-impl<T: Storable> ReadWith<T> for Slot<T> {
-    fn read_with<S: StorageOps>(&self, storage: &S) -> tempo_precompiles::Result<T> {
-        let ctx = self.offset().map_or(LayoutCtx::FULL, LayoutCtx::packed);
-        T::load(storage, self.slot(), ctx)
+impl<P: L1StorageReader> StorageOps for L1Storage<'_, P> {
+    fn load(&self, slot: U256) -> tempo_precompiles::Result<U256> {
+        let anchor = match self.l1.get_anchor() {
+            Some(anchor) => anchor,
+            None => TempoState::new().tempo_block_number.read()?,
+        };
+        self.l1
+            .read_l1_storage(self.account, slot.into(), anchor)
+            .map(Into::into)
+            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))
+    }
+
+    fn store(&mut self, _slot: U256, _value: U256) -> tempo_precompiles::Result<()> {
+        Err(TempoPrecompileError::Fatal(
+            "L1 storage is read-only".into(),
+        ))
     }
 }
 
@@ -133,23 +145,14 @@ impl<P: L1StorageReader> L1State<P> {
         self.set_anchor(block_number)?;
         self.provider.read_l1_storage(account, slot, block_number)
     }
-}
 
-impl<P: L1StorageReader> StorageOps for L1State<P> {
-    fn load(&self, slot: U256) -> tempo_precompiles::Result<U256> {
-        let anchor = match self.get_anchor() {
-            Some(anchor) => anchor,
-            None => TempoState::new().tempo_block_number.read()?,
+    /// Reads and decodes a typed slot from an L1 account at the active anchor.
+    pub fn read_l1<T: Storable>(&self, slot: &Slot<T>) -> tempo_precompiles::Result<T> {
+        let storage = L1Storage {
+            l1: self,
+            account: slot.address(),
         };
-        self.read_l1_storage(self.portal_address, slot.into(), anchor)
-            .map(Into::into)
-            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))
-    }
-
-    fn store(&mut self, _slot: U256, _value: U256) -> tempo_precompiles::Result<()> {
-        Err(TempoPrecompileError::Fatal(
-            "L1 portal storage is read-only".into(),
-        ))
+        T::load(&storage, slot.slot(), slot.ctx())
     }
 }
 
