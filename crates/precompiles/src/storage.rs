@@ -139,10 +139,10 @@ impl<P: L1StorageReader> L1State<P> {
     /// resolved through [`Self::read_l1`] rather than the local EVM journal.
     pub fn read_portal<T: Storable>(
         &self,
-        select: impl for<'a> FnOnce(&'a ZonePortal) -> &'a Slot<T>,
+        select_slot: impl for<'a> FnOnce(&'a ZonePortal) -> &'a Slot<T>,
     ) -> tempo_precompiles::Result<T> {
         let portal = ZonePortal::new(self.portal_address);
-        self.read_l1(select(&portal))
+        self.read_l1(select_slot(&portal))
     }
 }
 

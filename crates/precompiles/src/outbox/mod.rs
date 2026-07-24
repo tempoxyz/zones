@@ -10,7 +10,7 @@ use alloy_primitives::{Address, B256, Bytes, U256};
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
-    storage::{ContractStorage, Handler, Mapping, Slot},
+    storage::{ContractStorage, Handler, Mapping},
     tip20::{ITIP20, TIP20Error, TIP20Token},
 };
 use tempo_precompiles_macros::{Storable, contract};
@@ -19,8 +19,7 @@ use tempo_zone_contracts::{
     ZonePortalError,
 };
 use zone_primitives::constants::{
-    MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ZONE_INBOX_ADDRESS,
-    ZONE_OUTBOX_ADDRESS,
+    MAX_WITHDRAWAL_GAS_LIMIT, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
 
 use crate::{
@@ -332,10 +331,7 @@ impl ZoneOutbox {
         call: IZoneOutbox::setTempoGasRateCall,
     ) -> ZoneResult<()> {
         self.ensure_sequencer(l1, caller)?;
-        let max_tempo_gas_rate = l1.read_l1(&Slot::new(
-            PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
-            l1.portal_address(),
-        ))?;
+        let max_tempo_gas_rate = l1.read_portal(|portal| &portal.max_tempo_gas_rate)?;
         if call._tempoGasRate > max_tempo_gas_rate {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());
         }
