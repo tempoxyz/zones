@@ -678,7 +678,7 @@ where
 /// This must be called **once per L1 block** at the start of a zone block (before user txs).
 /// It calls [`IZoneInbox.advanceTempo`](crate::abi::IZoneInbox) which atomically:
 /// - Advances the zone's view of Tempo by processing the L1 block header
-/// - Enables newly-bridged TIP-20 tokens via the zone's TIP20Factory precompile
+/// - Activates newly-bridged TIP-20 tokens directly in the ZoneInbox precompile
 /// - Processes deposits from the queue (minting zone tokens to recipients)
 /// - Validates the deposit hash chain against Tempo state
 ///

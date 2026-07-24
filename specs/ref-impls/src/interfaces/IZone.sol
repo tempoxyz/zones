@@ -23,6 +23,20 @@ interface IZoneToken {
 
     function burn(uint256 amount) external;
 
+    function initialize(
+        address admin,
+        string calldata name,
+        string calldata symbol,
+        string calldata currency,
+        address quoteToken,
+        address policyAdmin
+    )
+        external;
+
+    function ISSUER_ROLE() external view returns (bytes32);
+
+    function grantRole(bytes32 role, address account) external;
+
     function transfer(address to, uint256 amount) external returns (bool);
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
@@ -167,7 +181,7 @@ struct DecryptionData {
                     CRYPTOGRAPHIC PRECOMPILES
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Token to be enabled on the zone via the TIP20 factory
+/// @notice Token to be activated directly by the ZoneInbox
 struct EnabledToken {
     address token;
     string name;
@@ -175,22 +189,8 @@ struct EnabledToken {
     string currency;
 }
 
-/// @title ITIP20ZoneFactory
-/// @notice Interface for the zone's TIP20 factory that enables new tokens
-interface ITIP20ZoneFactory {
-
-    function enableToken(
-        address token,
-        string calldata name,
-        string calldata symbol,
-        string calldata currency
-    )
-        external;
-
-}
-
-// TIP20 factory predeploy address
-address constant TIP20_FACTORY_ADDRESS = 0x20Fc000000000000000000000000000000000000;
+// Default quote token for zone TIP-20 activation.
+address constant PATH_USD_ADDRESS = 0x20C0000000000000000000000000000000000000;
 
 // Precompile address for Chaum-Pedersen proof verification
 // Predeploy at 0x1c00000000000000000000000000000000000100
@@ -1121,7 +1121,7 @@ interface IZoneInbox {
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid encrypted deposits, in order
-    /// @param enabledTokens Tokens to enable on the zone via the TIP20 factory
+    /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,

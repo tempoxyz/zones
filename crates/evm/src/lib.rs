@@ -22,9 +22,8 @@ use crate::{
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_FEE_MANAGER_ADDRESS,
-        ZONE_TIP20_FACTORY_ADDRESS, ZoneInbox, ZonePrecompileEnv, ZoneTokenFactory,
-        create_tip20_precompile, create_tip403_precompile, create_zone_fee_manager_precompile,
-        tx_context::ZoneTxContext,
+        ZoneInbox, ZonePrecompileEnv, create_tip20_precompile, create_tip403_precompile,
+        create_zone_fee_manager_precompile, tx_context::ZoneTxContext,
     },
 };
 use alloy_evm::{
@@ -54,8 +53,8 @@ use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
     RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
-    TIP20_CHANNEL_RESERVE_ADDRESS, account_keychain::AccountKeychain, error::Result as TempoResult,
-    nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
+    TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS, account_keychain::AccountKeychain,
+    error::Result as TempoResult, nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
     storage::actions::StorageActions, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
@@ -121,9 +120,8 @@ where
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
             Some(AesGcmDecrypt::create(&env))
         });
-        precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
-            Some(ZoneTokenFactory::create(&env))
-        });
+        // Zones activate bridged TIP-20s directly in the Inbox and expose no token factory.
+        precompiles.apply_precompile(&TIP20_FACTORY_ADDRESS, |_| None);
         precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
         precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
         let fee_env = env.clone();
