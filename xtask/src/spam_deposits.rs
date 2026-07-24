@@ -198,7 +198,7 @@ impl SpamDeposits {
                 let tx = tempo_primitives::TempoTransaction {
                     chain_id,
                     max_fee_per_gas: gas_price * 3,
-                    max_priority_fee_per_gas: gas_price,
+                    max_priority_fee_per_gas: 0,
                     gas_limit: 2_000_000,
                     calls: vec![Call {
                         to: TxKind::Call(self.portal),

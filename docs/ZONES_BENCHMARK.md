@@ -343,7 +343,7 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='cebfc5661ca713c4c1cf8099d68fde20c7a3b9c0'
+export TXGEN_REV='56025c9aa45b799403fe512efca51a9a2af212c6'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
@@ -710,7 +710,7 @@ configured write RPC. Each job:
    putting the phrase in workflow arguments or artifacts;
 2. restores private writable copies of the two isolated Schelk virgin volumes;
 3. checks out the exact Tempo revision and txgen commit
-   `cebfc5661ca713c4c1cf8099d68fde20c7a3b9c0`, then builds Tempo and Zone
+   `56025c9aa45b799403fe512efca51a9a2af212c6`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook

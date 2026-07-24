@@ -257,17 +257,9 @@ pub(crate) struct BenchmarkPreflight {
     #[arg(long)]
     l1_max_fee_per_gas: Option<u128>,
 
-    /// Override L1 maxPriorityFeePerGas (defaults to zero).
-    #[arg(long)]
-    l1_max_priority_fee_per_gas: Option<u128>,
-
     /// Override the queried Zone gas price used as maxFeePerGas.
     #[arg(long)]
     zone_max_fee_per_gas: Option<u128>,
-
-    /// Override Zone maxPriorityFeePerGas (defaults to maxFeePerGas).
-    #[arg(long)]
-    zone_max_priority_fee_per_gas: Option<u128>,
 
     /// Gas limit for L1 deposit transactions.
     #[arg(long, default_value_t = 2_000_000)]
@@ -716,38 +708,27 @@ impl BenchmarkPreflight {
         let l1_max_fee_per_gas = self
             .l1_max_fee_per_gas
             .unwrap_or_else(|| default_l1_max_fee_per_gas(queried_l1_gas_price));
-        let l1_max_priority_fee_per_gas = self.l1_max_priority_fee_per_gas.unwrap_or_default();
+        let l1_max_priority_fee_per_gas = 0;
         // A fresh Zone can return zero from eth_gasPrice before it has ordinary transaction
         // history. Its genesis and public transaction filler still use Tempo's T0 base fee, so
         // never render or budget a zero-fee transaction from that estimate.
         let zone_max_fee_per_gas = self
             .zone_max_fee_per_gas
             .unwrap_or_else(|| queried_zone_gas_price.max(u128::from(TEMPO_T0_BASE_FEE)));
-        let zone_max_priority_fee_per_gas = self
-            .zone_max_priority_fee_per_gas
-            .unwrap_or(zone_max_fee_per_gas);
+        let zone_max_priority_fee_per_gas = 0;
         validate_gas_prices("L1", l1_max_fee_per_gas, l1_max_priority_fee_per_gas)?;
         validate_gas_prices("Zone", zone_max_fee_per_gas, zone_max_priority_fee_per_gas)?;
         let activity_transaction_capacity = u64::from(self.accounts)
             .checked_mul(self.transactions_per_account)
             .ok_or_else(|| eyre!("activity transaction capacity overflows u64"))?;
         let approval_fee_bump = u128::from(self.accounts);
-        let (l1_approval_max_fee_per_gas, _) = expiring_fee_caps(
-            l1_max_fee_per_gas,
-            l1_max_priority_fee_per_gas,
-            approval_fee_bump,
-        )?;
-        let (zone_approval_max_fee_per_gas, _) = expiring_fee_caps(
-            zone_max_fee_per_gas,
-            zone_max_priority_fee_per_gas,
-            approval_fee_bump,
-        )?;
+        let l1_approval_max_fee_per_gas =
+            expiring_max_fee_cap(l1_max_fee_per_gas, approval_fee_bump)?;
+        let zone_approval_max_fee_per_gas =
+            expiring_max_fee_cap(zone_max_fee_per_gas, approval_fee_bump)?;
         let activity_fee_bump = u128::from(activity_transaction_capacity);
-        let (activity_max_fee_per_gas, _) = expiring_fee_caps(
-            zone_max_fee_per_gas,
-            zone_max_priority_fee_per_gas,
-            activity_fee_bump,
-        )?;
+        let activity_max_fee_per_gas =
+            expiring_max_fee_cap(zone_max_fee_per_gas, activity_fee_bump)?;
 
         let mut states = Vec::with_capacity(signers.len());
         for (offset, signer) in signers.into_iter().enumerate() {
@@ -1202,18 +1183,10 @@ fn default_l1_max_fee_per_gas(queried_gas_price: u128) -> u128 {
     queried_gas_price.max(u128::from(TEMPO_T7_BASE_FEE_CAP))
 }
 
-fn expiring_fee_caps(
-    max_fee: u128,
-    max_priority: u128,
-    maximum_bump: u128,
-) -> eyre::Result<(u128, u128)> {
-    let max_fee = max_fee
+fn expiring_max_fee_cap(max_fee: u128, maximum_bump: u128) -> eyre::Result<u128> {
+    max_fee
         .checked_add(maximum_bump)
-        .ok_or_else(|| eyre!("maxFeePerGas overflows the txgen expiring-nonce uniqueness bump"))?;
-    let max_priority = max_priority.checked_add(maximum_bump).ok_or_else(|| {
-        eyre!("maxPriorityFeePerGas overflows the txgen expiring-nonce uniqueness bump")
-    })?;
-    Ok((max_fee, max_priority))
+        .ok_or_else(|| eyre!("maxFeePerGas overflows the txgen expiring-nonce uniqueness bump"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2031,10 +2004,9 @@ mod tests {
     }
 
     #[test]
-    fn expiring_fee_cap_reserves_txgen_uniqueness_bump() {
-        assert_eq!(expiring_fee_caps(100, 90, 25).unwrap(), (125, 115));
-        assert!(expiring_fee_caps(u128::MAX, 90, 1).is_err());
-        assert!(expiring_fee_caps(100, u128::MAX, 1).is_err());
+    fn expiring_max_fee_cap_reserves_txgen_uniqueness_bump() {
+        assert_eq!(expiring_max_fee_cap(100, 25).unwrap(), 125);
+        assert!(expiring_max_fee_cap(u128::MAX, 1).is_err());
     }
 
     #[test]
@@ -2206,8 +2178,9 @@ mod tests {
             "roundtrip-scenario.yml",
         ] {
             let contents = fs::read_to_string(output.join(name)).unwrap();
-            let _: Value = serde_yaml::from_str(&contents).unwrap();
+            let spec: Value = serde_yaml::from_str(&contents).unwrap();
             assert!(!contents.contains("__"), "unresolved placeholder in {name}");
+            assert_zero_priority_fees(&spec, name);
         }
         for name in [
             "deposit.yml",
@@ -3515,7 +3488,7 @@ mod tests {
             l1_max_fee_per_gas: 100_000_000_000,
             l1_max_priority_fee_per_gas: 0,
             zone_max_fee_per_gas: 200_000_000_000,
-            zone_max_priority_fee_per_gas: 200_000_000_000,
+            zone_max_priority_fee_per_gas: 0,
             deposit_gas_limit: 2_000_000,
             activity_gas_limit: 500_000,
             withdrawal_tx_gas_limit: 10_000_000,
@@ -3545,6 +3518,29 @@ mod tests {
         ));
         fs::create_dir_all(&output).unwrap();
         output
+    }
+
+    fn assert_zero_priority_fees(value: &Value, source: &str) {
+        match value {
+            Value::Mapping(mapping) => {
+                for (key, value) in mapping {
+                    if key.as_str() == Some("max_priority_fee_per_gas") {
+                        assert_eq!(
+                            value.as_u64(),
+                            Some(0),
+                            "nonzero max priority fee in {source}"
+                        );
+                    }
+                    assert_zero_priority_fees(value, source);
+                }
+            }
+            Value::Sequence(sequence) => {
+                for value in sequence {
+                    assert_zero_priority_fees(value, source);
+                }
+            }
+            _ => {}
+        }
     }
 
     fn generate(txgen: &std::ffi::OsStr, spec: &Path) -> Vec<serde_json::Value> {
