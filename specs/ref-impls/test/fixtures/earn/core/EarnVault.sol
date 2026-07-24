@@ -933,4 +933,4 @@ contract EarnVault is IEarnVault {
         }
     }
 
-    }
+}

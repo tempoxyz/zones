@@ -1174,11 +1174,7 @@ impl EarnZoneFixture {
                 limits,
             )
             .await?;
-        let callback_gas_limit = if input_token == self.vault_asset {
-            CALLBACK_GAS_LIMIT
-        } else {
-            CALLBACK_GAS_LIMIT
-        };
+        let callback_gas_limit = CALLBACK_GAS_LIMIT;
         self.user
             .withdraw_token_with(
                 input_token,
