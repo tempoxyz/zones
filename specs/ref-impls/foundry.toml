@@ -9,7 +9,6 @@ libs = ["lib"]
 extra_output = ["storageLayout"]
 fs_permissions = [{ access = "read-write", path = "./" }]
 remappings = [
-    "@openzeppelin/contracts/=test/fixtures/earn/openzeppelin/",
     "tempo-std/=lib/tempo-std/src/",
     "forge-std/=lib/forge-std/src/",
 ]

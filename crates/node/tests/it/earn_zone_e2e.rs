@@ -1,9 +1,9 @@
 //! Tempo Earn scenarios that cross the public L1 / private Zone boundary.
 //!
-//! The Solidity fixtures under `specs/ref-impls/test/fixtures/earn` are copied from Tempo Earn. These
-//! tests deliberately exercise the complete callback path: a private withdrawal settles on L1,
-//! the Earn router deposits or redeems through the vault stack, and the output is encrypted back
-//! into the originating Zone.
+//! CI builds the Solidity artifacts from a pinned Tempo Earn checkout. These tests deliberately
+//! exercise the complete callback path: a private withdrawal settles on L1, the Earn router
+//! deposits or redeems through the vault stack, and the output is encrypted back into the
+//! originating Zone.
 
 use crate::utils::{
     L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, forge_bytecode, spawn_sequencer,
