@@ -103,7 +103,7 @@ withdrawal recipient. Every admitted benchmark user has the same `Account`
 role needed for deposit refunds and fallbacks, so closed access mode also
 permits a plain withdrawal to any of those users. The scenario still fixes the
 off-ramp destination to the bridge wallet and verifies that exact
-receipt-scoped event.
+transaction-hash-scoped event.
 
 Each composable request uses the exact eight-argument withdrawal overload, the
 configured callback budget (`10,000,000` gas by default), an empty `revealTo`,
@@ -111,13 +111,13 @@ an account fallback recipient, and a random action ID used both as the
 withdrawal memo and callback correlation key.
 The terminal matcher requires all of: request transaction hash, sender tag,
 queue/deposit hash, action ID, token, recipient, amount, and receipt-scoped
-event. Balance polling is not a completion signal.
+or transaction-hash-scoped event. Balance polling is not a completion signal.
 
 Every measured Zone withdrawal first waits at most 45 seconds for its exact
-source transaction receipt and `WithdrawalRequested` event. Only a confirmed,
-successful request advances to the longer cross-chain wait. This prevents a
-reverted, expired, or never-included request from occupying a journey slot for
-the full cross-chain timeout.
+transaction-hash-scoped `WithdrawalRequested` event. Only a successful request
+advances to the longer cross-chain wait. This prevents a reverted, expired, or
+never-included request from occupying a journey slot for the full cross-chain
+timeout.
 
 `ZONES_BENCH_RECIPIENT_MODE=existing|random` controls destination reuse. In the
 closed-loop neobank journey it changes only the ordinary private DLUSD transfer:
@@ -299,7 +299,7 @@ each account's exact Zone EarnShare balance before starting the load.
 Each measured journey submits a composable EarnShare withdrawal to
 `EarnRouter` with the configured nonzero callback gas limit, fallback
 recipient, sender tag, action ID, and encrypted return payload. Completion
-requires the receipt-scoped Zone `WithdrawalRequested`, exact L1
+requires the transaction-hash-scoped Zone `WithdrawalRequested`, exact L1
 `WithdrawalProcessed`, receipt-scoped `EarnRedeem`, and exact Zone encrypted
 `DepositProcessed` for the returned DLUSD. The postcondition verifies the
 remaining L1 share supply and aggregate private Zone EarnShare balance.

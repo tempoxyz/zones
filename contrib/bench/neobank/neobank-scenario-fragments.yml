@@ -180,23 +180,23 @@ fragments:
                 - "0x"
         save: request
       - id: request_result
-        depends_on: [request]
+        depends_on: [zone_before, request]
         wait_log:
           chain: zone
+          from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
-          events:
-            requested:
-              address: "__OUTBOX__"
-              abi: ZoneOutbox
-              event: WithdrawalRequested
-              where:
-                sender: { param: sender_address }
-                token: { param: input_token }
-                to: "__EARN_ROUTER__"
-                amount: { param: amount }
-                memo: { param: action_id }
-                gasLimit: __CALLBACK_GAS_LIMIT__
+          address: "__OUTBOX__"
+          abi: ZoneOutbox
+          event: WithdrawalRequested
+          where:
+            sender: { param: sender_address }
+            token: { param: input_token }
+            to: "__EARN_ROUTER__"
+            amount: { param: amount }
+            memo: { param: action_id }
+            gasLimit: __CALLBACK_GAS_LIMIT__
+          max_block_range: 1000
         timeout: 45s
         save: request_result
       - id: l1_processed_locator
@@ -334,23 +334,23 @@ fragments:
                 - "0x"
         save: request
       - id: request_result
-        depends_on: [request]
+        depends_on: [zone_before, request]
         wait_log:
           chain: zone
+          from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
-          events:
-            requested:
-              address: "__OUTBOX__"
-              abi: ZoneOutbox
-              event: WithdrawalRequested
-              where:
-                sender: { param: sender_address }
-                token: "__EARN_TOKEN__"
-                to: "__EARN_ROUTER__"
-                amount: { param: amount }
-                memo: { param: action_id }
-                gasLimit: __CALLBACK_GAS_LIMIT__
+          address: "__OUTBOX__"
+          abi: ZoneOutbox
+          event: WithdrawalRequested
+          where:
+            sender: { param: sender_address }
+            token: "__EARN_TOKEN__"
+            to: "__EARN_ROUTER__"
+            amount: { param: amount }
+            memo: { param: action_id }
+            gasLimit: __CALLBACK_GAS_LIMIT__
+          max_block_range: 1000
         timeout: 45s
         save: request_result
       - id: l1_processed_locator
@@ -486,23 +486,23 @@ fragments:
                 - "0x"
         save: request
       - id: request_result
-        depends_on: [request]
+        depends_on: [zone_before, request]
         wait_log:
           chain: zone
+          from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
-          events:
-            requested:
-              address: "__OUTBOX__"
-              abi: ZoneOutbox
-              event: WithdrawalRequested
-              where:
-                sender: { param: sender_address }
-                token: { param: input_token }
-                to: "__EARN_ROUTER__"
-                amount: { param: amount }
-                memo: { param: action_id }
-                gasLimit: __CALLBACK_GAS_LIMIT__
+          address: "__OUTBOX__"
+          abi: ZoneOutbox
+          event: WithdrawalRequested
+          where:
+            sender: { param: sender_address }
+            token: { param: input_token }
+            to: "__EARN_ROUTER__"
+            amount: { param: amount }
+            memo: { param: action_id }
+            gasLimit: __CALLBACK_GAS_LIMIT__
+          max_block_range: 1000
         timeout: 45s
         save: request_result
       - id: l1_processed_locator
@@ -548,7 +548,7 @@ fragments:
               abi: ZonePortal
               event: WithdrawalBounceBack
               where:
-                fallbackNonce: { var: request_result.events.requested.args.fallbackNonce }
+                fallbackNonce: { var: request_result.args.fallbackNonce }
                 token: { param: input_token }
                 amount: { param: amount }
         save: l1_result

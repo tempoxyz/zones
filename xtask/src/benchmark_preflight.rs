@@ -2720,16 +2720,17 @@ mod tests {
             steps[7]["wait_log"]["transaction_hash"]["var"],
             "offramp.tx_hash"
         );
-        assert_eq!(steps[7]["timeout"], "45s");
         assert_eq!(
-            steps[7]["wait_log"]["events"]["requested"]["event"],
-            "WithdrawalRequested"
+            steps[7]["wait_log"]["from_block"]["var"],
+            "earn_redeem.zone_return.processed.block_number"
         );
+        assert_eq!(steps[7]["timeout"], "45s");
+        assert_eq!(steps[7]["wait_log"]["event"], "WithdrawalRequested");
         assert_eq!(
-            steps[7]["wait_log"]["events"]["requested"]["where"]["amount"]["var"],
+            steps[7]["wait_log"]["where"]["amount"]["var"],
             "earn_redeem.zone_return.processed.args.amount"
         );
-        let requested = &steps[7]["wait_log"]["events"]["requested"]["where"];
+        let requested = &steps[7]["wait_log"]["where"];
         assert_eq!(requested["gasLimit"], 0);
         assert_eq!(requested["fee"], 0);
         assert_eq!(requested["data"], "0x");
@@ -3074,9 +3075,10 @@ mod tests {
                 "request.tx_hash"
             );
             assert_eq!(
-                request_result["wait_log"]["events"]["requested"]["event"],
-                "WithdrawalRequested"
+                request_result["wait_log"]["from_block"]["var"],
+                "zone_before.block_number"
             );
+            assert_eq!(request_result["wait_log"]["event"], "WithdrawalRequested");
             assert_eq!(request_result["timeout"], "45s");
             let locator = &fragments["fragments"][name]["steps"][5];
             assert_eq!(
@@ -3114,7 +3116,7 @@ mod tests {
         assert_eq!(
             bounce_fragment["steps"][6]["wait_log"]["events"]["bounceback"]["where"]["fallbackNonce"]
                 ["var"],
-            "request_result.events.requested.args.fallbackNonce"
+            "request_result.args.fallbackNonce"
         );
         assert_eq!(
             bounce_fragment["steps"][7]["wait_log"]["event"],

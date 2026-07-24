@@ -141,26 +141,26 @@ scenario:
       save: offramp
 
     - id: offramp_result
-      depends_on: [offramp]
+      depends_on: [earn_redeem.zone_return.processed, offramp]
       wait_log:
         chain: zone
+        from_block: { var: earn_redeem.zone_return.processed.block_number }
         transaction_hash: { var: offramp.tx_hash }
         sender: { var: offramp.sender }
-        events:
-          requested:
-            address: "__OUTBOX__"
-            abi: ZoneOutbox
-            event: WithdrawalRequested
-            where:
-              sender: { var: account.address }
-              token: "__DLUSD__"
-              to: "__BRIDGE_WALLET__"
-              amount: { var: earn_redeem.zone_return.processed.args.amount }
-              fee: 0
-              memo: { var: offramp_action_id }
-              gasLimit: 0
-              data: "0x"
-              revealTo: "0x"
+        address: "__OUTBOX__"
+        abi: ZoneOutbox
+        event: WithdrawalRequested
+        where:
+          sender: { var: account.address }
+          token: "__DLUSD__"
+          to: "__BRIDGE_WALLET__"
+          amount: { var: earn_redeem.zone_return.processed.args.amount }
+          fee: 0
+          memo: { var: offramp_action_id }
+          gasLimit: 0
+          data: "0x"
+          revealTo: "0x"
+        max_block_range: 1000
       timeout: 45s
       save: offramp_result
 
