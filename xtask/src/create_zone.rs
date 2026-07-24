@@ -14,6 +14,8 @@ use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_contracts::precompiles::ITIP403Registry;
+use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_zone_contracts::{
     ZONE_MESSENGER_ADDRESS, ZONE_VERIFIER_ADDRESS, ZoneFactory, ZonePortal,
 };
@@ -154,6 +156,39 @@ impl CreateZone {
 
         println!("Verifier: {ZONE_VERIFIER_ADDRESS}");
         println!("Messenger: {ZONE_MESSENGER_ADDRESS}");
+
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let mut policy = registry
+            .tokenTransferPolicyId(self.initial_token)
+            .call()
+            .await?;
+        if !policy.isSet {
+            println!(
+                "Migrating legacy transfer policy for initial token {}...",
+                self.initial_token
+            );
+            let receipt = registry
+                .migrateTransferPolicyIds(vec![self.initial_token])
+                .send_sync()
+                .await?;
+            if !receipt.status() {
+                return Err(eyre!(
+                    "transfer policy migration reverted (tx: {:?})",
+                    receipt.transaction_hash
+                ));
+            }
+
+            policy = registry
+                .tokenTransferPolicyId(self.initial_token)
+                .call()
+                .await?;
+        }
+        if !policy.isSet {
+            return Err(eyre!(
+                "transfer policy is not set for initial token {} after migration",
+                self.initial_token
+            ));
+        }
 
         // Anchor before createZone so the zone replays the creation block and its
         // initial TokenEnabled event during L1 backfill.
