@@ -1,5 +1,8 @@
 version: 1
 
+include:
+  - ./neobank-scenario-fragments.yml
+
 chains:
   l1:
     network: tempo
@@ -27,74 +30,26 @@ scenario:
   bindings:
     account:
       account: { pool: users, select: lease }
-    withdrawal_action_id:
+    earn_redeem_action_id:
       bytes32: { random_bytes: 32 }
 
   steps:
-    - checkpoint: { chain: l1 }
-      save: l1_before_withdrawal
-
-    - submit:
-        chain: zone
-        template: offramp
-        with:
-          from: { var: account.ref }
-          fee_token: "__DLUSD__"
-          call:
-            args:
-              - "__DLUSD__"
-              - "__BRIDGE_WALLET__"
-              - __WITHDRAWAL_ONLY_AMOUNT__
-              - { var: withdrawal_action_id }
-              - 0
-              - { var: account.address }
-              - "0x"
-              - "0x"
-      save: withdrawal
-
-    - wait_receipt:
-        chain: zone
-        transaction_hash: { var: withdrawal.tx_hash }
-        sender: { var: withdrawal.sender }
-      timeout: 45s
-      save: withdrawal_receipt
-
-    - wait_log:
-        chain: zone
-        from_block: { var: withdrawal_receipt.block_number }
-        transaction_hash: { var: withdrawal.tx_hash }
-        sender: { var: withdrawal.sender }
-        address: "__OUTBOX__"
-        abi: ZoneOutbox
-        event: WithdrawalRequested
-        where:
-          sender: { var: account.address }
-          token: "__DLUSD__"
-          to: "__BRIDGE_WALLET__"
-          amount: __WITHDRAWAL_ONLY_AMOUNT__
-          fee: 0
-          memo: { var: withdrawal_action_id }
-          gasLimit: 0
-          data: "0x"
-          revealTo: "0x"
-        max_block_range: 1000
-      timeout: 45s
-      save: withdrawal_requested
-
-    - wait_log:
-        chain: l1
-        from_block: { var: l1_before_withdrawal.block_number }
-        address: "__PORTAL__"
-        abi: ZonePortal
-        event: WithdrawalProcessed
-        where:
-          to: "__BRIDGE_WALLET__"
-          senderTag:
-            keccak256_packed:
-              types: [address, bytes32]
-              values: [{ var: account.address }, { var: withdrawal.tx_hash }]
-          token: "__DLUSD__"
-          amount: __WITHDRAWAL_ONLY_AMOUNT__
-          callbackSuccess: true
-        max_block_range: 1000
-      save: withdrawal_processed
+    - use: earn-redeem-and-return
+      as: earn_redeem
+      with:
+        sender: { var: account.ref }
+        sender_address: { var: account.address }
+        recipient: { var: account.address }
+        output_token: "__DLUSD__"
+        fee_token: "__DLUSD__"
+        amount: "__EARN_REDEEM_AMOUNT__"
+        min_vault_assets: "__EARN_REDEEM_AMOUNT__"
+        min_output_amount: "__EARN_REDEEM_AMOUNT__"
+        action_id:
+          keccak256_packed:
+            types: [bytes32, bytes32]
+            values:
+              - "0xc7d7f05674b5fc05e9d028fce107440aecad34cf4fed68fb31fe1600226cd7a1"
+              - { var: earn_redeem_action_id }
+        fallback_recipient: { var: account.address }
+        refund_recipient: { var: account.address }

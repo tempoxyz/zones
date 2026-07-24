@@ -17,10 +17,9 @@ boundaries:
 
 Three focused presets reuse the same topology and correlation rules when only
 one bridge direction should be loaded. `encrypted-deposit` measures the first
-boundary independently. `private-withdrawal` prepares portal-backed private
-DLUSD outside measurement, then measures the fifth boundary independently.
-`swapped-redemption` prepares a private EarnShare position outside measurement,
-then measures one swapped Earn redemption and its encrypted DLUSD
+boundary independently. `private-withdrawal` and `swapped-redemption` prepare a
+private EarnShare position outside measurement, then measure one composable
+EarnShare withdrawal, vault redemption, configured swap, and encrypted DLUSD
 return.
 
 The canonical `EarnFactory`, `EarnVault`, `EarnFees`, `EarnRouter`,
@@ -134,9 +133,11 @@ behavior is described in `docs/ZONES_BENCHMARK.md`.
 `contrib/bench/neobank/private-flow-scenario.yml` describes the complete
 journey. `encrypted-deposit-scenario.yml` isolates an encrypted DLUSD portal
 deposit and its exact L1 enqueue and Zone terminal events.
-`private-withdrawal-funding-scenario.yml` creates portal-backed private DLUSD
-outside measurement, while `private-withdrawal-scenario.yml` measures the
-corresponding outbox request and exact L1 terminal event.
+`swapped-redemption-position-scenario.yml` creates DLUSD-backed private
+EarnShare positions outside measurement. `private-withdrawal-scenario.yml`
+measures one composable EarnShare withdrawal through `EarnRouter`, vault
+redemption, the selected pathUSD-to-DLUSD swap, and exact encrypted DLUSD
+return.
 `swapped-lifecycle-scenario.yml` isolates the encrypted DLUSD entry,
 swapped Earn deposit, and swapped Earn redemption path used by the lifecycle
 load test. `swapped-redemption-position-scenario.yml` creates the DLUSD-backed
@@ -212,9 +213,9 @@ redemption, `third-party-recipient` for the two-user direct lifecycle,
 `slippage-bounce` for the failed-callback return path, `rewards-redemption` for
 the rewarded private-holder redemption path, or `full-journey` for the
 five-boundary journey. Use `encrypted-deposit` for the focused onramp and
-`private-withdrawal` for the focused off-ramp. The selected preset is recorded
-in the workflow summary and run metadata while the rendered scenario remains
-at the stable results-renderer path.
+`private-withdrawal` for the focused composable redemption. The selected preset
+is recorded in the workflow summary and run metadata while the rendered
+scenario remains at the stable results-renderer path.
 
 The default full-journey run uses 100 accounts, 100 complete journeys, 20
 journey starts per second, and at most 12 benchmark journeys in flight. The
@@ -235,7 +236,6 @@ the 30,000,000 L1 gas limit and 1 GiB L1 state-bloat preset.
 | Preset | Accounts | Journeys | Starts/s | Max in flight | Observed journeys/s | Journey p50 | Journey p95 | Run |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
 | `encrypted-deposit` | 100 | 1,000 | 40 | 100 | 36.334 | 1.505 s | 1.507 s | [29978182968](https://github.com/tempoxyz/zones/actions/runs/29978182968) |
-| `private-withdrawal` | 200 | 1,000 | 30 | 200 | 12.744 | 12.037 s | 28.418 s | [29978430968](https://github.com/tempoxyz/zones/actions/runs/29978430968) |
 | `slippage-bounce` | 100 | 1,000 | 4 | 100 | 1.964 | 50.662 s | 51.445 s | [29979095057](https://github.com/tempoxyz/zones/actions/runs/29979095057) |
 | `rewards-redemption` | 100 | 1,000 | 2 | 100 | 0.986 | 100.875 s | 102.368 s | [29979802140](https://github.com/tempoxyz/zones/actions/runs/29979802140) |
 | `swapped-lifecycle` | 100 | 1,000 | 2 | 100 | 0.984 | 100.864 s | 102.367 s | [29980825511](https://github.com/tempoxyz/zones/actions/runs/29980825511) |
@@ -279,23 +279,17 @@ Published scenario reports use the `neobank-encrypted-deposit` results route.
 
 ### Focused private-withdrawal load
 
-This preset first deposits `ceil(count/accounts) * deposit-amount` DLUSD to
-each benchmark account through the encrypted portal path. That funding run,
-portal approval, and user outbox approval are setup traffic. The runner waits
-for the exact terminal Zone deposit events, then waits up to two minutes for
-the portal's processed-deposit counter to reach the recorded deposit count. It
-verifies that each account can cover every withdrawal plus its worst-case Zone
-transaction fee cap and already has the required outbox allowance before it
-starts measurement.
+This preset creates each account's DLUSD-backed private EarnShare position and
+outbox allowances outside measurement. It verifies the L1 share supply and
+each account's exact Zone EarnShare balance before starting the load.
 
-Each measured journey checkpoints L1, submits the exact eight-argument outbox
-withdrawal with `gasLimit=0`, empty callback data, empty `revealTo`, the leased
-account as fallback recipient, and a random action ID as memo. It then requires
-the successful Zone receipt, its receipt-scoped `WithdrawalRequested`, and the
-exact L1 `WithdrawalProcessed` for the Bridge wallet. The terminal matcher uses
-the sender tag derived from the Zone sender and request transaction hash, plus
-the DLUSD token, amount, recipient, and successful callback flag. The runner
-also verifies the Bridge wallet's aggregate L1 DLUSD increase after the run.
+Each measured journey submits a composable EarnShare withdrawal to
+`EarnRouter` with the configured nonzero callback gas limit, fallback
+recipient, sender tag, action ID, and encrypted return payload. Completion
+requires the receipt-scoped Zone `WithdrawalRequested`, exact L1
+`WithdrawalProcessed`, receipt-scoped `EarnRedeem`, and exact Zone encrypted
+`DepositProcessed` for the returned DLUSD. The postcondition verifies the
+remaining L1 share supply and aggregate private Zone EarnShare balance.
 
 Run it locally with the same fast defaults:
 

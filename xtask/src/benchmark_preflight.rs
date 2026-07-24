@@ -2496,8 +2496,6 @@ mod tests {
             ("__OFFRAMP_AMOUNT__".into(), Value::from(1_u64)),
             ("__CALLBACK_GAS_LIMIT__".into(), Value::from(2_000_000_u64)),
             ("__ONRAMP_AMOUNT__".into(), Value::from(1_000_u64)),
-            ("__WITHDRAWAL_ONLY_AMOUNT__".into(), Value::from(75_u64)),
-            ("__WITHDRAWAL_SETUP_AMOUNT__".into(), Value::from(5_000_u64)),
             (
                 "__REWARD_ONRAMP_PER_ACCOUNT__".into(),
                 Value::from(2_000_u64),
@@ -2535,7 +2533,6 @@ mod tests {
             "../neobank/zone-flow.yml",
             "../neobank/neobank-scenario-fragments.yml",
             "../neobank/encrypted-deposit-scenario.yml",
-            "../neobank/private-withdrawal-funding-scenario.yml",
             "../neobank/private-withdrawal-scenario.yml",
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
@@ -2631,39 +2628,6 @@ mod tests {
             "onramp_action_id"
         );
 
-        let withdrawal_funding: Value = serde_yaml::from_str(
-            &fs::read_to_string(output.join("private-withdrawal-funding-scenario.yml")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            withdrawal_funding["scenario"]["name"],
-            "neobank-private-withdrawal-funding-setup"
-        );
-        assert_eq!(
-            withdrawal_funding["scenario"]["bindings"]["account"]["account"]["select"],
-            "lease"
-        );
-        let withdrawal_funding_steps = withdrawal_funding["scenario"]["steps"]
-            .as_sequence()
-            .unwrap();
-        assert_eq!(withdrawal_funding_steps.len(), 1);
-        let withdrawal_funding_step = &withdrawal_funding_steps[0];
-        assert_eq!(withdrawal_funding_step["use"], "encrypted-zone-entry");
-        assert_eq!(withdrawal_funding_step["as"], "funding");
-        assert_eq!(
-            withdrawal_funding_step["with"]["token"],
-            replacements["__DLUSD__"]
-        );
-        assert_eq!(
-            withdrawal_funding_step["with"]["fee_token"],
-            replacements["__DLUSD__"]
-        );
-        assert_eq!(withdrawal_funding_step["with"]["amount"], 5_000);
-        assert_eq!(
-            withdrawal_funding_step["with"]["memo"]["var"],
-            "funding_action_id"
-        );
-
         let private_withdrawal: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("private-withdrawal-scenario.yml")).unwrap(),
         )
@@ -2679,72 +2643,32 @@ mod tests {
         let private_withdrawal_steps = private_withdrawal["scenario"]["steps"]
             .as_sequence()
             .unwrap();
-        assert_eq!(private_withdrawal_steps.len(), 5);
-        assert_eq!(private_withdrawal_steps[0]["checkpoint"]["chain"], "l1");
-
-        let withdrawal_submit = &private_withdrawal_steps[1]["submit"];
-        assert_eq!(withdrawal_submit["chain"], "zone");
-        assert_eq!(withdrawal_submit["template"], "offramp");
-        assert_eq!(withdrawal_submit["with"]["from"]["var"], "account.ref");
+        assert_eq!(private_withdrawal_steps.len(), 1);
+        let earn_redeem = &private_withdrawal_steps[0];
+        assert_eq!(earn_redeem["use"], "earn-redeem-and-return");
+        assert_eq!(earn_redeem["as"], "earn_redeem");
+        assert_eq!(earn_redeem["with"]["sender"]["var"], "account.ref");
         assert_eq!(
-            withdrawal_submit["with"]["fee_token"],
+            earn_redeem["with"]["sender_address"]["var"],
+            "account.address"
+        );
+        assert_eq!(earn_redeem["with"]["recipient"]["var"], "account.address");
+        assert_eq!(
+            earn_redeem["with"]["output_token"],
             replacements["__DLUSD__"]
         );
-        let withdrawal_args = withdrawal_submit["with"]["call"]["args"]
-            .as_sequence()
-            .unwrap();
-        assert_eq!(withdrawal_args.len(), 8);
-        assert_eq!(withdrawal_args[0], replacements["__DLUSD__"]);
-        assert_eq!(withdrawal_args[1], replacements["__BRIDGE_WALLET__"]);
-        assert_eq!(withdrawal_args[2], 75);
-        assert_eq!(withdrawal_args[3]["var"], "withdrawal_action_id");
-        assert_eq!(withdrawal_args[4], 0);
-        assert_eq!(withdrawal_args[5]["var"], "account.address");
-        assert_eq!(withdrawal_args[6], "0x");
-        assert_eq!(withdrawal_args[7], "0x");
-
+        assert_eq!(earn_redeem["with"]["fee_token"], replacements["__DLUSD__"]);
+        for field in ["amount", "min_vault_assets", "min_output_amount"] {
+            assert_eq!(earn_redeem["with"][field], 100);
+        }
         assert_eq!(
-            private_withdrawal_steps[2]["wait_receipt"]["transaction_hash"]["var"],
-            "withdrawal.tx_hash"
-        );
-        assert_eq!(private_withdrawal_steps[2]["timeout"], "45s");
-
-        let withdrawal_requested = &private_withdrawal_steps[3]["wait_log"];
-        assert_eq!(withdrawal_requested["event"], "WithdrawalRequested");
-        assert_eq!(
-            withdrawal_requested["from_block"]["var"],
-            "withdrawal_receipt.block_number"
+            earn_redeem["with"]["fallback_recipient"]["var"],
+            "account.address"
         );
         assert_eq!(
-            withdrawal_requested["transaction_hash"]["var"],
-            "withdrawal.tx_hash"
+            earn_redeem["with"]["refund_recipient"]["var"],
+            "account.address"
         );
-        assert_eq!(withdrawal_requested["where"]["fee"], 0);
-        assert_eq!(withdrawal_requested["where"]["gasLimit"], 0);
-        assert_eq!(withdrawal_requested["where"]["data"], "0x");
-        assert_eq!(withdrawal_requested["where"]["revealTo"], "0x");
-
-        let withdrawal_processed = &private_withdrawal_steps[4]["wait_log"];
-        assert_eq!(withdrawal_processed["event"], "WithdrawalProcessed");
-        assert_eq!(
-            withdrawal_processed["from_block"]["var"],
-            "l1_before_withdrawal.block_number"
-        );
-        assert_eq!(
-            withdrawal_processed["where"]["to"],
-            replacements["__BRIDGE_WALLET__"]
-        );
-        assert_eq!(
-            withdrawal_processed["where"]["token"],
-            replacements["__DLUSD__"]
-        );
-        assert_eq!(withdrawal_processed["where"]["amount"], 75);
-        assert_eq!(withdrawal_processed["where"]["callbackSuccess"], true);
-        let sender_tag = &withdrawal_processed["where"]["senderTag"]["keccak256_packed"];
-        assert_eq!(sender_tag["types"][0], "address");
-        assert_eq!(sender_tag["types"][1], "bytes32");
-        assert_eq!(sender_tag["values"][0]["var"], "account.address");
-        assert_eq!(sender_tag["values"][1]["var"], "withdrawal.tx_hash");
 
         let scenario: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("private-flow-scenario.yml")).unwrap(),
@@ -3656,8 +3580,6 @@ mod tests {
             ("__OFFRAMP_AMOUNT__".into(), Value::from(1_u64)),
             ("__CALLBACK_GAS_LIMIT__".into(), Value::from(2_000_000_u64)),
             ("__ONRAMP_AMOUNT__".into(), Value::from(1_000_u64)),
-            ("__WITHDRAWAL_ONLY_AMOUNT__".into(), Value::from(75_u64)),
-            ("__WITHDRAWAL_SETUP_AMOUNT__".into(), Value::from(5_000_u64)),
             (
                 "__REWARD_ONRAMP_PER_ACCOUNT__".into(),
                 Value::from(2_000_u64),
@@ -3695,7 +3617,6 @@ mod tests {
             "../neobank/zone-flow.yml",
             "../neobank/neobank-scenario-fragments.yml",
             "../neobank/encrypted-deposit-scenario.yml",
-            "../neobank/private-withdrawal-funding-scenario.yml",
             "../neobank/private-withdrawal-scenario.yml",
             "../neobank/private-flow-scenario.yml",
             "../neobank/swapped-lifecycle-scenario.yml",
@@ -3755,8 +3676,7 @@ mod tests {
 
         for (scenario, expected_steps) in [
             ("encrypted-deposit-scenario.yml", 5),
-            ("private-withdrawal-funding-scenario.yml", 5),
-            ("private-withdrawal-scenario.yml", 5),
+            ("private-withdrawal-scenario.yml", 9),
             ("private-flow-scenario.yml", 30),
             ("swapped-lifecycle-scenario.yml", 23),
             ("swapped-redemption-position-scenario.yml", 14),

@@ -762,7 +762,7 @@ provision_up() {
     esac
     if [[ "$swap_mechanism" == direct-swap ]]; then
         case "$neobank_preset" in
-            full-journey|slippage-bounce|swapped-lifecycle|swapped-redemption)
+            full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle|swapped-redemption)
                 die "direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
                 ;;
         esac
@@ -791,7 +791,7 @@ provision_up() {
                     required_swap_uses="$max_concurrent"
                 fi
                 ;;
-            swapped-redemption)
+            private-withdrawal|swapped-redemption)
                 local setup_journeys_per_account setup_position_uses
                 setup_journeys_per_account=$(((count + accounts - 1) / accounts))
                 setup_position_uses=$((accounts * setup_journeys_per_account))
@@ -825,7 +825,6 @@ provision_up() {
     elif [[ "$profile" == neobank ]]; then
         case "$neobank_preset" in
             encrypted-deposit) ;;
-            private-withdrawal) planned_singleton_withdrawal_gas=1750000 ;;
             *) planned_singleton_withdrawal_gas=$((500000 + 1750000 + callback_gas_limit)) ;;
         esac
     fi

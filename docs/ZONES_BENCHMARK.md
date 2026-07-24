@@ -730,8 +730,8 @@ configured write RPC. Each job:
    applies the file-backed benchmark account map after the 30M-bounded Zone
    creation transaction, prepares approvals and private RPC authorization, and
    runs the selected measured scenario. The `neobank-private-withdrawal`
-   selection first creates and verifies portal-backed private DLUSD outside
-   measurement;
+   selection first creates and verifies DLUSD-backed private EarnShare
+   positions outside measurement;
 9. for `deposit`, runs the independent preflight/generate/bench pipeline; and
 10. renders the JSON report into a Markdown results page on the workflow
    overview, then uploads that page with the rendered benchmark assets,
@@ -744,7 +744,7 @@ routes:
 | Workflow phase | Untimed setup | Measured completion | Results route |
 | --- | --- | --- | --- |
 | `neobank-encrypted-deposit` | Fixture deployment and portal approval | Exact Zone `EncryptedDepositProcessed` correlated to the receipt-scoped L1 encrypted deposit | `/scenarios/neobank-encrypted-deposit` |
-| `neobank-private-withdrawal` | Encrypted DLUSD funding for every account and DLUSD outbox approval | Exact L1 `WithdrawalProcessed` correlated to the successful Zone receipt and receipt-scoped `WithdrawalRequested` | `/scenarios/neobank-private-withdrawal` |
+| `neobank-private-withdrawal` | DLUSD-backed private EarnShare positions and DLUSD/EarnShare outbox approvals | Receipt-scoped EarnShare withdrawal and Earn redemption, followed by the exact encrypted DLUSD `DepositProcessed` return | `/scenarios/neobank-private-withdrawal` |
 
 ### Dispatch configuration
 
@@ -890,9 +890,9 @@ because this self-provisioning workflow starts from a fresh pool with no
 pre-existing Zone balance. Run their independent assets manually against a
 fixture that passes `--fixture-state funded`, or select `roundtrip` to create
 balances within each measured journey. The focused
-`neobank-private-withdrawal` choice is self-contained: it creates encrypted,
-portal-backed DLUSD per account and confirms those deposits outside measurement
-before starting the withdrawal load.
+`neobank-private-withdrawal` choice is self-contained: it creates DLUSD-backed
+private EarnShare positions and verifies them outside measurement before
+starting the composable redemption load.
 
 ### Scenario reporting
 

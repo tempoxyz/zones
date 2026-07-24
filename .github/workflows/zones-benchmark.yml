@@ -408,7 +408,7 @@ jobs:
           esac
           if [ "$INPUT_SWAP_MECHANISM" = direct-swap ]; then
             case "$neobank_preset" in
-              full-journey|slippage-bounce|swapped-lifecycle|swapped-redemption)
+              full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle|swapped-redemption)
                 echo "::error::direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
                 exit 1
                 ;;
@@ -454,7 +454,6 @@ jobs:
           planned_singleton_withdrawal_gas=0
           case "$phase:$neobank_preset" in
             roundtrip:*) planned_singleton_withdrawal_gas=1750000 ;;
-            neobank-e2e:private-withdrawal) planned_singleton_withdrawal_gas=1750000 ;;
             neobank-e2e:encrypted-deposit) ;;
             neobank-e2e:*) planned_singleton_withdrawal_gas=$((500000 + 1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT)) ;;
           esac
@@ -514,7 +513,7 @@ jobs:
                   required_swap_uses=$INPUT_MAX_CONCURRENT
                 fi
                 ;;
-              swapped-redemption)
+              private-withdrawal|swapped-redemption)
                 setup_journeys_per_account=$(((INPUT_COUNT + INPUT_ACCOUNTS - 1) / INPUT_ACCOUNTS))
                 setup_position_uses=$((INPUT_ACCOUNTS * setup_journeys_per_account))
                 if [ "$INPUT_SWAP_MECHANISM" = direct-swap ]; then
