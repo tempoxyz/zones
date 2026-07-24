@@ -91,9 +91,25 @@ struct ScenarioReport {
     steps: Vec<StepReport>,
     total_scenario_latency: Latency,
     #[serde(default)]
+    client_observed_e2e_latency: Option<Latency>,
+    #[serde(default)]
+    observed_critical_path_latency: Option<Latency>,
+    #[serde(default)]
+    causal_edges: Vec<CausalEdgeReport>,
+    #[serde(default)]
     receipt_metrics: Vec<ReceiptMetricReport>,
     #[serde(default)]
     failures: Vec<FailureReport>,
+    #[serde(default)]
+    sampled_instances: Vec<serde_json::Value>,
+}
+
+impl ScenarioReport {
+    fn client_observed_e2e_latency(&self) -> &Latency {
+        self.client_observed_e2e_latency
+            .as_ref()
+            .unwrap_or(&self.total_scenario_latency)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,16 +124,48 @@ struct ScenarioConfiguration {
 struct ReportChain {
     name: String,
     chain_id: u64,
+    #[serde(default)]
+    observation_mode: Option<String>,
+    #[serde(default)]
+    observation_poll_interval_ms: Option<u64>,
+    #[serde(default)]
+    subscription_configured: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 struct StepReport {
     index: usize,
+    #[serde(default)]
+    id: Option<String>,
     name: String,
+    #[serde(default)]
+    chain: Option<String>,
     kind: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
     success: u64,
     failed: u64,
     latency: Latency,
+    #[serde(default)]
+    command_latency: Option<Latency>,
+}
+
+impl StepReport {
+    fn command_latency(&self) -> &Latency {
+        self.command_latency.as_ref().unwrap_or(&self.latency)
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct CausalEdgeReport {
+    relation: String,
+    source_step_id: String,
+    destination_step_id: String,
+    source_milestone: String,
+    destination_milestone: String,
+    observed_latency: Latency,
+    chain_timestamp_delta: Latency,
+    destination_observation_lag: Latency,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,6 +207,10 @@ struct ScenarioDefinition {
 
 #[derive(Debug, Deserialize)]
 struct ScenarioStep {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    depends_on: Vec<String>,
     #[serde(default)]
     save: Option<String>,
     #[serde(default, rename = "timeout")]
@@ -223,6 +275,8 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
         report.configuration.maximum_in_flight,
     )?;
 
+    write_observation_configuration(&mut output, &report.configuration.chains)?;
+
     writeln!(output, "## Throughput\n")?;
     writeln!(output, "| Scope | Count | Effective rate |")?;
     writeln!(output, "| --- | ---: | ---: |")?;
@@ -276,42 +330,65 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
             step.report.success,
             step.report.failed,
             step.report.success as f64 / elapsed_secs,
-            format_millis(step.report.latency.p50_ms),
-            format_millis(step.report.latency.p95_ms),
+            format_millis(step.report.command_latency().p50_ms),
+            format_millis(step.report.command_latency().p95_ms),
         )?;
     }
     writeln!(output)?;
 
-    writeln!(output, "## Completed journey latency\n")?;
+    writeln!(output, "## Client-observed end-to-end journey latency\n")?;
     write_latency_header(&mut output)?;
-    write_latency_row(&mut output, &report.total_scenario_latency)?;
+    write_latency_row(&mut output, report.client_observed_e2e_latency())?;
     writeln!(output)?;
 
-    writeln!(output, "## Measured step latency\n")?;
+    if let Some(latency) = &report.observed_critical_path_latency {
+        writeln!(output, "## Observed critical-path latency\n")?;
+        write_latency_header(&mut output)?;
+        write_latency_row(&mut output, latency)?;
+        writeln!(output)?;
+    }
+
+    write_causal_edges(&mut output, &report.causal_edges)?;
+
+    writeln!(output, "## Step command duration\n")?;
     writeln!(
         output,
-        "| Step | Chain | Operation | Successful | Failed | Mean | P50 | P95 | P99 |"
+        "| Step | Step ID | Depends on | Chain | Operation | Successful | Failed | Mean | P50 | P95 | P99 |"
     )?;
     writeln!(
         output,
-        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
+        "| --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |"
     )?;
     for step in steps.iter().filter(|step| step.report.kind != "checkpoint") {
         writeln!(
             output,
-            "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
             code(&step.report.name),
+            code(step.report.id.as_deref().unwrap_or(&step.report.name)),
+            if step.report.depends_on.is_empty() {
+                "—".to_owned()
+            } else {
+                code(&step.report.depends_on.join(", "))
+            },
             code(step.chain),
             code(&step.report.kind),
             step.report.success,
             step.report.failed,
-            format_millis(step.report.latency.mean_ms),
-            format_millis(step.report.latency.p50_ms),
-            format_millis(step.report.latency.p95_ms),
-            format_millis(step.report.latency.p99_ms),
+            format_millis(step.report.command_latency().mean_ms),
+            format_millis(step.report.command_latency().p50_ms),
+            format_millis(step.report.command_latency().p95_ms),
+            format_millis(step.report.command_latency().p99_ms),
         )?;
     }
     writeln!(output)?;
+
+    if !report.sampled_instances.is_empty() {
+        writeln!(
+            output,
+            "Sampled lifecycle traces retained in the JSON report: **{}**.\n",
+            report.sampled_instances.len()
+        )?;
+    }
 
     write_receipt_metrics(&mut output, &report.receipt_metrics)?;
 
@@ -334,7 +411,7 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
 
     writeln!(
         output,
-        "> Effective rates use the complete measured window, including ramp-up and drain. Aggregate user TPS sums submit steps across chains and is not a single-chain saturation result. Setup outside the measured scenario is excluded. A submit step ends at RPC acceptance by default, or at a successful receipt when configured with `await: receipt`; receipt and log wait steps capture subsequent execution and cross-chain progress."
+        "> Effective rates use the complete measured window, including ramp-up and drain. Aggregate user TPS sums submit steps across chains and is not a single-chain saturation result. Setup outside the measured scenario is excluded. Journey percentiles are computed from complete per-instance journeys; step and edge percentiles are never summed. Step command duration is client orchestration time, while causal edges separate observed dependency time, chain inclusion deltas, and destination observation lag."
     )?;
 
     Ok(output)
@@ -342,9 +419,13 @@ fn render_scenario_results(report: &ScenarioReport, scenario: &ScenarioSpec) -> 
 
 fn validate_scenario_report(report: &ScenarioReport, scenario: &ScenarioSpec) -> Result<()> {
     ensure!(
-        report.version == scenario.version,
-        "report version {} does not match scenario version {}",
-        report.version,
+        matches!(report.version, 1 | 2),
+        "unsupported txgen scenario report version {}",
+        report.version
+    );
+    ensure!(
+        scenario.version == 1,
+        "unsupported rendered scenario version {}",
         scenario.version
     );
     ensure!(
@@ -379,6 +460,63 @@ fn validate_scenario_report(report: &ScenarioReport, scenario: &ScenarioSpec) ->
         report.configuration.starts_per_second,
     )?;
     validate_latency("total scenario latency", &report.total_scenario_latency)?;
+    if report.version >= 2 {
+        let client_observed = report.client_observed_e2e_latency.as_ref().ok_or_else(|| {
+            eyre::eyre!("txgen scenario report version 2 has no client-observed E2E latency")
+        })?;
+        let critical_path = report
+            .observed_critical_path_latency
+            .as_ref()
+            .ok_or_else(|| {
+                eyre::eyre!("txgen scenario report version 2 has no observed critical-path latency")
+            })?;
+        validate_latency("client-observed E2E latency", client_observed)?;
+        validate_latency("observed critical-path latency", critical_path)?;
+    }
+    let step_ids = report
+        .steps
+        .iter()
+        .filter_map(|step| step.id.as_deref())
+        .collect::<BTreeSet<_>>();
+    if report.version >= 2 {
+        ensure!(
+            step_ids.len() == report.steps.len(),
+            "txgen scenario report version 2 has missing or duplicate step IDs"
+        );
+    }
+    for edge in &report.causal_edges {
+        ensure!(
+            step_ids.contains(edge.source_step_id.as_str()),
+            "causal edge references unknown source step {}",
+            edge.source_step_id
+        );
+        ensure!(
+            step_ids.contains(edge.destination_step_id.as_str()),
+            "causal edge references unknown destination step {}",
+            edge.destination_step_id
+        );
+        validate_latency(
+            &format!(
+                "causal edge {} -> {} observed latency",
+                edge.source_step_id, edge.destination_step_id
+            ),
+            &edge.observed_latency,
+        )?;
+        validate_signed_latency(
+            &format!(
+                "causal edge {} -> {} chain timestamp delta",
+                edge.source_step_id, edge.destination_step_id
+            ),
+            &edge.chain_timestamp_delta,
+        )?;
+        validate_signed_latency(
+            &format!(
+                "causal edge {} -> {} destination observation lag",
+                edge.source_step_id, edge.destination_step_id
+            ),
+            &edge.destination_observation_lag,
+        )?;
+    }
 
     let mut names = BTreeSet::new();
     for chain in &report.configuration.chains {
@@ -387,6 +525,28 @@ fn validate_scenario_report(report: &ScenarioReport, scenario: &ScenarioSpec) ->
             "duplicate report chain {}",
             chain.name
         );
+        if report.version >= 2 {
+            ensure!(
+                chain
+                    .observation_mode
+                    .as_deref()
+                    .is_some_and(|mode| !mode.is_empty()),
+                "report chain {} has no observation mode",
+                chain.name
+            );
+            ensure!(
+                chain
+                    .observation_poll_interval_ms
+                    .is_some_and(|milliseconds| milliseconds > 0),
+                "report chain {} has no positive observation poll interval",
+                chain.name
+            );
+            ensure!(
+                chain.subscription_configured.is_some(),
+                "report chain {} does not say whether subscription observation is configured",
+                chain.name
+            );
+        }
         let rendered = scenario.chains.get(&chain.name).ok_or_else(|| {
             eyre::eyre!(
                 "report chain {} is missing from rendered scenario",
@@ -431,6 +591,11 @@ fn resolve_steps<'a>(
                 .save
                 .clone()
                 .unwrap_or_else(|| format!("step_{}_{}", index + 1, kind));
+            let expected_id = rendered
+                .id
+                .clone()
+                .or_else(|| rendered.save.clone())
+                .unwrap_or_else(|| format!("step_{}_{}", index + 1, kind));
             ensure!(
                 reported.name == expected_name,
                 "report step {} is named {} but rendered scenario names it {}",
@@ -445,6 +610,27 @@ fn resolve_steps<'a>(
                 reported.kind,
                 kind
             );
+            if report.version >= 2 {
+                ensure!(
+                    reported.id.as_deref() == Some(expected_id.as_str()),
+                    "report step {} has ID {:?} but rendered scenario uses {}",
+                    reported.name,
+                    reported.id,
+                    expected_id
+                );
+                ensure!(
+                    reported.depends_on == rendered.depends_on,
+                    "report step {} has dependencies {:?} but rendered scenario uses {:?}",
+                    reported.name,
+                    reported.depends_on,
+                    rendered.depends_on
+                );
+                ensure!(
+                    reported.command_latency.is_some(),
+                    "report step {} has no command latency",
+                    reported.name
+                );
+            }
             let body = body.as_mapping().ok_or_else(|| {
                 eyre::eyre!(
                     "rendered scenario step {} operation must be a mapping",
@@ -463,13 +649,22 @@ fn resolve_steps<'a>(
                 expected_name,
                 chain
             );
+            if let Some(reported_chain) = reported.chain.as_deref() {
+                ensure!(
+                    reported_chain == chain,
+                    "report step {} uses chain {} but rendered scenario uses {}",
+                    reported.name,
+                    reported_chain,
+                    chain
+                );
+            }
             validate_latency(
-                &format!("step {} latency", reported.name),
-                &reported.latency,
+                &format!("step {} command latency", reported.name),
+                reported.command_latency(),
             )?;
             Ok(ResolvedStep {
                 report: reported,
-                chain,
+                chain: reported.chain.as_deref().unwrap_or(chain),
             })
         })
         .collect()
@@ -486,6 +681,43 @@ fn scenario_elapsed_secs(report: &ScenarioReport) -> Result<f64> {
         "scenario measured time must be greater than zero"
     );
     Ok(elapsed)
+}
+
+fn write_observation_configuration(output: &mut String, chains: &[ReportChain]) -> Result<()> {
+    if !chains.iter().any(|chain| {
+        chain.observation_mode.is_some()
+            || chain.observation_poll_interval_ms.is_some()
+            || chain.subscription_configured.is_some()
+    }) {
+        return Ok(());
+    }
+
+    writeln!(output, "## Chain observation\n")?;
+    writeln!(
+        output,
+        "| Chain | Mode | Poll fallback | Subscription configured |"
+    )?;
+    writeln!(output, "| --- | --- | ---: | --- |")?;
+    for chain in chains {
+        writeln!(
+            output,
+            "| {} | {} | {} | {} |",
+            code(&chain.name),
+            chain
+                .observation_mode
+                .as_deref()
+                .map_or_else(|| "—".to_owned(), code),
+            chain.observation_poll_interval_ms.map_or_else(
+                || "—".to_owned(),
+                |milliseconds| { format!("{milliseconds} ms") }
+            ),
+            chain
+                .subscription_configured
+                .map_or_else(|| "—".to_owned(), |configured| configured.to_string()),
+        )?;
+    }
+    writeln!(output)?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -624,6 +856,26 @@ fn validate_latency(name: &str, latency: &Latency) -> Result<()> {
     Ok(())
 }
 
+fn validate_signed_latency(name: &str, latency: &Latency) -> Result<()> {
+    for (field, value) in [
+        ("min", latency.min_ms),
+        ("max", latency.max_ms),
+        ("mean", latency.mean_ms),
+        ("p50", latency.p50_ms),
+        ("p95", latency.p95_ms),
+        ("p99", latency.p99_ms),
+    ] {
+        ensure!(value.is_finite(), "{name} {field} must be finite");
+    }
+    if latency.samples > 0 {
+        ensure!(
+            latency.min_ms <= latency.max_ms,
+            "{name} minimum exceeds maximum"
+        );
+    }
+    Ok(())
+}
+
 fn validate_phase_latency(latency: &PhaseLatency) -> Result<()> {
     for (field, value) in [
         ("phase latency min", latency.min_ms),
@@ -668,6 +920,59 @@ fn write_latency_row(output: &mut String, latency: &Latency) -> Result<()> {
         format_millis(latency.p99_ms),
         format_millis(latency.max_ms),
     )?;
+    Ok(())
+}
+
+fn write_causal_edges(output: &mut String, edges: &[CausalEdgeReport]) -> Result<()> {
+    if edges.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(output, "## Causal-edge timing\n")?;
+    writeln!(
+        output,
+        "| Dependency edge | Relation | Milestones | Timing | Samples | Mean | P50 | P95 | P99 |"
+    )?;
+    writeln!(
+        output,
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |"
+    )?;
+    for edge in edges {
+        let dependency = code(&format!(
+            "{} -> {}",
+            edge.source_step_id, edge.destination_step_id
+        ));
+        let milestones = code(&format!(
+            "{} -> {}",
+            edge.source_milestone, edge.destination_milestone
+        ));
+        for (timing, latency) in [
+            ("observed causal-edge latency", &edge.observed_latency),
+            (
+                "chain inclusion latency (timestamp delta)",
+                &edge.chain_timestamp_delta,
+            ),
+            (
+                "destination observation lag",
+                &edge.destination_observation_lag,
+            ),
+        ] {
+            writeln!(
+                output,
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |",
+                dependency,
+                code(&edge.relation),
+                milestones,
+                timing,
+                latency.samples,
+                format_millis(latency.mean_ms),
+                format_millis(latency.p50_ms),
+                format_millis(latency.p95_ms),
+                format_millis(latency.p99_ms),
+            )?;
+        }
+    }
+    writeln!(output)?;
     Ok(())
 }
 
@@ -750,7 +1055,7 @@ fn format_seconds(value: f64) -> String {
 }
 
 fn format_millis(value: f64) -> String {
-    if value >= 1_000.0 {
+    if value.abs() >= 1_000.0 {
         format!("{:.3} s", value / 1_000.0)
     } else {
         format!("{value:.3} ms")
@@ -826,6 +1131,130 @@ scenario:
 }
 "#;
 
+    const DAG_SCENARIO: &str = r#"
+version: 1
+chains:
+  l1:
+    chain_id: 1337
+  zone:
+    chain_id: 421700001
+scenario:
+  name: sample-roundtrip
+  execution: dag
+  steps:
+    - id: deposit
+      submit:
+        chain: l1
+      save: deposit
+    - id: deposit_processed
+      depends_on: [deposit]
+      wait_log:
+        chain: zone
+      save: deposit_processed
+    - id: activity
+      depends_on: [deposit_processed]
+      submit:
+        chain: zone
+      save: activity
+    - id: withdrawal
+      depends_on: [activity]
+      submit:
+        chain: zone
+      save: withdrawal
+"#;
+
+    fn report_v2() -> serde_json::Value {
+        let mut report: serde_json::Value = serde_json::from_str(REPORT).unwrap();
+        report["version"] = 2.into();
+        report["configuration"]["chains"][0]["observation_mode"] = "auto".into();
+        report["configuration"]["chains"][0]["observation_poll_interval_ms"] = 50.into();
+        report["configuration"]["chains"][0]["subscription_configured"] = true.into();
+        report["configuration"]["chains"][1]["observation_mode"] = "poll".into();
+        report["configuration"]["chains"][1]["observation_poll_interval_ms"] = 50.into();
+        report["configuration"]["chains"][1]["subscription_configured"] = false.into();
+
+        let definitions = [
+            ("deposit", "l1", Vec::<&str>::new()),
+            ("deposit_processed", "zone", vec!["deposit"]),
+            ("activity", "zone", vec!["deposit_processed"]),
+            ("withdrawal", "zone", vec!["activity"]),
+        ];
+        for (step, (id, chain, dependencies)) in report["steps"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .zip(definitions)
+        {
+            step["id"] = id.into();
+            step["chain"] = chain.into();
+            step["depends_on"] = serde_json::json!(dependencies);
+            step["command_latency"] = step["latency"].clone();
+        }
+        report["steps"][0]["command_latency"]["mean_ms"] = 13.0.into();
+        report["steps"][0]["command_latency"]["p50_ms"] = 12.0.into();
+        report["steps"][0]["command_latency"]["p95_ms"] = 18.0.into();
+        report["steps"][0]["command_latency"]["p99_ms"] = 20.0.into();
+        report["steps"][0]["command_latency"]["max_ms"] = 20.0.into();
+
+        report["client_observed_e2e_latency"] = serde_json::json!({
+            "samples": 100,
+            "min_ms": 3200.0,
+            "max_ms": 5100.0,
+            "mean_ms": 4200.0,
+            "p50_ms": 4250.0,
+            "p95_ms": 4950.0,
+            "p99_ms": 5100.0
+        });
+        report["observed_critical_path_latency"] = serde_json::json!({
+            "samples": 100,
+            "min_ms": 2500.0,
+            "max_ms": 3900.0,
+            "mean_ms": 3100.0,
+            "p50_ms": 3100.0,
+            "p95_ms": 3700.0,
+            "p99_ms": 3900.0
+        });
+        report["causal_edges"] = serde_json::json!([{
+            "relation": "dependency",
+            "source_step_id": "deposit",
+            "destination_step_id": "deposit_processed",
+            "source_milestone": "receipt",
+            "destination_milestone": "log",
+            "observed_latency": {
+                "samples": 100,
+                "min_ms": 700.0,
+                "max_ms": 1200.0,
+                "mean_ms": 860.0,
+                "p50_ms": 850.0,
+                "p95_ms": 1100.0,
+                "p99_ms": 1200.0
+            },
+            "chain_timestamp_delta": {
+                "samples": 100,
+                "min_ms": -1500.0,
+                "max_ms": 1000.0,
+                "mean_ms": 450.0,
+                "p50_ms": 500.0,
+                "p95_ms": 900.0,
+                "p99_ms": 1000.0
+            },
+            "destination_observation_lag": {
+                "samples": 100,
+                "min_ms": 1.0,
+                "max_ms": 52.0,
+                "mean_ms": 26.0,
+                "p50_ms": 25.0,
+                "p95_ms": 48.0,
+                "p99_ms": 52.0
+            }
+        }]);
+        report["sampled_instances"] = serde_json::json!([
+            {"instance": 0, "outcome": "completed"},
+            {"instance": 1, "outcome": "completed"}
+        ]);
+        report
+    }
+
     #[test]
     fn renders_generalized_scenario_throughput_and_latency() {
         let output = render_results(REPORT, Some(SCENARIO)).unwrap();
@@ -839,9 +1268,57 @@ scenario:
             "`zone` successful user submit steps (chain ID 421700001) | 199 | 9.950 TPS"
         ));
         assert!(output.contains("`withdrawal` | `zone` | 99 | 1 | 4.950"));
-        assert!(output.contains("`deposit_processed` | `zone` | `wait_log`"));
+        assert!(
+            output.contains("`deposit_processed` | `deposit_processed` | — | `zone` | `wait_log`")
+        );
         assert!(output.contains("4.100 s"));
         assert!(!output.contains("Receipt gas metrics"));
+    }
+
+    #[test]
+    fn renders_v2_dag_and_separates_causal_timing_from_command_duration() {
+        let report = report_v2();
+        let output =
+            render_results(&serde_json::to_string(&report).unwrap(), Some(DAG_SCENARIO)).unwrap();
+
+        assert!(output.contains("## Chain observation"));
+        assert!(output.contains("| `l1` | `auto` | 50 ms | true |"));
+        assert!(output.contains("| `zone` | `poll` | 50 ms | false |"));
+        assert!(output.contains("## Client-observed end-to-end journey latency"));
+        assert!(output.contains("4.250 s"));
+        assert!(output.contains("## Observed critical-path latency"));
+        assert!(output.contains("3.100 s"));
+        assert!(output.contains("## Causal-edge timing"));
+        assert!(output.contains("`deposit -&gt; deposit_processed`"));
+        assert!(output.contains("observed causal-edge latency | 100 | 860.000 ms | 850.000 ms"));
+        assert!(
+            output.contains(
+                "chain inclusion latency (timestamp delta) | 100 | 450.000 ms | 500.000 ms"
+            )
+        );
+        assert!(
+            output
+                .contains("destination observation lag | 100 | 26.000 ms | 25.000 ms | 48.000 ms")
+        );
+        assert!(output.contains("## Step command duration"));
+        assert!(output.contains(
+            "`deposit` | `deposit` | — | `l1` | `submit` | 100 | 0 | 13.000 ms | 12.000 ms"
+        ));
+        assert!(output.contains("Sampled lifecycle traces retained in the JSON report: **2**."));
+        assert!(output.contains("step and edge percentiles are never summed"));
+    }
+
+    #[test]
+    fn validates_v2_dag_step_dependencies() {
+        let report = report_v2();
+        let scenario =
+            DAG_SCENARIO.replace("depends_on: [deposit_processed]", "depends_on: [deposit]");
+        let error =
+            render_results(&serde_json::to_string(&report).unwrap(), Some(&scenario)).unwrap_err();
+
+        assert!(error.to_string().contains(
+            "report step activity has dependencies [\"deposit_processed\"] but rendered scenario uses [\"deposit\"]"
+        ));
     }
 
     #[test]
