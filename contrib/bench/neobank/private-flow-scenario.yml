@@ -65,6 +65,7 @@ scenario:
 
     - wait_receipt:
         chain: zone
+        poll_interval: 100ms
         transaction_hash: { var: private_transfer.tx_hash }
         sender: { var: private_transfer.sender }
       timeout: 45s
@@ -123,6 +124,7 @@ scenario:
 
     - wait_receipt:
         chain: zone
+        poll_interval: 100ms
         transaction_hash: { var: offramp.tx_hash }
         sender: { var: offramp.sender }
       timeout: 45s
@@ -130,6 +132,7 @@ scenario:
 
     - wait_log:
         chain: zone
+        poll_interval: 100ms
         from_block: { var: offramp_receipt.block_number }
         transaction_hash: { var: offramp.tx_hash }
         sender: { var: offramp.sender }
@@ -152,6 +155,7 @@ scenario:
 
     - wait_log:
         chain: l1
+        poll_interval: 100ms
         from_block: { var: l1_before_offramp.block_number }
         address: "__PORTAL__"
         abi: ZonePortal
