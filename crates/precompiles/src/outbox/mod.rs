@@ -12,7 +12,6 @@ use tempo_precompiles::{
     error::TempoPrecompileError,
     storage::{ContractStorage, Handler, Mapping, Slot},
     tip20::{ITIP20, TIP20Error, TIP20Token},
-    zone_factory::ZonePortalStorage as ZonePortal,
 };
 use tempo_precompiles_macros::{Storable, contract};
 use tempo_zone_contracts::{
@@ -59,7 +58,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        let portal = ZonePortal::new(l1.portal());
+        let portal = l1.portal();
         if caller != Address::ZERO && !l1.read_l1(&portal.is_sequencer[caller])? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
@@ -73,7 +72,7 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let portal = ZonePortal::new(l1.portal());
+        let portal = l1.portal();
         if !l1.read_l1(&portal.token_configs[token].enabled)? {
             return Err(ZonePortalError::token_not_enabled().into());
         }
@@ -336,7 +335,7 @@ impl ZoneOutbox {
         self.ensure_sequencer(l1, caller)?;
         let max_tempo_gas_rate = l1.read_l1(&Slot::new(
             PORTAL_MAX_TEMPO_GAS_RATE_SLOT.into(),
-            l1.portal(),
+            l1.portal_address(),
         ))?;
         if call._tempoGasRate > max_tempo_gas_rate {
             return Err(ZoneOutboxError::gas_fee_rate_too_high().into());

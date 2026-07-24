@@ -13,7 +13,6 @@ use alloy_sol_types::{SolCall, SolError};
 use tempo_precompiles::{
     dispatch::selector_from_calldata,
     tip20::{IRolesAuth, ITIP20},
-    zone_factory::ZonePortalStorage as ZonePortal,
 };
 use tempo_zone_contracts::Unauthorized;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
@@ -125,7 +124,7 @@ impl<P: L1StorageReader> TIP20Rules<P> {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        let portal = ZonePortal::new(self.l1.portal());
+        let portal = self.l1.portal();
         self.l1
             .read_l1(&portal.is_sequencer[caller])
             .map_err(CallRuleError::Tempo)

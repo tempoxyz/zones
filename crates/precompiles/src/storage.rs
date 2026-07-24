@@ -9,7 +9,9 @@ use core::{cell::Cell, fmt};
 
 use alloy_primitives::{Address, B256, U256};
 use revm::{context::result::AnyError, precompile::PrecompileError};
-use tempo_precompiles::error::TempoPrecompileError;
+use tempo_precompiles::{
+    error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
+};
 use thiserror::Error;
 
 use crate::tempo_state::TempoState;
@@ -79,8 +81,16 @@ impl<P> L1State<P> {
     }
 
     /// Returns the configured ZonePortal address.
-    pub const fn portal(&self) -> Address {
+    pub const fn portal_address(&self) -> Address {
         self.portal_address
+    }
+
+    /// Returns the canonical storage handlers for the configured ZonePortal.
+    ///
+    /// Values accessed through this handle must be read with [`Self::read_l1`] so they resolve
+    /// through the anchored L1 provider rather than the local EVM journal.
+    pub fn portal(&self) -> ZonePortal {
+        ZonePortal::new(self.portal_address)
     }
 
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
