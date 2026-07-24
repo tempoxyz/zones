@@ -215,6 +215,8 @@ positive_rate ZONES_BENCH_TPS
     die "max concurrency and approval timeout must be positive"
 (( 10#$ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS > 0 )) ||
     die "setup settlement timeout must be positive"
+(( 10#$ZONES_BENCH_SAMPLE_INSTANCES > 0 )) ||
+    die "sample instances must be positive"
 sample_instances="$ZONES_BENCH_SAMPLE_INSTANCES"
 if (( 10#$ZONES_BENCH_COUNT < 10#$sample_instances )); then
     sample_instances="$ZONES_BENCH_COUNT"

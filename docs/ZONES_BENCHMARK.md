@@ -939,11 +939,14 @@ execution and cross-chain progress. Untimed bootstrap and approval setup is
 excluded. Scenario mode still does not scrape the node metric endpoints used by
 Tempo's existing single-chain benchmark harness.
 
-The pinned txgen runtime atomically reserves distinct expiring nonces for
-independent same-account DAG submissions. Regular-nonce submissions still
-require an explicit dependency edge. Reverted withdrawals and rejected bridge
-outcomes surface as step timeouts rather than immediate terminal
-classifications.
+The pinned txgen runtime gives independent same-account DAG submissions
+distinct signed expiring-transaction identities through deterministic max-fee
+bumps while preserving a zero priority fee. Tempo's reserved expiring nonce key
+still encodes numeric nonce zero, so tests compare the signed hashes and fee
+identities rather than expecting different numeric nonce fields. Regular-nonce
+submissions still require an explicit dependency edge. Reverted withdrawals
+and rejected bridge outcomes surface as step timeouts rather than immediate
+terminal classifications.
 
 The workflow pins disjoint CPU sets but runs two validators, one Zone, and the
 sender on one 32-logical-CPU host without the two-validator harness's 60 GiB
