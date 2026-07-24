@@ -15,48 +15,48 @@ mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::{ZoneBlockExecutor, ZoneTxResult};
-pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
+pub use zone_evm::{contract_creation::validate_transaction, ZoneEvm};
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
     precompiles::{
-        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_FEE_MANAGER_ADDRESS,
-        ZONE_TIP20_FACTORY_ADDRESS, ZoneInbox, ZonePrecompileEnv, ZoneTokenFactory,
         create_tip20_precompile, create_tip403_precompile, create_zone_fee_manager_precompile,
-        tx_context::ZoneTxContext,
+        tx_context::ZoneTxContext, AesGcmDecrypt, ChaumPedersenVerify, L1State, L1StorageReader,
+        TempoState, ZoneInbox, ZonePrecompileEnv, ZoneTokenFactory, AES_GCM_DECRYPT_ADDRESS,
+        CHAUM_PEDERSEN_VERIFY_ADDRESS, TIP403_REGISTRY_ADDRESS, ZONE_FEE_MANAGER_ADDRESS,
+        ZONE_TIP20_FACTORY_ADDRESS,
     },
 };
 use alloy_evm::{
-    Database, Evm, EvmEnv, EvmFactory,
     block::BlockExecutorFactory,
     precompiles::PrecompilesMap,
-    revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
+    revm::{context::DBErrorMarker, inspector::NoOpInspector, Inspector},
+    Database, Evm, EvmEnv, EvmFactory,
 };
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
-    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
     block::StateDB,
     execute::{BlockAssembler, BlockAssemblerInput},
+    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{fmt, num::NonZeroU32, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
+use tempo_chainspec::{hardfork::TempoHardfork, TempoChainSpec};
 use tempo_evm::{
+    evm::{TempoEvm, TempoEvmFactory},
     FeeTokenResolver, TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig,
     TempoEvmError, TempoHaltReason, TempoNextBlockEnvAttributes, TempoStateAccess,
-    evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
-    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
-    TIP20_CHANNEL_RESERVE_ADDRESS, account_keychain::AccountKeychain, error::Result as TempoResult,
-    nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
-    storage::actions::StorageActions, tip20::is_tip20_prefix,
+    account_keychain::AccountKeychain, error::Result as TempoResult, nonce::NonceManager,
+    receive_policy_guard::ReceivePolicyGuard, storage::actions::StorageActions,
+    tip20::is_tip20_prefix, PrecompileEnv, ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS,
+    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
+    TIP_FEE_MANAGER_ADDRESS,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -490,7 +490,7 @@ fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneC
 mod tests {
     use super::*;
 
-    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
+    use alloy_primitives::{address, keccak256, Bytes, B256, U256};
     use alloy_rlp::Encodable;
     use alloy_sol_types::SolCall;
     use reth_chainspec::{EthChainSpec, ForkCondition};
@@ -500,17 +500,15 @@ mod tests {
     };
     use tempo_chainspec::{
         hardfork::TempoHardfork,
-        spec::{DEV, MODERATO, TempoHardforks},
+        spec::{TempoHardforks, DEV, MODERATO},
     };
     use tempo_precompiles::{
-        TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
+        storage::StorageKey, tip403_registry::tip403_registry_slots,
+        zone_factory::ZonePortalStorage, TIP403_REGISTRY_ADDRESS,
     };
     use tempo_zone_contracts::IZoneInbox;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
-    use zone_primitives::constants::{
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_IS_SEQUENCER_SLOT, TEMPO_STATE_ADDRESS,
-        ZONE_INBOX_ADDRESS,
-    };
+    use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
     #[test]
     fn composed_chain_spec_uses_zone_identity_and_parent_tempo_forks() {
@@ -536,21 +534,13 @@ mod tests {
         let token = address!("0x20C00000000000000000000000000000000000AA");
         let reader = MockL1Reader::default();
 
-        let membership_slot = sequencer.mapping_slot(PORTAL_IS_SEQUENCER_SLOT.into());
-        reader.set_u256(portal, membership_slot, PARENT, U256::ZERO);
-        reader.set_u256(portal, membership_slot, CHILD, U256::ONE);
-        reader.set_u256(
-            portal,
-            U256::from_be_bytes(PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.0),
-            CHILD,
-            U256::ZERO,
-        );
+        reader.seed_active_sequencer(portal, CHILD, sequencer);
 
         let policy_slot = token.mapping_slot(tip403_registry_slots::TOKEN_TRANSFER_POLICIES);
         let parent_policy = U256::from(0xaaaa);
         let child_policy = U256::from(0xbbbb);
-        reader.set_u256(TIP403_REGISTRY_ADDRESS, policy_slot, PARENT, parent_policy);
-        reader.set_u256(TIP403_REGISTRY_ADDRESS, policy_slot, CHILD, child_policy);
+        reader.insert(TIP403_REGISTRY_ADDRESS, policy_slot, PARENT, parent_policy);
+        reader.insert(TIP403_REGISTRY_ADDRESS, policy_slot, CHILD, child_policy);
 
         let genesis = TempoHeader::default();
         let mut genesis_rlp = Vec::new();
@@ -607,8 +597,7 @@ mod tests {
         );
 
         let requests = reader.storage_requests();
-        let child_membership_request = (portal, B256::from(membership_slot.to_be_bytes()), CHILD);
-        let parent_membership_request = (portal, B256::from(membership_slot.to_be_bytes()), PARENT);
+        let portal = ZonePortalStorage::new(portal);
         let child_policy_request = (
             TIP403_REGISTRY_ADDRESS,
             B256::from(policy_slot.to_be_bytes()),
@@ -619,13 +608,11 @@ mod tests {
             B256::from(policy_slot.to_be_bytes()),
             PARENT,
         );
-        let queue_head_request = (portal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, CHILD);
-
-        assert!(!requests.contains(&child_membership_request));
-        assert!(!requests.contains(&parent_membership_request));
+        assert!(!reader.requested(CHILD, &portal.is_sequencer[sequencer]));
+        assert!(!reader.requested(PARENT, &portal.is_sequencer[sequencer]));
         assert!(requests.contains(&child_policy_request));
         assert!(!requests.contains(&parent_policy_request));
-        assert!(requests.contains(&queue_head_request));
+        assert!(reader.requested(CHILD, &portal.current_deposit_queue_hash));
     }
 
     #[test]

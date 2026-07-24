@@ -1,22 +1,23 @@
 use super::*;
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{Bytes, address, keccak256};
+use alloy_primitives::{address, keccak256, Bytes};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS,
-    storage::{ContractStorage, StorageCtx},
+    storage::{ContractStorage, Handler, StorageCtx},
     test_util::TIP20Setup,
-    tip20::{ITIP20, TIP20Token},
+    tip20::{TIP20Token, ITIP20},
+    zone_factory::{zone_portal_slots, ZonePortalStorage},
+    PATH_USD_ADDRESS,
 };
 use tempo_primitives::TempoHeader;
 use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
-    EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
-    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
+    build_plaintext, call_precompile, compressed_x_and_parity, encrypt_plaintext, test_context,
+    test_env, test_storage_provider, EncryptedDepositFixture, MockL1Reader, TestContext,
 };
 
 const GAS: u64 = 30_000_000;
@@ -91,12 +92,13 @@ impl Harness {
     }
 
     fn set_queue_hash(&self, hash: B256) {
-        self.l1.set_u256(
-            PORTAL,
-            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.into(),
-            1,
-            U256::from_be_bytes(hash.0),
-        );
+        self.l1
+            .with_storage(1, || {
+                ZonePortalStorage::new(PORTAL)
+                    .current_deposit_queue_hash
+                    .write(hash)
+            })
+            .unwrap();
     }
 
     fn advance_call(
@@ -204,11 +206,10 @@ fn system_advance_selects_child_anchor_and_reads_queue() -> eyre::Result<()> {
     )?;
 
     assert_eq!(harness.l1_state.get_anchor(), Some(1));
-    assert!(harness.l1.storage_requests().contains(&(
-        PORTAL,
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    assert!(harness.l1.requested(
         1,
-    )));
+        &ZonePortalStorage::new(PORTAL).current_deposit_queue_hash,
+    ));
     Ok(())
 }
 
@@ -491,12 +492,12 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
 
-    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
-        .set_u256(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
-    harness.l1.set_u256(
+        .insert(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(
         portal,
         slot_x + U256::ONE,
         1,
@@ -546,12 +547,10 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         U256::from(900)
     );
     assert!(harness.pending_withdrawals()?.is_empty());
-    assert!(
-        harness
-            .l1
-            .storage_requests()
-            .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1))
-    );
+    assert!(harness
+        .l1
+        .storage_requests()
+        .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1)));
     Ok(())
 }
 
@@ -561,12 +560,12 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     let fixture = EncryptedDepositFixture::new();
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
     let portal = PORTAL;
-    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
-        .set_u256(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
-    harness.l1.set_u256(
+        .insert(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(
         portal,
         slot_x + U256::ONE,
         1,

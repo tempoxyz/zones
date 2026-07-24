@@ -19,7 +19,7 @@ mod tests;
 use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
     error::TempoPrecompileError,
@@ -31,9 +31,7 @@ use tempo_zone_contracts::{
     DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneInbox, IZoneOutbox,
     QueuedDeposit, ZoneInboxError, ZoneInboxEvent,
 };
-use zone_primitives::constants::{
-    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, PORTAL_ENCRYPTION_KEYS_SLOT, ZONE_INBOX_ADDRESS,
-};
+use zone_primitives::constants::ZONE_INBOX_ADDRESS;
 
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
@@ -115,8 +113,7 @@ impl ZoneInbox {
                     let Some(decryption) = decryptions.next() else {
                         return Err(ZoneInboxError::missing_decryption_data().into());
                     };
-                    let key =
-                        read_encryption_key(l1, portal, tempo_block_number, deposit.keyIndex)?;
+                    let key = read_encryption_key(l1, deposit.keyIndex)?;
                     self.process_deposit_encrypted(
                         &mut outbox,
                         portal,
@@ -143,11 +140,8 @@ impl ZoneInbox {
         // NOTE: A zero portal denotes the explicit no-L1 mode used by local development and offline
         // execution. There is no canonical queue to bind in that mode.
         if !portal.is_zero() {
-            let tempo_current_hash = l1.read_l1_storage(
-                portal,
-                PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
-                tempo_block_number,
-            )?;
+            let tempo_current_hash =
+                l1.read_portal(|portal| &portal.current_deposit_queue_hash)?;
             if tempo_current_hash != current_hash {
                 return Err(ZoneInboxError::invalid_deposit_queue_hash().into());
             }
@@ -400,27 +394,13 @@ fn recover_encrypted_payload(
 
 fn read_encryption_key<P: L1StorageReader>(
     l1: &L1State<P>,
-    portal: Address,
-    tempo_block_number: u64,
     key_index: U256,
 ) -> ZoneResult<(B256, u8)> {
-    let read_l1_portal_slot =
-        |slot: U256| l1.read_l1_storage(portal, slot.into(), tempo_block_number);
-
-    let base: U256 = keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).into();
-    let slot_x = key_index
-        .checked_mul(U256::from(2))
-        .and_then(|offset| base.checked_add(offset))
-        .ok_or_else(TempoPrecompileError::under_overflow)?;
-
-    let x = read_l1_portal_slot(slot_x)?;
+    let index = usize::try_from(key_index).map_err(|_| TempoPrecompileError::under_overflow())?;
+    let x = l1.read_portal(|portal| &portal.encryption_keys[index].x)?;
     if x.is_zero() {
         return Err(ZoneInboxError::invalid_shared_secret_proof().into());
     }
-    let meta = read_l1_portal_slot(
-        slot_x
-            .checked_add(U256::ONE)
-            .ok_or_else(TempoPrecompileError::under_overflow)?,
-    )?;
-    Ok((x, meta.as_slice()[31]))
+    let y_parity = l1.read_portal(|portal| &portal.encryption_keys[index].y_parity)?;
+    Ok((x, y_parity))
 }

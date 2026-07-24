@@ -1,12 +1,13 @@
 use super::*;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Bytes, address, keccak256};
+use alloy_primitives::{address, keccak256, Bytes};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     storage::{StorageCtx, StorageKey},
     test_util::TIP20Setup,
+    zone_factory::ZonePortalStorage,
 };
 use tempo_zone_contracts::IZoneOutbox as ZoneOutboxAbi;
 use zone_primitives::constants::{
@@ -18,7 +19,7 @@ use crate::{
     create_outbox_precompile,
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
-        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
+        call_precompile, test_context, test_env, test_storage_provider, MockL1Reader, TestContext,
     },
     tx_context,
 };
@@ -294,26 +295,27 @@ fn outbox_reads_injected_l1_state_at_tempo_checkpoint() -> eyre::Result<()> {
     harness.set_gas_rate(1)?;
     harness.request(1, BOB, B256::ZERO)?;
 
+    let portal = ZonePortalStorage::new(PORTAL);
+    assert_eq!(harness.l1.storage_requests().len(), 5);
     assert_eq!(
-        harness.l1.storage_requests(),
-        vec![
-            (
-                PORTAL,
-                keccak256((SEQUENCER, PORTAL_IS_SEQUENCER_SLOT).abi_encode()),
-                ANCHOR
-            ),
-            (PORTAL, PORTAL_MAX_TEMPO_GAS_RATE_SLOT, ANCHOR),
-            (
-                PORTAL,
-                harness
-                    .token
-                    .mapping_slot(PORTAL_TOKEN_CONFIGS_SLOT.into())
-                    .into(),
-                ANCHOR,
-            ),
-            (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
-            (PORTAL, PORTAL_ENFORCEMENT_MODES_SLOT, ANCHOR),
-        ]
+        harness
+            .l1
+            .request_count(ANCHOR, &portal.is_sequencer[SEQUENCER]),
+        1
+    );
+    assert_eq!(
+        harness.l1.request_count(ANCHOR, &portal.max_tempo_gas_rate),
+        1
+    );
+    assert_eq!(
+        harness
+            .l1
+            .request_count(ANCHOR, &portal.token_configs[harness.token].enabled),
+        1
+    );
+    assert_eq!(
+        harness.l1.request_count(ANCHOR, &portal.is_access_enforced),
+        2
     );
     Ok(())
 }

@@ -6,13 +6,12 @@ use revm::{
     bytecode::opcode::{CREATE, CREATE2},
     context::Transaction,
     interpreter::{
-        Instruction, InstructionContext, InstructionResult,
         instructions::contract::create as revm_create, interpreter::EthInterpreter,
-        interpreter_types::InputsTr,
+        interpreter_types::InputsTr, Instruction, InstructionContext, InstructionResult,
     },
 };
 use tempo_evm::evm::TempoEvm;
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, evm::TempoContext};
+use tempo_revm::{evm::TempoContext, TempoInvalidTransaction, TempoTxEnv};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type ZoneInstructionCtx<'a, DB> = InstructionContext<'a, TempoContext<DB>, EthInterpreter>;
@@ -75,14 +74,14 @@ mod tests {
     use super::*;
     use crate::{L1OverlayDB, ZoneEvm};
     use alloy_evm::{Evm, EvmEnv};
-    use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
+    use alloy_primitives::{bytes, Address, Bytes, TxKind, U256};
     use revm::{
         bytecode::Bytecode,
         context::{
-            TxEnv,
             result::{EVMError, ExecutionResult},
+            TxEnv,
         },
-        database::{EmptyDB, in_memory_db::CacheDB},
+        database::{in_memory_db::CacheDB, EmptyDB},
         inspector::NoOpInspector,
         state::AccountInfo,
     };

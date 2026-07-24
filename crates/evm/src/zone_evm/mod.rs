@@ -3,18 +3,18 @@
 pub(crate) mod contract_creation;
 
 use crate::{
-    TempoCtx,
     database::{L1OverlayDB, ZoneDbError},
+    TempoCtx,
 };
-use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
+use alloy_evm::{precompiles::PrecompilesMap, revm::Inspector, Database, Evm, EvmEnv};
 use alloy_primitives::{Address, Bytes};
 use revm::context::{
-    DBErrorMarker,
     result::{EVMError, ResultAndState},
+    DBErrorMarker,
 };
 use tempo_evm::{
-    TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, TempoPoolValidationResult,
-    evm::TempoEvm,
+    evm::TempoEvm, TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm,
+    TempoPoolValidationResult,
 };
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 use zone_l1::state::L1StateProvider;
