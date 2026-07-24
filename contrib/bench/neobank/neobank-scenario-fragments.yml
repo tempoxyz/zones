@@ -13,7 +13,8 @@ fragments:
     outputs:
       processed: log
     steps:
-      - wait_log:
+      - id: processed
+        wait_log:
           chain: zone
           from_block: { param: from_block }
           address: "__INBOX__"
@@ -43,10 +44,12 @@ fragments:
       enqueued: log
       zone_deposit.processed: log
     steps:
-      - checkpoint: { chain: zone }
+      - id: zone_before
+        checkpoint: { chain: zone }
         save: zone_before
 
-      - invoke:
+      - id: encryption
+        invoke:
           chain: l1
           action: prepare_encrypted_deposit
           with:
@@ -56,7 +59,9 @@ fragments:
             memo: { param: memo }
         save: encryption
 
-      - submit:
+      - id: submission
+        depends_on: [encryption]
+        submit:
           chain: l1
           template: encrypted_onramp
           with:
@@ -71,29 +76,33 @@ fragments:
                 - { param: sender_address }
         save: submission
 
-      - wait_log:
+      - id: enqueued
+        depends_on: [submission]
+        wait_log:
           chain: l1
           transaction_hash: { var: submission.tx_hash }
           sender: { var: submission.sender }
-          address: "__PORTAL__"
-          abi: ZonePortal
-          event: EncryptedDepositMade
-          where:
-            sender: { param: sender_address }
-            token: { param: token }
-          max_block_range: 1000
+          events:
+            deposit:
+              address: "__PORTAL__"
+              abi: ZonePortal
+              event: EncryptedDepositMade
+              where:
+                sender: { param: sender_address }
+                token: { param: token }
         timeout: 45s
         save: enqueued
 
       - use: wait-encrypted-zone-deposit
         as: zone_deposit
+        depends_on: [zone_before, enqueued]
         with:
           from_block: { var: zone_before.block_number }
-          deposit_hash: { var: enqueued.args.newCurrentDepositQueueHash }
+          deposit_hash: { var: enqueued.events.deposit.args.newCurrentDepositQueueHash }
           sender: { param: sender_address }
           recipient: { param: recipient }
           token: { param: token }
-          amount: { var: enqueued.args.netAmount }
+          amount: { var: enqueued.events.deposit.args.netAmount }
           memo: { param: memo }
 
   earn-deposit-and-return:
@@ -111,17 +120,19 @@ fragments:
       refund_recipient: address
     outputs:
       request: submit
-      request_receipt: receipt
-      requested: log
-      withdrawal_processed: log
-      callback: log
+      request_result: log
+      l1_processed_locator: log
+      l1_result: log
       zone_return.processed: log
     steps:
-      - checkpoint: { chain: l1 }
+      - id: l1_before
+        checkpoint: { chain: l1 }
         save: l1_before
-      - checkpoint: { chain: zone }
+      - id: zone_before
+        checkpoint: { chain: zone }
         save: zone_before
-      - invoke:
+      - id: encryption
+        invoke:
           chain: l1
           action: prepare_encrypted_deposit
           with:
@@ -130,7 +141,9 @@ fragments:
             portalAddress: "__PORTAL__"
             memo: { param: action_id }
         save: encryption
-      - submit:
+      - id: request
+        depends_on: [encryption]
+        submit:
           chain: zone
           template: gateway_deposit
           with:
@@ -166,31 +179,29 @@ fragments:
                                 refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
-      - wait_receipt:
+      - id: request_result
+        depends_on: [request]
+        wait_log:
           chain: zone
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
+          events:
+            requested:
+              address: "__OUTBOX__"
+              abi: ZoneOutbox
+              event: WithdrawalRequested
+              where:
+                sender: { param: sender_address }
+                token: { param: input_token }
+                to: "__EARN_ROUTER__"
+                amount: { param: amount }
+                memo: { param: action_id }
+                gasLimit: __CALLBACK_GAS_LIMIT__
         timeout: 45s
-        save: request_receipt
-      - wait_log:
-          chain: zone
-          from_block: { var: zone_before.block_number }
-          transaction_hash: { var: request.tx_hash }
-          sender: { var: request.sender }
-          address: "__OUTBOX__"
-          abi: ZoneOutbox
-          event: WithdrawalRequested
-          where:
-            sender: { param: sender_address }
-            token: { param: input_token }
-            to: "__EARN_ROUTER__"
-            amount: { param: amount }
-            memo: { param: action_id }
-            gasLimit: __CALLBACK_GAS_LIMIT__
-          max_block_range: 1000
-        timeout: 45s
-        save: requested
-      - wait_log:
+        save: request_result
+      - id: l1_processed_locator
+        depends_on: [l1_before, request]
+        wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
           address: "__PORTAL__"
@@ -206,28 +217,46 @@ fragments:
             amount: { param: amount }
             callbackSuccess: true
           max_block_range: 1000
-        save: withdrawal_processed
-      - wait_log:
+        save: l1_processed_locator
+      - id: l1_result
+        depends_on: [l1_processed_locator]
+        wait_log:
           chain: l1
-          transaction_hash: { var: withdrawal_processed.transaction_hash }
-          address: "__EARN_ROUTER__"
-          abi: EarnRouter
-          event: EarnDeposit
-          where:
-            actionId: { param: action_id }
-            earnVault: "__EARN_VAULT__"
-            inputToken: { param: input_token }
-            inputAmount: { param: amount }
-        save: callback
+          transaction_hash: { var: l1_processed_locator.transaction_hash }
+          events:
+            withdrawal:
+              address: "__PORTAL__"
+              abi: ZonePortal
+              event: WithdrawalProcessed
+              where:
+                to: "__EARN_ROUTER__"
+                senderTag:
+                  keccak256_packed:
+                    types: [address, bytes32]
+                    values: [{ param: sender_address }, { var: request.tx_hash }]
+                token: { param: input_token }
+                amount: { param: amount }
+                callbackSuccess: true
+            callback:
+              address: "__EARN_ROUTER__"
+              abi: EarnRouter
+              event: EarnDeposit
+              where:
+                actionId: { param: action_id }
+                earnVault: "__EARN_VAULT__"
+                inputToken: { param: input_token }
+                inputAmount: { param: amount }
+        save: l1_result
       - use: wait-encrypted-zone-deposit
         as: zone_return
+        depends_on: [zone_before, l1_result]
         with:
           from_block: { var: zone_before.block_number }
-          deposit_hash: { var: callback.args.zoneDepositHash }
+          deposit_hash: { var: l1_result.events.callback.args.zoneDepositHash }
           sender: "__EARN_ROUTER__"
           recipient: { param: recipient }
           token: "__EARN_TOKEN__"
-          amount: { var: callback.args.earnShares }
+          amount: { var: l1_result.events.callback.args.earnShares }
           memo: { param: action_id }
 
   earn-redeem-and-return:
@@ -245,17 +274,19 @@ fragments:
       refund_recipient: address
     outputs:
       request: submit
-      request_receipt: receipt
-      requested: log
-      withdrawal_processed: log
-      callback: log
+      request_result: log
+      l1_processed_locator: log
+      l1_result: log
       zone_return.processed: log
     steps:
-      - checkpoint: { chain: l1 }
+      - id: l1_before
+        checkpoint: { chain: l1 }
         save: l1_before
-      - checkpoint: { chain: zone }
+      - id: zone_before
+        checkpoint: { chain: zone }
         save: zone_before
-      - invoke:
+      - id: encryption
+        invoke:
           chain: l1
           action: prepare_encrypted_deposit
           with:
@@ -264,7 +295,9 @@ fragments:
             portalAddress: "__PORTAL__"
             memo: { param: action_id }
         save: encryption
-      - submit:
+      - id: request
+        depends_on: [encryption]
+        submit:
           chain: zone
           template: gateway_redeem
           with:
@@ -300,31 +333,29 @@ fragments:
                                 refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
-      - wait_receipt:
+      - id: request_result
+        depends_on: [request]
+        wait_log:
           chain: zone
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
+          events:
+            requested:
+              address: "__OUTBOX__"
+              abi: ZoneOutbox
+              event: WithdrawalRequested
+              where:
+                sender: { param: sender_address }
+                token: "__EARN_TOKEN__"
+                to: "__EARN_ROUTER__"
+                amount: { param: amount }
+                memo: { param: action_id }
+                gasLimit: __CALLBACK_GAS_LIMIT__
         timeout: 45s
-        save: request_receipt
-      - wait_log:
-          chain: zone
-          from_block: { var: zone_before.block_number }
-          transaction_hash: { var: request.tx_hash }
-          sender: { var: request.sender }
-          address: "__OUTBOX__"
-          abi: ZoneOutbox
-          event: WithdrawalRequested
-          where:
-            sender: { param: sender_address }
-            token: "__EARN_TOKEN__"
-            to: "__EARN_ROUTER__"
-            amount: { param: amount }
-            memo: { param: action_id }
-            gasLimit: __CALLBACK_GAS_LIMIT__
-          max_block_range: 1000
-        timeout: 45s
-        save: requested
-      - wait_log:
+        save: request_result
+      - id: l1_processed_locator
+        depends_on: [l1_before, request]
+        wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
           address: "__PORTAL__"
@@ -340,28 +371,46 @@ fragments:
             amount: { param: amount }
             callbackSuccess: true
           max_block_range: 1000
-        save: withdrawal_processed
-      - wait_log:
+        save: l1_processed_locator
+      - id: l1_result
+        depends_on: [l1_processed_locator]
+        wait_log:
           chain: l1
-          transaction_hash: { var: withdrawal_processed.transaction_hash }
-          address: "__EARN_ROUTER__"
-          abi: EarnRouter
-          event: EarnRedeem
-          where:
-            actionId: { param: action_id }
-            earnVault: "__EARN_VAULT__"
-            outputToken: { param: output_token }
-            earnShares: { param: amount }
-        save: callback
+          transaction_hash: { var: l1_processed_locator.transaction_hash }
+          events:
+            withdrawal:
+              address: "__PORTAL__"
+              abi: ZonePortal
+              event: WithdrawalProcessed
+              where:
+                to: "__EARN_ROUTER__"
+                senderTag:
+                  keccak256_packed:
+                    types: [address, bytes32]
+                    values: [{ param: sender_address }, { var: request.tx_hash }]
+                token: "__EARN_TOKEN__"
+                amount: { param: amount }
+                callbackSuccess: true
+            callback:
+              address: "__EARN_ROUTER__"
+              abi: EarnRouter
+              event: EarnRedeem
+              where:
+                actionId: { param: action_id }
+                earnVault: "__EARN_VAULT__"
+                outputToken: { param: output_token }
+                earnShares: { param: amount }
+        save: l1_result
       - use: wait-encrypted-zone-deposit
         as: zone_return
+        depends_on: [zone_before, l1_result]
         with:
           from_block: { var: zone_before.block_number }
-          deposit_hash: { var: callback.args.zoneDepositHash }
+          deposit_hash: { var: l1_result.events.callback.args.zoneDepositHash }
           sender: "__EARN_ROUTER__"
           recipient: { param: recipient }
           token: { param: output_token }
-          amount: { var: callback.args.outputAmount }
+          amount: { var: l1_result.events.callback.args.outputAmount }
           memo: { param: action_id }
 
   earn-deposit-expect-bounce:
@@ -377,17 +426,19 @@ fragments:
       refund_recipient: address
     outputs:
       request: submit
-      request_receipt: receipt
-      requested: log
-      withdrawal_processed: log
-      bounceback_enqueued: log
+      request_result: log
+      l1_processed_locator: log
+      l1_result: log
       bounceback_processed: log
     steps:
-      - checkpoint: { chain: l1 }
+      - id: l1_before
+        checkpoint: { chain: l1 }
         save: l1_before
-      - checkpoint: { chain: zone }
+      - id: zone_before
+        checkpoint: { chain: zone }
         save: zone_before
-      - invoke:
+      - id: encryption
+        invoke:
           chain: l1
           action: prepare_encrypted_deposit
           with:
@@ -396,7 +447,9 @@ fragments:
             portalAddress: "__PORTAL__"
             memo: { param: action_id }
         save: encryption
-      - submit:
+      - id: request
+        depends_on: [encryption]
+        submit:
           chain: zone
           template: gateway_deposit
           with:
@@ -432,31 +485,29 @@ fragments:
                                 refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
-      - wait_receipt:
+      - id: request_result
+        depends_on: [request]
+        wait_log:
           chain: zone
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
+          events:
+            requested:
+              address: "__OUTBOX__"
+              abi: ZoneOutbox
+              event: WithdrawalRequested
+              where:
+                sender: { param: sender_address }
+                token: { param: input_token }
+                to: "__EARN_ROUTER__"
+                amount: { param: amount }
+                memo: { param: action_id }
+                gasLimit: __CALLBACK_GAS_LIMIT__
         timeout: 45s
-        save: request_receipt
-      - wait_log:
-          chain: zone
-          from_block: { var: zone_before.block_number }
-          transaction_hash: { var: request.tx_hash }
-          sender: { var: request.sender }
-          address: "__OUTBOX__"
-          abi: ZoneOutbox
-          event: WithdrawalRequested
-          where:
-            sender: { param: sender_address }
-            token: { param: input_token }
-            to: "__EARN_ROUTER__"
-            amount: { param: amount }
-            memo: { param: action_id }
-            gasLimit: __CALLBACK_GAS_LIMIT__
-          max_block_range: 1000
-        timeout: 45s
-        save: requested
-      - wait_log:
+        save: request_result
+      - id: l1_processed_locator
+        depends_on: [l1_before, request]
+        wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
           address: "__PORTAL__"
@@ -472,19 +523,38 @@ fragments:
             amount: { param: amount }
             callbackSuccess: false
           max_block_range: 1000
-        save: withdrawal_processed
-      - wait_log:
+        save: l1_processed_locator
+      - id: l1_result
+        depends_on: [l1_processed_locator, request_result]
+        wait_log:
           chain: l1
-          transaction_hash: { var: withdrawal_processed.transaction_hash }
-          address: "__PORTAL__"
-          abi: ZonePortal
-          event: WithdrawalBounceBack
-          where:
-            fallbackNonce: { var: requested.args.fallbackNonce }
-            token: { param: input_token }
-            amount: { param: amount }
-        save: bounceback_enqueued
-      - wait_log:
+          transaction_hash: { var: l1_processed_locator.transaction_hash }
+          events:
+            withdrawal:
+              address: "__PORTAL__"
+              abi: ZonePortal
+              event: WithdrawalProcessed
+              where:
+                to: "__EARN_ROUTER__"
+                senderTag:
+                  keccak256_packed:
+                    types: [address, bytes32]
+                    values: [{ param: sender_address }, { var: request.tx_hash }]
+                token: { param: input_token }
+                amount: { param: amount }
+                callbackSuccess: false
+            bounceback:
+              address: "__PORTAL__"
+              abi: ZonePortal
+              event: WithdrawalBounceBack
+              where:
+                fallbackNonce: { var: request_result.events.requested.args.fallbackNonce }
+                token: { param: input_token }
+                amount: { param: amount }
+        save: l1_result
+      - id: bounceback_processed
+        depends_on: [zone_before, l1_result]
+        wait_log:
           chain: zone
           from_block: { var: zone_before.block_number }
           address: "__INBOX__"

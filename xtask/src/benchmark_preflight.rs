@@ -1854,7 +1854,10 @@ fn yaml_value(value: impl Serialize) -> Value {
 mod tests {
     use super::*;
     use alloy::{
-        consensus::{Transaction, transaction::SignerRecoverable},
+        consensus::{
+            Transaction,
+            transaction::{SignerRecoverable, TxHashRef},
+        },
         eips::eip2718::Decodable2718,
         primitives::{TxKind, address},
         sol_types::SolCall,
@@ -2563,14 +2566,11 @@ mod tests {
             true
         );
         for template in ["gateway_deposit", "gateway_redeem", "offramp"] {
-            assert!(
-                zone["templates"][template].get("expiring_nonce").is_none(),
-                "{template} must use a regular nonce so it cannot expire under load"
+            assert_eq!(
+                zone["templates"][template]["expiring_nonce"], true,
+                "{template} must support same-account DAG submission"
             );
-            assert!(
-                zone["templates"][template].get("valid_for_secs").is_none(),
-                "{template} must not have a transaction validity deadline"
-            );
+            assert_eq!(zone["templates"][template]["valid_for_secs"], 25);
         }
         assert_eq!(
             zone["templates"]["gateway_deposit"]["call"]["function"],
@@ -2674,6 +2674,7 @@ mod tests {
             &fs::read_to_string(output.join("private-flow-scenario.yml")).unwrap(),
         )
         .unwrap();
+        assert_eq!(scenario["scenario"]["execution"], "dag");
         let steps = scenario["scenario"]["steps"].as_sequence().unwrap();
         assert_eq!(steps.len(), 10);
         assert_eq!(steps[0]["use"], "encrypted-zone-entry");
@@ -2683,6 +2684,7 @@ mod tests {
             steps[1]["submit"]["with"]["call"]["args"][0]["var"],
             "recipient.address"
         );
+        assert_eq!(steps[1]["depends_on"][0], "onramp.zone_deposit.processed");
         assert_eq!(
             steps[2]["wait_receipt"]["transaction_hash"]["var"],
             "private_transfer.tx_hash"
@@ -2691,32 +2693,59 @@ mod tests {
         assert_eq!(steps[3]["use"], "earn-deposit-and-return");
         assert_eq!(steps[3]["as"], "earn_deposit");
         assert_eq!(steps[3]["with"]["fee_token"], replacements["__DLUSD__"]);
+        assert_eq!(steps[3]["depends_on"][0], "onramp.zone_deposit.processed");
+        assert!(
+            steps[3]["depends_on"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .all(|dependency| dependency != "private_transfer_receipt")
+        );
         assert_eq!(steps[4]["use"], "earn-redeem-and-return");
         assert_eq!(steps[4]["as"], "earn_redeem");
         assert_eq!(steps[4]["with"]["fee_token"], replacements["__DLUSD__"]);
         assert_eq!(
             steps[4]["with"]["amount"]["var"],
-            "earn_deposit.callback.args.earnShares"
+            "earn_deposit.zone_return.processed.args.amount"
         );
         assert_eq!(
-            steps[7]["wait_receipt"]["transaction_hash"]["var"],
+            steps[4]["depends_on"][0],
+            "earn_deposit.zone_return.processed"
+        );
+        assert_eq!(
+            steps[6]["submit"]["with"]["call"]["args"][2]["var"],
+            "earn_redeem.zone_return.processed.args.amount"
+        );
+        assert_eq!(
+            steps[7]["wait_log"]["transaction_hash"]["var"],
             "offramp.tx_hash"
         );
         assert_eq!(steps[7]["timeout"], "45s");
-        assert_eq!(steps[8]["wait_log"]["event"], "WithdrawalRequested");
         assert_eq!(
-            steps[8]["wait_log"]["from_block"]["var"],
-            "offramp_receipt.block_number"
+            steps[7]["wait_log"]["events"]["requested"]["event"],
+            "WithdrawalRequested"
         );
         assert_eq!(
-            steps[8]["wait_log"]["transaction_hash"]["var"],
-            "offramp.tx_hash"
+            steps[7]["wait_log"]["events"]["requested"]["where"]["amount"]["var"],
+            "earn_redeem.zone_return.processed.args.amount"
         );
-        assert_eq!(steps[8]["wait_log"]["where"]["gasLimit"], 0);
-        assert_eq!(steps[8]["wait_log"]["where"]["fee"], 0);
-        assert_eq!(steps[8]["wait_log"]["where"]["data"], "0x");
-        assert_eq!(steps[8]["wait_log"]["where"]["revealTo"], "0x");
-        assert_eq!(steps[9]["wait_log"]["event"], "WithdrawalProcessed");
+        let requested = &steps[7]["wait_log"]["events"]["requested"]["where"];
+        assert_eq!(requested["gasLimit"], 0);
+        assert_eq!(requested["fee"], 0);
+        assert_eq!(requested["data"], "0x");
+        assert_eq!(requested["revealTo"], "0x");
+        assert_eq!(steps[8]["wait_log"]["event"], "WithdrawalProcessed");
+        assert_eq!(
+            steps[8]["wait_log"]["where"]["amount"]["var"],
+            "earn_redeem.zone_return.processed.args.amount"
+        );
+        assert_eq!(
+            steps[9]["depends_on"],
+            serde_yaml::from_str::<Value>(
+                "[private_transfer_receipt, offramp_result, offramp_processed]"
+            )
+            .unwrap()
+        );
 
         let swapped: Value = serde_yaml::from_str(
             &fs::read_to_string(output.join("swapped-lifecycle-scenario.yml")).unwrap(),
@@ -2828,7 +2857,7 @@ mod tests {
         );
         assert_eq!(
             direct_steps[2]["with"]["amount"]["var"],
-            "earn_deposit.callback.args.earnShares"
+            "earn_deposit.zone_return.processed.args.amount"
         );
 
         let third_party: Value = serde_yaml::from_str(
@@ -2919,7 +2948,7 @@ mod tests {
         );
         assert_eq!(
             third_party_redeem["with"]["amount"]["var"],
-            "earn_deposit.callback.args.earnShares"
+            "earn_deposit.zone_return.processed.args.amount"
         );
         for field in ["fallback_recipient", "refund_recipient"] {
             assert_eq!(
@@ -3025,30 +3054,45 @@ mod tests {
         );
         assert_eq!(
             fragments["fragments"]["encrypted-zone-entry"]["steps"][4]["with"]["amount"]["var"],
-            "enqueued.args.netAmount"
+            "enqueued.events.deposit.args.netAmount"
         );
         assert_eq!(
-            fragments["fragments"]["earn-deposit-and-return"]["steps"][8]["with"]["amount"]["var"],
-            "callback.args.earnShares"
+            fragments["fragments"]["earn-deposit-and-return"]["steps"][7]["with"]["amount"]["var"],
+            "l1_result.events.callback.args.earnShares"
         );
         assert_eq!(
-            fragments["fragments"]["earn-redeem-and-return"]["steps"][8]["with"]["amount"]["var"],
-            "callback.args.outputAmount"
+            fragments["fragments"]["earn-redeem-and-return"]["steps"][7]["with"]["amount"]["var"],
+            "l1_result.events.callback.args.outputAmount"
         );
-        for name in ["earn-deposit-and-return", "earn-redeem-and-return"] {
-            let receipt = &fragments["fragments"][name]["steps"][4];
+        for (name, callback_event) in [
+            ("earn-deposit-and-return", "EarnDeposit"),
+            ("earn-redeem-and-return", "EarnRedeem"),
+        ] {
+            let request_result = &fragments["fragments"][name]["steps"][4];
             assert_eq!(
-                receipt["wait_receipt"]["transaction_hash"]["var"],
+                request_result["wait_log"]["transaction_hash"]["var"],
                 "request.tx_hash"
             );
-            assert_eq!(receipt["timeout"], "45s");
-            let requested = &fragments["fragments"][name]["steps"][5];
             assert_eq!(
-                requested["wait_log"]["from_block"]["var"],
-                "zone_before.block_number"
+                request_result["wait_log"]["events"]["requested"]["event"],
+                "WithdrawalRequested"
             );
-            assert!(requested["wait_log"]["transaction_hash"].is_mapping());
-            assert_eq!(requested["timeout"], "45s");
+            assert_eq!(request_result["timeout"], "45s");
+            let locator = &fragments["fragments"][name]["steps"][5];
+            assert_eq!(
+                locator["wait_log"]["from_block"]["var"],
+                "l1_before.block_number"
+            );
+            let l1_result = &fragments["fragments"][name]["steps"][6]["wait_log"];
+            assert_eq!(
+                l1_result["transaction_hash"]["var"],
+                "l1_processed_locator.transaction_hash"
+            );
+            assert_eq!(
+                l1_result["events"]["withdrawal"]["event"],
+                "WithdrawalProcessed"
+            );
+            assert_eq!(l1_result["events"]["callback"]["event"], callback_event);
         }
         let bounce_fragment = &fragments["fragments"]["earn-deposit-expect-bounce"];
         let bounce_callback = &bounce_fragment["steps"][3]["submit"]["with"]["call"]["args"][6]["abi_encode"]
@@ -3060,19 +3104,20 @@ mod tests {
         );
         assert_eq!(bounce_callback["minEarnShares"]["param"], "amount");
         assert_eq!(
-            bounce_fragment["steps"][6]["wait_log"]["where"]["callbackSuccess"],
+            bounce_fragment["steps"][5]["wait_log"]["where"]["callbackSuccess"],
             false
         );
         assert_eq!(
-            bounce_fragment["steps"][7]["wait_log"]["transaction_hash"]["var"],
-            "withdrawal_processed.transaction_hash"
+            bounce_fragment["steps"][6]["wait_log"]["transaction_hash"]["var"],
+            "l1_processed_locator.transaction_hash"
         );
         assert_eq!(
-            bounce_fragment["steps"][7]["wait_log"]["where"]["fallbackNonce"]["var"],
-            "requested.args.fallbackNonce"
+            bounce_fragment["steps"][6]["wait_log"]["events"]["bounceback"]["where"]["fallbackNonce"]
+                ["var"],
+            "request_result.events.requested.args.fallbackNonce"
         );
         assert_eq!(
-            bounce_fragment["steps"][8]["wait_log"]["event"],
+            bounce_fragment["steps"][7]["wait_log"]["event"],
             "WithdrawalBounceBackProcessed"
         );
         for (fragment, flow) in [
@@ -3208,15 +3253,97 @@ mod tests {
         let activity = &activities[0];
         assert_eq!(activity.chain_id(), Some(config.zone_chain_id));
         assert_eq!(activity.fee_token(), Some(config.token));
-        assert!(activity.is_expiring_nonce());
-        assert!(activity.max_fee_per_gas() > config.zone_max_fee_per_gas);
-        assert!(activities[1].max_fee_per_gas() > config.zone_max_fee_per_gas);
-        assert_ne!(activity.max_fee_per_gas(), activities[1].max_fee_per_gas());
+        for activity in &activities {
+            assert!(activity.is_expiring_nonce());
+            assert_eq!(activity.nonce(), 0);
+            assert_eq!(activity.max_priority_fee_per_gas(), Some(0));
+            assert!(activity.max_fee_per_gas() > config.zone_max_fee_per_gas);
+        }
+        assert_ne!(
+            activities[0].max_fee_per_gas(),
+            activities[1].max_fee_per_gas()
+        );
+        assert_ne!(activities[0].tx_hash(), activities[1].tx_hash());
         let (target, input) = only_call(activity);
         assert_eq!(target, config.token);
         let call = ITIP20::transferCall::abi_decode(input).unwrap();
         assert_eq!(call.amount, U256::from(config.activity_amount));
         assert!(pool_addresses.contains(&call.to));
+
+        let mut nonce_probe_replacements = common_replacements(&config);
+        nonce_probe_replacements.extend(HashMap::from([
+            ("__ZONE_TOKEN__".into(), yaml_value(config.token)),
+            (
+                "__EARN_TOKEN__".into(),
+                Value::from("0x2000000000000000000000000000000000000003"),
+            ),
+            (
+                "__EARN_ROUTER__".into(),
+                Value::from("0x3000000000000000000000000000000000000001"),
+            ),
+            (
+                "__BRIDGE_WALLET__".into(),
+                Value::from("0x3000000000000000000000000000000000000002"),
+            ),
+            (
+                "__PRIVATE_TRANSFER_RECIPIENT__".into(),
+                serde_yaml::from_str("{ var: recipient.address }").unwrap(),
+            ),
+            ("__PRIVATE_TRANSFER_AMOUNT__".into(), Value::from(1_u64)),
+            ("__EARN_DEPOSIT_AMOUNT__".into(), Value::from(100_u64)),
+            ("__EARN_REDEEM_AMOUNT__".into(), Value::from(100_u64)),
+            ("__OFFRAMP_AMOUNT__".into(), Value::from(100_u64)),
+            ("__CALLBACK_GAS_LIMIT__".into(), Value::from(2_000_000_u64)),
+        ]));
+        let nonce_probe_path = output.join("neobank-zone-nonce-probe.yml");
+        render_document(
+            "../neobank/zone-flow.yml",
+            &nonce_probe_path,
+            &nonce_probe_replacements,
+            true,
+        )
+        .unwrap();
+        let mut nonce_probe: Value =
+            serde_yaml::from_str(&fs::read_to_string(&nonce_probe_path).unwrap()).unwrap();
+        nonce_probe["artifacts"] =
+            serde_yaml::from_str("{ TIP20: abis/tip20.json, ZoneOutbox: abis/zone-outbox.json }")
+                .unwrap();
+        nonce_probe["sequences"] = serde_yaml::from_str(
+            r#"
+nonce_probe:
+  bindings:
+    account:
+      account: { pool: users, select: { index: 0 } }
+    recipient:
+      account: { pool: users, select: { index: 1 } }
+  steps:
+    - { name: first, template: private_transfer }
+    - { name: second, template: private_transfer }
+"#,
+        )
+        .unwrap();
+        nonce_probe["mix"] =
+            serde_yaml::from_str("[{ sequence: nonce_probe, weight: 100 }]").unwrap();
+        fs::write(
+            &nonce_probe_path,
+            serde_yaml::to_string(&nonce_probe).unwrap(),
+        )
+        .unwrap();
+
+        let nonce_probe = generate(&txgen, &nonce_probe_path);
+        let nonce_probe = workload_envelopes(&nonce_probe);
+        assert_eq!(nonce_probe.len(), 2);
+        for transaction in &nonce_probe {
+            assert!(transaction.is_expiring_nonce());
+            assert_eq!(transaction.nonce(), 0);
+            assert_eq!(transaction.max_priority_fee_per_gas(), Some(0));
+            assert!(transaction.max_fee_per_gas() > config.zone_max_fee_per_gas);
+        }
+        assert_ne!(
+            nonce_probe[0].max_fee_per_gas(),
+            nonce_probe[1].max_fee_per_gas()
+        );
+        assert_ne!(nonce_probe[0].tx_hash(), nonce_probe[1].tx_hash());
 
         let withdrawal = generate(&txgen, &output.join("withdrawal.yml"));
         assert_setup_approvals(
@@ -3533,6 +3660,30 @@ mod tests {
         assert!(steps.iter().all(|step| step.get("use").is_none()));
     }
 
+    fn assert_flattened_dag_scenario(scenario: &Value, expected_steps: usize) {
+        assert_flattened_scenario(scenario, expected_steps);
+        assert_eq!(scenario["scenario"]["execution"], "dag");
+        let steps = scenario["scenario"]["steps"].as_sequence().unwrap();
+        let ids = steps
+            .iter()
+            .map(|step| step["id"].as_str().expect("DAG step must have an ID"))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), expected_steps, "DAG step IDs must be unique");
+        for step in steps {
+            if let Some(dependencies) = step["depends_on"].as_sequence() {
+                for dependency in dependencies {
+                    let dependency = dependency
+                        .as_str()
+                        .expect("DAG dependencies must be step IDs");
+                    assert!(
+                        ids.contains(dependency),
+                        "DAG dependency {dependency} must name a rendered step"
+                    );
+                }
+            }
+        }
+    }
+
     fn validate_neobank_scenario(txgen: &std::ffi::OsStr) {
         let output = temp_output("neobank-scenario-validation");
         let config = local_render_config();
@@ -3676,17 +3827,17 @@ mod tests {
 
         for (scenario, expected_steps) in [
             ("encrypted-deposit-scenario.yml", 5),
-            ("private-withdrawal-scenario.yml", 9),
-            ("private-flow-scenario.yml", 30),
-            ("swapped-lifecycle-scenario.yml", 23),
-            ("swapped-redemption-position-scenario.yml", 14),
-            ("swapped-redemption-scenario.yml", 9),
-            ("direct-lifecycle-scenario.yml", 23),
-            ("third-party-recipient-scenario.yml", 28),
-            ("slippage-bounce-scenario.yml", 14),
-            ("rewards-position-scenario.yml", 14),
+            ("private-withdrawal-scenario.yml", 8),
+            ("private-flow-scenario.yml", 28),
+            ("swapped-lifecycle-scenario.yml", 21),
+            ("swapped-redemption-position-scenario.yml", 13),
+            ("swapped-redemption-scenario.yml", 8),
+            ("direct-lifecycle-scenario.yml", 21),
+            ("third-party-recipient-scenario.yml", 26),
+            ("slippage-bounce-scenario.yml", 13),
+            ("rewards-position-scenario.yml", 13),
             ("rewards-funding-scenario.yml", 3),
-            ("rewards-redemption-scenario.yml", 18),
+            ("rewards-redemption-scenario.yml", 16),
         ] {
             let rendered_path = output.join(format!("{scenario}.rendered.yml"));
             let validation = Command::new(txgen)
@@ -3714,7 +3865,7 @@ mod tests {
             );
             let rendered: Value =
                 serde_yaml::from_str(&fs::read_to_string(rendered_path).unwrap()).unwrap();
-            assert_flattened_scenario(&rendered, expected_steps);
+            assert_flattened_dag_scenario(&rendered, expected_steps);
         }
         fs::remove_dir_all(output).unwrap();
     }

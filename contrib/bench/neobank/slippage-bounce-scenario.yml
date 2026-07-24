@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-slippage-bounce
+  execution: dag
   timeout: 10m
 
   bindings:
@@ -57,6 +58,7 @@ scenario:
 
     - use: earn-deposit-expect-bounce
       as: earn_deposit_bounce
+      depends_on: [onramp.zone_deposit.processed]
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }

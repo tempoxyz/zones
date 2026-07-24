@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-rewards-position-setup
+  execution: dag
   timeout: 10m
 
   bindings:
@@ -62,6 +63,7 @@ scenario:
 
     - use: earn-deposit-and-return
       as: position
+      depends_on: [onramp.zone_deposit.processed]
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }

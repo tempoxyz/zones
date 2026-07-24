@@ -14,6 +14,7 @@ chains:
 
 scenario:
   name: neobank-rewards-funding-setup
+  execution: dag
   timeout: 10m
 
   bindings:
@@ -21,7 +22,8 @@ scenario:
       account: { pool: control, select: lease }
 
   steps:
-    - submit:
+    - id: approval
+      submit:
         chain: l1
         template: reward_approval
         with:
@@ -33,7 +35,9 @@ scenario:
         await: receipt
       save: approval
 
-    - submit:
+    - id: funding
+      depends_on: [approval]
+      submit:
         chain: l1
         template: reward_fund
         with:
@@ -46,7 +50,9 @@ scenario:
         await: receipt
       save: funding
 
-    - wait_log:
+    - id: funded
+      depends_on: [funding]
+      wait_log:
         chain: l1
         transaction_hash: { var: funding.tx_hash }
         sender: { var: funding.sender }

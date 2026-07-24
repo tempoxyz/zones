@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-encrypted-deposit
+  execution: dag
   timeout: 10m
 
   bindings:

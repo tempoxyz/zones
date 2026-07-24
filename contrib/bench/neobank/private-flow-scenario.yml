@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-private-zone-flow
+  execution: dag
   timeout: 10m
 
   bindings:
@@ -61,7 +62,9 @@ scenario:
         amount: __ONRAMP_AMOUNT__
         memo: { var: onramp_action_id }
 
-    - submit:
+    - id: private_transfer
+      depends_on: [onramp.zone_deposit.processed]
+      submit:
         chain: zone
         template: private_transfer
         with:
@@ -71,7 +74,9 @@ scenario:
             args: [__PRIVATE_TRANSFER_RECIPIENT__, __PRIVATE_TRANSFER_AMOUNT__]
       save: private_transfer
 
-    - wait_receipt:
+    - id: private_transfer_receipt
+      depends_on: [private_transfer]
+      wait_receipt:
         chain: zone
         transaction_hash: { var: private_transfer.tx_hash }
         sender: { var: private_transfer.sender }
@@ -80,6 +85,7 @@ scenario:
 
     - use: earn-deposit-and-return
       as: earn_deposit
+      depends_on: [onramp.zone_deposit.processed]
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }
@@ -95,23 +101,28 @@ scenario:
 
     - use: earn-redeem-and-return
       as: earn_redeem
+      depends_on: [earn_deposit.zone_return.processed]
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
         output_token: "__DLUSD__"
         fee_token: "__DLUSD__"
-        amount: { var: earn_deposit.callback.args.earnShares }
+        amount: { var: earn_deposit.zone_return.processed.args.amount }
         min_vault_assets: __EARN_REDEEM_AMOUNT__
         min_output_amount: __EARN_REDEEM_AMOUNT__
         action_id: { var: earn_redeem_action_id }
         fallback_recipient: { var: account.address }
         refund_recipient: { var: account.address }
 
-    - checkpoint: { chain: l1 }
+    - id: l1_before_offramp
+      depends_on: [earn_redeem.zone_return.processed]
+      checkpoint: { chain: l1 }
       save: l1_before_offramp
 
-    - submit:
+    - id: offramp
+      depends_on: [l1_before_offramp, earn_redeem.zone_return.processed]
+      submit:
         chain: zone
         template: offramp
         with:
@@ -121,7 +132,7 @@ scenario:
             args:
               - "__DLUSD__"
               - "__BRIDGE_WALLET__"
-              - __OFFRAMP_AMOUNT__
+              - { var: earn_redeem.zone_return.processed.args.amount }
               - { var: offramp_action_id }
               - 0
               - { var: account.address }
@@ -129,36 +140,33 @@ scenario:
               - "0x"
       save: offramp
 
-    - wait_receipt:
+    - id: offramp_result
+      depends_on: [offramp]
+      wait_log:
         chain: zone
         transaction_hash: { var: offramp.tx_hash }
         sender: { var: offramp.sender }
+        events:
+          requested:
+            address: "__OUTBOX__"
+            abi: ZoneOutbox
+            event: WithdrawalRequested
+            where:
+              sender: { var: account.address }
+              token: "__DLUSD__"
+              to: "__BRIDGE_WALLET__"
+              amount: { var: earn_redeem.zone_return.processed.args.amount }
+              fee: 0
+              memo: { var: offramp_action_id }
+              gasLimit: 0
+              data: "0x"
+              revealTo: "0x"
       timeout: 45s
-      save: offramp_receipt
+      save: offramp_result
 
-    - wait_log:
-        chain: zone
-        from_block: { var: offramp_receipt.block_number }
-        transaction_hash: { var: offramp.tx_hash }
-        sender: { var: offramp.sender }
-        address: "__OUTBOX__"
-        abi: ZoneOutbox
-        event: WithdrawalRequested
-        where:
-          sender: { var: account.address }
-          token: "__DLUSD__"
-          to: "__BRIDGE_WALLET__"
-          amount: __OFFRAMP_AMOUNT__
-          fee: 0
-          memo: { var: offramp_action_id }
-          gasLimit: 0
-          data: "0x"
-          revealTo: "0x"
-        max_block_range: 1000
-      timeout: 45s
-      save: offramp_requested
-
-    - wait_log:
+    - id: offramp_processed
+      depends_on: [l1_before_offramp, offramp]
+      wait_log:
         chain: l1
         from_block: { var: l1_before_offramp.block_number }
         address: "__PORTAL__"
@@ -171,7 +179,14 @@ scenario:
               types: [address, bytes32]
               values: [{ var: account.address }, { var: offramp.tx_hash }]
           token: "__DLUSD__"
-          amount: __OFFRAMP_AMOUNT__
+          amount: { var: earn_redeem.zone_return.processed.args.amount }
           callbackSuccess: true
         max_block_range: 1000
       save: offramp_processed
+
+    - id: journey_complete
+      depends_on:
+        - private_transfer_receipt
+        - offramp_result
+        - offramp_processed
+      checkpoint: { chain: l1 }

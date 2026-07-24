@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-swapped-lifecycle
+  execution: dag
   timeout: 10m
 
   bindings:
@@ -59,6 +60,7 @@ scenario:
 
     - use: earn-deposit-and-return
       as: earn_deposit
+      depends_on: [onramp.zone_deposit.processed]
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }
@@ -74,13 +76,14 @@ scenario:
 
     - use: earn-redeem-and-return
       as: earn_redeem
+      depends_on: [earn_deposit.zone_return.processed]
       with:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
         output_token: "__DLUSD__"
         fee_token: "__DLUSD__"
-        amount: { var: earn_deposit.callback.args.earnShares }
+        amount: { var: earn_deposit.zone_return.processed.args.amount }
         min_vault_assets: __EARN_REDEEM_AMOUNT__
         min_output_amount: __EARN_REDEEM_AMOUNT__
         action_id: { var: earn_redeem_action_id }

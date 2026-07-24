@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-third-party-recipient
+  execution: dag
   timeout: 10m
 
   bindings:
@@ -74,6 +75,7 @@ scenario:
 
     - use: earn-deposit-and-return
       as: earn_deposit
+      depends_on: [account_a_entry.zone_deposit.processed]
       with:
         sender: { var: account_a.ref }
         sender_address: { var: account_a.address }
@@ -89,13 +91,16 @@ scenario:
 
     - use: earn-redeem-and-return
       as: earn_redeem
+      depends_on:
+        - account_b_fee_entry.zone_deposit.processed
+        - earn_deposit.zone_return.processed
       with:
         sender: { var: account_b.ref }
         sender_address: { var: account_b.address }
         recipient: { var: account_a.address }
         output_token: "__PATHUSD__"
         fee_token: "__PATHUSD__"
-        amount: { var: earn_deposit.callback.args.earnShares }
+        amount: { var: earn_deposit.zone_return.processed.args.amount }
         min_vault_assets: __EARN_REDEEM_AMOUNT__
         min_output_amount: __EARN_REDEEM_AMOUNT__
         action_id: { var: earn_redeem_action_id }

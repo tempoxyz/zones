@@ -33,6 +33,7 @@ chains:
 
 scenario:
   name: neobank-rewards-redemption
+  execution: dag
   timeout: 10m
 
   bindings:
