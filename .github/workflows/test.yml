@@ -76,11 +76,12 @@ jobs:
 
       - name: Build Solidity artifacts
         run: |
-          forge build --root specs/ref-impls
+          forge build --root specs/ref-impls --no-lint
           forge build \
             --root earn \
             --skip test \
             --skip script \
+            --no-lint \
             --out "$GITHUB_WORKSPACE/specs/ref-impls/out"
 
       - name: Build and archive tests
