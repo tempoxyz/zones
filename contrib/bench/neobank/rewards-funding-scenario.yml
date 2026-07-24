@@ -5,6 +5,10 @@ chains:
     network: tempo
     rpc_url: "${L1_RPC_URL}"
     query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    observation:
+      mode: auto
+      websocket_url: "${L1_WS_RPC_URL}"
+      poll_interval: 50ms
     chain_id: __L1_CHAIN_ID__
     workload: ./l1-onramp.yml
 

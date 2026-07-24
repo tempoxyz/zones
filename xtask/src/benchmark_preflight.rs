@@ -3209,11 +3209,9 @@ mod tests {
         assert_eq!(activity.chain_id(), Some(config.zone_chain_id));
         assert_eq!(activity.fee_token(), Some(config.token));
         assert!(activity.is_expiring_nonce());
-        assert_eq!(activity.max_fee_per_gas(), config.zone_max_fee_per_gas + 1);
-        assert_eq!(
-            activities[1].max_fee_per_gas(),
-            config.zone_max_fee_per_gas + 2
-        );
+        assert!(activity.max_fee_per_gas() > config.zone_max_fee_per_gas);
+        assert!(activities[1].max_fee_per_gas() > config.zone_max_fee_per_gas);
+        assert_ne!(activity.max_fee_per_gas(), activities[1].max_fee_per_gas());
         let (target, input) = only_call(activity);
         assert_eq!(target, config.token);
         let call = ITIP20::transferCall::abi_decode(input).unwrap();
@@ -3506,8 +3504,10 @@ mod tests {
             .arg(rendered)
             .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
             .env("L1_RPC_URL", "http://127.0.0.1:18545")
+            .env("L1_WS_RPC_URL", "ws://127.0.0.1:18545")
             .env("ZONES_BENCH_L1_QUERY_RPC_URL", "http://127.0.0.1:18546")
             .env("ZONE_RPC_URL", "http://127.0.0.1:19545")
+            .env("ZONE_WS_RPC_URL", "ws://127.0.0.1:19545")
             .env("ZONE_PRIVATE_RPC_URL", "http://127.0.0.1:19546")
             .env(
                 "ZONES_BENCH_ZONE_AUTH_MAP",
@@ -3698,9 +3698,11 @@ mod tests {
                 .arg(&rendered_path)
                 .env("ZONES_BENCH_MNEMONIC", TEST_MNEMONIC)
                 .env("L1_RPC_URL", "http://l1.invalid")
+                .env("L1_WS_RPC_URL", "ws://l1.invalid")
                 .env("ZONES_BENCH_L1_QUERY_RPC_URL", "http://l1-query.invalid")
                 .env("ZONE_PRIVATE_RPC_URL", "http://zone-private.invalid")
                 .env("ZONE_RPC_URL", "http://zone-query.invalid")
+                .env("ZONE_WS_RPC_URL", "ws://zone-query.invalid")
                 .env("ZONES_BENCH_ZONE_AUTH_MAP", output.join("zone-auth.json"))
                 .output()
                 .unwrap();

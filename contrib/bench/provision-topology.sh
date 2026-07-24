@@ -1093,6 +1093,8 @@ provision_up() {
         --zone.id "$zone_id" \
         --http --http.addr 127.0.0.1 --http.port 8546 \
         --http.api eth,net,web3,txpool \
+        --ws --ws.addr 127.0.0.1 --ws.port 8546 \
+        --ws.api eth,net,web3,txpool \
         --metrics 127.0.0.1:9201 \
         --private-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
@@ -1130,6 +1132,7 @@ provision_up() {
         ZONES_BENCH_L1_QUERY_RPC_URL "$l1_b_rpc" \
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
+        ZONE_WS_RPC_URL "ws://127.0.0.1:8546" \
         ZONE_PRIVATE_RPC_URL "$zone_private_rpc" \
         ZONES_BENCH_TOKEN "$zone_token" \
         ZONES_BENCH_PROFILE "$profile" \

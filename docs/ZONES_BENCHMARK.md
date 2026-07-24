@@ -343,13 +343,15 @@ Install `txgen-tempo` and `bench` from the exact combined txgen revision used by
 this workflow (Rust 1.93 or newer is required):
 
 ```bash
-export TXGEN_REV='56025c9aa45b799403fe512efca51a9a2af212c6'
+export TXGEN_REV='072877b673f60b5f559f17da098296f1841b6732'
 cargo install --git https://github.com/tempoxyz/txgen \
   --rev "$TXGEN_REV" --locked txgen-tempo bench-cli
 ```
 
-That pinned `tempoxyz/txgen:main` revision includes scenario receipt-gas
-publication as well as the encrypted-deposit and callback encoding support.
+That pinned `tempoxyz/txgen:main` revision includes DAG scenario execution,
+subscription-backed observation with canonical polling fallback, causal report
+schema v2, sampled lifecycle traces, receipt-gas publication, and the
+encrypted-deposit and callback encoding support.
 
 The paired-manifest and safe-root checks are standalone and do not start nodes
 or build contracts:
@@ -560,6 +562,7 @@ txgen-tempo scenario run \
   --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
   --seed "$ZONES_BENCH_SEED" \
   --failure-policy continue \
+  --sample-instances 10 \
   --report target/zones-benchmark/roundtrip-report.json
 
 kill "$auth_map_pid"
@@ -710,7 +713,7 @@ configured write RPC. Each job:
    putting the phrase in workflow arguments or artifacts;
 2. restores private writable copies of the two isolated Schelk virgin volumes;
 3. checks out the exact Tempo revision and txgen commit
-   `56025c9aa45b799403fe512efca51a9a2af212c6`, then builds Tempo and Zone
+   `072877b673f60b5f559f17da098296f1841b6732`, then builds Tempo and Zone
    binaries with the e2e benchmark's `profiling` profile and
    `-C target-cpu=native`;
 4. applies the pinned Tempo benchmark host tuning and invokes its cleanup hook
@@ -901,19 +904,31 @@ workflow submits measured L1 user transactions through validator A and uses
 validator B for aggregate queries; unlike the independent deposit pipeline, it
 does not spread L1 submissions across both validators.
 
-Scenario mode writes the journey and per-step latency JSON report and publishes
-the same finalized measured report to ClickHouse. GitHub Actions scenario runs
+The provisioned public L1 and Zone endpoints expose WebSocket subscriptions for
+observation while transaction submission remains on the configured HTTP RPCs.
+Neobank scenario chains use txgen's `auto` observation mode, which prefers
+new-head and log subscriptions with canonical backfill and verification, then
+falls back to 50 ms HTTP polling. The WebSocket endpoints carry no private-Zone
+authorization material.
+
+Scenario mode writes report schema v2 JSON and publishes the same finalized
+measured report to ClickHouse. GitHub Actions scenario runs
 require `CLICKHOUSE_URL`, `CLICKHOUSE_USER`, and `CLICKHOUSE_PASSWORD`; local
 runs retain JSON-only behavior unless those variables are set. Credentials
 remain in the process environment, while txgen receives only the
 credential-free endpoint and non-secret run/ref metadata. The workflow combines
 the JSON report with the rendered scenario to publish a scenario-native results
-page. It reports completed journeys per second,
-aggregate and per-chain successful submit-step TPS, completed-journey latency,
-latency for every measured submit and wait step, and receipt gas metrics grouped
-by chain, input template, and scenario step. These gas figures come from outer
-transaction receipts; they do not trace or split internal-call gas. The
-generated Markdown is also included in the run artifact.
+page. It reports completed journeys per second, aggregate and per-chain
+successful submit-step TPS, client-observed end-to-end latency, observed
+critical-path latency, causal-edge and chain-inclusion timing, observation lag,
+per-step command duration, and receipt gas grouped by chain, input template,
+and scenario step. Journey P50/P95/P99 values are calculated from complete
+per-instance journeys; they are never produced by summing aggregate step
+percentiles. Gas figures come from outer transaction receipts and do not split
+internal-call gas. Each measured run retains up to ten txgen lifecycle samples,
+which contain transaction and canonical block identities and timing milestones
+but exclude calldata, decoded values, credentials, authorization maps, and
+signing material. The generated Markdown is also included in the run artifact.
 
 These rates cover the complete measured window, including ramp-up and drain;
 they are not a saturation or single-chain capacity claim. Aggregate user TPS
@@ -924,13 +939,11 @@ execution and cross-chain progress. Untimed bootstrap and approval setup is
 excluded. Scenario mode still does not scrape the node metric endpoints used by
 Tempo's existing single-chain benchmark harness.
 
-The pinned txgen scenario runtime currently serializes expiring-nonce activity
-submissions through one internal fee-uniqueness scheduling lane until each RPC
-accepts the transaction. Its capacity depends on RPC acceptance latency and it
-can cap measured Zone activity at any configured rate; it must be fixed upstream
-before interpreting that path as unconstrained throughput. Reverted withdrawals
-and rejected bridge outcomes also surface as step timeouts rather than immediate
-terminal classifications.
+The pinned txgen runtime atomically reserves distinct expiring nonces for
+independent same-account DAG submissions. Regular-nonce submissions still
+require an explicit dependency edge. Reverted withdrawals and rejected bridge
+outcomes surface as step timeouts rather than immediate terminal
+classifications.
 
 The workflow pins disjoint CPU sets but runs two validators, one Zone, and the
 sender on one 32-logical-CPU host without the two-validator harness's 60 GiB

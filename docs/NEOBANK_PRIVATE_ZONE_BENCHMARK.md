@@ -165,6 +165,13 @@ compose shared, receipt-correlated boundaries from
 `l1-onramp.yml` and `zone-flow.yml` contain the underlying transaction templates
 and remain separate from the generic roundtrip assets.
 
+The complete journey uses txgen's DAG execution mode. Its exact terminal
+onramp event gates both Zone branches that consume the onramped balance. The
+private transfer and Earn path then run independently; terminal journey
+completion joins them after the Earn deposit return, Earn redemption return,
+and correlated off-ramp finish. Dependency edges follow actual saved outputs
+or spendable returned balances rather than imposing presentation order.
+
 The transaction generator prepares each encrypted payload in memory from
 the leased account, action ID, portal address, and current portal encryption
 key. It ABI-encodes the canonical callback tuple directly into the composable
@@ -206,6 +213,12 @@ workflow results renderer:
 ```bash
 contrib/bench/run-neobank-private-flow.sh
 ```
+
+The provisioner exports public L1 and Zone WebSocket URLs for txgen observation.
+Every preset uses `auto` subscription mode with canonical backfill and a 50 ms
+HTTP polling fallback; authenticated Zone transaction submission remains on
+the private HTTP RPC. The measured run retains up to ten sanitized instance
+lifecycle samples for diagnosis.
 
 Set `ZONES_BENCH_NEOBANK_PRESET=swapped-lifecycle` before provisioning for the
 swapped stablecoin lifecycle, `swapped-redemption` for one swapped Earn
@@ -462,8 +475,10 @@ scenario contributes benchmark latency and throughput.
 
 That runner should provision the existing topology, deploy and configure the
 fixtures outside measurement, create the private-RPC authorization map in a
-mode-0700 temporary directory, run the scenario, publish per-step and journey
-latency, and remove the temporary material on exit.
+mode-0700 temporary directory, run the scenario, and publish report schema v2
+metrics: client-observed end-to-end latency, complete-instance critical-path
+latency, causal-edge and inclusion timing, observation lag, per-step command
+duration, and receipt gas. It removes the temporary material on exit.
 
 ## Production differences
 

@@ -15,7 +15,6 @@ fragments:
     steps:
       - wait_log:
           chain: zone
-          poll_interval: 100ms
           from_block: { param: from_block }
           address: "__INBOX__"
           abi: ZoneInbox
@@ -74,7 +73,6 @@ fragments:
 
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           transaction_hash: { var: submission.tx_hash }
           sender: { var: submission.sender }
           address: "__PORTAL__"
@@ -170,14 +168,12 @@ fragments:
         save: request
       - wait_receipt:
           chain: zone
-          poll_interval: 100ms
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
         timeout: 45s
         save: request_receipt
       - wait_log:
           chain: zone
-          poll_interval: 100ms
           from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
@@ -196,7 +192,6 @@ fragments:
         save: requested
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           from_block: { var: l1_before.block_number }
           address: "__PORTAL__"
           abi: ZonePortal
@@ -214,7 +209,6 @@ fragments:
         save: withdrawal_processed
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           transaction_hash: { var: withdrawal_processed.transaction_hash }
           address: "__EARN_ROUTER__"
           abi: EarnRouter
@@ -308,14 +302,12 @@ fragments:
         save: request
       - wait_receipt:
           chain: zone
-          poll_interval: 100ms
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
         timeout: 45s
         save: request_receipt
       - wait_log:
           chain: zone
-          poll_interval: 100ms
           from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
@@ -334,7 +326,6 @@ fragments:
         save: requested
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           from_block: { var: l1_before.block_number }
           address: "__PORTAL__"
           abi: ZonePortal
@@ -352,7 +343,6 @@ fragments:
         save: withdrawal_processed
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           transaction_hash: { var: withdrawal_processed.transaction_hash }
           address: "__EARN_ROUTER__"
           abi: EarnRouter
@@ -444,14 +434,12 @@ fragments:
         save: request
       - wait_receipt:
           chain: zone
-          poll_interval: 100ms
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
         timeout: 45s
         save: request_receipt
       - wait_log:
           chain: zone
-          poll_interval: 100ms
           from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
@@ -470,7 +458,6 @@ fragments:
         save: requested
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           from_block: { var: l1_before.block_number }
           address: "__PORTAL__"
           abi: ZonePortal
@@ -488,7 +475,6 @@ fragments:
         save: withdrawal_processed
       - wait_log:
           chain: l1
-          poll_interval: 100ms
           transaction_hash: { var: withdrawal_processed.transaction_hash }
           address: "__PORTAL__"
           abi: ZonePortal
@@ -500,7 +486,6 @@ fragments:
         save: bounceback_enqueued
       - wait_log:
           chain: zone
-          poll_interval: 100ms
           from_block: { var: zone_before.block_number }
           address: "__INBOX__"
           abi: ZoneInbox
