@@ -85,14 +85,6 @@ impl<P> L1State<P> {
         self.portal_address
     }
 
-    /// Returns the canonical storage handlers for the configured ZonePortal.
-    ///
-    /// Values accessed through this handle must be read with [`Self::read_l1`] so they resolve
-    /// through the anchored L1 provider rather than the local EVM journal.
-    pub fn portal(&self) -> ZonePortal {
-        ZonePortal::new(self.portal_address)
-    }
-
     fn set_anchor(&self, new: u64) -> Result<(), L1StateError> {
         match self.get_anchor() {
             None => {
@@ -139,6 +131,18 @@ impl<P: L1StorageReader> L1State<P> {
             account: slot.address(),
         };
         T::load(&storage, slot.slot(), slot.ctx())
+    }
+
+    /// Selects and reads a typed slot from the configured ZonePortal at the active anchor.
+    ///
+    /// The callback only exposes the portal for selecting a handler; the selected value is always
+    /// resolved through [`Self::read_l1`] rather than the local EVM journal.
+    pub fn read_portal<T: Storable>(
+        &self,
+        select: impl for<'a> FnOnce(&'a ZonePortal) -> &'a Slot<T>,
+    ) -> tempo_precompiles::Result<T> {
+        let portal = ZonePortal::new(self.portal_address);
+        self.read_l1(select(&portal))
     }
 }
 

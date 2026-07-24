@@ -58,8 +58,7 @@ impl ZoneOutbox {
         l1: &L1State<P>,
         caller: Address,
     ) -> ZoneResult<()> {
-        let portal = l1.portal();
-        if caller != Address::ZERO && !l1.read_l1(&portal.is_sequencer[caller])? {
+        if caller != Address::ZERO && !l1.read_portal(|portal| &portal.is_sequencer[caller])? {
             return Err(ZoneOutboxError::only_sequencer().into());
         }
         Ok(())
@@ -72,20 +71,19 @@ impl ZoneOutbox {
         to: Address,
         gas_limit: u64,
     ) -> ZoneResult<()> {
-        let portal = l1.portal();
-        if !l1.read_l1(&portal.token_configs[token].enabled)? {
+        if !l1.read_portal(|portal| &portal.token_configs[token].enabled)? {
             return Err(ZonePortalError::token_not_enabled().into());
         }
 
-        let access_enforced = l1.read_l1(&portal.is_access_enforced)?;
-        let gateway_enforced = l1.read_l1(&portal.is_gateway_enforced)?;
+        let access_enforced = l1.read_portal(|portal| &portal.is_access_enforced)?;
+        let gateway_enforced = l1.read_portal(|portal| &portal.is_gateway_enforced)?;
 
         if gas_limit == 0 {
             if !access_enforced && !gateway_enforced {
                 return Ok(());
             }
 
-            let role = l1.read_l1(&portal.role[to])?;
+            let role = l1.read_portal(|portal| &portal.role[to])?;
             if gateway_enforced && role == IZonePortal::Role::CallbackGateway as u8 {
                 return Err(ZonePortalError::invalid_callback_target().into());
             }
@@ -93,7 +91,8 @@ impl ZoneOutbox {
                 return Err(ZonePortalError::account_not_allowed(to).into());
             }
         } else if gateway_enforced
-            && l1.read_l1(&portal.role[to])? != IZonePortal::Role::CallbackGateway as u8
+            && l1.read_portal(|portal| &portal.role[to])?
+                != IZonePortal::Role::CallbackGateway as u8
         {
             return Err(ZonePortalError::invalid_callback_target().into());
         }

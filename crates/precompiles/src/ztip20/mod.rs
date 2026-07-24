@@ -124,9 +124,8 @@ impl<P: L1StorageReader> TIP20Rules<P> {
 
     #[inline]
     fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        let portal = self.l1.portal();
         self.l1
-            .read_l1(&portal.is_sequencer[caller])
+            .read_portal(|portal| &portal.is_sequencer[caller])
             .map_err(CallRuleError::Tempo)
     }
 }
