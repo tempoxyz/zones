@@ -754,20 +754,22 @@ mechanism comparison:
 
 | Controls | Inputs and defaults |
 | --- | --- |
-| Workload | `phase=neobank-full-journey`, `accounts=100`, `count=1000`, `tps=20`, `max-concurrent=12`, and an optional `seed` derived from the workflow run when empty |
+| Workload | `phase=neobank-full-journey`, `accounts=100`, `count=100`, `tps=20`, `max-concurrent=12`, and an optional `seed` derived from the workflow run when empty |
 | Transaction amounts | `deposit-amount=2000000`, `activity-amount=1`, `withdrawal-amount=1000000`, and `bootstrap-deposit-amount=10000000` |
-| Route and destination | `swap-mechanism=direct-swap`, `swap-liquidity=10000000000`, `recipient-mode=existing`, and `callback-gas-limit=10000000` |
+| Route and destination | `swap-mechanism=simple`, `swap-liquidity=10000000000`, `recipient-mode=existing`, and `callback-gas-limit=10000000` |
 | L1 state | `state-bloat-gib=1` and `force-bloat=false` |
 | L1 capacity | `l1-gas-limit=30000000` and `l1-general-gas-limit=30000000` |
 | Withdrawal scheduler | `withdrawal-max-batch-gas=30000000`, `withdrawal-max-in-flight-batches=12`, `zone-batch-interval-blocks=120`, and `withdrawal-poll-interval-secs=5` |
 | Waiting and drain | `step-timeout=10m`, `setup-settlement-timeout-secs=120`, and `drain-timeout=300` |
 
 For scenario phases, `count` is complete journeys and `tps` is journey starts
-per second. For the independent `deposit` phase they are transactions and
-transactions per second. The benchmark-side `max-concurrent` default is 12 for
-every phase and preset. It limits txgen transactions or journeys and is
-independent of `withdrawal-max-in-flight-batches`, which limits the Zone
-withdrawal scheduler's ordered L1 batches; both happen to default to 12.
+per second; `tps` accepts positive decimals so a sustained run can offer load
+just above an observed capacity. For the independent `deposit` phase they are
+transactions and integer transactions per second. The benchmark-side
+`max-concurrent` default is 12 for every phase and preset. It limits txgen
+transactions or journeys and is independent of
+`withdrawal-max-in-flight-batches`, which limits the Zone withdrawal
+scheduler's ordered L1 batches; both happen to default to 12.
 `step-timeout` accepts a positive duration ending in
 `ms`, `s`, `m`, or `h`; `drain-timeout=0` is the only supported zero-valued
 timeout and skips the independent phase's final txpool drain. The workflow
@@ -808,19 +810,21 @@ mnemonic file, Schelk snapshots, and private sender-auth map are outside the
 artifact tree; the sender-auth map is mode 0600 and deleted on exit.
 
 After the workflow exists on the default branch, dispatch it from the Actions
-UI or CLI and select the branch/ref to test:
+UI or CLI and select the branch/ref to test. This example offers `1.2`
+journeys/s with 13 in flight, just above the approximately `1.14` journeys/s
+observed at the prior 12-journey capacity point:
 
 ```bash
 gh workflow run zones-benchmark.yml \
   --ref '<branch-or-tag>' \
   -f phase=neobank-full-journey \
   -f accounts=100 \
-  -f count=100 \
-  -f tps=20 \
-  -f max-concurrent=12 \
+  -f count=1000 \
+  -f tps=1.2 \
+  -f max-concurrent=13 \
   -f state-bloat-gib=1 \
   -f force-bloat=false \
-  -f swap-mechanism=direct-swap \
+  -f swap-mechanism=simple \
   -f swap-liquidity=10000000000 \
   -f recipient-mode=existing
 ```

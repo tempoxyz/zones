@@ -221,7 +221,9 @@ journey starts per second, and at most 12 benchmark journeys in flight. The
 same benchmark-side default applies to every phase and preset. It is independent
 of the Zone withdrawal scheduler's
 `ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES`, which limits ordered L1
-withdrawal batches rather than txgen transactions or journeys.
+withdrawal batches rather than txgen transactions or journeys. Scenario start
+rates may be positive decimals, such as `1.2`, so sustained runs can target the
+observed capacity without using an integer rate far above it.
 
 The historical validation runs below predate the canonical Earn v1 fixture
 refresh and used larger in-flight caps than the current default of 12. They are

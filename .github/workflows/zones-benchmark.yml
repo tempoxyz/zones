@@ -31,7 +31,7 @@ on:
         required: true
         default: "100"
       tps:
-        description: Target phase TPS, or journey starts per second for a scenario.
+        description: Target phase TPS, or fractional journey starts per second for a scenario.
         type: string
         required: true
         default: "20"
@@ -352,7 +352,7 @@ jobs:
             INPUT_SEED=$((10#$RUN_ID * 100000 + 10#$RUN_ATTEMPT))
           fi
           for name in \
-            INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT \
+            INPUT_ACCOUNTS INPUT_COUNT INPUT_MAX_CONCURRENT \
             INPUT_STATE_BLOAT_GIB INPUT_DEPOSIT_AMOUNT INPUT_ACTIVITY_AMOUNT \
             INPUT_WITHDRAWAL_AMOUNT INPUT_BOOTSTRAP_DEPOSIT_AMOUNT \
             INPUT_CALLBACK_GAS_LIMIT INPUT_SWAP_LIQUIDITY \
@@ -371,13 +371,28 @@ jobs:
               exit 1
             fi
           done
-          for name in INPUT_ACCOUNTS INPUT_COUNT INPUT_TPS INPUT_MAX_CONCURRENT; do
+          for name in INPUT_ACCOUNTS INPUT_COUNT INPUT_MAX_CONCURRENT; do
             value="${!name}"
             if (( ${#value} > 9 || 10#$value == 0 )); then
               echo "::error::$name must be between 1 and 999999999"
               exit 1
             fi
           done
+          if [ "$phase" = neobank-e2e ]; then
+            if ! [[ "$INPUT_TPS" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] \
+              || ! awk -v value="$INPUT_TPS" 'BEGIN { exit !(value > 0 && value <= 999999999) }'; then
+              echo "::error::INPUT_TPS must be a positive decimal no greater than 999999999"
+              exit 1
+            fi
+            INPUT_TPS="$(awk -v value="$INPUT_TPS" 'BEGIN { printf "%.15g", value }')"
+          else
+            if ! [[ "$INPUT_TPS" =~ ^[0-9]+$ ]] \
+              || (( ${#INPUT_TPS} > 9 || 10#$INPUT_TPS == 0 )); then
+              echo "::error::INPUT_TPS must be between 1 and 999999999"
+              exit 1
+            fi
+            INPUT_TPS=$((10#$INPUT_TPS))
+          fi
           for name in \
             INPUT_DEPOSIT_AMOUNT INPUT_BOOTSTRAP_DEPOSIT_AMOUNT \
             INPUT_ACTIVITY_AMOUNT INPUT_WITHDRAWAL_AMOUNT
@@ -473,7 +488,6 @@ jobs:
           esac
           INPUT_ACCOUNTS=$((10#$INPUT_ACCOUNTS))
           INPUT_COUNT=$((10#$INPUT_COUNT))
-          INPUT_TPS=$((10#$INPUT_TPS))
           INPUT_MAX_CONCURRENT=$((10#$INPUT_MAX_CONCURRENT))
           INPUT_STATE_BLOAT_GIB=$((10#$INPUT_STATE_BLOAT_GIB))
           swap_liquidity=$((10#$INPUT_SWAP_LIQUIDITY))
@@ -982,7 +996,7 @@ jobs:
             --argjson forceBloat "$((10#$ZONES_BENCH_FORCE_BLOAT))" \
             --argjson accounts "$((10#$ZONES_BENCH_ACCOUNTS))" \
             --argjson count "$((10#$ZONES_BENCH_COUNT))" \
-            --argjson targetRate "$((10#$ZONES_BENCH_TPS))" \
+            --argjson targetRate "$ZONES_BENCH_TPS" \
             --argjson maxConcurrent "$((10#$ZONES_BENCH_MAX_CONCURRENT))" \
             --argjson depositAmount "$((10#$ZONES_BENCH_DEPOSIT_AMOUNT))" \
             --argjson activityAmount "$((10#$ZONES_BENCH_ACTIVITY_AMOUNT))" \

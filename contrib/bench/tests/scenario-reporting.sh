@@ -29,7 +29,7 @@ ZONES_BENCH_SWAP_MECHANISM=simple
 ZONES_BENCH_RECIPIENT_MODE=random
 ZONES_BENCH_ACCOUNTS=100
 ZONES_BENCH_COUNT=1000
-ZONES_BENCH_TPS=20
+ZONES_BENCH_TPS=1.2
 ZONES_BENCH_MAX_CONCURRENT=12
 ZONES_BENCH_DEPOSIT_AMOUNT=2000000
 ZONES_BENCH_ACTIVITY_AMOUNT=1
@@ -64,6 +64,7 @@ joined=" ${args[*]} "
 [[ "$joined" == *" --metadata recipient-mode=random "* ]]
 [[ "$joined" == *" --metadata accounts=100 "* ]]
 [[ "$joined" == *" --metadata count=1000 "* ]]
+[[ "$joined" == *" --metadata target-rate=1.2 "* ]]
 [[ "$joined" == *" --metadata max-concurrent=12 "* ]]
 [[ "$joined" == *" --metadata swap-liquidity=10000000000 "* ]]
 [[ "$joined" == *" --metadata callback-gas-limit=10000000 "* ]]

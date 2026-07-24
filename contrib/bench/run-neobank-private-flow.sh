@@ -12,6 +12,13 @@ source "$bench_dir/scenario-reporting.sh"
 die() { echo "error: $*" >&2; exit 1; }
 need() { [[ -n "${!1:-}" ]] || die "$1 must be set"; }
 uint() { [[ "${!1:-}" =~ ^[0-9]+$ ]] || die "$1 must be an unsigned integer"; }
+positive_rate() {
+    local value="${!1:-}"
+    if ! [[ "$value" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] ||
+        ! awk -v value="$value" 'BEGIN { exit !(value > 0 && value <= 999999999) }'; then
+        die "$1 must be a positive decimal no greater than 999999999"
+    fi
+}
 
 load_benchmark_mnemonic() {
     local mode
@@ -194,12 +201,13 @@ if [[ "$ZONES_BENCH_SWAP_MECHANISM" == direct-swap ]]; then
 fi
 [[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
     die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"
-for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT ZONES_BENCH_TPS \
+for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
     ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_APPROVAL_TIMEOUT_SECS \
     ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS ZONES_BENCH_SEED
 do uint "$name"; done
+positive_rate ZONES_BENCH_TPS
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
 (( 10#$ZONES_BENCH_MAX_CONCURRENT > 0 && 10#$ZONES_BENCH_APPROVAL_TIMEOUT_SECS > 0 )) ||
     die "max concurrency and approval timeout must be positive"
