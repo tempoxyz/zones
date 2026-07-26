@@ -73,34 +73,6 @@ impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
     }
 }
 
-/// Database error produced by [`L1OverlayDB`].
-#[derive(Debug, Error)]
-pub enum ZoneDbError<E> {
-    /// Error from the caller-provided database.
-    #[error("inner database error: {0}")]
-    Inner(#[source] E),
-    /// The selected Zone state contains an invalid Tempo anchor.
-    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
-    AnchorOverflow(U256),
-    /// Execution-local Tempo L1 state could not be read or advanced consistently.
-    #[error(transparent)]
-    L1State(#[from] L1StateError),
-    /// A transaction attempted to persist mirrored Tempo-owned state.
-    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
-    L1Write { address: Address, slot: U256 },
-}
-
-impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
-
-impl<E: DBErrorMarker> ZoneDbError<E> {
-    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
-        match self {
-            Self::Inner(error) => EVMError::Database(error),
-            error => EVMError::CustomAny(AnyError::new(error)),
-        }
-    }
-}
-
 impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
     fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
         if let Some(anchor) = self.l1.get_anchor() {
@@ -184,6 +156,34 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         self.inner.block_hash(number).map_err(ZoneDbError::Inner)
+    }
+}
+
+/// Database error produced by [`L1OverlayDB`].
+#[derive(Debug, Error)]
+pub enum ZoneDbError<E> {
+    /// Error from the caller-provided database.
+    #[error("inner database error: {0}")]
+    Inner(#[source] E),
+    /// The selected Zone state contains an invalid Tempo anchor.
+    #[error("invalid Tempo anchor (does not fit in u64): {0}")]
+    AnchorOverflow(U256),
+    /// Execution-local Tempo L1 state could not be read or advanced consistently.
+    #[error(transparent)]
+    L1State(#[from] L1StateError),
+    /// A transaction attempted to persist mirrored Tempo-owned state.
+    #[error("write to mirrored Tempo storage address={address} slot={slot}")]
+    L1Write { address: Address, slot: U256 },
+}
+
+impl<E: DBErrorMarker> DBErrorMarker for ZoneDbError<E> {}
+
+impl<E: DBErrorMarker> ZoneDbError<E> {
+    pub(crate) fn into_evm_error<TxError>(self) -> EVMError<E, TxError> {
+        match self {
+            Self::Inner(error) => EVMError::Database(error),
+            error => EVMError::CustomAny(AnyError::new(error)),
+        }
     }
 }
 
