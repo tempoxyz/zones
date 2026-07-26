@@ -68,6 +68,14 @@ impl L1BlockTracker {
         self.state.read().latest
     }
 
+    /// Subscribe to observation updates, which fire whenever a new L1 block is recorded.
+    ///
+    /// Lets a caller hold one subscription across a wait loop so an observation recorded between
+    /// checks still wakes it, rather than being missed by a fresh subscribe.
+    pub fn subscribe_observations(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+
     /// Return whether `number` fits inside the bounded follower lookahead window.
     pub fn has_capacity_for(&self, number: u64) -> bool {
         self.state.read().pruned_through.is_none_or(|consumed| {

@@ -1003,6 +1003,7 @@ where
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
             self.enabled_tokens.clone(),
+            self.l1_block_tracker.clone(),
         );
         let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
@@ -1066,19 +1067,24 @@ pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: L1StateCache,
     enabled_tokens: EnabledTokenRegistry,
+    l1_block_tracker: L1BlockTracker,
 }
 
 impl ZoneExecutorBuilder {
     /// Create a zone executor builder with the shared L1 state cache.
+    ///
+    /// `l1_block_tracker` bounds precompile L1 reads to independently observed blocks.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: L1StateCache,
         enabled_tokens: EnabledTokenRegistry,
+        l1_block_tracker: L1BlockTracker,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
             enabled_tokens,
+            l1_block_tracker,
         }
     }
 }
@@ -1097,7 +1103,8 @@ where
             self.l1_state_cache,
             runtime_handle.clone(),
         )
-        .await?;
+        .await?
+        .with_head_bound(self.l1_block_tracker);
 
         let l1_chain_id = l1_provider.chain_id().await?;
         let tempo_chain_spec = tempo_chain_spec_for_l1(l1_chain_id)

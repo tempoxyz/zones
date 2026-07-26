@@ -23,7 +23,7 @@ use tracing::{debug, info, warn};
 use zone_precompiles::{L1StateError, L1StorageReader};
 
 use super::cache::L1StateCache;
-use crate::rpc::rpc_connection_config;
+use crate::{L1BlockTracker, rpc::rpc_connection_config};
 
 /// Upper bound on the delay between synchronous cache-miss attempts.
 ///
@@ -52,7 +52,9 @@ pub struct L1StateProviderConfig {
     /// Interval between WebSocket reconnection attempts.
     /// Defaults to 100ms.
     pub retry_connection_interval: std::time::Duration,
-    /// Maximum number of synchronous RPC attempts per cache miss. `None` retries indefinitely.
+    /// Maximum attempts per synchronous wait, applied independently to each phase of a cache
+    /// miss: first waiting for the observed L1 head, then fetching over RPC. A caller setting
+    /// this to `n` can therefore wait up to `2n` times before failing. `None` waits indefinitely.
     pub max_sync_attempts: Option<NonZeroU32>,
 }
 
@@ -102,6 +104,10 @@ pub struct L1StateProvider {
     max_sync_attempts: Option<NonZeroU32>,
     /// Base delay for the synchronous cache-miss wait, shared with the transport retry layer.
     initial_backoff_ms: u64,
+    /// Independently observed L1 head, used to hold back reads above it.
+    ///
+    /// Unset for callers with no subscriber (tests, the no-L1 CLI fallback), which read unbounded.
+    head_bound: Option<L1BlockTracker>,
 }
 
 impl L1StateProvider {
@@ -151,6 +157,7 @@ impl L1StateProvider {
             runtime_handle,
             max_sync_attempts: config.max_sync_attempts,
             initial_backoff_ms: config.initial_backoff_ms,
+            head_bound: None,
         })
     }
 
@@ -171,7 +178,17 @@ impl L1StateProvider {
             runtime_handle,
             max_sync_attempts: config.max_sync_attempts,
             initial_backoff_ms: config.initial_backoff_ms,
+            head_bound: None,
         }
+    }
+
+    /// Hold synchronous reads back until `tracker` has independently observed the L1 block.
+    ///
+    /// Only production wires this; callers without a subscriber read unbounded.
+    #[must_use]
+    pub fn with_head_bound(mut self, tracker: L1BlockTracker) -> Self {
+        self.head_bound = Some(tracker);
+        self
     }
 
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
@@ -187,9 +204,9 @@ impl L1StateProvider {
     /// therefore retries until the value is fetched, stalling block production rather than failing
     /// closed.
     ///
-    /// Rejecting a read that consensus can prove is out of range is a separate, sound check, but
-    /// it belongs *before* the request, compared against in-consensus state — not after it, by
-    /// classifying whatever the endpoint happened to return. That bound is tracked as follow-up.
+    /// Bounding the request is a separate, sound check, and it happens *before* the request in
+    /// [`await_observed_head`](Self::await_observed_head) rather than after it by classifying
+    /// whatever the endpoint happened to return.
     ///
     /// [`RetryBackoffLayer`] is the single retry policy: it classifies and backs off per request.
     /// This loop adds no classification of its own, only a capped delay between attempts so a
@@ -211,6 +228,10 @@ impl L1StateProvider {
         }
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
+
+        // Bound the request against independently observed L1 state before it reaches the
+        // transport, so an attacker-chosen block number cannot steer this node's RPC traffic.
+        self.await_observed_head(block_number)?;
 
         let mut attempt = 0u32;
         loop {
@@ -245,6 +266,75 @@ impl L1StateProvider {
                     warn!(%address, %slot, block_number, %rpc_err, ?elapsed, attempt, ?backoff, "L1 storage RPC fetch failed, stalling before retry");
                     std::thread::sleep(backoff);
                 }
+            }
+        }
+    }
+
+    /// Wait until the requested L1 block is at or below the independently observed head.
+    ///
+    /// A read above the local head is not evidence that the block is bogus — this node may simply
+    /// be behind — so it must never become a validity verdict. Waiting keeps the outcome the same
+    /// on every honest node: a lagging node catches up and proceeds, while a block number no
+    /// honest head ever reaches stalls without an `eth_getStorageAt` ever being issued. That is
+    /// what stops an attacker-chosen number from steering this node's RPC.
+    ///
+    /// A tracker that has observed nothing yet reads unbounded. `latest` is only populated once
+    /// the subscriber records its first block, so blocking before then would stall a node whose
+    /// subscriber has not made first contact. This is the weakest point of the bound: the first
+    /// Tempo import — the one read with no parent-hash or contiguity constraint — is also the one
+    /// most likely to run while the tracker is still cold. Closing that needs a startup ordering
+    /// guarantee between the subscriber and block execution, which is tracked separately.
+    ///
+    /// The wait is driven by the tracker's observation channel rather than a timer, so it wakes
+    /// the moment the head advances instead of after a backoff interval. Unlike the RPC retry
+    /// loop there is no remote endpoint to pace here — this only reads local process state.
+    fn await_observed_head(&self, block_number: u64) -> Result<()> {
+        let Some(tracker) = self.head_bound.as_ref() else {
+            return Ok(());
+        };
+        // Subscribe once for the whole wait so an observation recorded between checks still
+        // wakes us instead of being missed by a fresh subscribe.
+        let mut observations = tracker.subscribe_observations();
+
+        let mut waits = 0u32;
+        loop {
+            let Some(latest) = tracker.latest() else {
+                return Ok(());
+            };
+            if block_number <= latest.number {
+                if waits > 0 {
+                    info!(
+                        block_number,
+                        observed_head = latest.number,
+                        waits,
+                        "L1 head caught up to the requested block"
+                    );
+                }
+                return Ok(());
+            }
+
+            waits += 1;
+            if self
+                .max_sync_attempts
+                .is_some_and(|max_attempts| waits >= max_attempts.get())
+            {
+                return Err(eyre::eyre!(
+                    "L1 block {block_number} is above the observed head {} after {waits} attempts",
+                    latest.number
+                ));
+            }
+            warn!(
+                block_number,
+                observed_head = latest.number,
+                waits,
+                "L1 read is ahead of the observed head, waiting"
+            );
+            if tokio::task::block_in_place(|| self.runtime_handle.block_on(observations.changed()))
+                .is_err()
+            {
+                // The subscriber is gone, so nothing will advance the head; fall through and let
+                // the RPC layer decide rather than waiting forever.
+                return Ok(());
             }
         }
     }
@@ -332,6 +422,7 @@ impl L1StorageReader for L1StateProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_eips::NumHash;
 
     async fn test_reader(config: L1StateProviderConfig) -> L1StateProvider {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -345,6 +436,92 @@ mod tests {
             provider,
             tokio::runtime::Handle::current(),
         )
+    }
+
+    /// Tracker whose contiguous observations run through `head`.
+    fn tracker_at(head: u64) -> L1BlockTracker {
+        let tracker = L1BlockTracker::default();
+        tracker.initialize_consumed_through(head.saturating_sub(1));
+        tracker
+            .record(NumHash::new(head, B256::repeat_byte(0xab)))
+            .expect("contiguous observation");
+        tracker
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_are_unbounded_without_an_observed_head() {
+        // No tracker at all: the no-L1 CLI fallback and tests must not block.
+        let unbounded = test_reader(L1StateProviderConfig::default()).await;
+        unbounded
+            .await_observed_head(u64::MAX)
+            .expect("an absent tracker imposes no bound");
+
+        // Tracker present but cold: blocking here would deadlock node startup.
+        let cold = test_reader(L1StateProviderConfig::default())
+            .await
+            .with_head_bound(L1BlockTracker::default());
+        cold.await_observed_head(u64::MAX)
+            .expect("an unobserved tracker imposes no bound");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_at_or_below_the_observed_head_proceed() {
+        let reader = test_reader(L1StateProviderConfig::default())
+            .await
+            .with_head_bound(tracker_at(10));
+
+        reader
+            .await_observed_head(10)
+            .expect("head itself is in range");
+        reader
+            .await_observed_head(3)
+            .expect("below head is in range");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reads_above_the_observed_head_wait_rather_than_reject() {
+        let tracker = tracker_at(10);
+        let reader = test_reader(L1StateProviderConfig::default())
+            .await
+            .with_head_bound(tracker.clone());
+
+        // A lagging node must not treat "ahead of my head" as invalid — it waits and proceeds.
+        let waiting = tokio::task::spawn_blocking(move || reader.await_observed_head(11));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !waiting.is_finished(),
+            "read above the head must not resolve early"
+        );
+
+        // The wait is observation-driven, so recording the block releases it immediately rather
+        // than after a backoff interval.
+        tracker
+            .record(NumHash::new(11, B256::repeat_byte(0xcd)))
+            .expect("contiguous observation");
+        tokio::time::timeout(Duration::from_secs(5), waiting)
+            .await
+            .expect("advancing the head must release the wait")
+            .expect("wait task must not panic")
+            .expect("block 11 is observed once recorded");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bounded_callers_fail_finitely_above_the_observed_head() {
+        let reader = test_reader(L1StateProviderConfig {
+            max_sync_attempts: Some(NonZeroU32::MIN),
+            ..Default::default()
+        })
+        .await
+        .with_head_bound(tracker_at(10));
+
+        let err = tokio::task::spawn_blocking(move || {
+            reader.get_storage(Address::ZERO, B256::ZERO, 5_000)
+        })
+        .await
+        .expect("storage task must not panic")
+        .expect_err("a bounded caller must give up above the head");
+        let message = err.to_string();
+        assert!(message.contains("above the observed head 10"), "{message}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
