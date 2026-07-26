@@ -696,6 +696,45 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
 }
 
 #[test]
+fn refund_reads_are_limited_to_owner_and_active_sequencer() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.l1.seed_active_sequencer(PORTAL, 0, SEQUENCER);
+    {
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            ZoneInbox::new().withdrawal_bounce_backs[PATH_USD_ADDRESS][BOB].write(444)?;
+            Ok(())
+        })?;
+    }
+
+    let calldata = IZoneInbox::refundsCall {
+        token: PATH_USD_ADDRESS,
+        owner: BOB,
+    }
+    .abi_encode();
+
+    let owner_output = harness.call(BOB, &calldata)?;
+    assert_eq!(
+        IZoneInbox::refundsCall::abi_decode_returns(&owner_output.bytes)?,
+        444
+    );
+
+    let outsider_output = harness.call(ALICE, &calldata)?;
+    assert!(outsider_output.is_revert());
+    assert_eq!(
+        outsider_output.bytes,
+        IZoneInbox::Unauthorized {}.abi_encode()
+    );
+
+    let sequencer_output = harness.call(SEQUENCER, &calldata)?;
+    assert_eq!(
+        IZoneInbox::refundsCall::abi_decode_returns(&sequencer_output.bytes)?,
+        444
+    );
+    Ok(())
+}
+
+#[test]
 fn claim_refund_clears_balance_and_mints_to_caller() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     {
