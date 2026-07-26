@@ -724,8 +724,13 @@ never selects a public test mnemonic or a public/mainnet write endpoint. Its
 mnemonic file, Schelk snapshots, and private sender-auth map are outside the
 artifact tree; the sender-auth map is mode 0600 and deleted on exit.
 
-After the workflow exists on the default branch, dispatch it from the Actions
-UI or CLI and select the branch/ref to test. This example offers `1.2`
+After the workflow exists on the default branch, it runs the default
+`neobank-full-journey` benchmark nightly at 02:45 UTC with the defaults above.
+The scheduled event always uses the workflow and Zones revision from the default
+branch.
+
+To test another phase, load, or branch/ref, dispatch it from the Actions UI or
+CLI. This example offers `1.2`
 journeys/s with 13 in flight, just above the approximately `1.14` journeys/s
 observed at the prior 12-journey capacity point:
 

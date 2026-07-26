@@ -1,6 +1,9 @@
 name: Zones benchmark
 
 on:
+  schedule:
+    - cron: "45 2 * * *"
+
   workflow_dispatch:
     inputs:
       phase:
@@ -191,6 +194,7 @@ jobs:
   authorize:
     name: Resolve and authorize benchmark request
     if: >-
+      github.event_name == 'schedule' ||
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'pull_request' &&
        github.event.pull_request.head.repo.full_name == github.repository)
@@ -259,7 +263,7 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          INPUT_PHASE: ${{ inputs.phase }}
+          INPUT_PHASE: ${{ inputs.phase || 'neobank-full-journey' }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
           INPUT_COUNT: ${{ inputs.count || '100' }}
           INPUT_TPS: ${{ inputs.tps || '20' }}
