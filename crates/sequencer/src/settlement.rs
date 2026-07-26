@@ -711,6 +711,13 @@ impl BatchSubmitter {
             metadata.sequencer_threshold > 0,
             "portal sequencer threshold is zero"
         );
+        if self.attestation_store.is_none() {
+            eyre::ensure!(
+                metadata.sequencer_threshold == 1,
+                "minimal TIP-1091 compatibility supports only a 1-of-1 sequencer set; portal threshold is {}",
+                metadata.sequencer_threshold
+            );
+        }
         if !batch.withdrawal_queue_hash.is_zero() {
             let pending = metadata.queue_tail.saturating_sub(metadata.queue_head);
             eyre::ensure!(
@@ -1944,6 +1951,52 @@ mod tests {
         assert_eq!(second.stable.zone_id, 42);
         assert_eq!(second.stable.chain_id, 42431);
         assert!(asserter.read_q().is_empty());
+    }
+
+    #[test]
+    fn submission_metadata_requires_one_of_one_without_attestation_store() {
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(Asserter::new())
+            .erased();
+        let mut submitter = BatchSubmitter::new(Address::ZERO, provider);
+        let batch = BatchData {
+            zone_height: 1,
+            tempo_block_number: 1,
+            prev_block_hash: B256::ZERO,
+            next_block_hash: B256::repeat_byte(0x11),
+            prev_processed_deposit_hash: B256::ZERO,
+            next_processed_deposit_hash: B256::ZERO,
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 1,
+        };
+        let metadata = PortalSubmissionMetadata {
+            queue_head: 0,
+            queue_tail: 0,
+            withdrawal_batch_index: 0,
+            stable: StablePortalMetadata {
+                zone_id: 1,
+                chain_id: 1,
+            },
+            sequencer_set_version: 1,
+            sequencer_threshold: 2,
+            signer_is_sequencer: true,
+            verifier: Address::ZERO,
+        };
+
+        let err = submitter
+            .validate_submission_metadata(&batch, metadata)
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("supports only a 1-of-1 sequencer set")
+        );
+
+        submitter.set_attestation_store(Some(AttestationStore::default()));
+        submitter
+            .validate_submission_metadata(&batch, metadata)
+            .unwrap();
     }
 
     #[tokio::test]
