@@ -1,9 +1,9 @@
 //! Tempo Earn scenarios that cross the public L1 / private Zone boundary.
 //!
-//! The Solidity fixtures under `specs/ref-impls/test/fixtures/earn` are copied from Tempo Earn. These
-//! tests deliberately exercise the complete callback path: a private withdrawal settles on L1,
-//! the Earn router deposits or redeems through the vault stack, and the output is encrypted back
-//! into the originating Zone.
+//! CI builds the Solidity artifacts from the Tempo Earn `main` branch. These tests deliberately
+//! exercise the complete callback path: a private withdrawal settles on L1, the Earn router
+//! deposits or redeems through the vault stack, and the output is encrypted back into the
+//! originating Zone.
 
 use crate::utils::{
     L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, forge_bytecode, spawn_sequencer,
@@ -102,12 +102,6 @@ alloy_sol_types::sol! {
         address refundRecipient;
     }
 
-    struct EarnZoneReturn {
-        uint256 keyIndex;
-        EarnEncryptedDepositPayload encrypted;
-        address refundRecipient;
-    }
-
     struct EarnCallbackData {
         EarnFlow flow;
         address earnVault;
@@ -187,7 +181,7 @@ alloy_sol_types::sol! {
     }
 
     #[sol(rpc)]
-    contract EarnRouter {
+    contract UniversalEarnRouter {
         function deposit(address earnVault, uint256 assets, uint256 minEarnShares, address recipient)
             external
             returns (uint256 earnShares);
@@ -394,7 +388,7 @@ impl EarnZoneFixture {
             .await?;
         eyre::ensure!(receipt.status(), "initializing the Earn engine failed");
 
-        let router = deploy_contract(&l1, "EarnRouter", Vec::new()).await?;
+        let router = deploy_contract(&l1, "UniversalEarnRouter", Vec::new()).await?;
         let router_block = l1.set_zone_gateway_on_portal(portal, router, true).await?;
         zone.wait_for_l2_tempo_finalized(router_block, E2E_TIMEOUT)
             .await?;
@@ -636,7 +630,8 @@ impl EarnZoneFixture {
             .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
             .await?;
         let action_id = keccak256(encrypted.ciphertext.as_ref());
-        let destination_data = EarnZoneReturn {
+        let destination_data = EarnZoneDelivery {
+            portal: self.portal,
             keyIndex: key_index,
             encrypted: map_encrypted_payload(encrypted),
             refundRecipient: refund_recipient,
@@ -738,7 +733,7 @@ impl EarnZoneFixture {
         for token in [self.vault_asset, self.alternate_asset, self.earn_share] {
             eyre::ensure!(
                 self.l1.balance_of(token, self.router).await? == U256::ZERO,
-                "EarnRouter retained token {token}"
+                "UniversalEarnRouter retained token {token}"
             );
         }
         Ok(())
@@ -784,7 +779,7 @@ impl EarnZoneFixture {
             encrypted: map_encrypted_payload(encrypted),
             refundRecipient: self.user.address(),
         };
-        let receipt = EarnRouter::new(self.router, provider)
+        let receipt = UniversalEarnRouter::new(self.router, provider)
             .depositToZone(
                 self.earn_vault,
                 U256::from(AMOUNT),
@@ -870,7 +865,7 @@ impl EarnZoneFixture {
             .l1
             .balance_of(self.earn_share, self.user.address())
             .await?;
-        let receipt = EarnRouter::new(self.router, provider)
+        let receipt = UniversalEarnRouter::new(self.router, provider)
             .deposit(
                 self.earn_vault,
                 U256::from(AMOUNT),
@@ -913,7 +908,7 @@ impl EarnZoneFixture {
             encrypted: map_encrypted_payload(encrypted),
             refundRecipient: self.user.address(),
         };
-        let receipt = EarnRouter::new(self.router, provider)
+        let receipt = UniversalEarnRouter::new(self.router, provider)
             .redeemToZone(
                 self.earn_vault,
                 U256::from(earn_shares),
