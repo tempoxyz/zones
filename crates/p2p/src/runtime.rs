@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    P2pNetworkId, Role, ZoneManifest,
+    Leadership, P2pNetworkId, Role, ZoneManifest,
     identity::{Ed25519Identity, Secp256k1Identity},
     network::{
         self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
@@ -141,7 +141,7 @@ pub struct P2pConfig {
     secp256k1_identity: Secp256k1Identity,
     listen: SocketAddr,
     bypass_ip_check: bool,
-    role: Role,
+    leadership: Leadership,
 }
 
 impl P2pConfig {
@@ -160,25 +160,35 @@ impl P2pConfig {
         let secp256k1_identity = Secp256k1Identity::read_from_file(secp256k1_key_path)?;
         let manifest = ZoneManifest::read_from_file(manifest_path)?;
         validate_ip_check_configuration(&manifest, bypass_ip_check)?;
-        let role = manifest.validate_node(
+        manifest.validate_node(
             expected_zone_id,
             &ed25519_identity.ed25519_public_key(),
             secp256k1_identity.address(),
             asserted_role,
         )?;
+        let leadership = Leadership::new(manifest.bootstrap_leadership());
         Ok(Self {
             manifest: Arc::new(manifest),
             ed25519_identity,
             secp256k1_identity,
             listen,
             bypass_ip_check,
-            role,
+            leadership,
         })
     }
 
-    /// Manifest-derived role for this node.
-    pub const fn role(&self) -> Role {
-        self.role
+    /// The shared leadership record for this node.
+    ///
+    /// Callers that outlive the P2P runtime should hold on to this handle rather than a
+    /// bare [`tokio::sync::watch::Receiver`], so the channel stays open for as long as
+    /// they are watching it.
+    pub fn leadership(&self) -> Leadership {
+        self.leadership.clone()
+    }
+
+    /// Role of this node under the current leadership record.
+    pub fn role(&self) -> Role {
+        self.leadership.role_of(&self.ed25519_public_key())
     }
 
     /// This node's Ed25519 public key used by Commonware.
@@ -229,7 +239,7 @@ impl std::fmt::Debug for P2pConfig {
             .field("secp256k1_address", &self.secp256k1_address())
             .field("listen", &self.listen)
             .field("bypass_ip_check", &self.bypass_ip_check)
-            .field("role", &self.role)
+            .field("leadership", &self.leadership.current())
             .finish_non_exhaustive()
     }
 }
@@ -429,6 +439,8 @@ fn run(
         .with_catch_panics(true);
     commonware_runtime::tokio::Runner::new(runtime_config).start(|context| async move {
         let local_ed25519_public_key = config.ed25519_public_key();
+        let leadership = config.leadership();
+        let role = leadership.role_of(&local_ed25519_public_key);
         let (mut commonware, mut oracle, peers) = network::instantiate(
             context.clone(),
             &config.manifest,
@@ -479,7 +491,7 @@ fn run(
         info!(
             target: "zone::p2p",
             zone_id = config.manifest.zone_id(),
-            role = %config.role,
+            role = %role,
             ed25519_public_key = %local_ed25519_public_key,
             listen = %config.listen,
             peers = config.manifest.nodes().len(),
@@ -488,34 +500,24 @@ fn run(
 
         let _ = events
             .send(P2pEvent::Started {
-                role: config.role,
-                ed25519_public_key: local_ed25519_public_key,
+                role,
+                ed25519_public_key: local_ed25519_public_key.clone(),
                 listen: config.listen,
             })
             .await;
 
-        let followers: Vec<PublicKey> = config
+        let peers: Vec<PublicKey> = config
             .manifest
             .nodes()
             .iter()
-            .filter(|node| config.manifest.role_of(node.ed25519_public_key()) == Some(Role::Follower))
             .map(|node| node.ed25519_public_key().clone())
             .collect();
-        let backfill_peers = match config.role {
-            // A recovering leader can backfill from all followers
-            Role::Leader => followers.clone(),
-
-            // A recovering follower can backfill from the canonical leader
-            Role::Follower => vec![config.manifest.leader_ed25519_public_key().clone()],
-        };
 
         let backfill_lifecycle = Arc::new(Mutex::new(BackfillJob::default()));
-        let leader = config.manifest.leader_ed25519_public_key().clone();
         let command_loop = run_commands(
-            config.role,
-            leader,
-            followers,
-            backfill_peers,
+            local_ed25519_public_key.clone(),
+            peers,
+            leadership.clone(),
             backfill_lifecycle.clone(),
             P2pSenders {
                 blocks: block_sender,
@@ -530,7 +532,8 @@ fn run(
         tokio::pin!(command_loop);
 
         let receive_loop = run_receivers(
-            config.role,
+            local_ed25519_public_key,
+            leadership,
             config.manifest,
             P2pReceivers {
                 blocks: block_receiver,
@@ -565,15 +568,24 @@ fn run(
 }
 
 async fn run_commands(
-    role: Role,
-    leader: PublicKey,
-    followers: Vec<PublicKey>,
-    backfill_peers: Vec<PublicKey>,
+    local_ed25519_public_key: PublicKey,
+    peers: Vec<PublicKey>,
+    leadership: Leadership,
     backfill_job: SharedBackfillLifecycle,
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
     while let Some(command) = commands.recv().await {
+        let (role, leader) = local_role_and_leader(&leadership, &local_ed25519_public_key);
+        // Built per command so it follows the leadership record, but only in the arms that
+        // actually address a peer set — forwarding a transaction must not allocate one.
+        let followers = || {
+            peers
+                .iter()
+                .filter(|peer| *peer != &leader)
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         match command {
             P2pCommand::BroadcastBlock(block) => {
                 if role != Role::Leader {
@@ -586,6 +598,7 @@ async fn run_commands(
                     continue;
                 }
 
+                let followers = followers();
                 let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
                         let sent = senders.blocks
@@ -618,7 +631,7 @@ async fn run_commands(
                 }
                 senders
                     .settlement_proposals
-                    .send(Recipients::Some(followers.clone()), proposal, true)
+                    .send(Recipients::Some(followers()), proposal, true)
                     .await
                     .wrap_err("failed broadcasting settlement proposal")?;
             }
@@ -636,6 +649,12 @@ async fn run_commands(
             }
 
             P2pCommand::RequestBackfill { start } => {
+                let backfill_peers = match role {
+                    // A recovering leader can backfill from all followers.
+                    Role::Leader => followers(),
+                    // A recovering follower can backfill from the canonical leader.
+                    Role::Follower => vec![leader.clone()],
+                };
                 let now = Instant::now();
                 let request = {
                     backfill_job
@@ -741,8 +760,17 @@ async fn run_commands(
     Err(eyre::eyre!("P2P command channel closed unexpectedly"))
 }
 
+fn local_role_and_leader(
+    leadership: &Leadership,
+    local_ed25519_public_key: &PublicKey,
+) -> (Role, PublicKey) {
+    let record = leadership.current();
+    (record.role_of(local_ed25519_public_key), record.leader)
+}
+
 async fn run_receivers(
-    role: Role,
+    local_ed25519_public_key: PublicKey,
+    leadership: Leadership,
     manifest: Arc<ZoneManifest>,
     receivers: P2pReceivers,
     backfill_job: SharedBackfillLifecycle,
@@ -757,12 +785,13 @@ async fn run_receivers(
         mut transactions,
     } = receivers;
 
-    let leader = manifest.leader_ed25519_public_key().clone();
     loop {
         let event = tokio::select! {
             // Got a block
             result = blocks.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("block channel receive failed: {err}"))?;
+                let (role, leader) =
+                    local_role_and_leader(&leadership, &local_ed25519_public_key);
                 if role == Role::Leader || peer != leader {
                     warn!(target: "zone::p2p", %peer, "Ignoring live block from non-leader");
                     continue;
@@ -773,6 +802,8 @@ async fn run_receivers(
             // Got a settlement proposal at a batch boundary
             result = settlement_proposals.recv() => {
                 let (peer, bytes) = result.wrap_err("settlement proposal channel receive failed")?;
+                let (role, leader) =
+                    local_role_and_leader(&leadership, &local_ed25519_public_key);
                 if role != Role::Follower || peer != leader {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement proposal from ineligible peer");
                     continue;
@@ -783,6 +814,8 @@ async fn run_receivers(
             // Got a response from a follower to the settlement proposal
             result = settlement_signatures.recv() => {
                 let (peer, bytes) = result.wrap_err("settlement signature channel receive failed")?;
+                let (role, leader) =
+                    local_role_and_leader(&leadership, &local_ed25519_public_key);
                 if role != Role::Leader || peer == leader {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement signature from ineligible peer");
                     continue;
@@ -805,6 +838,8 @@ async fn run_receivers(
             // Got backfill response (for an existing request)
             result = backfill_responses.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill response receive failed: {err}"))?;
+                let (role, leader) =
+                    local_role_and_leader(&leadership, &local_ed25519_public_key);
                 let eligible = match role { Role::Leader => peer != leader, Role::Follower => peer == leader };
                 if !eligible {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill response from ineligible peer");
@@ -854,7 +889,12 @@ async fn run_receivers(
             // Got a transaction forwarded by an authenticated follower.
             result = transactions.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("transaction channel receive failed: {err}"))?;
-                if role != Role::Leader || manifest.role_of(&peer) != Some(Role::Follower) {
+                let (role, leader) =
+                    local_role_and_leader(&leadership, &local_ed25519_public_key);
+                if role != Role::Leader
+                    || peer == leader
+                    || !manifest.contains_ed25519_public_key(&peer)
+                {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %peer, "Ignoring transaction from role-invalid peer");
                     continue;
@@ -1028,7 +1068,7 @@ mod tests {
             .enumerate()
             .map(|(index, (identity, listen))| {
                 let secp256k1_identity = secp256k1_identity(index as u64 + 1);
-                let role = manifest
+                manifest
                     .validate_node(
                         9,
                         &identity.ed25519_public_key(),
@@ -1043,7 +1083,7 @@ mod tests {
                         secp256k1_identity,
                         listen,
                         bypass_ip_check: false,
-                        role,
+                        leadership: crate::Leadership::new(manifest.bootstrap_leadership()),
                     },
                     P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
                 )
@@ -1446,12 +1486,12 @@ mod tests {
         assert_eq!(role, crate::Role::Follower);
         let mut handle = spawn_p2p(
             P2pConfig {
-                manifest,
+                manifest: manifest.clone(),
                 ed25519_identity: identity,
                 secp256k1_identity,
                 listen: addresses[1],
                 bypass_ip_check: false,
-                role,
+                leadership: crate::Leadership::new(manifest.bootstrap_leadership()),
             },
             P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
         )

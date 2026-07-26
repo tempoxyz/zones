@@ -500,6 +500,60 @@ async fn test_empty_l1_blocks_advance_zone() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Cancelling the `ZoneEngine` must stop it only between zone blocks, leaving the deposit
+/// queue cursor and the local head in agreement.
+///
+/// This is the invariant that makes leadership handover safe: the supervisor cancels the
+/// engine rather than aborting it, because `build_next_block` consumes an L1 block from the
+/// queue and canonicalizes the resulting zone block across several awaits. Stopping partway
+/// would either replay an L1 anchor (`advanceTempo` rejects it) or skip one, and either way
+/// the node could never build another block.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_engine_stops_cleanly_between_blocks() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(20).await?;
+
+    // Produce a few blocks so the stop lands on a running engine, not an idle one.
+    fixture.inject_empty_blocks(zone.deposit_queue(), 5);
+    zone.wait_for_tempo_block_number(5, DEFAULT_TIMEOUT).await?;
+
+    // Keep feeding the queue while the engine is asked to stop, so cancellation races with
+    // block production instead of arriving during an idle period.
+    fixture.inject_empty_blocks(zone.deposit_queue(), 10);
+    let head = zone.stop_engine().await?;
+
+    // Every L1 block the engine consumed produced exactly one zone block, and nothing was
+    // half-consumed: the queue front is the next unbuilt anchor.
+    let tempo_block_number = zone.tempo_block_number().await?;
+    assert_eq!(
+        tempo_block_number, head,
+        "each zone block imports exactly one L1 block, so the head and the Tempo cursor must agree"
+    );
+    let next_anchor = zone
+        .deposit_queue()
+        .peek()
+        .map(|block| block.header.num_hash().number);
+    if let Some(next_anchor) = next_anchor {
+        assert_eq!(
+            next_anchor,
+            tempo_block_number + 1,
+            "the queue front must be the anchor of the next unbuilt zone block"
+        );
+    }
+
+    // A stopped engine stays stopped, and the node keeps serving RPC.
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        zone.provider().get_block_number().await?,
+        head,
+        "a cancelled engine must not resume building"
+    );
+
+    Ok(())
+}
+
 /// Two independent zones processing deposits from a shared L1 timeline.
 ///
 /// Verifies that:

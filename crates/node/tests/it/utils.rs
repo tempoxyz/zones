@@ -64,6 +64,7 @@ use tempo_zone_contracts::{
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
@@ -580,6 +581,11 @@ pub(crate) struct ZoneTestNode {
     l1_block_tracker: L1BlockTracker,
     rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
+    /// Cancels the `ZoneEngine`, when this node runs one.
+    ///
+    /// Mirrors how the production supervisor stops the engine on demotion, so tests can
+    /// exercise the same graceful-stop path.
+    engine_stop: Option<CancellationToken>,
     _tasks: Runtime,
 }
 
@@ -587,6 +593,32 @@ impl ZoneTestNode {
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
+    }
+
+    /// Stops the `ZoneEngine` the way the production supervisor does on demotion, and
+    /// waits until block production has actually ceased.
+    ///
+    /// Returns the head the engine stopped at.
+    pub(crate) async fn stop_engine(&self) -> eyre::Result<u64> {
+        let stop = self
+            .engine_stop
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("this test node does not run a ZoneEngine"))?;
+        stop.cancel();
+
+        // The engine finishes the block in flight before returning, so poll until the head
+        // holds still rather than assuming it stops instantly.
+        let provider = self.provider();
+        let mut previous = provider.get_block_number().await?;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let current = provider.get_block_number().await?;
+            if current == previous {
+                return Ok(current);
+            }
+            previous = current;
+        }
+        eyre::bail!("ZoneEngine kept producing blocks after cancellation")
     }
 
     /// Returns an HTTP provider connected to this zone node.
@@ -724,6 +756,16 @@ impl ZoneTestNode {
             }
         })
         .await
+    }
+
+    /// Reads `tempoBlockNumber` from the L2 `TempoState` predeploy right now.
+    pub(crate) async fn tempo_block_number(&self) -> eyre::Result<u64> {
+        use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState};
+
+        Ok(TempoState::new(TEMPO_STATE_ADDRESS, self.provider())
+            .tempoBlockNumber()
+            .call()
+            .await?)
     }
 
     /// Wait for `tempoBlockNumber` on this zone to reach at least `target`.
@@ -1125,16 +1167,20 @@ impl ZoneTestNode {
             .launch_with_debug_capabilities()
             .await?;
 
+        let mut engine_stop = None;
         if spawn_engine {
             let provider = node_handle.node.provider();
             let last_header = provider
                 .sealed_header(provider.best_block_number()?)?
                 .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let stop = CancellationToken::new();
+            engine_stop = Some(stop.clone());
             let engine = zone_node::ZoneEngine::new(
                 provider.chain_spec(),
                 node_handle.node.add_ons_handle.beacon_engine_handle.clone(),
                 node_handle.node.payload_builder_handle.clone(),
                 deposit_queue.clone(),
+                l1_block_tracker.clone(),
                 last_header,
                 sequencer_signer.address(),
                 SecretKey::from(sequencer_signer.credential()),
@@ -1143,7 +1189,7 @@ impl ZoneTestNode {
             node_handle
                 .node
                 .task_executor
-                .spawn_critical_task("zone-engine", engine.run());
+                .spawn_critical_task("zone-engine", engine.run_until(stop));
         }
 
         let http_url: url::Url = node_handle
@@ -1176,6 +1222,7 @@ impl ZoneTestNode {
             l1_block_tracker,
             rpc_api_factory,
             node_handle: Box::new(node_handle),
+            engine_stop,
             _tasks: tasks,
         })
     }

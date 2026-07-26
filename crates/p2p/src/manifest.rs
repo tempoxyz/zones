@@ -24,6 +24,104 @@ pub enum Role {
     Follower,
 }
 
+/// Shared, updatable leadership record for a zone node.
+///
+/// Owns the write side of the record so that whichever component decides leadership — an
+/// admin RPC, or an L1 leadership registry watcher — can publish a new one, while every
+/// role-dependent task observes it through [`Self::subscribe`].
+///
+/// The handle is reference-counted and every observer holds a clone, so the underlying
+/// channel is alive for as long as anyone is watching it. Observers can therefore treat
+/// "the channel closed" as impossible rather than as a fatal condition.
+///
+/// Nothing publishes a new record yet: the value stays at the manifest's bootstrap record
+/// for the lifetime of the process, which keeps the static-leader behaviour unchanged.
+#[derive(Debug, Clone)]
+pub struct Leadership(std::sync::Arc<tokio::sync::watch::Sender<LeadershipState>>);
+
+impl Leadership {
+    /// Creates a handle seeded with `initial`.
+    pub fn new(initial: LeadershipState) -> Self {
+        Self(std::sync::Arc::new(tokio::sync::watch::channel(initial).0))
+    }
+
+    /// Observes the current and all future leadership records.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<LeadershipState> {
+        self.0.subscribe()
+    }
+
+    /// Returns the record in force right now.
+    pub fn current(&self) -> LeadershipState {
+        self.0.borrow().clone()
+    }
+
+    /// Returns the role of `ed25519_public_key` under the current record.
+    pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Role {
+        self.0.borrow().role_of(ed25519_public_key)
+    }
+
+    /// Publishes a new leadership record to every observer.
+    ///
+    /// Callers are responsible for the epoch ordering rules; this is a plain overwrite.
+    pub fn publish(&self, state: LeadershipState) {
+        self.0.send_replace(state);
+    }
+}
+
+/// The leadership record currently observed by a zone node.
+///
+/// Epoch zero is bootstrapped from the manifest. Later leadership changes replace this
+/// record through the [`Leadership`] handle.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadershipState {
+    /// Monotonically increasing fencing epoch.
+    pub epoch: u64,
+    /// Ed25519 identity of the selected leader.
+    pub leader: PublicKey,
+    /// First block where the leader can become active.
+    pub start_block: u64,
+}
+
+impl LeadershipState {
+    /// Creates a leadership record.
+    pub const fn new(epoch: u64, leader: PublicKey, start_block: u64) -> Self {
+        Self {
+            epoch,
+            leader,
+            start_block,
+        }
+    }
+
+    /// Monotonically increasing fencing epoch.
+    pub const fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// First block governed by this record.
+    pub const fn start_block(&self) -> u64 {
+        self.start_block
+    }
+
+    /// Leader selected by this record.
+    pub const fn leader(&self) -> &PublicKey {
+        &self.leader
+    }
+
+    /// Returns the leader for `block_number` when this record governs it.
+    pub fn leader_for(&self, block_number: u64) -> Option<&PublicKey> {
+        (block_number >= self.start_block).then_some(&self.leader)
+    }
+
+    /// Returns the role of `ed25519_public_key` under this record.
+    pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Role {
+        if ed25519_public_key == &self.leader {
+            Role::Leader
+        } else {
+            Role::Follower
+        }
+    }
+}
+
 /// A validated P2P address from the manifest.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ManifestAddress {
@@ -247,11 +345,9 @@ impl ZoneManifest {
                 local: local_secp256k1_address,
             });
         }
-        let role = if local_ed25519_public_key == &self.leader_ed25519_public_key {
-            Role::Leader
-        } else {
-            Role::Follower
-        };
+        let role = self
+            .bootstrap_leadership()
+            .role_of(local_ed25519_public_key);
         if let Some(asserted) = asserted_role
             && asserted != role
         {
@@ -278,20 +374,21 @@ impl ZoneManifest {
         &self.leader_ed25519_public_key
     }
 
+    /// Initial leadership record used until a persisted or externally decided
+    /// record is available.
+    pub fn bootstrap_leadership(&self) -> LeadershipState {
+        LeadershipState::new(0, self.leader_ed25519_public_key.clone(), 0)
+    }
+
     /// All nodes in the static peer set.
     pub fn nodes(&self) -> &[ManifestNode] {
         &self.nodes
     }
 
-    /// Returns the role of a manifest member, or `None` for an unknown Ed25519 key.
-    pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Option<Role> {
+    /// Returns whether an Ed25519 key belongs to the manifest's static peer set.
+    pub fn contains_ed25519_public_key(&self, ed25519_public_key: &PublicKey) -> bool {
         self.node_by_ed25519_public_key(ed25519_public_key)
             .is_some()
-            .then_some(if ed25519_public_key == &self.leader_ed25519_public_key {
-                Role::Leader
-            } else {
-                Role::Follower
-            })
     }
 
     fn node_by_ed25519_public_key(&self, ed25519_public_key: &PublicKey) -> Option<&ManifestNode> {
@@ -453,7 +550,14 @@ mod tests {
         let manifest = ZoneManifest::parse(&input).unwrap();
         let leader = PrivateKey::from_seed(1).public_key();
         let follower = PrivateKey::from_seed(2).public_key();
+        let leadership = manifest.bootstrap_leadership();
 
+        assert_eq!(leadership.epoch(), 0);
+        assert_eq!(leadership.start_block(), 0);
+        assert_eq!(leadership.leader_for(0), Some(&leader));
+        assert_eq!(leadership.leader_for(u64::MAX), Some(&leader));
+        assert_eq!(leadership.role_of(&leader), Role::Leader);
+        assert_eq!(leadership.role_of(&follower), Role::Follower);
         assert_eq!(
             manifest
                 .validate_node(7, &leader, secp256k1_address(1).parse().unwrap(), None)

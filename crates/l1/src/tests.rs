@@ -153,9 +153,10 @@ fn test_subscriber(
             block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
+            retain_observations: true,
         },
         local_state,
-        deposit_queue: Some(DepositQueue::default()),
+        deposit_queue: DepositQueue::default(),
         subscriber_metrics: Default::default(),
     }
 }
@@ -331,10 +332,8 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
 }
 
 #[test]
-fn observer_mode_applies_state_and_records_without_a_deposit_sink() {
-    let mut subscriber =
-        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
-    subscriber.deposit_queue = None;
+fn subscriber_applies_state_and_retains_observation_until_consumed() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
     let header = make_test_header(10);
     let sealed = seal(header);
     let anchor = sealed.num_hash();
@@ -362,7 +361,6 @@ fn observer_mode_applies_state_and_records_without_a_deposit_sink() {
         subscriber.config.block_tracker.observed_hash(10),
         Some(anchor.hash)
     );
-    assert!(subscriber.deposit_queue.is_none());
 }
 
 fn make_test_header(number: u64) -> TempoHeader {
@@ -709,6 +707,61 @@ async fn test_resolve_start_block_skips_backfill_without_checkpoint() {
     assert_eq!(subscriber.resolve_start_block().await.unwrap(), None);
 }
 
+/// Reconnecting must resume fetching after the last observation without treating that
+/// observation as canonical zone progress. Otherwise every reconnect reopens another full
+/// follower lookahead window while the existing observations and deposits remain retained.
+#[tokio::test]
+async fn test_reconnect_does_not_advance_lookahead_floor_from_fetch_cursor() {
+    let consumed = 100;
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new([consumed])),
+        None,
+    );
+    subscriber
+        .config
+        .block_tracker
+        .initialize_consumed_through(consumed);
+
+    let mut header = make_test_header(consumed + 1);
+    for number in consumed + 1..=consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS {
+        if number > consumed + 1 {
+            header = make_chained_header(number, header_hash(&header));
+        }
+        let sealed = seal(header.clone());
+        subscriber
+            .config
+            .block_tracker
+            .record(sealed.num_hash())
+            .unwrap();
+        subscriber
+            .deposit_queue
+            .try_enqueue_sealed(sealed, L1PortalEvents::default())
+            .expect("test headers must be contiguous");
+    }
+
+    let blocked = consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS + 1;
+    assert!(!subscriber.config.block_tracker.has_capacity_for(blocked));
+
+    // No provider response is needed: reconnect resumes from the in-memory fetch cursor.
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    assert_eq!(
+        subscriber.next_block_to_sync(&l1_provider).await.unwrap(),
+        blocked
+    );
+
+    assert!(
+        !subscriber.config.block_tracker.has_capacity_for(blocked),
+        "reconnect must not turn the fetch high-water mark into consumed progress"
+    );
+    assert_eq!(
+        subscriber.deposit_queue.drain().len(),
+        MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS as usize
+    );
+    assert!(asserter.read_q().is_empty());
+}
+
 #[tokio::test]
 async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
@@ -739,11 +792,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         .expect_err("finite trigger stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
 
-    let blocks = subscriber
-        .deposit_queue
-        .as_ref()
-        .expect("leader test subscriber has a deposit queue")
-        .drain();
+    let blocks = subscriber.deposit_queue.drain();
     assert_eq!(
         blocks
             .iter()
@@ -751,7 +800,112 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
             .collect::<Vec<_>>(),
         vec![10, 11, 12]
     );
+    for block in blocks {
+        assert_eq!(
+            subscriber
+                .config
+                .block_tracker
+                .observed_hash(block.header.number()),
+            Some(block.header.hash()),
+            "enqueueing must not prune an observation before its zone block is consumed"
+        );
+    }
     assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn test_follow_finalized_reports_parent_discontinuity_without_publishing_header() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let header_12 = make_chained_header(12, B256::repeat_byte(0xCC));
+
+    // The provider claims block 12 is finalized, but returns a numbered range whose final
+    // header does not extend block 11. This is an RPC/finality invariant violation and must
+    // be reported through the subscriber retry path rather than panicking its critical task.
+    asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    push_header_and_empty_receipts(&asserter, header_11.clone());
+    push_header_and_empty_receipts(&asserter, header_12);
+
+    let err = subscriber
+        .follow_finalized(&l1_provider, futures::stream::pending())
+        .await
+        .expect_err("a parent-discontinuous finalized range must be rejected");
+    assert!(
+        err.to_string()
+            .contains("unexpected discontinuity while enqueueing finalized L1 block 12"),
+        "unexpected error: {err}"
+    );
+
+    assert_eq!(
+        subscriber.config.block_tracker.observed_hash(11),
+        Some(header_hash(&header_11))
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.observed_hash(12),
+        None,
+        "a rejected header must not be published to follower import"
+    );
+    assert!(asserter.read_q().is_empty());
+}
+
+/// Without `retain_observations` there is no consumer to release tracker entries, so the
+/// subscriber must prune as it goes. Otherwise it would stall in `wait_for_capacity` once
+/// `MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS` observations piled up.
+#[tokio::test]
+async fn test_follow_finalized_prunes_observations_when_retention_is_off() {
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    subscriber.config.retain_observations = false;
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    asserter.push_success(&Some(header_response(header_11.clone())));
+    push_header_and_empty_receipts(&asserter, header_11);
+
+    let err = subscriber
+        .follow_finalized(
+            &l1_provider,
+            futures::stream::iter([Ok::<_, eyre::Report>(())]),
+        )
+        .await
+        .expect_err("finite trigger stream should end the subscriber");
+    assert!(err.to_string().contains("head notification stream ended"));
+
+    // The deposit queue still owns the pending data...
+    let blocks = subscriber.deposit_queue.drain();
+    assert_eq!(
+        blocks
+            .iter()
+            .map(|block| block.header.number())
+            .collect::<Vec<_>>(),
+        vec![10, 11]
+    );
+    // ...but the tracker holds nothing, so its lookahead window can never fill up.
+    for number in [10, 11] {
+        assert_eq!(
+            subscriber.config.block_tracker.observed_hash(number),
+            None,
+            "observation {number} must be pruned when nothing consumes the tracker"
+        );
+    }
+    assert!(
+        subscriber
+            .config
+            .block_tracker
+            .has_capacity_for(11 + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+    );
 }
 
 #[tokio::test]
@@ -795,14 +949,7 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
         .unwrap();
 
     assert_eq!(next, 11);
-    assert!(
-        subscriber
-            .deposit_queue
-            .as_ref()
-            .expect("leader test subscriber has a deposit queue")
-            .drain()
-            .is_empty()
-    );
+    assert!(subscriber.deposit_queue.drain().is_empty());
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1317,6 +1464,88 @@ fn test_try_enqueue_sequential_append() {
     ));
 
     assert_eq!(queue.pending_len(), 2);
+}
+
+/// External block input must report a gap as a recoverable error.
+#[test]
+fn try_enqueue_sealed_reports_a_gap() {
+    let queue = DepositQueue::default();
+
+    let h1 = make_test_header(10);
+    queue
+        .try_enqueue_sealed(seal(h1), L1PortalEvents::from_deposits(vec![]))
+        .expect("the first block is always contiguous");
+
+    // Skip block 11.
+    let h3 = make_test_header(12);
+    let err = queue
+        .try_enqueue_sealed(seal(h3), L1PortalEvents::from_deposits(vec![]))
+        .expect_err("a gap must be reported");
+    assert!(
+        err.to_string().contains("11..=11"),
+        "error should name the missing range, got: {err}"
+    );
+}
+
+#[test]
+fn try_enqueue_sealed_accepts_a_duplicate_from_the_second_producer() {
+    let queue = DepositQueue::default();
+    let header = seal(make_test_header(10));
+
+    // Both the subscriber and follower import enqueue the same observation; the second one
+    // must be a no-op rather than an error.
+    for _ in 0..2 {
+        queue
+            .try_enqueue_sealed(header.clone(), L1PortalEvents::from_deposits(vec![]))
+            .expect("a duplicate is not a gap");
+    }
+    assert_eq!(queue.last_enqueued().map(|last| last.number), Some(10));
+}
+
+/// `confirm_through` runs after the zone block is irreversibly canonical, so it must keep
+/// advancing the queue even when the front is not exactly the block being confirmed.
+/// Refusing would leave the cursor stuck and silently stall replication.
+#[test]
+fn confirm_through_advances_past_stale_entries_and_is_idempotent() {
+    let queue = DepositQueue::default();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let h12 = make_chained_header(12, header_hash(&h11));
+    let anchor_12 = seal(h12.clone()).num_hash();
+    for header in [h10, h11, h12] {
+        queue
+            .try_enqueue_sealed(seal(header), L1PortalEvents::from_deposits(vec![]))
+            .expect("test headers must be contiguous");
+    }
+
+    // Confirming block 12 drains 10 and 11 with it rather than refusing to move.
+    queue
+        .confirm_through(anchor_12)
+        .expect("a matching hash must advance the queue");
+    assert!(queue.peek().is_none());
+
+    // Replaying the same confirmation is a no-op, not an error.
+    queue
+        .confirm_through(anchor_12)
+        .expect("confirm_through must be idempotent");
+}
+
+#[test]
+fn confirm_through_rejects_a_conflicting_hash() {
+    let queue = DepositQueue::default();
+    let header = make_test_header(10);
+    queue
+        .try_enqueue_sealed(seal(header), L1PortalEvents::from_deposits(vec![]))
+        .expect("the first test header must be accepted");
+
+    let conflicting = NumHash::new(10, B256::repeat_byte(0xAB));
+    let err = queue
+        .confirm_through(conflicting)
+        .expect_err("a different hash at the same height is a real conflict");
+    assert!(
+        err.to_string().contains("deposit queue holds L1 block 10"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

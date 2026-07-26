@@ -240,6 +240,35 @@ impl PendingDeposits {
         Some(block)
     }
 
+    /// Confirm that every pending L1 block up to and including `expected` has been
+    /// consumed, advancing the queue to the first block after it.
+    ///
+    /// Unlike [`confirm`](Self::confirm) this is idempotent and tolerant of a queue that
+    /// has already moved past `expected` (nothing to do). Callers that consume a block
+    /// *after* it is irreversibly canonical use this so a queue that drifted cannot
+    /// wedge the consumer forever.
+    ///
+    /// Returns an error only when the queue holds a *different* hash at
+    /// `expected.number`, which means the local L1 view contradicts the block that was
+    /// just consumed.
+    pub(crate) fn confirm_through(&mut self, expected: NumHash) -> eyre::Result<()> {
+        while let Some(front) = self.pending.first().map(|entry| entry.header.num_hash()) {
+            if front.number > expected.number {
+                break;
+            }
+            eyre::ensure!(
+                front.number < expected.number || front.hash == expected.hash,
+                "deposit queue holds L1 block {} with hash {}, but the consumed block is {}",
+                front.number,
+                front.hash,
+                expected.hash,
+            );
+            self.confirm(front)
+                .expect("front was just read and matches by construction");
+        }
+        Ok(())
+    }
+
     /// Drain all pending L1 block deposits.
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<L1BlockDeposits> {
@@ -352,18 +381,27 @@ impl DepositQueue {
         self.notify.notify_one();
     }
 
-    /// Like [`enqueue`](Self::enqueue) but accepts an already-sealed header,
-    /// avoiding a redundant hash computation.
-    pub fn enqueue_sealed(&self, header: SealedHeader<TempoHeader>, events: L1PortalEvents) {
+    /// Enqueue an already-sealed header, reporting a gap or parent discontinuity.
+    ///
+    /// Both the finalized L1 subscriber and follower block import are driven by external
+    /// input, so a discontinuity must be a recoverable error rather than a process abort.
+    pub fn try_enqueue_sealed(
+        &self,
+        header: SealedHeader<TempoHeader>,
+        events: L1PortalEvents,
+    ) -> eyre::Result<()> {
         let mut queue = self.inner.lock();
-        match queue.try_enqueue(header, events) {
-            EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-            EnqueueOutcome::NeedBackfill { from, to } => {
-                panic!("enqueue_sealed found a non-contiguous finalized range {from}..={to}")
-            }
-        }
+        let outcome = queue.try_enqueue(header, events);
         drop(queue);
-        self.notify.notify_one();
+        match outcome {
+            EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {
+                self.notify.notify_one();
+                Ok(())
+            }
+            EnqueueOutcome::NeedBackfill { from, to } => Err(eyre::eyre!(
+                "deposit queue is missing finalized L1 blocks {from}..={to}"
+            )),
+        }
     }
 
     /// Peek at the next L1 block without removing it.
@@ -377,6 +415,15 @@ impl DepositQueue {
     /// (e.g. a reorg purged it between `peek` and `confirm`).
     pub fn confirm(&self, expected: NumHash) -> Option<L1BlockDeposits> {
         self.inner.lock().confirm(expected)
+    }
+
+    /// Advance the queue past `expected`, tolerating a queue that already moved on.
+    ///
+    /// See [`PendingDeposits::confirm_through`]. Used by follower block import, which
+    /// confirms only after the zone block is irreversibly canonical and therefore cannot
+    /// treat "the front is not what I expected" as a reason to stop advancing.
+    pub fn confirm_through(&self, expected: NumHash) -> eyre::Result<()> {
+        self.inner.lock().confirm_through(expected)
     }
 
     /// Wait until an L1 block is available.
