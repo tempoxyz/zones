@@ -602,87 +602,71 @@ impl WithdrawalProcessor {
                     .processWithdrawals(batch_withdrawals, remaining_queue)
                     .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY)
                     .nonce(nonce)
+                    .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+                    .max_priority_fee_per_gas(0)
                     .gas(batch.gas_limit);
 
-                let pending = tokio::time::timeout(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT, call.send())
-                    .await
-                    .map_err(|_| eyre::eyre!("processWithdrawals tx send timed out"))
-                    .and_then(|result| result.map_err(Into::into));
-
-                match pending {
-                    Ok(pending) => {
-                        let tx_hash = *pending.tx_hash();
-                        self.metrics
-                            .withdrawals_processed_total
-                            .increment(batch.len() as u64);
-                        self.metrics
-                            .withdrawals_per_batch
-                            .record(batch.len() as f64);
-
-                        in_flight.push(async move {
-                            let receipt = pending
-                                .with_timeout(Some(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT))
-                                .get_receipt()
-                                .await;
-                            (batch, nonce, tx_hash, remaining_queue, receipt)
-                        });
-                        submitted += 1;
-                    }
-                    Err(e) => {
-                        self.metrics
-                            .withdrawals_failed_total
-                            .increment(batch.len() as u64);
-                        error!(
-                            slot,
-                            nonce,
-                            start_index = absolute_start,
-                            withdrawal_count = batch.len(),
-                            error = %e,
-                            "processWithdrawals tx failed to send; queue will be reconciled and retried"
-                        );
-                        retry = true;
-                    }
-                }
+                in_flight.push(async move {
+                    let receipt =
+                        tokio::time::timeout(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT, call.send_sync())
+                            .await
+                            .map_err(|_| {
+                                eyre::eyre!(
+                                    "processWithdrawals sync submission timed out after {} seconds",
+                                    PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT.as_secs()
+                                )
+                            })
+                            .and_then(|result| result.map_err(Into::into));
+                    (batch, nonce, remaining_queue, receipt)
+                });
+                submitted += 1;
             }
 
-            let Some((batch, nonce, tx_hash, remaining_queue, receipt)) = in_flight.next().await
-            else {
+            let Some((batch, nonce, remaining_queue, receipt)) = in_flight.next().await else {
                 break;
             };
 
             match receipt {
-                Ok(receipt) if receipt.status() => {
+                Ok(receipt) => {
+                    let tx_hash = receipt.transaction_hash();
                     self.metrics
-                        .withdrawals_confirmed_total
-                        .increment(batch.len() as u64);
-                    self.metrics.batches_confirmed_total.increment(1);
-                    info!(
-                        slot,
-                        nonce,
-                        %tx_hash,
-                        start_index = offset + batch.start,
-                        withdrawal_count = batch.len(),
-                        gas_used = receipt.gas_used,
-                        "✅ Withdrawal batch confirmed on L1"
-                    );
-                }
-                Ok(_) => {
-                    self.metrics
-                        .withdrawals_failed_total
+                        .withdrawals_processed_total
                         .increment(batch.len() as u64);
                     self.metrics
-                        .withdrawals_reverted_total
-                        .increment(batch.len() as u64);
-                    error!(
-                        slot,
-                        nonce,
-                        %tx_hash,
-                        start_index = offset + batch.start,
-                        withdrawal_count = batch.len(),
-                        expected_remaining_queue = %remaining_queue,
-                        "processWithdrawals tx reverted; queue will be reconciled and retried"
-                    );
-                    retry = true;
+                        .withdrawals_per_batch
+                        .record(batch.len() as f64);
+                    if receipt.status() {
+                        self.metrics
+                            .withdrawals_confirmed_total
+                            .increment(batch.len() as u64);
+                        self.metrics.batches_confirmed_total.increment(1);
+                        info!(
+                            slot,
+                            nonce,
+                            %tx_hash,
+                            start_index = offset + batch.start,
+                            withdrawal_count = batch.len(),
+                            gas_used = receipt.gas_used,
+                            "✅ Withdrawal batch confirmed on L1"
+                        );
+                    } else {
+                        self.metrics
+                            .withdrawals_failed_total
+                            .increment(batch.len() as u64);
+                        self.metrics
+                            .withdrawals_reverted_total
+                            .increment(batch.len() as u64);
+                        error!(
+                            slot,
+                            nonce,
+                            %tx_hash,
+                            start_index = offset + batch.start,
+                            withdrawal_count = batch.len(),
+                            expected_remaining_queue = %remaining_queue,
+                            "processWithdrawals tx reverted; queue will be reconciled and retried"
+                        );
+                        retry = true;
+                    }
                 }
                 Err(e) => {
                     self.metrics
@@ -691,7 +675,6 @@ impl WithdrawalProcessor {
                     error!(
                         slot,
                         nonce,
-                        %tx_hash,
                         start_index = offset + batch.start,
                         withdrawal_count = batch.len(),
                         expected_remaining_queue = %remaining_queue,

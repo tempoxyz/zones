@@ -191,6 +191,8 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
+            true,
+            true,
             bridgeAccounts,
             _zoneGateways(),
             address(messengerContract),
@@ -208,6 +210,8 @@ contract ZoneBridgeTest is BaseTest {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(l1Portal),
+                    accessMode: true,
+                    gatewayMode: true,
                     admin: admin,
                     sequencers: sequencers,
                     threshold: 1,

@@ -35,9 +35,9 @@ pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
 
     let receipt = ZonePortal::new(portal, provider)
         .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-        .send()
-        .await?
-        .get_receipt()
+        .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
+        .max_priority_fee_per_gas(0)
+        .send_sync()
         .await?;
     let tx_hash = receipt.transaction_hash();
     eyre::ensure!(

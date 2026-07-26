@@ -181,8 +181,13 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
                 .expect("sequencer signer is parsed whenever sequencing is enabled");
+            let l1_transaction_signer = p2p_config
+                .as_ref()
+                .filter(|config| config.role() == Role::Leader)
+                .map(P2pConfig::block_attestation_signer);
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
+                l1_transaction_signer,
                 zone_id: args.zone_id,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_interval_blocks: args.zone_batch_interval_blocks,
@@ -502,13 +507,7 @@ mod tests {
 
     #[test]
     fn dev_is_parsed_by_the_top_level_cli() {
-        let parsed = ZoneCli::try_parse_from([
-            "tempo-zone",
-            "dev",
-            "--dev.zone-gateway",
-            "0x0000000000000000000000000000000000000001",
-        ])
-        .unwrap();
+        let parsed = ZoneCli::try_parse_from(["tempo-zone", "dev"]).unwrap();
         assert!(matches!(parsed, ZoneCli::Dev(_)));
     }
 

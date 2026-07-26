@@ -48,7 +48,10 @@ contract ZoneMessenger is IZoneMessenger {
         ZoneInfo memory zone = zoneFactory.zones(zoneId);
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
 
-        if (IZonePortal(msg.sender).role(target) != Role.CallbackGateway) {
+        if (
+            !IZonePortal(msg.sender).isGatewayOpen()
+                && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
+        ) {
             revert InvalidCallbackTarget();
         }
 

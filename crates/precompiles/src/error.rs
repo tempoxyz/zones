@@ -3,11 +3,9 @@
 use alloy_sol_types::{SolError, SolInterface};
 use revm::precompile::{PrecompileOutput, PrecompileResult};
 use tempo_precompiles::IntoPrecompileResult;
-use tempo_zone_contracts::{ZoneOutboxError, ZonePortalError};
+use tempo_zone_contracts::{TempoStateError, ZoneInboxError, ZoneOutboxError, ZonePortalError};
 
-use crate::{
-    storage::L1StateError, tip20_factory::ZoneTokenFactoryError, tip403_proxy::ReadOnlyRegistry,
-};
+use crate::{storage::L1StateError, tip403_proxy::ReadOnlyRegistry};
 
 pub use tempo_precompiles::error::{Result, TempoPrecompileError};
 
@@ -34,9 +32,15 @@ pub enum ZonePrecompileError {
     /// Error from the ZoneOutbox.
     #[error("ZoneOutbox error: {0:?}")]
     Outbox(ZoneOutboxError),
-    /// Error from the zone TIP-20 factory.
-    #[error("Zone TIP-20 factory error: {0:?}")]
-    ZoneTokenFactory(ZoneTokenFactoryError),
+    /// Error from TempoState checkpoint validation.
+    #[error("TempoState error: {0:?}")]
+    TempoState(TempoStateError),
+    /// Error from the ZoneInbox.
+    #[error("ZoneInbox error: {0:?}")]
+    Inbox(ZoneInboxError),
+    /// Malformed nested ABI data, matching Solidity's empty revert.
+    #[error("malformed ABI calldata")]
+    MalformedCalldata,
     /// Error from the read-only zone TIP-403 registry.
     #[error("Zone TIP-403 registry error: {0:?}")]
     Zone403Registry(ReadOnlyRegistry),
@@ -49,7 +53,9 @@ impl IntoPrecompileResult for ZonePrecompileError {
             Self::L1State(error) => return Err(error.into()),
             Self::Portal(error) => error.abi_encode(),
             Self::Outbox(error) => error.abi_encode(),
-            Self::ZoneTokenFactory(error) => error.abi_encode(),
+            Self::TempoState(error) => error.abi_encode(),
+            Self::Inbox(error) => error.abi_encode(),
+            Self::MalformedCalldata => Default::default(),
             Self::Zone403Registry(error) => error.abi_encode(),
         };
         Ok(PrecompileOutput::revert(gas, data.into(), reservoir))
@@ -95,13 +101,6 @@ mod tests {
 
     #[test]
     fn other_zone_and_tempo_errors_preserve_conversion_behavior() {
-        let factory_error = ZoneTokenFactoryError::only_zone_inbox();
-        let output = ZonePrecompileError::from(factory_error.clone())
-            .into_precompile_result(10, 20)
-            .unwrap();
-        assert!(output.is_revert());
-        assert_eq!(output.bytes, factory_error.abi_encode());
-
         let output = ZonePrecompileError::from(TempoPrecompileError::OutOfGas)
             .into_precompile_result(10, 20)
             .unwrap();

@@ -68,7 +68,7 @@ pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
 /// [`MAX_RLP_BLOCK_SIZE`] so such blocks still replicate.
 const BLOCK_SIZE_SAFETY_MARGIN: usize = 1024 * 1024;
 
-/// Stable diagnostic retained when the precompile stack stringifies an [`L1StateError`].
+/// Diagnostic retained when upstream Tempo precompile storage stringifies an [`L1StateError`].
 const L1_STORAGE_UNAVAILABLE_ERROR_PREFIX: &str = "Tempo L1 storage unavailable";
 
 /// Factory for constructing the zone payload builder.
@@ -676,9 +676,9 @@ where
 /// Build the `advanceTempo(header, deposits, decryptions, enabledTokens)` system transaction.
 ///
 /// This must be called **once per L1 block** at the start of a zone block (before user txs).
-/// It calls [`ZoneInbox.advanceTempo`](crate::abi::ZoneInbox) which atomically:
+/// It calls [`IZoneInbox.advanceTempo`](crate::abi::IZoneInbox) which atomically:
 /// - Advances the zone's view of Tempo by processing the L1 block header
-/// - Enables newly-bridged TIP-20 tokens via the zone's TIP20Factory precompile
+/// - Activates newly-bridged TIP-20 tokens directly in the ZoneInbox precompile
 /// - Processes deposits from the queue (minting zone tokens to recipients)
 /// - Validates the deposit hash chain against Tempo state
 ///
@@ -690,7 +690,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
     let mut header_rlp = Vec::new();
     prepared.header.header().encode(&mut header_rlp);
 
-    let calldata = abi::ZoneInbox::advanceTempoCall {
+    let calldata = abi::IZoneInbox::advanceTempoCall {
         header: Bytes::from(header_rlp),
         deposits: prepared.queued_deposits.clone(),
         decryptions: prepared.decryptions.clone(),
@@ -733,7 +733,7 @@ mod tests {
     };
     use tempo_transaction_pool::transaction::TempoPooledTransaction;
 
-    use crate::abi::{self, DepositType, ZoneInbox};
+    use crate::abi::{self, DepositType, IZoneInbox};
     use zone_l1::PreparedL1Block;
 
     #[test]
@@ -890,7 +890,6 @@ mod tests {
                             memo: B256::ZERO,
                         }),
                     ),
-                    rejected: false,
                 },
                 abi::QueuedDeposit {
                     depositType: DepositType::Encrypted,
@@ -910,7 +909,6 @@ mod tests {
                             },
                         }),
                     ),
-                    rejected: false,
                 },
             ],
             decryptions: vec![abi::DecryptionData {
@@ -932,7 +930,7 @@ mod tests {
             tempo_primitives::TempoTxEnvelope::Legacy(signed) => &signed.tx().input,
             _ => panic!("expected Legacy tx"),
         };
-        let decoded = ZoneInbox::advanceTempoCall::abi_decode(input)
+        let decoded = IZoneInbox::advanceTempoCall::abi_decode(input)
             .expect("calldata should decode as advanceTempo");
 
         // Should have 2 queued deposits

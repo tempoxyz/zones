@@ -4,8 +4,11 @@ pragma solidity ^0.8.13;
 import {
     ITempoState,
     IZoneConfig,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_GATEWAY_MODE_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_ROLE_SLOT,
     PORTAL_TOKEN_CONFIGS_SLOT,
     Role
@@ -113,8 +116,27 @@ contract ZoneConfig is IZoneConfig {
         return uint8(uint256(value) & 0xff) != 0;
     }
 
-    /// @notice Check account membership in the portal's admin-managed closed-loop allowlist.
+    /// @notice Read the maximum sequencer-configurable Tempo gas rate from the portal.
+    function maxTempoGasRate() external view returns (uint128) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_MAX_TEMPO_GAS_RATE_SLOT);
+        return uint128(uint256(value));
+    }
+
+    /// @notice Read account allowlist enforcement from the dedicated packed mode slot.
+    function isAccessEnforced() public view returns (bool) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_ACCESS_MODE_SLOT);
+        return uint8(uint256(value)) != 0;
+    }
+
+    /// @notice Read whether callback gateway enforcement is disabled.
+    function isGatewayOpen() public view returns (bool) {
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, PORTAL_GATEWAY_MODE_SLOT);
+        return uint8(uint256(value) >> 8) == 0;
+    }
+
+    /// @notice Check whether an account is authorized under the portal's access mode.
     function isAllowedAccount(address account) external view returns (bool) {
+        if (!isAccessEnforced()) return true;
         bytes32 accountSlot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
         return
             uint256(tempoState.readTempoStorageSlot(tempoPortal, accountSlot))

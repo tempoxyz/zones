@@ -5,8 +5,10 @@
 
 use crate::{
     ZoneEngine,
-    replication::{broadcast_persisted_blocks, run_block_sync},
+    replication::{AttestationContext, broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
+    settlement_attestation::collect_leader_settlements,
+    tx_forwarding::{forward_new_transactions, insert_forwarded_transactions, route_p2p_events},
 };
 use alloy_primitives::Address;
 use alloy_provider::Provider as _;
@@ -33,17 +35,21 @@ use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
-use reth_transaction_pool::{
-    Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
-    error::InvalidPoolTransactionError,
+use reth_storage_api::{
+    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
 };
-use std::{collections::HashSet, num::NonZeroU32, sync::Arc, time::Duration};
+use reth_transaction_pool::{
+    Pool, PoolTransaction, TransactionPool as _, TransactionValidationTaskExecutor,
+    blobstore::InMemoryBlobStore, error::InvalidPoolTransactionError,
+};
+use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
+use tempo_evm::TempoInvalidTransaction;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
+use tempo_precompiles::tip20::TIP20Token;
 use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
@@ -54,13 +60,15 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
-use tracing::{debug, info};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
+use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    DepositQueue, L1Subscriber, L1SubscriberConfig, TempoStateExt,
-    state::{L1StateCache, L1StateProvider, L1StateProviderConfig},
+    DepositQueue, L1BlockTracker, L1Subscriber, L1SubscriberConfig, TempoStateExt,
+    state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
@@ -68,7 +76,8 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_sequencer::{
-    BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
+    attestation::AttestationDomain, spawn_zone_sequencer,
 };
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
@@ -142,8 +151,10 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
-    /// Sequencer private key signer for signing L1 transactions.
+    /// Shared sequencer signer used for block production and encryption.
     pub sequencer_signer: PrivateKeySigner,
+    /// Individual manifest-node signer used for L1 settlement transactions.
+    pub l1_transaction_signer: Option<PrivateKeySigner>,
     /// Zone ID for chain ID validation.
     pub zone_id: u32,
     /// How often the zone monitor polls for new L2 blocks.
@@ -181,6 +192,10 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: L1StateCache,
+    /// Shared registry of tokens enabled for this zone.
+    enabled_tokens: EnabledTokenRegistry,
+    /// L1 anchors independently observed and applied by the subscriber.
+    l1_block_tracker: L1BlockTracker,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
     /// Number of zone blocks between withdrawal batch boundaries.
@@ -206,12 +221,16 @@ impl ZoneNode {
     ) -> Self {
         let deposit_queue = DepositQueue::default();
 
-        let l1_state_cache = L1StateCache::new(HashSet::from([portal_address]));
+        let l1_state_cache = L1StateCache::new();
+        let enabled_tokens = EnabledTokenRegistry::default();
+        let l1_block_tracker = L1BlockTracker::default();
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
+            enabled_tokens: enabled_tokens.clone(),
             l1_state_cache: l1_state_cache.clone(),
+            block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
         };
@@ -228,6 +247,8 @@ impl ZoneNode {
             l1_config,
             l1_state_provider_config,
             l1_state_cache,
+            enabled_tokens,
+            l1_block_tracker,
             portal_address,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
@@ -304,6 +325,15 @@ impl ZoneNode {
         self.l1_state_cache.clone()
     }
 
+    /// Returns the shared enabled-token registry.
+    pub fn enabled_tokens(&self) -> EnabledTokenRegistry {
+        self.enabled_tokens.clone()
+    }
+
+    /// Returns the L1 block observation tracker.
+    pub fn l1_block_tracker(&self) -> L1BlockTracker {
+        self.l1_block_tracker.clone()
+    }
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
@@ -337,7 +367,9 @@ impl ZoneNode {
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(ZonePoolBuilder)
+            .pool(ZonePoolBuilder::new(
+                executor_builder.enabled_tokens.clone(),
+            ))
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
@@ -440,14 +472,7 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        let sp = ctx.node.provider().latest()?;
-        let tempo_block_number = sp.tempo_block_number()?;
-        self.l1_config
-            .l1_state_cache
-            .write()
-            .initialize_floor(tempo_block_number);
-        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber and initialized cache");
-
+        let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &self.l1_config.l1_rpc_url,
@@ -456,28 +481,49 @@ where
             .await?
             .erased();
 
+        self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
+            .await?;
+
         let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
-        if p2p_role == Some(Role::Follower) {
-            // TODO(multi-sequencer): Split L1 observation/cache updates from deposit
-            // enqueueing. Followers import complete blocks from the leader and do not consume
-            // DepositQueue; starting the unified subscriber here would grow that queue forever.
-            // On promotion/restart the subscriber resumes from the tempoBlockNumber persisted in
-            // the follower's imported zone state.
-            info!(target: "reth::cli", "Skipping L1 deposit subscriber on follower");
-        } else {
-            self.spawn_l1_subscriber(&ctx);
-        }
+        self.spawn_l1_subscriber(&ctx, p2p_role == Some(Role::Follower));
 
         let task_executor = ctx.node.task_executor().clone();
+        let attestation_store = self
+            .p2p_config
+            .as_ref()
+            .filter(|config| config.role() == Role::Leader)
+            .map(|_| AttestationStore::default());
         if let Some(config) = self.p2p_config.take() {
-            let network_id =
-                P2pNetworkId::new(l1_provider.get_chain_id().await?, self.portal_address);
+            let l1_chain_id = l1_provider.get_chain_id().await?;
+            let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
+            let attestation_domain = AttestationDomain {
+                l1_chain_id,
+                portal_address: self.portal_address,
+                zone_id: config.zone_id(),
+                sequencer_set_version: config.sequencer_set_version(),
+            };
+            let anchor_config = self
+                .sequencer_config
+                .as_ref()
+                .map(|config| config.batch_anchor_config)
+                .unwrap_or_default();
+            let attestation = AttestationContext::new(
+                attestation_domain,
+                config.block_attestation_signer(),
+                config.block_attestation_addresses(),
+                attestation_store.clone(),
+                l1_provider.clone(),
+                anchor_config,
+            );
             Self::launch_p2p(
                 config,
                 network_id,
+                attestation,
                 &task_executor,
                 ctx.node.provider().clone(),
+                ctx.node.pool().clone(),
                 ctx.beacon_engine_handle.clone(),
+                self.l1_config.block_tracker.clone(),
             )?;
         }
 
@@ -512,6 +558,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 chain_id,
+                attestation_store,
             )
             .await?;
         }
@@ -531,11 +578,17 @@ where
     fn launch_p2p(
         config: P2pConfig,
         network_id: P2pNetworkId,
+        attestation: AttestationContext,
         task_executor: &reth_tasks::TaskExecutor,
         provider: N::Provider,
+        pool: N::Pool,
         engine: ConsensusEngineHandle<ZonePayloadTypes>,
+        l1_block_tracker: L1BlockTracker,
     ) -> eyre::Result<()> {
         let role = config.role();
+        // Subscribe before starting Commonware (and, importantly, before RPC launch) so a
+        // follower cannot admit a transaction in a startup gap.
+        let new_transactions = (role == Role::Follower).then(|| pool.new_transactions_listener());
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
@@ -545,18 +598,55 @@ where
             events,
         } = handle.into_parts();
 
-        if role == Role::Leader {
-            // Only a leader can build + broadcast blocks
-            task_executor.spawn_critical_task(
-                "zone-p2p-block-broadcast",
-                broadcast_persisted_blocks(provider.clone(), commands.clone()),
-            );
-        }
+        let sync_events = match role {
+            Role::Leader => {
+                task_executor.spawn_critical_task(
+                    "zone-p2p-block-broadcast",
+                    broadcast_persisted_blocks(provider.clone(), commands.clone()),
+                );
+                let (sync_events_tx, sync_events) = tokio::sync::mpsc::channel(128);
+                let (transaction_events_tx, transaction_events) = tokio::sync::mpsc::channel(128);
+                task_executor.spawn_critical_task(
+                    "zone-p2p-event-router",
+                    route_p2p_events(events, sync_events_tx, transaction_events_tx),
+                );
+                task_executor.spawn_critical_task(
+                    "zone-p2p-transaction-import",
+                    insert_forwarded_transactions(pool, transaction_events),
+                );
+                sync_events
+            }
+            Role::Follower => {
+                task_executor.spawn_critical_task(
+                    "zone-p2p-transaction-forward",
+                    forward_new_transactions(
+                        pool,
+                        new_transactions.expect("follower listener must be initialized"),
+                        commands.clone(),
+                    ),
+                );
+                events
+            }
+        };
         task_executor.spawn_critical_task(
             "zone-p2p-block-sync",
-            run_block_sync(role, provider, engine, events, commands),
+            run_block_sync(
+                role,
+                provider.clone(),
+                engine,
+                sync_events,
+                commands.clone(),
+                l1_block_tracker,
+                attestation.clone(),
+            ),
         );
-
+        if role == Role::Leader {
+            // Only a leader can propose settlement attestations
+            task_executor.spawn_critical_task(
+                "zone-p2p-settlement-collection",
+                collect_leader_settlements(provider, commands, attestation),
+            );
+        }
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
             |shutdown| async move {
@@ -594,15 +684,74 @@ where
         Ok(())
     }
 
-    /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
-    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
-        L1Subscriber::spawn(
-            self.l1_config.clone(),
-            ctx.node.provider().clone(),
-            self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
+    /// Seed the enabled-token registry from the zone's current L1 snapshot.
+    async fn resolve_and_seed_tokens(
+        &mut self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        block_number: u64,
+    ) -> eyre::Result<()> {
+        let portal = self.portal_address;
+        let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+        let portal_code = l1_provider
+            .get_code_at(portal)
+            .block_id(block_id)
+            .await
+            .map_err(|err| {
+                eyre::eyre!(
+                    "failed to check portal {portal} deployment at L1 block {block_number}: {err}"
+                )
+            })?;
+        let enabled_tokens = if portal_code.is_empty() {
+            info!(
+                target: "reth::cli",
+                %portal,
+                block_number,
+                "Portal is not deployed at the L1 anchor, starting with an empty enabled-token registry"
+            );
+            Vec::new()
+        } else {
+            ZonePortal::new(portal, l1_provider)
+                .enabled_tokens_at(block_id)
+                .await
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to discover enabled tokens from portal {portal} at L1 block \
+                         {block_number}: {err}"
+                    )
+                })?
+        };
+        info!(
+            target: "reth::cli",
+            count = enabled_tokens.len(),
+            ?enabled_tokens,
+            block_number,
+            "Discovered enabled tokens from L1"
         );
-        info!(target: "reth::cli", "Unified L1 subscriber started");
+
+        let mut registry = self.l1_config.enabled_tokens.write();
+        registry.clear();
+        registry.extend(enabled_tokens);
+        Ok(())
+    }
+
+    /// Spawn shared L1 observation, with deposit enqueueing only on leaders.
+    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>, observer_only: bool) {
+        if observer_only {
+            L1Subscriber::spawn_observer(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 observer started for follower");
+        } else {
+            L1Subscriber::spawn(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                self.deposit_queue.clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        }
     }
 
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
@@ -689,6 +838,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         chain_id: u64,
+        attestation_store: Option<AttestationStore>,
     ) -> eyre::Result<()> {
         if config.zone_id != 0 {
             let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
@@ -722,8 +872,12 @@ where
             zone_poll_interval: config.zone_poll_interval,
             batch_interval_blocks: config.batch_interval_blocks,
             batch_anchor_config: config.batch_anchor_config,
+            attestation_store,
         };
-        let seq_handle = spawn_zone_sequencer(sequencer_config, config.sequencer_signer).await;
+        let l1_transaction_signer = config
+            .l1_transaction_signer
+            .unwrap_or(config.sequencer_signer);
+        let seq_handle = spawn_zone_sequencer(sequencer_config, l1_transaction_signer).await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
         // Critical task — node shuts down if either exits.
@@ -804,6 +958,7 @@ where
         let executor_builder = ZoneExecutorBuilder::new(
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
+            self.enabled_tokens.clone(),
         );
         let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
@@ -865,6 +1020,7 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
 pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: L1StateCache,
+    enabled_tokens: EnabledTokenRegistry,
 }
 
 impl ZoneExecutorBuilder {
@@ -872,10 +1028,12 @@ impl ZoneExecutorBuilder {
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: L1StateCache,
+        enabled_tokens: EnabledTokenRegistry,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
+            enabled_tokens,
         }
     }
 }
@@ -929,9 +1087,54 @@ where
 }
 
 /// Transaction pool builder for Zone - uses Tempo pool with defaults.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
-pub struct ZonePoolBuilder;
+pub struct ZonePoolBuilder {
+    enabled_tokens: EnabledTokenRegistry,
+}
+
+impl ZonePoolBuilder {
+    /// Create a pool builder using the shared enabled-token registry.
+    pub fn new(enabled_tokens: EnabledTokenRegistry) -> Self {
+        Self { enabled_tokens }
+    }
+}
+
+fn validate_has_enabled_token_balance(
+    provider: &impl StateProviderFactory,
+    enabled_tokens: &EnabledTokenRegistry,
+    sender: Address,
+) -> Result<(), InvalidPoolTransactionError> {
+    let state = provider.latest().map_err(|err| {
+        warn!(%err, "Failed to read latest state for zone token-balance admission check");
+        InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
+            TempoInvalidTransaction::EthInvalidTransaction(
+                "could not verify balance of an enabled zone token".into(),
+            ),
+        ))
+    })?;
+
+    for token in enabled_tokens.read().iter().copied() {
+        let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
+        let balance = state.storage(token, slot.into()).map_err(|err| {
+            warn!(%err, %sender, "Failed to read zone token balance during pool admission");
+            InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
+                TempoInvalidTransaction::EthInvalidTransaction(
+                    "could not verify balance of an enabled zone token".into(),
+                ),
+            ))
+        })?;
+        if balance.is_some_and(|balance| !balance.is_zero()) {
+            return Ok(());
+        }
+    }
+
+    Err(InvalidPoolTransactionError::other(
+        TempoPoolTransactionError::Evm(TempoInvalidTransaction::EthInvalidTransaction(
+            "sender must hold a nonzero balance of an enabled zone token".into(),
+        )),
+    ))
+}
 
 impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
@@ -972,6 +1175,12 @@ where
                 zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST,
             )
             .map_err(|err| InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(err)))
+        });
+
+        let provider = ctx.provider().clone();
+        let enabled_tokens = self.enabled_tokens;
+        validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
+            validate_has_enabled_token_balance(&provider, &enabled_tokens, *tx.sender_ref())
         });
 
         let validator =

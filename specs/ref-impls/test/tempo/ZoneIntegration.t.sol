@@ -153,6 +153,8 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.initialize(
             1,
             address(l2ZoneToken),
+            true,
+            true,
             _closedLoopAccounts(),
             _zoneGateways(),
             address(messengerContract),
@@ -170,6 +172,8 @@ contract ZoneIntegrationTest is BaseTest {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(l1Portal),
+                    accessMode: true,
+                    gatewayMode: true,
                     admin: admin,
                     sequencers: sequencers,
                     threshold: 1,

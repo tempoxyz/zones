@@ -5,10 +5,10 @@ pub use ZonePortal::{
     ZonePortalErrors as ZonePortalError,
 };
 
-use crate::IZoneOutbox;
+use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
-use zone_primitives::constants::{EMPTY_SENTINEL, PORTAL_TOKEN_CONFIGS_SLOT};
+use zone_primitives::constants::EMPTY_SENTINEL;
 
 crate::sol! {
     #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -141,6 +141,8 @@ crate::sol! {
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
+        event ZoneGasRateUpdated(uint128 zoneGasRate);
+        event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
         event BouncebackGasUpdated(uint64 bouncebackGas);
 
         event AdminTransferStarted(
@@ -154,6 +156,8 @@ crate::sol! {
         );
 
         event RoleUpdated(address indexed account, Role prev, Role next);
+        event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
+        event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
         // -- Errors --
 
@@ -165,11 +169,23 @@ crate::sol! {
         error PolicyForbids();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
+        error InvalidCallbackTarget();
+        error AccountNotAllowed(address account);
 
         // -- View functions --
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
+        function messenger() external view returns (address);
+        function isAccessEnforced() external view returns (bool);
+        function setAccessMode(bool enforced) external;
+        function isGatewayOpen() external view returns (bool);
+        function setGatewayMode(bool enforced) external;
+        function role(address account) external view returns (Role);
+        function setRole(address account, Role role) external;
+        function setAllowedAccount(address account, bool allowed) external;
+        function setGateway(address account, bool allowed) external;
+        function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
         function sequencerSetVersion() external view returns (uint64);
         function sequencerThreshold() external view returns (uint8);
@@ -221,13 +237,12 @@ crate::sol! {
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
 
+        function setZoneGasRate(uint128 newZoneGasRate) external;
+        function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
         function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
-        function role(address account) external view returns (Role);
-        function setAllowedAccount(address account, bool allowed) external;
-        function setGateway(address account, bool allowed) external;
 
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
@@ -254,6 +269,7 @@ crate::sol! {
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
+        function maxTempoGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
@@ -349,7 +365,33 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
+            Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
+            Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
         }
+    }
+}
+
+impl EncryptedDeposit {
+    /// Build the event emitted after a successful encrypted deposit.
+    pub fn processed_event(
+        &self,
+        deposit_hash: B256,
+        recipient: Address,
+        memo: B256,
+    ) -> ZoneInboxEvent {
+        ZoneInboxEvent::encrypted_deposit_processed(
+            deposit_hash,
+            self.sender,
+            recipient,
+            self.token,
+            self.amount,
+            memo,
+        )
+    }
+
+    /// Build the event emitted after a failed encrypted deposit.
+    pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
+        ZoneInboxEvent::encrypted_deposit_failed(deposit_hash, self.sender, self.token, self.amount)
     }
 }
 
@@ -418,9 +460,4 @@ impl Withdrawal {
         }
         hash
     }
-}
-
-/// Return the storage slot for `token` in the portal token-config mapping.
-pub fn portal_token_config_slot(token: Address) -> B256 {
-    keccak256((token, PORTAL_TOKEN_CONFIGS_SLOT).abi_encode())
 }

@@ -1,15 +1,13 @@
 use alloy::{
     primitives::{Address, B256, U256},
     providers::{Provider, ProviderBuilder},
-    signers::local::{MnemonicBuilder, PrivateKeySigner},
-    sol_types::SolEvent,
+    signers::local::PrivateKeySigner,
 };
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
-use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
-use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
+use tempo_contracts::precompiles::ITIP20;
+use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::ZonePortal;
 
-use crate::utils::{self, DEFAULT_POLL, ZoneTestNode, poll_until};
+use crate::utils::{DEFAULT_POLL, ZoneTestNode, poll_until};
 
 const L1_WS_RPC_URL: &str = "wss://rpc.testnet.tempo.xyz";
 const L1_HTTP_RPC_URL: &str = "https://rpc.testnet.tempo.xyz";
@@ -43,52 +41,11 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
     let depositor = l1_signer.address();
     fund_l1_wallet(depositor).await?;
 
-    // Deterministic zone token address from test mnemonic + fixed salt
-    let zone_wallet = MnemonicBuilder::from_phrase(utils::TEST_MNEMONIC).build()?;
-    let zone_admin = zone_wallet.address();
-    let zone_token_address = utils::compute_tip20_address(zone_admin, utils::ZONE_TEST_TOKEN_SALT);
-
     // Start the zone node pointing at the existing portal on testnet
     let zone = ZoneTestNode::start(L1_WS_RPC_URL.to_string(), portal_address).await?;
 
-    // --- Zone setup: create the mint target token, grant system sender ISSUER_ROLE ---
-
-    let zone_provider = ProviderBuilder::new()
-        .wallet(zone_wallet)
-        .connect_http(zone.http_url().clone());
-
-    let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, zone_provider.clone());
-    let receipt = factory
-        .createToken_0(
-            "ZoneTest".to_string(),
-            "ZTEST".to_string(),
-            "USD".to_string(),
-            PATH_USD_ADDRESS,
-            zone_admin,
-            utils::ZONE_TEST_TOKEN_SALT,
-        )
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(500_000)
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-
-    let event = ITIP20Factory::TokenCreated::decode_log(&receipt.logs()[1].inner)?;
-    assert_eq!(event.token, zone_token_address, "token address mismatch");
-
-    let zone_token = ITIP20::new(zone_token_address, zone_provider.clone());
-    let roles = IRolesAuth::new(zone_token_address, zone_provider.clone());
-
-    // System tx sender (Address::ZERO) needs ISSUER_ROLE to mint deposits
-    roles
-        .grantRole(*ISSUER_ROLE, Address::ZERO)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(300_000)
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
+    let zone_provider = ProviderBuilder::new().connect_http(zone.http_url().clone());
+    let zone_token = ITIP20::new(PATH_USD_ADDRESS, zone_provider.clone());
 
     // --- L1: deposit on the existing portal ---
 

@@ -19,7 +19,7 @@
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::{BlockNumberOrTag, NumHash};
 use alloy_network::primitives::HeaderResponse as _;
-use alloy_primitives::{Address, B256, Bloom, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bloom, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{BlockId, Log};
@@ -88,7 +88,9 @@ pub use event::{EnabledToken, L1PortalEvents};
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
-pub use subscriber::{L1Subscriber, L1SubscriberConfig};
+pub use subscriber::{
+    L1BlockTracker, L1Subscriber, L1SubscriberConfig, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
+};
 
 pub(crate) use event::EnqueueOutcome;
 

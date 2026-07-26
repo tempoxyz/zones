@@ -6,12 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_primitives::Address as EthereumAddress;
+use alloy_primitives::{Address as EthereumAddress, B256};
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{
     AddressableManager as _, Receiver as _, Recipients, Sender as _, authenticated::lookup,
 };
 use commonware_runtime::{Runner as _, Spawner as _};
+use eyre::WrapErr as _;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -21,7 +22,8 @@ use crate::{
     identity::{Ed25519Identity, Secp256k1Identity},
     network::{
         self, BACKFILL_REQUEST_CHANNEL, BACKFILL_RESPONSE_CHANNEL, BLOCK_BACKLOG, BLOCK_CHANNEL,
-        MAX_MESSAGE_SIZE,
+        MAX_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
+        TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
     },
 };
 
@@ -114,14 +116,20 @@ impl BackfillJob {
 
 struct P2pSenders {
     blocks: CommonwareSender,
+    settlement_proposals: CommonwareSender,
+    settlement_signatures: CommonwareSender,
     backfill_requests: CommonwareSender,
     backfill_responses: CommonwareSender,
+    transactions: CommonwareSender,
 }
 
 struct P2pReceivers {
     blocks: CommonwareReceiver,
+    settlement_proposals: CommonwareReceiver,
+    settlement_signatures: CommonwareReceiver,
     backfill_requests: CommonwareReceiver,
     backfill_responses: CommonwareReceiver,
+    transactions: CommonwareReceiver,
 }
 
 /// Fully validated configuration for one node's Zone P2P runtime.
@@ -183,9 +191,33 @@ impl P2pConfig {
         self.secp256k1_identity.address()
     }
 
+    /// Signer used for EIP-712 zone-block attestations.
+    pub fn block_attestation_signer(&self) -> alloy_signer_local::PrivateKeySigner {
+        self.secp256k1_identity.signer()
+    }
+
+    /// Expected attestation address for every peer.
+    pub fn block_attestation_addresses(&self) -> HashMap<PublicKey, EthereumAddress> {
+        self.manifest
+            .nodes()
+            .iter()
+            .map(|node| (node.ed25519_public_key().clone(), node.secp256k1_address()))
+            .collect()
+    }
+
     /// Local socket bound by Commonware.
     pub const fn listen(&self) -> SocketAddr {
         self.listen
+    }
+
+    /// Zone ID included in each block attestation.
+    pub fn zone_id(&self) -> u32 {
+        self.manifest.zone_id()
+    }
+
+    /// Registered signer-set version included in each block attestation.
+    pub fn sequencer_set_version(&self) -> u64 {
+        self.manifest.sequencer_set_version()
     }
 }
 
@@ -218,6 +250,10 @@ fn validate_ip_check_configuration(
 pub enum P2pCommand {
     /// Broadcast one RLP-encoded sealed zone block to all configured followers.
     BroadcastBlock(Vec<u8>),
+    /// Broadcast one ABI-encoded settlement proposal to all followers.
+    BroadcastSettlementProposal(Vec<u8>),
+    /// Return one ABI-encoded settlement signature to the leader.
+    SendSettlementSignature(Vec<u8>),
     /// Ask the role-appropriate peers for canonical blocks beginning at `start`.
     RequestBackfill { start: u64 },
     /// Return one canonical block to the peer that requested it.
@@ -231,6 +267,11 @@ pub enum P2pCommand {
         peer: PublicKey,
         request_id: u64,
         tip: u64,
+    },
+    /// Forward one canonical EIP-2718 transaction from a follower to the leader.
+    ForwardTransaction {
+        transaction_hash: B256,
+        transaction: Vec<u8>,
     },
 }
 
@@ -248,6 +289,16 @@ pub enum P2pEvent {
         leader_ed25519_public_key: PublicKey,
         block: Vec<u8>,
     },
+    /// A follower received a proposed settlement statement from the leader.
+    SettlementProposalReceived {
+        leader: PublicKey,
+        proposal: Vec<u8>,
+    },
+    /// The leader received a settlement signature from a follower.
+    SettlementSignatureReceived {
+        follower: PublicKey,
+        signature: Vec<u8>,
+    },
     /// An authenticated peer requested canonical blocks beginning at `start`.
     BackfillRequested {
         peer: PublicKey,
@@ -258,6 +309,11 @@ pub enum P2pEvent {
     BackfillBlockReceived { peer: PublicKey, block: Vec<u8> },
     /// The responder sent all blocks available in this response page.
     BackfillCompleted { peer: PublicKey, tip: u64 },
+    /// The leader received a raw transaction from an authenticated follower.
+    TransactionReceived {
+        follower_ed25519_public_key: PublicKey,
+        transaction: Vec<u8>,
+    },
 }
 
 /// Handle used to communicate with, supervise, and stop the dedicated P2P runtime.
@@ -384,6 +440,16 @@ fn run(
         oracle.track(0, peers).await;
         let (block_sender, block_receiver) =
             commonware.register(BLOCK_CHANNEL, network::block_quota(), BLOCK_BACKLOG);
+        let (settlement_proposal_sender, settlement_proposal_receiver) = commonware.register(
+            SETTLEMENT_PROPOSAL_CHANNEL,
+            network::settlement_quota(),
+            BLOCK_BACKLOG,
+        );
+        let (settlement_signature_sender, settlement_signature_receiver) = commonware.register(
+            SETTLEMENT_SIGNATURE_CHANNEL,
+            network::settlement_quota(),
+            BLOCK_BACKLOG,
+        );
 
         // The backfill request and responses are on separate channels
         let (backfill_request_sender, backfill_request_receiver) = commonware.register(
@@ -395,6 +461,11 @@ fn run(
             BACKFILL_RESPONSE_CHANNEL,
             network::backfill_response_quota(),
             BLOCK_BACKLOG,
+        );
+        let (transaction_sender, transaction_receiver) = commonware.register(
+            TRANSACTION_CHANNEL,
+            network::transaction_quota(),
+            TRANSACTION_BACKLOG,
         );
         let mut network_task = commonware.start();
 
@@ -430,7 +501,6 @@ fn run(
             .filter(|node| config.manifest.role_of(node.ed25519_public_key()) == Some(Role::Follower))
             .map(|node| node.ed25519_public_key().clone())
             .collect();
-
         let backfill_peers = match config.role {
             // A recovering leader can backfill from all followers
             Role::Leader => followers.clone(),
@@ -440,15 +510,20 @@ fn run(
         };
 
         let backfill_lifecycle = Arc::new(Mutex::new(BackfillJob::default()));
+        let leader = config.manifest.leader_ed25519_public_key().clone();
         let command_loop = run_commands(
             config.role,
+            leader,
             followers,
             backfill_peers,
             backfill_lifecycle.clone(),
             P2pSenders {
                 blocks: block_sender,
+                settlement_proposals: settlement_proposal_sender,
+                settlement_signatures: settlement_signature_sender,
                 backfill_requests: backfill_request_sender,
                 backfill_responses: backfill_response_sender,
+                transactions: transaction_sender,
             },
             command_rx,
         );
@@ -459,8 +534,11 @@ fn run(
             config.manifest,
             P2pReceivers {
                 blocks: block_receiver,
+                settlement_proposals: settlement_proposal_receiver,
+                settlement_signatures: settlement_signature_receiver,
                 backfill_requests: backfill_request_receiver,
                 backfill_responses: backfill_response_receiver,
+                transactions: transaction_receiver,
             },
             backfill_lifecycle,
             events,
@@ -488,6 +566,7 @@ fn run(
 
 async fn run_commands(
     role: Role,
+    leader: PublicKey,
     followers: Vec<PublicKey>,
     backfill_peers: Vec<PublicKey>,
     backfill_job: SharedBackfillLifecycle,
@@ -530,6 +609,30 @@ async fn run_commands(
                 if sent.len() != followers.len() {
                     debug!(target: "zone::p2p", connected = sent.len(), configured = followers.len(), "Some followers are not connected; block was not sent to them");
                 }
+            }
+
+            P2pCommand::BroadcastSettlementProposal(proposal) => {
+                if role != Role::Leader {
+                    warn!(target: "zone::p2p", "Ignoring settlement proposal command on follower");
+                    continue;
+                }
+                senders
+                    .settlement_proposals
+                    .send(Recipients::Some(followers.clone()), proposal, true)
+                    .await
+                    .wrap_err("failed broadcasting settlement proposal")?;
+            }
+
+            P2pCommand::SendSettlementSignature(signature) => {
+                if role != Role::Follower {
+                    warn!(target: "zone::p2p", "Ignoring settlement signature command on leader");
+                    continue;
+                }
+                senders
+                    .settlement_signatures
+                    .send(Recipients::Some(vec![leader.clone()]), signature, true)
+                    .await
+                    .wrap_err("failed sending settlement signature")?;
             }
 
             P2pCommand::RequestBackfill { start } => {
@@ -597,6 +700,41 @@ async fn run_commands(
                     .await
                     .map_err(|err| eyre::eyre!("failed completing block backfill: {err}"))?;
             }
+
+            P2pCommand::ForwardTransaction {
+                transaction_hash,
+                transaction,
+            } => {
+                if role != Role::Follower {
+                    metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
+                    warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on leader");
+                    continue;
+                }
+                let sent = match senders
+                    .transactions
+                    .send(
+                        Recipients::Some(vec![leader.clone()]),
+                        transaction.clone(),
+                        true,
+                    )
+                    .await
+                {
+                    Ok(sent) => sent,
+                    Err(err) => {
+                        metrics::counter!("zone_p2p_transaction_sends_without_leader_total")
+                            .increment(1);
+                        warn!(target: "zone::p2p", ?transaction_hash, leader = %leader, transaction_size_bytes = transaction.len(), %err, "Failed to send forwarded transaction; dropping this send attempt");
+                        continue;
+                    }
+                };
+                if sent.is_empty() {
+                    metrics::counter!("zone_p2p_transaction_sends_without_leader_total")
+                        .increment(1);
+                    warn!(target: "zone::p2p", ?transaction_hash, leader = %leader, transaction_size_bytes = transaction.len(), "Forwarded transaction was not sent (leader disconnected, sender throttled, or outbound queue full); dropping this send attempt");
+                } else {
+                    debug!(target: "zone::p2p", ?transaction_hash, leader = %leader, transaction_size_bytes = transaction.len(), "Forwarded transaction to leader");
+                }
+            }
         }
     }
 
@@ -612,8 +750,11 @@ async fn run_receivers(
 ) -> eyre::Result<()> {
     let P2pReceivers {
         mut blocks,
+        mut settlement_proposals,
+        mut settlement_signatures,
         mut backfill_requests,
         mut backfill_responses,
+        mut transactions,
     } = receivers;
 
     let leader = manifest.leader_ed25519_public_key().clone();
@@ -627,6 +768,26 @@ async fn run_receivers(
                     continue;
                 }
                 P2pEvent::BlockReceived { leader_ed25519_public_key: peer, block: bytes.into() }
+            }
+
+            // Got a settlement proposal at a batch boundary
+            result = settlement_proposals.recv() => {
+                let (peer, bytes) = result.wrap_err("settlement proposal channel receive failed")?;
+                if role != Role::Follower || peer != leader {
+                    warn!(target: "zone::p2p", %peer, "Ignoring settlement proposal from ineligible peer");
+                    continue;
+                }
+                P2pEvent::SettlementProposalReceived { leader: peer, proposal: bytes.into() }
+            }
+
+            // Got a response from a follower to the settlement proposal
+            result = settlement_signatures.recv() => {
+                let (peer, bytes) = result.wrap_err("settlement signature channel receive failed")?;
+                if role != Role::Leader || peer == leader {
+                    warn!(target: "zone::p2p", %peer, "Ignoring settlement signature from ineligible peer");
+                    continue;
+                }
+                P2pEvent::SettlementSignatureReceived { follower: peer, signature: bytes.into() }
             }
 
             // Got backfill request
@@ -689,6 +850,21 @@ async fn run_receivers(
                     }
                 }
             }
+
+            // Got a transaction forwarded by an authenticated follower.
+            result = transactions.recv() => {
+                let (peer, bytes) = result.map_err(|err| eyre::eyre!("transaction channel receive failed: {err}"))?;
+                if role != Role::Leader || manifest.role_of(&peer) != Some(Role::Follower) {
+                    metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
+                    warn!(target: "zone::p2p", %peer, "Ignoring transaction from role-invalid peer");
+                    continue;
+                }
+                metrics::counter!("zone_p2p_transactions_received_total").increment(1);
+                P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key: peer,
+                    transaction: bytes.into(),
+                }
+            }
         };
         events
             .send(event)
@@ -705,7 +881,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use alloy_primitives::address;
+    use alloy_primitives::{B256, address};
     use commonware_codec::Encode as _;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
@@ -912,6 +1088,101 @@ mod tests {
 
         let leader_commands = handles[0].parts.as_ref().unwrap().commands.clone();
         let follower_commands = handles[1].parts.as_ref().unwrap().commands.clone();
+        // Role-invalid commands are dropped without stopping either runtime.
+        leader_commands
+            .send(P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(1),
+                transaction: vec![0x01],
+            })
+            .await
+            .unwrap();
+        follower_commands
+            .send(P2pCommand::BroadcastBlock(block.clone()))
+            .await
+            .unwrap();
+
+        let transaction_hash = B256::with_last_byte(2);
+        let transaction = vec![0x76, 0x01, 0x02, 0x03];
+        follower_commands
+            .send(P2pCommand::ForwardTransaction {
+                transaction_hash,
+                transaction: transaction.clone(),
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key,
+                    transaction: received,
+                }) = handles[0].events_mut().recv().await
+                {
+                    assert_eq!(follower_ed25519_public_key, first_follower_peer);
+                    assert_eq!(received, transaction);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive forwarded transaction");
+
+        // Forwarding is point-to-point: the other follower receives neither the transaction nor
+        // the role-invalid block command above.
+        let other_follower = tokio::time::timeout(Duration::from_millis(300), async {
+            while let Some(event) = handles[2].events_mut().recv().await {
+                assert!(
+                    !matches!(event, P2pEvent::TransactionReceived { .. }),
+                    "forwarded transaction reached another follower"
+                );
+            }
+        })
+        .await;
+        assert!(other_follower.is_err(), "other follower runtime stopped");
+
+        let proposal = vec![0x10, 0x20];
+        leader_commands
+            .send(P2pCommand::BroadcastSettlementProposal(proposal.clone()))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::SettlementProposalReceived {
+                    leader,
+                    proposal: received,
+                }) = handles[1].events_mut().recv().await
+                {
+                    assert_eq!(leader, leader_peer);
+                    assert_eq!(received, proposal);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("follower did not receive settlement proposal");
+
+        let settlement_signature = vec![0x30, 0x40];
+        follower_commands
+            .send(P2pCommand::SendSettlementSignature(
+                settlement_signature.clone(),
+            ))
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::SettlementSignatureReceived {
+                    follower,
+                    signature,
+                }) = handles[0].events_mut().recv().await
+                {
+                    assert_eq!(follower, first_follower_peer);
+                    assert_eq!(signature, settlement_signature);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive settlement signature");
+
         leader_commands
             .send(P2pCommand::SendBackfillBlock {
                 peer: first_follower_peer.clone(),
@@ -1135,5 +1406,92 @@ mod tests {
                 .expect("P2P runtime did not stop")
                 .expect("P2P runtime failed");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn unavailable_leader_drops_transaction_without_stopping_follower() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [
+            ed25519_identity(11),
+            ed25519_identity(12),
+            ed25519_identity(13),
+        ];
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 11);
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let identity = ed25519_identity(12);
+        let secp256k1_identity = secp256k1_identity(12);
+        let role = manifest
+            .validate_node(
+                9,
+                &identity.ed25519_public_key(),
+                secp256k1_identity.address(),
+                None,
+            )
+            .unwrap();
+        assert_eq!(role, crate::Role::Follower);
+        let mut handle = spawn_p2p(
+            P2pConfig {
+                manifest,
+                ed25519_identity: identity,
+                secp256k1_identity,
+                listen: addresses[1],
+                bypass_ip_check: false,
+                role,
+            },
+            P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !matches!(
+                handle.events_mut().recv().await,
+                Some(P2pEvent::Started { .. })
+            ) {}
+        })
+        .await
+        .expect("follower P2P runtime did not start");
+        let commands = handle.parts.as_ref().unwrap().commands.clone();
+        commands
+            .send(P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(1),
+                transaction: vec![0x76, 0x01],
+            })
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        commands
+            .send(P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(2),
+                transaction: vec![0x76, 0x02],
+            })
+            .await
+            .expect("a dropped send must not stop the command loop");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(100),
+                &mut handle.parts.as_mut().unwrap().stopped,
+            )
+            .await
+            .is_err(),
+            "follower runtime stopped after an unavailable-leader send"
+        );
+
+        handle.shutdown().await.unwrap();
     }
 }

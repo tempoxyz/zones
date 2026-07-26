@@ -36,11 +36,6 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev The L1 processor adds fixed overhead around this value.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
-    /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
-    /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
-    ///      Any practical fee rate would be orders of magnitude lower.
-    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
-
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     /// @dev Covers processWithdrawals overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
@@ -132,10 +127,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
     ///      If actual Tempo gas is higher, sequencer covers the difference.
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
+    ///      The portal admin bounds this rate through maxTempoGasRate.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
         if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
-        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        if (_tempoGasRate > config.maxTempoGasRate()) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }
@@ -258,11 +254,15 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         if (gasLimit == 0) {
-            if (config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            if (!config.isGatewayOpen() && config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
             if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
         } else {
             _validateGasLimit(gasLimit);
-            if (!config.isZoneGateway(to)) revert IZonePortal.InvalidCallbackTarget();
+            if (!config.isGatewayOpen() && !config.isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
         }
 
         _validateRevealTo(revealTo);
@@ -294,8 +294,7 @@ contract ZoneOutbox is IZoneOutbox {
             revert TransferFailed();
         }
 
-        // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
-        // Amount goes to recipient, fee goes to sequencer
+        // Burn the tokens (they'll be released on Tempo when withdrawal is processed).
         zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array

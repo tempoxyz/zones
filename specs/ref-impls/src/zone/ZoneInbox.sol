@@ -11,16 +11,15 @@ import {
     EncryptedDeposit,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
-    ITIP20ZoneFactory,
     ITempoState,
     IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
     IZoneToken,
+    PATH_USD_ADDRESS,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
-    TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
 import {
@@ -223,11 +222,16 @@ contract ZoneInbox is IZoneInbox {
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
 
-        // Enable new tokens
+        // Activate new tokens directly in the Inbox.
         for (uint256 i = 0; i < enabledTokens.length; i++) {
             EnabledToken calldata t = enabledTokens[i];
-            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS)
-                .enableToken(t.token, t.name, t.symbol, t.currency);
+            IZoneToken token = IZoneToken(t.token);
+            token.initialize(
+                address(this), t.name, t.symbol, t.currency, PATH_USD_ADDRESS, address(this)
+            );
+            bytes32 issuerRole = token.ISSUER_ROLE();
+            token.grantRole(issuerRole, address(this));
+            token.grantRole(issuerRole, ZONE_OUTBOX);
             emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
         }
 

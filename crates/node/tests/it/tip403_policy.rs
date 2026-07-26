@@ -121,7 +121,7 @@ async fn test_l1_blacklisted_sender_cannot_pay_for_empty_transaction() -> eyre::
 
     const BLACKLIST_POLICY_ID: u64 = 42;
     seed_raw_tip403_token_policy(
-        &mut zone.l1_state_cache().write(),
+        &mut zone.l1_state_cache().lock(),
         anchor,
         PATH_USD_ADDRESS,
         BLACKLIST_POLICY_ID,

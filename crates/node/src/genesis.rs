@@ -23,7 +23,7 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 /// `tempoPortal` immutable occurrences in ZoneInbox deployed bytecode.
 const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 4;
 /// `tempoPortal` immutable occurrences in ZoneConfig deployed bytecode.
-const ZONE_CONFIG_PORTAL_IMMUTABLES: usize = 3;
+const ZONE_CONFIG_PORTAL_IMMUTABLES: usize = 6;
 
 /// Parses the bundled zone genesis template.
 pub fn genesis_template() -> eyre::Result<Genesis> {

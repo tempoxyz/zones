@@ -4,7 +4,7 @@
 //! - Authentication enforcement (missing/invalid tokens, wrong chain ID)
 //! - Public method access
 //! - Balance & state privacy (users only see their own data)
-//! - Block redaction (logsBloom zeroed, transactions cleared)
+//! - Block redaction (activity-derived header fields zeroed, transactions cleared)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
@@ -12,10 +12,12 @@ use crate::utils::{
     start_zone_with_private_rpc_l1, start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
-    primitives::{Address, B256, U256, address, hex},
+    primitives::{Address, B256, TxKind, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
+use alloy_eips::eip2718::Encodable2718;
 use alloy_provider::ProviderBuilder;
+use alloy_signer::SignerSync;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::{SolCall, SolError};
 use futures::{SinkExt, StreamExt};
@@ -29,9 +31,13 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
+use tempo_primitives::{
+    TempoTxEnvelope,
+    transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
+};
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
-    ZoneInbox,
+    IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
+    ZONE_TOKEN_ADDRESS,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
@@ -64,6 +70,38 @@ fn address_topic(address: Address) -> String {
     format!("{:#x}", B256::left_padding_from(address.as_slice()))
 }
 
+fn signed_sponsored_raw_transaction(
+    signer: &PrivateKeySigner,
+    fee_payer: &PrivateKeySigner,
+    chain_id: u64,
+) -> eyre::Result<String> {
+    let mut transaction = TempoTransaction {
+        chain_id,
+        max_priority_fee_per_gas: TEMPO_T0_BASE_FEE as u128,
+        max_fee_per_gas: TEMPO_T0_BASE_FEE as u128,
+        gas_limit: 500_000,
+        calls: vec![Call {
+            to: TxKind::Call(signer.address()),
+            value: U256::ZERO,
+            input: Default::default(),
+        }],
+        fee_token: Some(PATH_USD_ADDRESS),
+        ..Default::default()
+    };
+
+    let fee_payer_hash = transaction.fee_payer_signature_hash(signer.address());
+    transaction.fee_payer_signature = Some(fee_payer.sign_hash_sync(&fee_payer_hash)?);
+
+    let signature = signer.sign_hash_sync(&transaction.signature_hash())?;
+    let signed = AASigned::new_unhashed(
+        transaction,
+        TempoSignature::Primitive(PrimitiveSignature::Secp256k1(signature)),
+    );
+    let envelope: TempoTxEnvelope = signed.into();
+
+    Ok(format!("0x{}", hex::encode(envelope.encoded_2718())))
+}
+
 fn assert_filter_not_found_error(response: &serde_json::Value) {
     let error = response
         .get("error")
@@ -78,6 +116,54 @@ fn assert_filter_not_found_error(response: &serde_json::Value) {
         "filter not found",
         "filter-not-found message should be stable",
     );
+}
+
+fn assert_redacted_block(block: &Value) {
+    assert!(!block.is_null(), "block should not be null");
+    assert!(
+        block["transactions"]
+            .as_array()
+            .is_some_and(|transactions| transactions.is_empty()),
+        "block transactions should be empty (redacted)"
+    );
+
+    let zero_root = format!("{:#x}", B256::ZERO);
+    assert_eq!(block["transactionsRoot"], zero_root);
+    assert_eq!(block["receiptsRoot"], zero_root);
+    assert_eq!(block["stateRoot"], zero_root);
+    assert_eq!(block["extraData"], "0x");
+
+    if let Some(withdrawals_root) = block.get("withdrawalsRoot") {
+        assert!(
+            withdrawals_root.is_null() || withdrawals_root == zero_root.as_str(),
+            "block withdrawalsRoot should be null or zero"
+        );
+    }
+    if let Some(bloom) = block.get("logsBloom").and_then(Value::as_str) {
+        let bloom_trimmed = bloom.strip_prefix("0x").unwrap_or(bloom);
+        assert!(
+            bloom_trimmed.chars().all(|c| c == '0'),
+            "block logsBloom should be all zeros"
+        );
+    }
+    assert_eq!(block["gasUsed"], "0x0");
+    if let Some(size) = block.get("size") {
+        assert_eq!(size.as_str(), Some("0x0"));
+    }
+    if let Some(blob_gas_used) = block.get("blobGasUsed") {
+        assert_eq!(blob_gas_used.as_str(), Some("0x0"));
+    }
+    if let Some(excess_blob_gas) = block.get("excessBlobGas") {
+        assert_eq!(excess_blob_gas.as_str(), Some("0x0"));
+    }
+    if let Some(withdrawals) = block.get("withdrawals") {
+        assert!(
+            withdrawals
+                .as_array()
+                .is_some_and(|withdrawals| withdrawals.is_empty()),
+            "block withdrawals should be empty when present"
+        );
+    }
 }
 
 type PrivateRpcWs =
@@ -188,6 +274,56 @@ async fn test_auth_rejection() -> eyre::Result<()> {
         .call_raw("eth_blockNumber", serde_json::json!([]), &bad_token)
         .await?;
     assert_eq!(status.as_u16(), 403, "wrong chain ID should return 403");
+
+    Ok(())
+}
+
+/// Pool admission requires the transaction sender to hold an enabled zone token.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_raw_transaction_requires_enabled_token_balance() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let user_signer = PrivateKeySigner::random();
+    let fee_payer = PrivateKeySigner::random();
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        fee_payer.address(),
+        fee_payer.address(),
+        1_000_000,
+    )
+    .await?;
+    let raw = signed_sponsored_raw_transaction(&user_signer, &fee_payer, ctx.config.chain_id)?;
+
+    for method in ["eth_sendRawTransaction", "eth_sendRawTransactionSync"] {
+        let response = ctx.call_as_user(method, json!([raw]), &user_signer).await?;
+        assert_eq!(
+            response["error"]["code"].as_i64(),
+            Some(-32603),
+            "{method} should reject a sender without enabled-token balance: {response}",
+        );
+        assert_eq!(
+            response["error"]["message"].as_str(),
+            Some("sender must hold a nonzero balance of an enabled zone token"),
+            "{method} should explain why the transaction was rejected: {response}",
+        );
+    }
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        user_signer.address(),
+        user_signer.address(),
+        1_000_000,
+    )
+    .await?;
+
+    let response = ctx
+        .call_as_user("eth_sendRawTransaction", json!([raw]), &user_signer)
+        .await?;
+    assert!(
+        response["result"].as_str().is_some(),
+        "funded sender transaction should be accepted: {response}",
+    );
 
     Ok(())
 }
@@ -689,7 +825,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
     let owner = owner_signer.address();
     let outsider_signer = PrivateKeySigner::random();
 
-    let refunds_call = ZoneInbox::refundsCall {
+    let refunds_call = IZoneInbox::refundsCall {
         token: ZONE_TOKEN_ADDRESS,
         owner,
     };
@@ -737,7 +873,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
             .trim_start_matches("0x"),
     )?;
     assert_eq!(
-        ZoneInbox::refundsCall::abi_decode_returns(&owner_refunds_bytes)?,
+        IZoneInbox::refundsCall::abi_decode_returns(&owner_refunds_bytes)?,
         0,
         "own refunds(token, owner) read should retain normal eth_call behavior"
     );
@@ -847,7 +983,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
 }
 
 /// Block access control: full=true is rejected for all callers;
-/// full=false returns redacted blocks (empty txs, zeroed logsBloom).
+/// full=false returns redacted blocks without activity-derived commitments.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_block_access_control() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -881,38 +1017,17 @@ async fn test_block_access_control() -> eyre::Result<()> {
         )
         .await?;
     let block = resp.get("result").expect("should have result");
-    assert!(!block.is_null(), "block should not be null");
+    assert_redacted_block(block);
 
-    let txs = block
-        .get("transactions")
-        .expect("block should have transactions field");
-    assert!(
-        txs.as_array().is_some_and(|a| a.is_empty()),
-        "block transactions should be empty (redacted)"
-    );
-    if let Some(bloom) = block.get("logsBloom").and_then(|b| b.as_str()) {
-        let bloom_trimmed = bloom.strip_prefix("0x").unwrap_or(bloom);
-        assert!(
-            bloom_trimmed.chars().all(|c| c == '0'),
-            "block logsBloom should be all zeros"
-        );
-    }
-    assert_eq!(block["gasUsed"], "0x0");
-    if let Some(size) = block.get("size") {
-        assert_eq!(size.as_str(), Some("0x0"));
-    }
-    if let Some(blob_gas_used) = block.get("blobGasUsed") {
-        assert_eq!(blob_gas_used.as_str(), Some("0x0"));
-    }
-    if let Some(excess_blob_gas) = block.get("excessBlobGas") {
-        assert_eq!(excess_blob_gas.as_str(), Some("0x0"));
-    }
-    if let Some(withdrawals) = block.get("withdrawals") {
-        assert!(
-            withdrawals.as_array().is_some_and(|items| items.is_empty()),
-            "block withdrawals should be empty when present"
-        );
-    }
+    let block_hash = block["hash"].as_str().expect("block should have hash");
+    let resp = ctx
+        .call_as_user(
+            "eth_getBlockByHash",
+            serde_json::json!([block_hash, false]),
+            &user_signer,
+        )
+        .await?;
+    assert_redacted_block(resp.get("result").expect("should have result"));
 
     Ok(())
 }
@@ -1162,6 +1277,8 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         zone_info["result"]["zoneId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.zone_id),
     );
+    assert_eq!(zone_info["result"]["isAccessEnforced"], true);
+    assert_eq!(zone_info["result"]["isGatewayOpen"], false);
     assert_eq!(
         zone_info["result"]["zoneTokens"]
             .as_array()

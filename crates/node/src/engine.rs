@@ -44,7 +44,7 @@ use eyre::OptionExt;
 use reth_chainspec::EthereumHardforks;
 use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{BuiltPayload, PayloadKind, PayloadTypes};
+use reth_payload_primitives::{BuiltPayload, PayloadKind};
 use reth_primitives_traits::SealedHeader;
 use std::{sync::Arc, time::Duration};
 use tempo_primitives::TempoHeader;
@@ -246,8 +246,7 @@ impl ZoneEngine {
 
         let header = payload.block().sealed_header().clone();
         let block_number = header.number();
-        let payload = ZonePayloadTypes::block_to_payload(payload.block().clone(), None);
-        let res = self.to_engine.new_payload(payload).await?;
+        let res = self.to_engine.new_payload(payload.into()).await?;
 
         if !res.is_valid() {
             eyre::bail!("Invalid payload for block {block_number}");

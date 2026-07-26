@@ -21,8 +21,11 @@ import {
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_ENFORCEMENT_MODES_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
+    PORTAL_ROLE_SLOT,
     Role,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
@@ -188,6 +191,47 @@ contract ReentrantWithdrawalReceiver is IWithdrawalReceiver {
 
 }
 
+/// @dev Keeps the twelve-argument portal initializer encoder out of the already-large proxy test.
+contract ZonePortalInitializationForwarder {
+
+    function initialize(
+        address target,
+        uint32 id,
+        address initialToken,
+        address portalMessenger,
+        address portalAdmin,
+        address sequencer,
+        address portalVerifier
+    )
+        external
+    {
+        address[] memory accounts = new address[](2);
+        accounts[0] = portalAdmin;
+        accounts[1] = sequencer;
+        address[] memory gateways = new address[](1);
+        gateways[0] = portalMessenger;
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
+
+        ZonePortal(target)
+            .initialize(
+                id,
+                initialToken,
+                true,
+                true,
+                accounts,
+                gateways,
+                portalMessenger,
+                portalAdmin,
+                sequencers,
+                1,
+                portalVerifier,
+                ""
+            );
+    }
+
+}
+
 contract ZonePortalProxyStorageTest is Test {
 
     function _emptyAddresses() internal pure returns (address[] memory values) {
@@ -207,6 +251,8 @@ contract ZonePortalProxyStorageTest is Test {
             .initialize(
                 1,
                 makeAddr("initial token"),
+                true,
+                true,
                 _emptyAddresses(),
                 _emptyAddresses(),
                 ZONE_MESSENGER_ADDRESS,
@@ -251,30 +297,17 @@ contract ZonePortalProxyStorageTest is Test {
         );
         vm.etch(proxyA, runtime);
         vm.etch(proxyB, runtime);
+        ZonePortalInitializationForwarder forwarder = new ZonePortalInitializationForwarder();
+        vm.etch(ZONE_FACTORY_ADDRESS, address(forwarder).code);
 
         address messengerA = makeAddr("messenger A");
         address messengerB = makeAddr("messenger B");
         address verifierA = makeAddr("verifier A");
         address verifierB = makeAddr("verifier B");
-        address[] memory sequencersA = new address[](1);
-        sequencersA[0] = makeAddr("sequencer A");
-        vm.prank(makeAddr("not factory"));
-        vm.expectRevert(IZonePortal.NotFactory.selector);
-        ZonePortal(proxyA)
-            .initialize(
-                1,
-                initialToken,
-                _emptyAddresses(),
-                _emptyAddresses(),
-                messengerA,
-                makeAddr("admin A"),
-                sequencersA,
-                1,
-                verifierA,
-                ""
-            );
+        _expectNotFactoryRevert(proxyA, initialToken, messengerA, verifierA);
 
         vm.startPrank(ZONE_FACTORY_ADDRESS);
+        _expectInitializationEvents(proxyA, messengerA);
         _initializePortal(proxyA, initialToken, 1, messengerA, verifierA);
         _initializePortal(proxyB, initialToken, 2, messengerB, verifierB);
 
@@ -292,6 +325,53 @@ contract ZonePortalProxyStorageTest is Test {
         assertEq(ZonePortal(proxyB).messenger(), messengerB);
         assertEq(ZonePortal(proxyB).verifier(), verifierB);
         assertEq(ZonePortal(proxyB).blockHash(), bytes32(0));
+    }
+
+    function _expectNotFactoryRevert(
+        address proxy,
+        address initialToken,
+        address portalMessenger,
+        address portalVerifier
+    )
+        internal
+    {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer A");
+        address[] memory noAccounts = new address[](0);
+        address[] memory noGateways = new address[](0);
+        address portalAdmin = makeAddr("admin A");
+        vm.prank(makeAddr("not factory"));
+        vm.expectRevert(IZonePortal.NotFactory.selector);
+        ZonePortal(proxy)
+            .initialize(
+                1,
+                initialToken,
+                true,
+                true,
+                noAccounts,
+                noGateways,
+                portalMessenger,
+                portalAdmin,
+                sequencers,
+                1,
+                portalVerifier,
+                ""
+            );
+    }
+
+    function _expectInitializationEvents(address proxy, address portalMessenger) internal {
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = makeAddr("sequencer 1");
+        vm.expectEmit(false, false, false, true, proxy);
+        emit IZonePortal.EnforcementModesUpdated(true, true);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.SequencerSetUpdated(0, 1, sequencers);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(portalMessenger, Role.None, Role.CallbackGateway);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(makeAddr("admin 1"), Role.None, Role.Account);
+        vm.expectEmit(true, false, false, true, proxy);
+        emit IZonePortal.RoleUpdated(makeAddr("sequencer 1"), Role.None, Role.Account);
     }
 
     function test_initializeRevertsIfTokenPolicyBindingIsNotSet() public {
@@ -328,6 +408,8 @@ contract ZonePortalProxyStorageTest is Test {
         portal.initialize(
             1,
             initialToken,
+            true,
+            true,
             noAccounts,
             noGateways,
             makeAddr("messenger"),
@@ -348,20 +430,15 @@ contract ZonePortalProxyStorageTest is Test {
     )
         internal
     {
-        address[] memory sequencers = new address[](1);
-        sequencers[0] = makeAddr(string.concat("sequencer ", vm.toString(id)));
-        ZonePortal(target)
+        ZonePortalInitializationForwarder(ZONE_FACTORY_ADDRESS)
             .initialize(
+                target,
                 id,
                 initialToken,
-                _proxyAccounts(id),
-                _proxyGateways(portalMessenger),
                 portalMessenger,
                 makeAddr(string.concat("admin ", vm.toString(id))),
-                sequencers,
-                1,
-                portalVerifier,
-                ""
+                makeAddr(string.concat("sequencer ", vm.toString(id))),
+                portalVerifier
             );
     }
 
@@ -659,19 +736,18 @@ contract ZonePortalTest is BaseTest {
         assertFalse(portal.isSequencer(removed));
     }
 
-    function test_allSequencersCanCallConfigurationMethods() public {
+    function test_allSequencersCanCallSequencerConfigurationMethods() public {
         address[] memory signers = _activateSequencerSet(2);
 
         for (uint256 i = 0; i < signers.length; ++i) {
             vm.startPrank(signers[i]);
-            portal.setZoneGasRate(uint128(i + 1));
             portal.setRpcUrl(string.concat("https://sequencer-", vm.toString(i), ".example"));
             vm.stopPrank();
         }
 
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setZoneGasRate(4);
+        portal.setRpcUrl("https://not-a-sequencer.example");
     }
 
     function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
@@ -779,6 +855,12 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.enableToken(address(pathUSD));
+
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setZoneGasRate(1);
+
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setBouncebackGas(1);
         vm.stopPrank();
     }
 
@@ -855,12 +937,6 @@ contract ZonePortalTest is BaseTest {
         bytes32 prevBlockHash = portal.blockHash();
 
         vm.startPrank(admin);
-
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setZoneGasRate(1);
-
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setBouncebackGas(1);
 
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.setRpcUrl("https://rpc.example");
@@ -1006,6 +1082,158 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.pendingAdmin(), address(0));
     }
 
+    function test_setZoneGateway_supportsLegacyAndReplacementTogether() public {
+        address replacement = makeAddr("replacement gateway");
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(replacement, Role.None, Role.CallbackGateway);
+        vm.prank(admin);
+        portal.setGateway(replacement, true);
+
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.CallbackGateway));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
+
+        vm.prank(admin);
+        portal.setGateway(address(zoneGateway), false);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.None));
+        assertEq(uint8(portal.role(replacement)), uint8(Role.CallbackGateway));
+    }
+
+    function test_setPortalRole_changesAccountToCallbackGatewayAtomically() public {
+        vm.prank(admin);
+        portal.setRole(alice, Role.CallbackGateway);
+        assertEq(uint8(portal.role(alice)), uint8(Role.CallbackGateway));
+    }
+
+    function test_setZoneGateway_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setGateway(address(0), true);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.CallbackGateway));
+        portal.setGateway(address(0), false);
+        vm.stopPrank();
+
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
+    }
+
+    function test_setZoneGateway_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setGateway(makeAddr("replacement gateway"), true);
+    }
+
+    function test_setAccessMode_opensAndReclosesWithoutDiscardingMembership() public {
+        address outsider = makeAddr("mutable mode outsider");
+        address stagedAccount = makeAddr("staged account");
+
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.EnforcementModesUpdated(false, true);
+        vm.prank(admin);
+        portal.setAccessMode(false);
+
+        vm.prank(admin);
+        portal.setRole(stagedAccount, Role.Account);
+
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(outsider, 2);
+        vm.startPrank(outsider);
+        pathUSD.approve(address(portal), 2);
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+        vm.stopPrank();
+
+        vm.prank(admin);
+        portal.setAccessMode(true);
+
+        assertTrue(portal.isAccessEnforced());
+        assertEq(uint8(portal.role(stagedAccount)), uint8(Role.Account));
+        vm.prank(outsider);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, outsider));
+        portal.deposit(address(pathUSD), outsider, 1, bytes32(0), outsider);
+    }
+
+    function test_setGatewayMode_makesGatewayMembershipInertWhileOpen() public {
+        address gateway = makeAddr("mutable mode gateway");
+
+        vm.prank(admin);
+        portal.setRole(gateway, Role.CallbackGateway);
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(gateway, 2);
+        vm.startPrank(gateway);
+        pathUSD.approve(address(portal), 2);
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+        vm.stopPrank();
+
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.EnforcementModesUpdated(true, false);
+        vm.prank(admin);
+        portal.setGatewayMode(false);
+
+        assertEq(uint8(portal.role(gateway)), uint8(Role.CallbackGateway));
+        vm.prank(gateway);
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.AccountNotAllowed.selector, gateway));
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), alice);
+    }
+
+    function test_setModes_revertIfNotAdmin() public {
+        vm.startPrank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setAccessMode(false);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setGatewayMode(false);
+        vm.stopPrank();
+    }
+
+    function test_setAllowedAccount_enablesAndDisablesMembership() public {
+        address account = makeAddr("managed account");
+
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(account, Role.None, Role.Account);
+        vm.prank(admin);
+        portal.setAllowedAccount(account, true);
+        assertEq(uint8(portal.role(account)), uint8(Role.Account));
+
+        vm.prank(admin);
+        portal.setAllowedAccount(account, false);
+        assertEq(uint8(portal.role(account)), uint8(Role.None));
+    }
+
+    function test_setPortalRole_changesCallbackGatewayToAccountAtomically() public {
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
+        assertEq(uint8(portal.role(address(zoneGateway))), uint8(Role.Account));
+    }
+
+    function test_setAllowedAccount_revertsForMessenger() public {
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.InvalidAllowedAccount.selector);
+        portal.setAllowedAccount(address(messenger), true);
+    }
+
+    function test_setPortalRole_eventIncludesold() public {
+        vm.expectEmit(true, false, false, true);
+        emit IZonePortal.RoleUpdated(address(zoneGateway), Role.CallbackGateway, Role.Account);
+        vm.prank(admin);
+        portal.setRole(address(zoneGateway), Role.Account);
+    }
+
+    function test_setAllowedAccount_enablesAndDisablesZeroAddress() public {
+        vm.startPrank(admin);
+        portal.setAllowedAccount(address(0), true);
+        assertEq(uint8(portal.role(address(0))), uint8(Role.Account));
+        portal.setAllowedAccount(address(0), false);
+        vm.stopPrank();
+
+        assertEq(uint8(portal.role(address(0))), uint8(Role.None));
+    }
+
+    function test_setAllowedAccount_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setAllowedAccount(makeAddr("managed account"), true);
+    }
     /*//////////////////////////////////////////////////////////////
                          DEPOSIT TESTS (L1 -> ZONE)
     //////////////////////////////////////////////////////////////*/
@@ -1743,6 +1971,68 @@ contract ZonePortalTest is BaseTest {
         return _callbackData(flow, alice, 0);
     }
 
+    function _openPortalModes() internal {
+        vm.startPrank(admin);
+        portal.setAccessMode(false);
+        portal.setGatewayMode(false);
+        vm.stopPrank();
+    }
+
+    function test_withdrawal_withCallback() public {
+        _openPortalModes();
+
+        // Fund portal
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        // Create withdrawal with callback
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            5_000_000,
+            alice,
+            "callback_data"
+        );
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        // Advance a block so the history precompile can return a hash
+        vm.roll(block.number + 1);
+
+        // Submit batch adding withdrawal
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash(),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            wHash,
+            "",
+            ""
+        );
+
+        // Process withdrawal (0 = last item in slot)
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+
+        // Receiver should have gotten funds and callback
+        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 500e6);
+        assertEq(withdrawalReceiver.lastSenderTag(), _senderTag(alice));
+        assertEq(withdrawalReceiver.lastAmount(), 500e6);
+        assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
+    }
+
     function _callbackData(
         GatewayFlow flow,
         address tempoRefundRecipient,
@@ -2187,6 +2477,71 @@ contract ZonePortalTest is BaseTest {
         vm.prank(alice); // Not sequencer
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+    }
+
+    function test_processWithdrawal_revertsOnSequencerCallbackReentrancy() public {
+        _openPortalModes();
+
+        ReentrantWithdrawalReceiver receiver = new ReentrantWithdrawalReceiver();
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        Withdrawal memory nested =
+            _withdrawal(address(pathUSD), alice, bob, 200e6, bytes32(0), 0, alice, "");
+        Withdrawal memory outer = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(receiver),
+            300e6,
+            bytes32(0),
+            500_000,
+            alice,
+            abi.encode(nested, bytes32(0))
+        );
+
+        bytes32 remainingQueue = keccak256(abi.encode(nested, EMPTY_SENTINEL));
+        bytes32 withdrawalQueue = keccak256(abi.encode(outer, remainingQueue));
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("reentrancy")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: portal.currentDepositQueueHash(),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalQueue,
+            "",
+            ""
+        );
+
+        address[] memory receiverSet = new address[](1);
+        receiverSet[0] = address(receiver);
+        vm.prank(admin);
+        portal.setSequencerSet(receiverSet, 1);
+
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        vm.prank(address(receiver));
+        portal.processWithdrawals(_singleWithdrawal(outer), remainingQueue);
+
+        assertFalse(receiver.nestedCallSucceeded());
+        assertEq(receiver.nestedRevertSelector(), IZonePortal.ReentrantWithdrawal.selector);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(portal.withdrawalQueueSlot(0), remainingQueue);
+
+        vm.prank(address(receiver));
+        portal.processWithdrawals(_singleWithdrawal(nested), bytes32(0));
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + nested.amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -2748,6 +3103,54 @@ contract ZonePortalTest is BaseTest {
         assertEq(successfulReceiver.callCount(), callCountBefore);
     }
 
+    function test_withdrawal_nonZeroGasLimit_callbackExecuted() public {
+        _openPortalModes();
+
+        // Fund portal
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+        portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""), alice);
+        vm.stopPrank();
+
+        bytes32 depositHash = portal.currentDepositQueueHash();
+
+        // Create withdrawal with callback
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(successfulReceiver),
+            500e6,
+            bytes32(0),
+            5_000_000,
+            alice,
+            "test"
+        );
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            wHash,
+            "",
+            ""
+        );
+
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+
+        // Callback should have been called
+        assertEq(successfulReceiver.callCount(), 1);
+        assertEq(pathUSD.balanceOf(address(successfulReceiver)), 500e6);
+    }
+
     /*//////////////////////////////////////////////////////////////
                      BOUNCE-BACK DEPOSIT TESTS
     //////////////////////////////////////////////////////////////*/
@@ -3298,7 +3701,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_deductsFee() public {
-        portal.setZoneGasRate(1); // 1 token per gas -> fee = 100_000
+        _setZoneGasRate(1); // 1 token per gas -> fee = 100_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
@@ -3433,7 +3836,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnDepositTooSmall() public {
-        portal.setZoneGasRate(1); // fee = 100_000
+        _setZoneGasRate(1); // fee = 100_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
         vm.startPrank(alice);
@@ -3580,6 +3983,9 @@ contract ZonePortalTest is BaseTest {
     ///        slot 17: zoneHeight
     ///        slot 18: _sequencers.length
     ///        slot 19: isSequencer mapping
+    ///        slot 20: role mapping
+    ///        slot 21: account/gateway enforcement booleans [packed]
+    ///        slot 22: maxTempoGasRate (uint128)
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -3587,7 +3993,7 @@ contract ZonePortalTest is BaseTest {
 
         // --- Slot 1: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
         uint128 testRate = 42;
-        portal.setZoneGasRate(testRate);
+        _setZoneGasRate(testRate);
         bytes32 slot1 = vm.load(address(portal), bytes32(uint256(1)));
         // zoneGasRate is at the lowest 128 bits (uint128), withdrawalBatchIndex at bits 128-191
         uint128 loadedRate = uint128(uint256(slot1));
@@ -3605,7 +4011,7 @@ contract ZonePortalTest is BaseTest {
 
         // --- Slot 4: deposit counters + bouncebackGas (uint64) packed ---
         uint64 testBouncebackGas = 43;
-        portal.setBouncebackGas(testBouncebackGas);
+        _setBouncebackGas(testBouncebackGas);
         bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
         assertEq(
             uint64(uint256(slot4) >> 128),
@@ -3673,6 +4079,24 @@ contract ZonePortalTest is BaseTest {
         bytes32 isSequencerSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
             uint256(vm.load(address(portal), isSequencerSlot)), 1, "slot 19: membership mismatch"
+        );
+
+        // --- Slot 20: role mapping ---
+        bytes32 gatewaySlot = keccak256(abi.encode(address(zoneGateway), uint256(PORTAL_ROLE_SLOT)));
+        assertEq(
+            uint256(vm.load(address(portal), gatewaySlot)),
+            uint256(Role.CallbackGateway),
+            "slot 20: gateway role mismatch"
+        );
+
+        bytes32 modeSlot = vm.load(address(portal), PORTAL_ENFORCEMENT_MODES_SLOT);
+        assertEq(uint16(uint256(modeSlot)), 0x0101, "slot 21: enforcement modes mismatch");
+
+        bytes32 maxTempoGasRateSlot = vm.load(address(portal), PORTAL_MAX_TEMPO_GAS_RATE_SLOT);
+        assertEq(
+            uint128(uint256(maxTempoGasRateSlot)),
+            portal.maxTempoGasRate(),
+            "slot 22: maxTempoGasRate mismatch"
         );
     }
 
@@ -3814,13 +4238,13 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.currentDepositQueueHash(), depositHash);
     }
 
-    /// @notice Sequencer updates the zone gas rate and emits the new value.
+    /// @notice Admin updates the zone gas rate and emits the new value.
     function test_setZoneGasRate_updatesRateAndEmits() public {
         uint128 newRate = 42;
 
         vm.expectEmit(false, false, false, true, address(portal));
         emit IZonePortal.ZoneGasRateUpdated(newRate);
-        portal.setZoneGasRate(newRate);
+        _setZoneGasRate(newRate);
 
         assertEq(portal.zoneGasRate(), newRate);
     }
@@ -3829,6 +4253,7 @@ contract ZonePortalTest is BaseTest {
     function test_setZoneGasRate_revertsWhenTooHigh() public {
         uint128 tooHigh = uint128(1e18) + 1;
 
+        vm.prank(admin);
         vm.expectRevert(IZonePortal.GasFeeRateTooHigh.selector);
         portal.setZoneGasRate(tooHigh);
     }
@@ -3838,32 +4263,60 @@ contract ZonePortalTest is BaseTest {
     function test_setZoneGasRate_acceptsExactMaximum() public {
         uint128 maxRate = portal.MAX_GAS_FEE_RATE();
 
-        portal.setZoneGasRate(maxRate);
+        _setZoneGasRate(maxRate);
         assertEq(portal.zoneGasRate(), maxRate);
     }
 
-    /// @notice Only the sequencer can update the zone gas rate.
-    function test_setZoneGasRate_revertsIfNotSequencer() public {
-        vm.prank(alice);
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
+    /// @notice Only the admin can update the zone gas rate.
+    function test_setZoneGasRate_revertsIfNotAdmin() public {
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setZoneGasRate(1);
     }
 
-    /// @notice Sequencer updates the gas amount used for bounce-back fees.
+    function test_maxTempoGasRate_defaultsToZero() public view {
+        assertEq(portal.maxTempoGasRate(), 0);
+    }
+
+    function test_setMaxTempoGasRate_updatesMaximumAndEmits() public {
+        uint128 newMaximum = 42;
+
+        vm.expectEmit(false, false, false, true, address(portal));
+        emit IZonePortal.MaxTempoGasRateUpdated(newMaximum);
+        _setMaxTempoGasRate(newMaximum);
+
+        assertEq(portal.maxTempoGasRate(), newMaximum);
+    }
+
+    function test_setMaxTempoGasRate_revertsWhenTooHigh() public {
+        uint128 tooHigh = portal.MAX_GAS_FEE_RATE() + 1;
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.GasFeeRateTooHigh.selector);
+        portal.setMaxTempoGasRate(tooHigh);
+    }
+
+    function test_setMaxTempoGasRate_revertsIfNotAdmin() public {
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.setMaxTempoGasRate(1);
+    }
+
+    /// @notice Admin updates the gas amount used for bounce-back fees.
     function test_setBouncebackGas_updatesGasAndEmits() public {
         uint64 newBouncebackGas = 42;
 
         vm.expectEmit(false, false, false, true, address(portal));
         emit IZonePortal.BouncebackGasUpdated(newBouncebackGas);
-        portal.setBouncebackGas(newBouncebackGas);
+        _setBouncebackGas(newBouncebackGas);
 
         assertEq(portal.bouncebackGas(), newBouncebackGas);
     }
 
-    /// @notice Only the sequencer can update the bounce-back gas amount.
-    function test_setBouncebackGas_revertsIfNotSequencer() public {
-        vm.prank(alice);
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
+    /// @notice Only the admin can update the bounce-back gas amount.
+    function test_setBouncebackGas_revertsIfNotAdmin() public {
+        vm.prank(sequencer);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setBouncebackGas(1);
     }
 
@@ -3986,7 +4439,7 @@ contract ZonePortalTest is BaseTest {
     function testFuzz_calculateDepositFee(uint128 zoneGasRate) public {
         zoneGasRate = uint128(bound(zoneGasRate, 0, portal.MAX_GAS_FEE_RATE()));
 
-        portal.setZoneGasRate(zoneGasRate);
+        _setZoneGasRate(zoneGasRate);
 
         uint128 fee = portal.calculateDepositFee();
 
@@ -3996,7 +4449,7 @@ contract ZonePortalTest is BaseTest {
     /// @notice Bounceback fee rounds basefee gas cost up to token units.
     function testFuzz_calculateBouncebackFee(uint64 bouncebackGas, uint256 basefee) public {
         basefee = bound(basefee, 0, 1e18);
-        portal.setBouncebackGas(bouncebackGas);
+        _setBouncebackGas(bouncebackGas);
         vm.fee(basefee);
 
         uint256 expected = (uint256(bouncebackGas) * basefee + 1e12 - 1) / 1e12;
@@ -4009,8 +4462,8 @@ contract ZonePortalTest is BaseTest {
     function testFuzz_deposit_amountBoundary(uint128 amount) public {
         amount = uint128(bound(amount, 0, 1000e6));
         vm.fee(1e12);
-        portal.setZoneGasRate(1);
-        portal.setBouncebackGas(300_000);
+        _setZoneGasRate(1);
+        _setBouncebackGas(300_000);
         uint128 minimum = portal.calculateDepositFee() + portal.calculateBouncebackFee();
 
         vm.startPrank(alice);
@@ -4099,6 +4552,21 @@ contract ZonePortalTest is BaseTest {
         assertEq(x, xs[expectedIndex]);
         assertEq(yParity, yParities[expectedIndex]);
         assertEq(keyIndex, expectedIndex);
+    }
+
+    function _setZoneGasRate(uint128 rate) internal {
+        vm.prank(admin);
+        portal.setZoneGasRate(rate);
+    }
+
+    function _setMaxTempoGasRate(uint128 rate) internal {
+        vm.prank(admin);
+        portal.setMaxTempoGasRate(rate);
+    }
+
+    function _setBouncebackGas(uint64 gasAmount) internal {
+        vm.prank(admin);
+        portal.setBouncebackGas(gasAmount);
     }
 
 }

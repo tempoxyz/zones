@@ -42,6 +42,7 @@ the configuration shape:
 
 ```toml
 zone_id = 7
+sequencer_set_version = 1
 leader_ed25519_public_key = "0xleader..."
 
 [[nodes]]
@@ -95,8 +96,10 @@ Add these arguments to the node's normal command:
 --sequencer.role leader
 ```
 
-Use each node's own key files and listener address. The secp256k1 key is loaded
-and validated now but will only be used once zone-block quorum signing is wired.
+Use each node's own key files and listener address. Followers use their individual
+secp256k1 keys to sign settlement attestations after importing and validating blocks.
+This key is independent from the shared `--sequencer-key`; reusing that shared key
+would collapse several nodes into one recoverable quorum identity.
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
 
@@ -119,3 +122,14 @@ node buffers out-of-order arrivals, then re-executes and canonicalizes only the 
 its local head. Parent linkage, execution results, block hash, and forkchoice validation therefore
 remain mandatory during catch-up; authenticated transport alone never makes a returned block
 canonical.
+
+## Transaction forwarding
+
+Commonware carries blocks, catch-up traffic, and transactions on independent authenticated
+channels. A follower sends canonical EIP-2718 transaction bytes only to the configured leader,
+and the leader accepts transaction messages only from manifest members with the follower role.
+
+This permits public RPC to be exposed on followers while keeping the leader's RPC private. The
+leader decodes and validates every forwarded transaction again, and it alone selects and orders
+transactions for blocks; follower validation is not trusted. Followers periodically retry live
+pool transactions, recovering from listener overflow and temporary leader disconnections.

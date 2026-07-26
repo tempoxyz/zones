@@ -13,16 +13,16 @@ import {
     EncryptedDepositPayload,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
-    ITIP20ZoneFactory,
     IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
     IZonePortal,
+    IZoneToken,
+    PORTAL_ACCESS_MODE_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
-    TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
@@ -85,6 +85,7 @@ contract ZoneInboxTest is Test {
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
             bytes32(uint256(1))
         );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1)));
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, address(0x500), true);
@@ -1165,15 +1166,20 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decryptions, enabledTokens);
     }
 
+    function _mockTokenActivation(address token) internal {
+        bytes32 issuerRole = keccak256("ISSUER_ROLE");
+        vm.mockCall(token, abi.encodeWithSelector(IZoneToken.initialize.selector), abi.encode());
+        vm.mockCall(
+            token, abi.encodeWithSelector(IZoneToken.ISSUER_ROLE.selector), abi.encode(issuerRole)
+        );
+        vm.mockCall(token, abi.encodeWithSelector(IZoneToken.grantRole.selector), abi.encode());
+    }
+
     /// @notice Advancing accepts an enabled token even if the portal has not enabled it.
     function test_advanceTempo_enabledTokenNotPortalEnabled_accepts() public {
         address token = address(0x777);
-        vm.etch(TIP20_FACTORY_ADDRESS, hex"00");
-        vm.mockCall(
-            TIP20_FACTORY_ADDRESS,
-            abi.encodeWithSelector(ITIP20ZoneFactory.enableToken.selector),
-            abi.encode()
-        );
+        vm.etch(token, hex"00");
+        _mockTokenActivation(token);
 
         EnabledToken[] memory enabledTokens = new EnabledToken[](1);
         enabledTokens[0] =
@@ -1186,12 +1192,8 @@ contract ZoneInboxTest is Test {
     /// @notice Advancing accepts duplicate enabled token entries.
     function test_advanceTempo_duplicateEnabledToken_accepts() public {
         address token = address(0x777);
-        vm.etch(TIP20_FACTORY_ADDRESS, hex"00");
-        vm.mockCall(
-            TIP20_FACTORY_ADDRESS,
-            abi.encodeWithSelector(ITIP20ZoneFactory.enableToken.selector),
-            abi.encode()
-        );
+        vm.etch(token, hex"00");
+        _mockTokenActivation(token);
 
         EnabledToken[] memory enabledTokens = new EnabledToken[](2);
         enabledTokens[0] =

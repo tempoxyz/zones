@@ -2,20 +2,72 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::B256;
+use alloy_provider::DynProvider;
 use alloy_rlp::Decodable as _;
 use alloy_rpc_types_engine::ForkchoiceState;
+use alloy_sol_types::SolCall as _;
 use futures::{StreamExt as _, stream::BoxStream};
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::{ConsensusEngineHandle, PayloadTypes as _};
-use reth_primitives_traits::SealedBlock;
+use reth_primitives_traits::{SealedBlock, SealedHeader};
 use reth_provider::HeaderProvider;
-use reth_storage_api::{BlockNumReader, BlockReader};
-use std::{collections::BTreeMap, time::Duration};
-use tempo_primitives::{Block, TempoHeader};
+use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProviderFactory};
+use std::{
+    collections::{BTreeMap, HashMap},
+    time::Duration,
+};
+use tempo_alloy::TempoNetwork;
+use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::mpsc;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+use zone_l1::{L1BlockTracker, L1PortalEvents, TempoStateExt as _};
 use zone_p2p::{P2pCommand, P2pEvent, Role};
-use zone_payload::ZonePayloadTypes;
+use zone_payload::{
+    ZonePayloadTypes,
+    abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
+};
+use zone_sequencer::{
+    BatchAnchorConfig,
+    attestation::{
+        AttestationDomain, AttestationStore, SettlementAttestation, SignedSettlementAttestation,
+    },
+};
+
+use alloy_signer_local::PrivateKeySigner;
+use eyre::{OptionExt as _, WrapErr as _};
+
+use crate::settlement_attestation::build_settlement_attestation;
+
+/// Shared signing and L1-validation context for settlement attestations.
+#[derive(Clone)]
+pub(crate) struct AttestationContext {
+    pub(crate) domain: AttestationDomain,
+    pub(crate) signer: PrivateKeySigner,
+    pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+    pub(crate) store: Option<AttestationStore>,
+    pub(crate) l1_provider: DynProvider<TempoNetwork>,
+    pub(crate) anchor_config: BatchAnchorConfig,
+}
+
+impl AttestationContext {
+    pub(crate) fn new(
+        domain: AttestationDomain,
+        signer: PrivateKeySigner,
+        addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
+        store: Option<AttestationStore>,
+        l1_provider: DynProvider<TempoNetwork>,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
+        Self {
+            domain,
+            signer,
+            addresses,
+            store,
+            l1_provider,
+            anchor_config,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PersistedTip {
@@ -343,32 +395,54 @@ pub(crate) async fn run_block_sync<P>(
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    l1_block_tracker: L1BlockTracker,
+    attestation: AttestationContext,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
         + HeaderProvider<Header = TempoHeader>
+        + StateProviderFactory
+        + ReceiptProvider
         + Clone
         + Send
         + Sync
         + 'static,
 {
     match role {
-        Role::Leader => run_leader_backfill_server(provider, events, commands).await,
-        Role::Follower => run_follower_block_sync(provider, engine, events, commands).await,
+        Role::Leader => run_leader_backfill_server(provider, events, commands, attestation).await,
+        Role::Follower => {
+            run_follower_block_sync(
+                provider,
+                engine,
+                events,
+                commands,
+                l1_block_tracker,
+                attestation,
+            )
+            .await
+        }
     }
 }
 
-/// Serve follower backfill requests without ever requesting or importing peer blocks.
+/// Leader will serve follower backfill requests (without ever requesting or importing peer blocks).
 async fn run_leader_backfill_server<P>(
     provider: P,
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    attestation: AttestationContext,
 ) where
-    P: BlockNumReader + BlockReader<Block = Block> + Clone + Send + Sync + 'static,
+    P: BlockNumReader
+        + BlockReader<Block = Block>
+        + HeaderProvider<Header = TempoHeader>
+        + ReceiptProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     let (backfill_requests, backfill_request_rx) = mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
     let mut backfill_server = BackfillServerTask(tokio::spawn(serve_backfill_requests(
-        provider,
+        provider.clone(),
         commands,
         backfill_request_rx,
     )));
@@ -387,9 +461,40 @@ async fn run_leader_backfill_server<P>(
                             tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
                         }
                     }
+                    P2pEvent::SettlementSignatureReceived { follower, signature } => {
+                        let result = async {
+                            let signed = SignedSettlementAttestation::decode(&signature)?;
+                            let signer = signed.recover_signer(attestation.domain)?;
+                            let expected_signer = attestation.addresses.get(&follower).copied()
+                                .ok_or_eyre("unknown follower identity")?;
+                            eyre::ensure!(signer == expected_signer, "settlement signer does not match authenticated peer");
+                            let height: u64 = signed
+                                .attestation
+                                .zoneHeight
+                                .try_into()
+                                .wrap_err("settlement height does not fit in u64")?;
+                            let expected = build_settlement_attestation(
+                                &provider,
+                                height,
+                                &attestation,
+                                Some((signed.attestation.anchorBlockNumber, signed.attestation.anchorBlockHash)),
+                            ).await?.ok_or_eyre("signed block is not a batch boundary")?;
+                            eyre::ensure!(signed.attestation == expected, "settlement signature does not match leader state");
+                            let (_, signatures) = attestation.store.as_ref()
+                                .expect("leader must have an attestation store")
+                                .insert_settlement(attestation.domain, signer, signed);
+                            Ok::<_, eyre::Report>((height, signer, signatures))
+                        }.await;
+                        match result {
+                            Ok((height, signer, signatures)) => info!(target: "zone::p2p", %follower, %signer, height, signatures, "Stored follower settlement signature"),
+                            Err(err) => tracing::warn!(target: "zone::p2p", %follower, %err, "Rejected follower settlement signature"),
+                        }
+                    }
                     P2pEvent::BlockReceived { .. }
                     | P2pEvent::BackfillBlockReceived { .. }
-                    | P2pEvent::BackfillCompleted { .. } => {
+                    | P2pEvent::BackfillCompleted { .. }
+                    | P2pEvent::TransactionReceived { .. }
+                    | P2pEvent::SettlementProposalReceived { .. } => {
                         // A leader never follows peer chain heads. Keeping this explicit ensures
                         // ZoneEngine remains the sole writer of the leader's canonical head.
                         debug!(target: "zone::p2p", "Ignoring peer block sync event on serve-only leader");
@@ -413,10 +518,14 @@ async fn run_follower_block_sync<P>(
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    l1_block_tracker: L1BlockTracker,
+    attestation: AttestationContext,
 ) where
     P: BlockNumReader
         + BlockReader<Block = Block>
         + HeaderProvider<Header = TempoHeader>
+        + StateProviderFactory
+        + ReceiptProvider
         + Clone
         + Send
         + Sync
@@ -452,6 +561,38 @@ async fn run_follower_block_sync<P>(
                 };
                 match event {
                     P2pEvent::Started { .. } => {}
+                    P2pEvent::SettlementProposalReceived { leader, proposal } => {
+                        let result = async {
+                            let proposal = SettlementAttestation::decode(&proposal)?;
+                            let height: u64 = proposal
+                                .zoneHeight
+                                .try_into()
+                                .wrap_err("settlement height does not fit in u64")?;
+                            let expected = build_settlement_attestation(
+                                &provider,
+                                height,
+                                &attestation,
+                                Some((proposal.anchorBlockNumber, proposal.anchorBlockHash)),
+                            ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
+                            eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
+
+                            let signed = SignedSettlementAttestation::sign(
+                                proposal,
+                                attestation.domain,
+                                &attestation.signer,
+                            )?;
+
+                            // Return the signed settlement attestation back to the leader
+                            commands.send(P2pCommand::SendSettlementSignature(signed.encode()))
+                                .await
+                                .wrap_err("P2P command channel closed")?;
+                            Ok::<_, eyre::Report>(height)
+                        }.await;
+                        match result {
+                            Ok(height) => info!(target: "zone::p2p", %leader, height, "Signed settlement proposal"),
+                            Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
+                        }
+                    }
                     P2pEvent::BackfillRequested { peer, request_id, start } => {
                         if let Err(err) = backfill_requests.try_send(BackfillRequest { peer, request_id, start }) {
                             tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
@@ -472,7 +613,12 @@ async fn run_follower_block_sync<P>(
                                     }
                                 };
                                 if number <= best {
-                                    if let Err(err) = import_peer_block(&provider, &engine, &block).await {
+                                    if let Err(err) = import_peer_block(
+                                        &provider,
+                                        &engine,
+                                        &l1_block_tracker,
+                                        &block,
+                                    ).await {
                                         tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
                                     }
                                     continue;
@@ -484,7 +630,12 @@ async fn run_follower_block_sync<P>(
                                 if number > best.saturating_add(1) {
                                     info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
                                 }
-                                if let Err(err) = drain_pending_blocks(&provider, &engine, &mut pending).await {
+                                if let Err(err) = drain_pending_blocks(
+                                    &provider,
+                                    &engine,
+                                    &l1_block_tracker,
+                                    &mut pending,
+                                ).await {
                                     tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
                                     backfill.needed = true;
                                 } else {
@@ -518,6 +669,12 @@ async fn run_follower_block_sync<P>(
                             pending.first_key_value().map(|(&number, _)| number),
                         );
                         debug!(target: "zone::p2p", %peer, best, tip, backfill_needed = backfill.needed, "Completed block backfill response page");
+                    }
+                    P2pEvent::TransactionReceived { .. } => {
+                        debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
+                    }
+                    P2pEvent::SettlementSignatureReceived { .. } => {
+                        debug!(target: "zone::p2p", "Ignoring leader-only attestation event on follower");
                     }
                 }
             }
@@ -572,11 +729,13 @@ async fn run_follower_block_sync<P>(
 async fn drain_pending_blocks<P>(
     provider: &P,
     engine: &ConsensusEngineHandle<ZonePayloadTypes>,
+    l1_block_tracker: &L1BlockTracker,
     pending: &mut BTreeMap<u64, Vec<u8>>,
 ) -> eyre::Result<()>
 where
     P: reth_storage_api::BlockNumReader
         + reth_storage_api::HeaderProvider<Header = TempoHeader>
+        + StateProviderFactory
         + Clone
         + Send
         + Sync
@@ -587,17 +746,24 @@ where
         let Some(block) = pending.remove(&next) else {
             return Ok(());
         };
-        import_peer_block(provider, engine, &block).await?;
+        import_peer_block(provider, engine, l1_block_tracker, &block).await?;
     }
 }
 
 async fn import_peer_block<P>(
     provider: &P,
     engine: &ConsensusEngineHandle<ZonePayloadTypes>,
+    l1_block_tracker: &L1BlockTracker,
     encoded: &[u8],
 ) -> eyre::Result<()>
 where
-    P: BlockNumReader + HeaderProvider<Header = TempoHeader> + Clone + Send + Sync + 'static,
+    P: BlockNumReader
+        + HeaderProvider<Header = TempoHeader>
+        + StateProviderFactory
+        + Clone
+        + Send
+        + Sync
+        + 'static,
 {
     // Check the received block
     let mut input = encoded;
@@ -646,14 +812,40 @@ where
         );
     }
 
-    // 3. All txns in the block execute properly
+    // 3. Require the block to advance the local Tempo checkpoint by exactly
+    // one independently observed L1 block.
+    let (l1_header, portal_inputs) = decode_advance_tempo(&block)?;
+    let local = provider
+        .state_by_block_hash(parent.hash())?
+        .tempo_num_hash()?;
+    validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
+    let anchor = l1_header.num_hash();
+    loop {
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            l1_block_tracker.wait_for_portal_events(anchor),
+        )
+        .await
+        {
+            Ok(observed) => break portal_inputs.validate(&observed?)?,
+            Err(_) => warn!(
+                target: "zone::p2p",
+                block_number,
+                l1_block = anchor.number,
+                l1_hash = ?anchor.hash,
+                "Peer block import is waiting for local L1 observation of its anchor"
+            ),
+        }
+    }
+
+    // 4. All txns in the block execute properly
     let payload = ZonePayloadTypes::block_to_payload(block, None);
     let status = engine.new_payload(payload).await?;
     if !status.is_valid() {
         eyre::bail!("execution engine rejected peer block {block_number} ({hash}): {status:?}");
     }
 
-    // 4. Forkchoice
+    // 5. Forkchoice
     let forkchoice = ForkchoiceState::same_hash(hash);
     let result = engine.fork_choice_updated(forkchoice, None).await?;
     if !result.is_valid() {
@@ -662,8 +854,97 @@ where
         );
     }
 
+    // Mirror the leader engine only after the block is canonical locally.
+    l1_block_tracker.prune_through(anchor.number);
+
     info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
     Ok(())
+}
+
+struct AdvanceTempoPortalInputs {
+    deposits: Vec<zone_payload::abi::QueuedDeposit>,
+    enabled_tokens: Vec<zone_payload::abi::EnabledToken>,
+}
+
+impl AdvanceTempoPortalInputs {
+    fn validate(&self, observed: &L1PortalEvents) -> eyre::Result<()> {
+        observed.validate_advance_tempo_inputs(&self.deposits, &self.enabled_tokens)
+    }
+}
+
+fn validate_l1_checkpoint_transition(
+    l1_header: &SealedHeader<TempoHeader>,
+    local_number: u64,
+    local_hash: B256,
+    zone_block_number: u64,
+) -> eyre::Result<()> {
+    if l1_header.number() != local_number.saturating_add(1) {
+        eyre::bail!(
+            "peer block {zone_block_number} advances Tempo to L1 block {}, but local checkpoint is {}; expected {}",
+            l1_header.number(),
+            local_number,
+            local_number.saturating_add(1)
+        );
+    }
+    if l1_header.parent_hash() != local_hash {
+        eyre::bail!(
+            "advanceTempo L1 header {} does not extend the local Tempo checkpoint: embedded parent {}, local hash {}",
+            l1_header.number(),
+            l1_header.parent_hash(),
+            local_hash
+        );
+    }
+    Ok(())
+}
+
+/// Decode the L1 header embedded in the first `IZoneInbox.advanceTempo` system transaction.
+#[cfg(test)]
+fn decode_advance_tempo_header(
+    block: &SealedBlock<Block>,
+) -> eyre::Result<SealedHeader<TempoHeader>> {
+    decode_advance_tempo(block).map(|(header, _)| header)
+}
+
+fn decode_advance_tempo(
+    block: &SealedBlock<Block>,
+) -> eyre::Result<(SealedHeader<TempoHeader>, AdvanceTempoPortalInputs)> {
+    // Do some basic checks
+
+    // 1. `advanceTempo` is the first tx
+    let first_tx = block.body().transactions().next().ok_or_else(|| {
+        eyre::eyre!("peer block has no transactions; expected an advanceTempo system tx")
+    })?;
+    let TempoTxEnvelope::Legacy(signed) = first_tx else {
+        eyre::bail!("first transaction in peer block is not a legacy system transaction")
+    };
+    if !first_tx.is_system_tx() {
+        eyre::bail!("first transaction in peer block is not a Tempo system transaction")
+    }
+
+    // 2. Address is correct
+    if signed.tx().to != ZONE_INBOX_ADDRESS.into() {
+        eyre::bail!("first Tempo system transaction is not sent to IZoneInbox")
+    }
+    let call = IZoneInbox::advanceTempoCall::abi_decode(signed.tx().input.as_ref())
+        .map_err(|err| eyre::eyre!("first transaction does not decode as advanceTempo: {err}"))?;
+
+    // 3. the system tx is valid.
+    let mut header_rlp = call.header.as_ref();
+    let header = TempoHeader::decode(&mut header_rlp)
+        .map_err(|err| eyre::eyre!("invalid RLP-encoded L1 header in advanceTempo: {err}"))?;
+    if !header_rlp.is_empty() {
+        eyre::bail!(
+            "advanceTempo L1 header has {} trailing bytes",
+            header_rlp.len()
+        )
+    }
+    Ok((
+        SealedHeader::seal_slow(header),
+        AdvanceTempoPortalInputs {
+            deposits: call.deposits,
+            enabled_tokens: call.enabledTokens,
+        },
+    ))
 }
 
 #[cfg(test)]
@@ -710,6 +991,248 @@ mod tests {
                 encoded: vec![number as u8],
             })
         }
+    }
+
+    #[test]
+    fn decodes_advance_tempo_header_from_first_system_tx() {
+        use alloy_consensus::BlockHeader as _;
+        use reth_primitives_traits::{SealedBlock, SealedHeader};
+        use tempo_primitives::{Block, TempoHeader};
+
+        let l1_header = TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 7,
+                parent_hash: B256::repeat_byte(0x42),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let prepared = zone_l1::PreparedL1Block {
+            header: SealedHeader::seal_slow(l1_header),
+            queued_deposits: vec![],
+            decryptions: vec![],
+            enabled_tokens: vec![],
+        };
+        let tx = zone_payload::build_advance_tempo_tx(&prepared);
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader::default(),
+            body: alloy_consensus::BlockBody {
+                transactions: vec![tx.into_inner()],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        });
+
+        let decoded = super::decode_advance_tempo_header(&block).unwrap();
+        assert_eq!(decoded.number(), 7);
+        assert_eq!(decoded.parent_hash(), B256::repeat_byte(0x42));
+        assert_eq!(decoded.hash(), prepared.header.hash());
+    }
+
+    #[test]
+    fn rejects_advance_tempo_sent_to_wrong_contract() {
+        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_primitives::{Address, Bytes, U256};
+        use alloy_rlp::Encodable as _;
+        use alloy_sol_types::SolCall as _;
+        use reth_primitives_traits::SealedBlock;
+        use tempo_primitives::{
+            Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+        };
+
+        let mut header_rlp = Vec::new();
+        TempoHeader::default().encode(&mut header_rlp);
+        let calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
+            header: Bytes::from(header_rlp),
+            deposits: vec![],
+            decryptions: vec![],
+            enabledTokens: vec![],
+        }
+        .abi_encode();
+        let tx = TxLegacy {
+            chain_id: None,
+            nonce: 0,
+            gas_price: 0,
+            gas_limit: 100_000,
+            to: Address::repeat_byte(0x99).into(),
+            value: U256::ZERO,
+            input: calldata.into(),
+        };
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader::default(),
+            body: alloy_consensus::BlockBody {
+                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                    tx,
+                    TEMPO_SYSTEM_TX_SIGNATURE,
+                ))],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        });
+
+        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        assert!(error.to_string().contains("IZoneInbox"));
+    }
+
+    #[test]
+    fn rejects_block_without_advance_tempo() {
+        use reth_primitives_traits::SealedBlock;
+        use tempo_primitives::{Block, TempoHeader};
+
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader::default(),
+            body: alloy_consensus::BlockBody {
+                transactions: vec![],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        });
+
+        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        assert!(error.to_string().contains("no transactions"));
+    }
+
+    #[test]
+    fn rejects_non_system_advance_tempo_transaction() {
+        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_primitives::Signature;
+        use reth_primitives_traits::{SealedBlock, SealedHeader};
+        use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
+
+        let prepared = zone_l1::PreparedL1Block {
+            header: SealedHeader::seal_slow(TempoHeader::default()),
+            queued_deposits: vec![],
+            decryptions: vec![],
+            enabled_tokens: vec![],
+        };
+        let TempoTxEnvelope::Legacy(system_tx) =
+            zone_payload::build_advance_tempo_tx(&prepared).into_inner()
+        else {
+            unreachable!("advanceTempo builder must produce a legacy transaction")
+        };
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader::default(),
+            body: alloy_consensus::BlockBody {
+                transactions: vec![TempoTxEnvelope::Legacy(Signed::<TxLegacy>::new_unhashed(
+                    system_tx.tx().clone(),
+                    Signature::test_signature(),
+                ))],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        });
+
+        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        assert!(error.to_string().contains("not a Tempo system transaction"));
+    }
+
+    #[test]
+    fn rejects_malformed_advance_tempo_calldata() {
+        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_primitives::{Bytes, U256};
+        use reth_primitives_traits::SealedBlock;
+        use tempo_primitives::{
+            Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+        };
+
+        let tx = TxLegacy {
+            to: zone_payload::abi::ZONE_INBOX_ADDRESS.into(),
+            value: U256::ZERO,
+            input: Bytes::from_static(b"not advanceTempo calldata"),
+            ..Default::default()
+        };
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader::default(),
+            body: alloy_consensus::BlockBody {
+                transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                    tx,
+                    TEMPO_SYSTEM_TX_SIGNATURE,
+                ))],
+                ommers: vec![],
+                withdrawals: None,
+            },
+        });
+
+        let error = super::decode_advance_tempo_header(&block).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not decode as advanceTempo")
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_or_trailing_advance_tempo_header_rlp() {
+        use alloy_consensus::{Signed, TxLegacy};
+        use alloy_primitives::{Bytes, U256};
+        use alloy_sol_types::SolCall as _;
+        use reth_primitives_traits::SealedBlock;
+        use tempo_primitives::{
+            Block, TempoHeader, TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+        };
+
+        let make_block = |header: Vec<u8>| {
+            let calldata = zone_payload::abi::IZoneInbox::advanceTempoCall {
+                header: Bytes::from(header),
+                deposits: vec![],
+                decryptions: vec![],
+                enabledTokens: vec![],
+            }
+            .abi_encode();
+            let tx = TxLegacy {
+                to: zone_payload::abi::ZONE_INBOX_ADDRESS.into(),
+                value: U256::ZERO,
+                input: calldata.into(),
+                ..Default::default()
+            };
+            SealedBlock::seal_slow(Block {
+                header: TempoHeader::default(),
+                body: alloy_consensus::BlockBody {
+                    transactions: vec![TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                        tx,
+                        TEMPO_SYSTEM_TX_SIGNATURE,
+                    ))],
+                    ommers: vec![],
+                    withdrawals: None,
+                },
+            })
+        };
+
+        let malformed = make_block(vec![0xff]);
+        let error = super::decode_advance_tempo_header(&malformed).unwrap_err();
+        assert!(error.to_string().contains("invalid RLP-encoded L1 header"));
+
+        let mut trailing = alloy_rlp::encode(TempoHeader::default());
+        trailing.push(0x00);
+        let trailing = make_block(trailing);
+        let error = super::decode_advance_tempo_header(&trailing).unwrap_err();
+        assert!(error.to_string().contains("trailing bytes"));
+    }
+
+    #[test]
+    fn validates_embedded_l1_checkpoint_continuity() {
+        use reth_primitives_traits::SealedHeader;
+        use tempo_primitives::TempoHeader;
+
+        let local_hash = B256::repeat_byte(0x42);
+        let header = SealedHeader::seal_slow(TempoHeader {
+            inner: alloy_consensus::Header {
+                number: 11,
+                parent_hash: local_hash,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        super::validate_l1_checkpoint_transition(&header, 10, local_hash, 7).unwrap();
+
+        let skipped =
+            super::validate_l1_checkpoint_transition(&header, 9, local_hash, 7).unwrap_err();
+        assert!(skipped.to_string().contains("expected 10"));
+
+        let wrong_parent =
+            super::validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7)
+                .unwrap_err();
+        assert!(wrong_parent.to_string().contains("does not extend"));
     }
 
     #[tokio::test]

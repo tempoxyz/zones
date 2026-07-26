@@ -209,6 +209,8 @@ contract BaseTest is Test {
         portal.initialize(
             zoneId,
             initialToken,
+            true,
+            true,
             _closedLoopAccounts(),
             _zoneGateways(),
             ZONE_MESSENGER_ADDRESS,
@@ -226,6 +228,8 @@ contract BaseTest is Test {
                 ZoneInfo({
                     zoneId: zoneId,
                     portal: address(portal),
+                    accessMode: true,
+                    gatewayMode: true,
                     admin: portalAdmin,
                     sequencers: sequencers,
                     threshold: threshold,

@@ -77,6 +77,8 @@ contract ZonePortalGasLimitTest is Test {
         portal.initialize(
             1,
             address(token),
+            true,
+            true,
             allowedAccounts,
             noGateways,
             address(0x400),
@@ -93,15 +95,15 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(portal.calculateBouncebackFee(), 0);
     }
 
-    function test_setBouncebackGas_onlySequencer() public {
-        vm.prank(admin);
-        vm.expectRevert(IZonePortal.NotSequencer.selector);
+    function test_setBouncebackGas_onlyAdmin() public {
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.setBouncebackGas(300_000);
     }
 
     function test_setBouncebackGas_updatesGasAndFee() public {
         vm.expectEmit(false, false, false, true, address(portal));
         emit IZonePortal.BouncebackGasUpdated(300_000);
+        vm.prank(admin);
         portal.setBouncebackGas(300_000);
         vm.fee(1e12);
 
@@ -238,6 +240,7 @@ contract ZonePortalGasLimitTest is Test {
     }
 
     function _configureBouncebackFee() internal {
+        vm.prank(admin);
         portal.setBouncebackGas(300_000);
         vm.fee(1e12);
     }

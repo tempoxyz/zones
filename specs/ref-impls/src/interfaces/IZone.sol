@@ -23,6 +23,20 @@ interface IZoneToken {
 
     function burn(uint256 amount) external;
 
+    function initialize(
+        address admin,
+        string calldata name,
+        string calldata symbol,
+        string calldata currency,
+        address quoteToken,
+        address policyAdmin
+    )
+        external;
+
+    function ISSUER_ROLE() external view returns (bytes32);
+
+    function grantRole(bytes32 role, address account) external;
+
     function transfer(address to, uint256 amount) external returns (bool);
 
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
@@ -35,6 +49,8 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
+    bool accessMode; // creation-time enforcement flag; query the portal for the current value
+    bool gatewayMode; // creation-time enforcement flag; query the portal for the current value
     address admin;
     address[] sequencers;
     uint8 threshold;
@@ -165,7 +181,7 @@ struct DecryptionData {
                     CRYPTOGRAPHIC PRECOMPILES
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Token to be enabled on the zone via the TIP20 factory
+/// @notice Token to be activated directly by the ZoneInbox
 struct EnabledToken {
     address token;
     string name;
@@ -173,22 +189,8 @@ struct EnabledToken {
     string currency;
 }
 
-/// @title ITIP20ZoneFactory
-/// @notice Interface for the zone's TIP20 factory that enables new tokens
-interface ITIP20ZoneFactory {
-
-    function enableToken(
-        address token,
-        string calldata name,
-        string calldata symbol,
-        string calldata currency
-    )
-        external;
-
-}
-
-// TIP20 factory predeploy address
-address constant TIP20_FACTORY_ADDRESS = 0x20Fc000000000000000000000000000000000000;
+// Default quote token for zone TIP-20 activation.
+address constant PATH_USD_ADDRESS = 0x20C0000000000000000000000000000000000000;
 
 // Precompile address for Chaum-Pedersen proof verification
 // Predeploy at 0x1c00000000000000000000000000000000000100
@@ -354,6 +356,9 @@ interface IZoneTxContext {
 //   slot 17: zoneHeight (uint256)
 //   slot 18: _sequencers (address[])
 //   slot 19: isSequencer (mapping(address => bool))
+//   slot 20: role (mapping(address => Role))
+//   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
+//   slot 22: maxTempoGasRate (uint128)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -367,6 +372,11 @@ bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(13));
 bytes32 constant PORTAL_IS_SEQUENCER_SLOT = bytes32(uint256(19));
 bytes32 constant PORTAL_ROLE_SLOT = bytes32(uint256(PORTAL_IS_SEQUENCER_SLOT) + 1);
+bytes32 constant PORTAL_ENFORCEMENT_MODES_SLOT = bytes32(uint256(PORTAL_ROLE_SLOT) + 1);
+bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
+    bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
+bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
+bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -417,7 +427,9 @@ interface IZoneFactory {
 
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (admin can enable more later)
-        address[] allowedAccounts; // initial closed-loop account allowlist
+        bool accessMode; // whether to initially enforce the account allowlist
+        bool gatewayMode; // whether to initially enforce callback gateway registration
+        address[] allowedAccounts; // initial account allowlist (retained while access is open)
         address[] zoneGateways; // initial withdrawal-and-call implementations
         address admin;
         address[] sequencers;
@@ -425,16 +437,12 @@ interface IZoneFactory {
         string rpcUrl;
     }
 
-    event PortalUpdated(address indexed source, bytes32 indexed codeHash);
-
-    event MessengerUpdated(address indexed source, bytes32 indexed codeHash);
-
-    event VerifierUpdated(address indexed source, bytes32 indexed codeHash);
-
     event ZoneCreated(
         uint32 indexed zoneId,
         address indexed portal,
         address initialToken,
+        bool accessMode,
+        bool gatewayMode,
         address admin,
         address[] sequencers,
         uint8 threshold,
@@ -445,31 +453,15 @@ interface IZoneFactory {
     error NotOwner();
     error InvalidAdmin();
     error InvalidSequencerSet();
-    error InvalidPortalImplementation();
-    error InvalidZoneMessengerImplementation();
-    error InvalidVerifierImplementation();
-    error ImplementationUpdatesLocked();
+    error InvalidClosedLoopConfig();
+    error DuplicateAllowedAccount();
+    error DuplicateZoneGateway();
 
     /// @notice Returns the account authorized to create zones.
     function owner() external view returns (address);
 
-    /// @notice Returns whether shared runtime updates have been permanently disabled.
-    function implementationUpdatesLocked() external view returns (bool);
-
     /// @notice Transfers zone-creation authority to `newOwner`.
     function transferOwnership(address newOwner) external;
-
-    /// @notice Permanently disables updates to the shared protocol-managed runtimes.
-    function lockImplementationUpdates() external;
-
-    /// @notice Copies a deployed runtime to the protocol-managed portal implementation account.
-    function setPortalImplementation(address source) external;
-
-    /// @notice Copies a deployed runtime to the protocol-managed messenger account.
-    function setZoneMessengerImplementation(address source) external;
-
-    /// @notice Copies a deployed runtime to the protocol-managed verifier account.
-    function setVerifierImplementation(address source) external;
 
     /// @notice Creates a new zone and deploys its portal contract.
     /// @param params The initial token, admin, sequencer set, threshold, and RPC URL.
@@ -589,6 +581,7 @@ interface IZonePortal {
         bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);
 
     /// @notice Emitted when admin enables a new TIP-20 token for bridging
@@ -605,6 +598,9 @@ interface IZonePortal {
 
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
+
+    /// @notice Emitted when the independently mutable enforcement flags are initialized or updated.
+    event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
     error NotSequencer();
     error NotAdmin();
@@ -641,11 +637,14 @@ interface IZonePortal {
     error InvalidAllowedAccount();
     error AccountNotAllowed(address account);
 
+    /// @notice Emitted when an account's portal role is initialized or updated.
     event RoleUpdated(address indexed account, Role prev, Role next);
 
     function initialize(
         uint32 zoneId,
         address initialToken,
+        bool accessMode,
+        bool gatewayMode,
         address[] calldata allowedAccounts,
         address[] calldata zoneGateways,
         address messenger,
@@ -671,11 +670,36 @@ interface IZonePortal {
     /// @notice Fixed callback messenger assigned during portal initialization.
     function messenger() external view returns (address);
 
+    /// @notice Whether account allowlist enforcement is enabled.
+    function isAccessEnforced() external view returns (bool);
+
+    /// @notice Change account allowlist enforcement. Only callable by the admin.
+    function setAccessMode(bool enforced) external;
+
+    /// @notice Whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() external view returns (bool);
+
+    /// @notice Change callback gateway enforcement. Only callable by the admin.
+    function setGatewayMode(bool enforced) external;
+
+    function role(address account) external view returns (Role);
+
+    /// @notice Assign an account's portal role. Only callable by the admin.
+    function setRole(address account, Role role) external;
+
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external;
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external;
+
     function admin() external view returns (address);
 
     function pendingAdmin() external view returns (address);
 
     function zoneGasRate() external view returns (uint128);
+
+    function maxTempoGasRate() external view returns (uint128);
 
     function bouncebackGas() external view returns (uint64);
 
@@ -762,15 +786,6 @@ interface IZonePortal {
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
     function acceptAdmin() external;
 
-    /// @notice Return an account's closed-loop portal role.
-    function role(address account) external view returns (Role);
-
-    /// @notice Add or remove an account from closed-loop portal flows.
-    function setAllowedAccount(address account, bool allowed) external;
-
-    /// @notice Add or remove a callback gateway.
-    function setGateway(address account, bool allowed) external;
-
     /// @notice Get the sequencer's current encryption public key for encrypted deposits
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
@@ -812,11 +827,16 @@ interface IZonePortal {
         view
         returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
+    /// @notice Set zone gas rate. Only callable by admin.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
 
+    /// @notice Set the maximum Tempo gas rate a sequencer may configure on the zone.
+    /// @param _maxTempoGasRate Maximum zone token units per gas unit on Tempo
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external;
+
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
+    /// @dev Only callable by admin.
     /// @param _bouncebackGas Gas amount used in the Tempo-side bounce-back fee calculation
     function setBouncebackGas(uint64 _bouncebackGas) external;
 
@@ -1102,7 +1122,7 @@ interface IZoneInbox {
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid encrypted deposits, in order
-    /// @param enabledTokens Tokens to enable on the zone via the TIP20 factory
+    /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
@@ -1183,6 +1203,7 @@ interface IZoneOutbox {
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
+    ///      The rate must not exceed the finalized portal maxTempoGasRate.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
@@ -1259,7 +1280,17 @@ interface IZoneConfig {
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
 
-    /// @notice Check closed-loop account membership by reading from L1 ZonePortal.
+    /// @notice Read the maximum sequencer-configurable Tempo gas rate from L1 ZonePortal.
+    function maxTempoGasRate() external view returns (uint128);
+
+    /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
+    function isAccessEnforced() external view returns (bool);
+
+    /// @notice Read whether callback gateway registration enforcement is disabled on L1 ZonePortal.
+    function isGatewayOpen() external view returns (bool);
+
+    /// @notice Check whether an account is authorized under the zone's access policy.
+    /// @dev Returns true for every account when enforcement is disabled.
     function isAllowedAccount(address account) external view returns (bool);
 
     /// @notice Check whether an address is a registered callback-only ZoneGateway.
