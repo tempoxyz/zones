@@ -22,16 +22,18 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
+    PATH_USD_ADDRESS,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
-    tip20::{ITIP20, TIP20Token},
+    tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
+    tip403_registry::TIP403Registry,
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
     DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneInbox, IZoneOutbox,
     QueuedDeposit, ZoneInboxError, ZoneInboxEvent,
 };
-use zone_primitives::constants::ZONE_INBOX_ADDRESS;
+use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     AesGcmDecrypt, ChaumPedersenVerify, ZonePrecompileError, ZoneResult,
@@ -40,7 +42,6 @@ use crate::{
     outbox::ZoneOutbox,
     storage::{L1State, L1StorageReader},
     tempo_state::TempoState,
-    tip20_factory::{ZoneTokenFactory, enableTokenCall},
 };
 
 /// ABI selector for the block-opening `advanceTempo` system call.
@@ -166,14 +167,26 @@ impl ZoneInbox {
     }
 
     fn enable_tokens(&mut self, tokens: Vec<EnabledToken>) -> ZoneResult<()> {
-        for token in tokens {
-            ZoneTokenFactory::new().enable_token(enableTokenCall {
-                token: token.token,
-                name: token.name.clone(),
-                symbol: token.symbol.clone(),
-                currency: token.currency.clone(),
-            })?;
-            self.emit_event(token.enabled_event())?;
+        for enabled in tokens {
+            // Since TIP-20 initialization writes the default policy ID into the L1-mirrored
+            // TIP-403 registry, we cache the L1 value beforehand.
+            let mut policy_registry = TIP403Registry::new();
+            let l1_policy = policy_registry.token_transfer_policies[enabled.token].read()?;
+
+            let mut token = TIP20Token::from_address(enabled.token)?;
+            token.initialize(
+                ZONE_INBOX_ADDRESS,
+                &enabled.name,
+                &enabled.symbol,
+                &enabled.currency,
+                PATH_USD_ADDRESS,
+                ZONE_INBOX_ADDRESS,
+            )?;
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+            policy_registry.token_transfer_policies[enabled.token].write(l1_policy)?;
+
+            self.emit_event(enabled.enabled_event())?;
         }
         Ok(())
     }
