@@ -18,7 +18,7 @@ use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
     storage::{L1State, L1StateError, L1StorageReader},
-    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
+    tempo_state::{TEMPO_BLOCK_HASH_SLOT, TEMPO_BLOCK_NUMBER_SLOT},
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
@@ -77,6 +77,18 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
     fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
         if let Some(anchor) = self.l1.get_anchor() {
             return Ok(anchor);
+        }
+
+        // An empty checkpoint stores block number zero as a sentinel, not as a height. Resolving
+        // it would read L1 at Tempo genesis, where this zone's portal does not exist, and quietly
+        // return zeroes for policies that are actually unknown.
+        if self
+            .inner
+            .storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH_SLOT)
+            .map_err(ZoneDbError::Inner)?
+            .is_zero()
+        {
+            return Err(ZoneDbError::NoTempoCheckpoint);
         }
 
         let value = self
@@ -168,6 +180,9 @@ pub enum ZoneDbError<E> {
     /// The selected Zone state contains an invalid Tempo anchor.
     #[error("invalid Tempo anchor (does not fit in u64): {0}")]
     AnchorOverflow(U256),
+    /// No Tempo checkpoint has been imported yet, so no L1 height can be resolved.
+    #[error("zone has no Tempo checkpoint; L1 state cannot be resolved before the first import")]
+    NoTempoCheckpoint,
     /// Execution-local Tempo L1 state could not be read or advanced consistently.
     #[error(transparent)]
     L1State(#[from] L1StateError),
@@ -197,15 +212,40 @@ mod tests {
     };
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
+    /// Zone state holding an imported checkpoint at `anchor`.
     fn test_db(anchor: u64) -> CacheDB<EmptyDB> {
-        let mut db = CacheDB::new(EmptyDB::default());
+        let mut db = empty_checkpoint_db();
         db.insert_account_storage(
             TEMPO_STATE_ADDRESS,
             TEMPO_BLOCK_NUMBER_SLOT,
             U256::from(anchor),
         )
         .unwrap();
+        // A non-zero hash is what distinguishes an imported checkpoint from the empty sentinel.
+        db.insert_account_storage(
+            TEMPO_STATE_ADDRESS,
+            TEMPO_BLOCK_HASH_SLOT,
+            U256::from(0xabcd),
+        )
+        .unwrap();
         db
+    }
+
+    /// Zone state before the first Tempo import, where both checkpoint slots are zero.
+    fn empty_checkpoint_db() -> CacheDB<EmptyDB> {
+        CacheDB::new(EmptyDB::default())
+    }
+
+    #[test]
+    fn registry_reads_fail_closed_before_the_first_import() {
+        let mut db = L1OverlayDB::new(empty_checkpoint_db(), TestL1::default(), Address::ZERO);
+
+        // Block zero is the empty-checkpoint sentinel, not a height to resolve L1 state at.
+        assert!(matches!(
+            db.storage(TIP403_REGISTRY_ADDRESS, U256::from(7)),
+            Err(ZoneDbError::NoTempoCheckpoint)
+        ));
+        assert_eq!(db.l1_state().get_anchor(), None);
     }
 
     #[test]

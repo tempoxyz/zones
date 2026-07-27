@@ -40,6 +40,12 @@ pub struct TempoState {
 /// Storage slot containing the finalized Tempo block number in Zone state.
 pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
 
+/// Storage slot containing the finalized Tempo block hash in Zone state.
+///
+/// Zero means no checkpoint has been imported yet, which is distinct from a checkpoint at Tempo
+/// block zero. Readers must consult this before treating [`TEMPO_BLOCK_NUMBER_SLOT`] as a height.
+pub const TEMPO_BLOCK_HASH_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_HASH;
+
 impl TempoState {
     /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
     ///
@@ -164,6 +170,18 @@ impl TempoState {
         self.tempo_block_hash.read()
     }
 
+    /// Resolve the Tempo height that L1 reads must be anchored to.
+    ///
+    /// While the checkpoint is empty, `tempoBlockNumber` is a sentinel rather than a height.
+    /// Reading L1 at zero would silently resolve against Tempo genesis, where this zone's portal
+    /// does not exist yet, so callers fail closed instead.
+    fn read_anchor(&mut self) -> tempo_precompiles::Result<Option<u64>> {
+        if self.tempo_block_hash.read()?.is_zero() {
+            return Ok(None);
+        }
+        self.tempo_block_number.read().map(Some)
+    }
+
     fn read_tempo_storage_slot<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
@@ -175,8 +193,9 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
+        let block_number = match self.read_anchor() {
+            Ok(Some(number)) => number,
+            Ok(None) => return self.revert_error(TempoStateAbi::NoTempoCheckpoint {}),
             Err(err) => return self.storage.error_result(err),
         };
         let value = l1.read_l1_storage(call.account, call.slot, block_number)?;
@@ -196,8 +215,9 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
+        let block_number = match self.read_anchor() {
+            Ok(Some(number)) => number,
+            Ok(None) => return self.revert_error(TempoStateAbi::NoTempoCheckpoint {}),
             Err(err) => return self.storage.error_result(err),
         };
         let mut values = Vec::with_capacity(call.slots.len());
