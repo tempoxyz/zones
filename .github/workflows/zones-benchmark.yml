@@ -583,7 +583,6 @@ jobs:
       ZONES_BENCH_COUNT: ${{ needs.authorize.outputs.count }}
       ZONES_BENCH_TPS: ${{ needs.authorize.outputs.tps }}
       ZONES_BENCH_MAX_CONCURRENT: ${{ needs.authorize.outputs.max-concurrent }}
-      ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT: ${{ needs.authorize.outputs.count }}
       ZONES_BENCH_BLOAT_GIB: ${{ needs.authorize.outputs.state-bloat-gib }}
       ZONES_BENCH_FORCE_BLOAT: ${{ needs.authorize.outputs.force-bloat }}
       ZONES_BENCH_DEPOSIT_AMOUNT: ${{ needs.authorize.outputs.deposit-amount }}
@@ -886,10 +885,8 @@ jobs:
           echo "$cargo_bin_dir" >> "$GITHUB_PATH"
           echo "TXGEN_TEMPO_BIN=$cargo_bin_dir/txgen-tempo" >> "$GITHUB_ENV"
           echo "TXGEN_BENCH_BIN=$cargo_bin_dir/bench" >> "$GITHUB_ENV"
-          CARGO_TARGET_DIR="$ZONES_BENCH_ZONES_TARGET_DIR" \
-            TXGEN_TEMPO_BIN="$cargo_bin_dir/txgen-tempo" \
-            cargo test --profile profiling -p tempo-xtask \
-              txgen_generates_representative_local_transactions_when_installed
+          TXGEN_TEMPO_BIN="$cargo_bin_dir/txgen-tempo" \
+            contrib/bench/tests/txgen-specs.sh
 
       - name: Apply benchmark host tuning
         run: |

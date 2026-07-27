@@ -12,7 +12,7 @@ chains:
       mode: auto
       websocket_url: "${L1_WS_RPC_URL}"
       poll_interval: 50ms
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./l1-onramp.yml
 
   zone:
@@ -28,7 +28,7 @@ chains:
         name: X-Authorization-Token
         map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
         reload_interval: 1s
-    chain_id: __ZONE_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
     workload: ./zone-flow.yml
 
 scenario:
@@ -51,9 +51,9 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        token: "__DLUSD__"
-        fee_token: "__DLUSD__"
-        amount: __ONRAMP_AMOUNT__
+        token: "${ZONES_BENCH_DLUSD}"
+        fee_token: "${ZONES_BENCH_DLUSD}"
+        amount: ${ZONES_BENCH_DEPOSIT_AMOUNT}
         memo: { var: onramp_action_id }
 
     - use: earn-deposit-expect-bounce
@@ -63,9 +63,9 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        input_token: "__DLUSD__"
-        fee_token: "__DLUSD__"
-        amount: __EARN_DEPOSIT_AMOUNT__
+        input_token: "${ZONES_BENCH_DLUSD}"
+        fee_token: "${ZONES_BENCH_DLUSD}"
+        amount: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
         action_id: { var: earn_deposit_action_id }
         fallback_recipient: { var: account.address }
         refund_recipient: { var: account.address }

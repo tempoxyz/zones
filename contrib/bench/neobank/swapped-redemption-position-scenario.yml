@@ -12,7 +12,7 @@ chains:
       mode: auto
       websocket_url: "${L1_WS_RPC_URL}"
       poll_interval: 50ms
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./l1-onramp.yml
 
   zone:
@@ -28,7 +28,7 @@ chains:
         name: X-Authorization-Token
         map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
         reload_interval: 1s
-    chain_id: __ZONE_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
     workload: ./zone-flow.yml
 
 scenario:
@@ -51,9 +51,9 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        token: "__DLUSD__"
-        fee_token: "__DLUSD__"
-        amount: "__SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT__"
+        token: "${ZONES_BENCH_DLUSD}"
+        fee_token: "${ZONES_BENCH_DLUSD}"
+        amount: "${ZONES_BENCH_SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT}"
         memo:
           keccak256_packed:
             types: [bytes32, bytes32]
@@ -68,11 +68,11 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        input_token: "__DLUSD__"
-        fee_token: "__DLUSD__"
-        amount: "__SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT__"
-        min_vault_assets: "__SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT__"
-        min_vault_shares: "__SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT__"
+        input_token: "${ZONES_BENCH_DLUSD}"
+        fee_token: "${ZONES_BENCH_DLUSD}"
+        amount: "${ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT}"
+        min_vault_assets: "${ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT}"
+        min_vault_shares: "${ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT}"
         action_id:
           keccak256_packed:
             types: [bytes32, bytes32]

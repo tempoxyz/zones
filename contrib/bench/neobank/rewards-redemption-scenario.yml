@@ -12,7 +12,7 @@ chains:
       mode: auto
       websocket_url: "${L1_WS_RPC_URL}"
       poll_interval: 50ms
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./l1-onramp.yml
 
   zone:
@@ -28,7 +28,7 @@ chains:
         name: X-Authorization-Token
         map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
         reload_interval: 1s
-    chain_id: __ZONE_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
     workload: ./zone-flow.yml
 
 scenario:
@@ -51,11 +51,11 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        output_token: "__PATHUSD__"
-        fee_token: "__PATHUSD__"
-        amount: "__REWARD_FIRST_REDEEM_AMOUNT__"
-        min_vault_assets: "__REWARD_FIRST_REDEEM_AMOUNT__"
-        min_output_amount: "__REWARD_FIRST_REDEEM_AMOUNT__"
+        output_token: "${ZONES_BENCH_PATHUSD}"
+        fee_token: "${ZONES_BENCH_PATHUSD}"
+        amount: "${ZONES_BENCH_REWARD_FIRST_REDEEM_AMOUNT}"
+        min_vault_assets: "${ZONES_BENCH_REWARD_FIRST_REDEEM_AMOUNT}"
+        min_output_amount: "${ZONES_BENCH_REWARD_FIRST_REDEEM_AMOUNT}"
         action_id:
           keccak256_packed:
             types: [bytes32, bytes32]
@@ -71,11 +71,11 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        output_token: "__PATHUSD__"
-        fee_token: "__PATHUSD__"
-        amount: "__REWARD_SECOND_REDEEM_AMOUNT__"
-        min_vault_assets: "__REWARD_SECOND_REDEEM_AMOUNT__"
-        min_output_amount: "__REWARD_SECOND_REDEEM_AMOUNT__"
+        output_token: "${ZONES_BENCH_PATHUSD}"
+        fee_token: "${ZONES_BENCH_PATHUSD}"
+        amount: "${ZONES_BENCH_REWARD_SECOND_REDEEM_AMOUNT}"
+        min_vault_assets: "${ZONES_BENCH_REWARD_SECOND_REDEEM_AMOUNT}"
+        min_output_amount: "${ZONES_BENCH_REWARD_SECOND_REDEEM_AMOUNT}"
         action_id:
           keccak256_packed:
             types: [bytes32, bytes32]

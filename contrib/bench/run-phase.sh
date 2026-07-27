@@ -60,6 +60,17 @@ require_env L1_RPC_URL
 require_env ZONE_RPC_URL
 require_env ZONES_BENCH_TOKEN
 require_env ZONES_BENCH_SEED
+for name in \
+    L1_PORTAL_ADDRESS ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
+    ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_ID \
+    ZONES_BENCH_INBOX ZONES_BENCH_OUTBOX \
+    ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_L1_MAX_PRIORITY_FEE_PER_GAS \
+    ZONES_BENCH_ZONE_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS \
+    ZONES_BENCH_ACCOUNT_END ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX \
+    ZONES_BENCH_SEQUENCER_ACCOUNT_END
+do
+    require_env "$name"
+done
 if [[ "$phase" != deposit ]]; then
     require_env ZONE_PRIVATE_RPC_URL
 fi
@@ -79,39 +90,45 @@ ZONES_BENCH_ACCOUNTS="${ZONES_BENCH_ACCOUNTS:-100}"
 ZONES_BENCH_COUNT="${ZONES_BENCH_COUNT:-100}"
 ZONES_BENCH_TPS="${ZONES_BENCH_TPS:-100}"
 ZONES_BENCH_MAX_CONCURRENT="${ZONES_BENCH_MAX_CONCURRENT:-12}"
-ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT="${ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT:-$ZONES_BENCH_COUNT}"
 ZONES_BENCH_DEPOSIT_AMOUNT="${ZONES_BENCH_DEPOSIT_AMOUNT:-1000000}"
 ZONES_BENCH_ACTIVITY_AMOUNT="${ZONES_BENCH_ACTIVITY_AMOUNT:-1}"
 ZONES_BENCH_WITHDRAWAL_AMOUNT="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
+ZONES_BENCH_APPROVAL_GAS_LIMIT="${ZONES_BENCH_APPROVAL_GAS_LIMIT:-2000000}"
+ZONES_BENCH_DEPOSIT_GAS_LIMIT="${ZONES_BENCH_DEPOSIT_GAS_LIMIT:-2000000}"
+ZONES_BENCH_ACTIVITY_GAS_LIMIT="${ZONES_BENCH_ACTIVITY_GAS_LIMIT:-500000}"
+ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT="${ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT:-10000000}"
 ZONES_BENCH_DRAIN_TIMEOUT="${ZONES_BENCH_DRAIN_TIMEOUT:-300}"
-ZONES_BENCH_APPROVAL_TIMEOUT_SECS="${ZONES_BENCH_APPROVAL_TIMEOUT_SECS:-40}"
 ZONES_BENCH_RECIPIENT_MODE="${ZONES_BENCH_RECIPIENT_MODE:-existing}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_OUTPUT="${ZONES_BENCH_OUTPUT:-target/zones-benchmark/$phase}"
 ZONES_BENCH_REPORT="${ZONES_BENCH_REPORT:-target/zones-benchmark/report-$phase.json}"
-ZONES_BENCH_FIXTURE_STATE="${ZONES_BENCH_FIXTURE_STATE:-}"
-
-if [[ -z "$ZONES_BENCH_FIXTURE_STATE" ]]; then
-    if [[ "$phase" == deposit ]]; then
-        ZONES_BENCH_FIXTURE_STATE=empty
-    else
-        ZONES_BENCH_FIXTURE_STATE=funded
-    fi
-fi
-case "$ZONES_BENCH_FIXTURE_STATE" in
-    empty | funded) ;;
-    *) die "ZONES_BENCH_FIXTURE_STATE must be empty or funded" ;;
-esac
 case "$ZONES_BENCH_RECIPIENT_MODE" in
-    existing | random) ;;
+    existing)
+        ZONES_BENCH_RECIPIENT_GENERATOR='{ pool: { pool: users, select: random } }'
+        ;;
+    random)
+        ZONES_BENCH_RECIPIENT_GENERATOR=random
+        ;;
     *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
 esac
+ZONES_BENCH_RECIPIENT_ACCOUNT_START="$ZONES_BENCH_ACCOUNT_START"
+ZONES_BENCH_RECIPIENT_ACCOUNT_END="$ZONES_BENCH_ACCOUNT_END"
+ZONES_BENCH_RECIPIENT_POOL=users
+ZONES_BENCH_RECIPIENT_SELECT=random
+ZONES_BENCH_L1_QUERY_RPC_URL="${ZONES_BENCH_L1_QUERY_RPC_URL:-$L1_RPC_URL}"
+[[ "$ZONES_BENCH_L1_QUERY_RPC_URL" == http://* || "$ZONES_BENCH_L1_QUERY_RPC_URL" == https://* ]] ||
+    die "ZONES_BENCH_L1_QUERY_RPC_URL must be an explicit HTTP(S) URL"
 
 for name in \
     ZONES_BENCH_ACCOUNT_START \
+    ZONES_BENCH_ACCOUNT_END \
+    ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX \
+    ZONES_BENCH_SEQUENCER_ACCOUNT_END \
     ZONES_BENCH_SEED \
-    ZONES_BENCH_DRAIN_TIMEOUT
+    ZONES_BENCH_DRAIN_TIMEOUT \
+    ZONES_BENCH_L1_MAX_PRIORITY_FEE_PER_GAS \
+    ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS
 do
     require_uint "$name"
 done
@@ -129,24 +146,39 @@ for name in \
     ZONES_BENCH_COUNT \
     ZONES_BENCH_TPS \
     ZONES_BENCH_MAX_CONCURRENT \
-    ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT \
     ZONES_BENCH_DEPOSIT_AMOUNT \
     ZONES_BENCH_ACTIVITY_AMOUNT \
-    ZONES_BENCH_WITHDRAWAL_AMOUNT
+    ZONES_BENCH_WITHDRAWAL_AMOUNT \
+    ZONES_BENCH_APPROVAL_GAS_LIMIT \
+    ZONES_BENCH_DEPOSIT_GAS_LIMIT \
+    ZONES_BENCH_ACTIVITY_GAS_LIMIT \
+    ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT \
+    ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
+    ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
+    ZONES_BENCH_EXPECTED_ZONE_ID \
+    ZONES_BENCH_L1_MAX_FEE_PER_GAS \
+    ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
 do
     require_positive_uint "$name"
 done
 
-if [[ "$phase" != activity ]]; then
-    require_positive_uint ZONES_BENCH_APPROVAL_TIMEOUT_SECS
-    (( 10#$ZONES_BENCH_APPROVAL_TIMEOUT_SECS > 25 )) ||
-        die "approval timeout must exceed the 25-second expiring-nonce window"
-    (( 10#$ZONES_BENCH_APPROVAL_TIMEOUT_SECS <= 60 )) ||
-        die "approval timeout must not exceed 60 seconds for expiring-nonce setup"
-fi
+(( 10#$ZONES_BENCH_ACCOUNT_END - 10#$ZONES_BENCH_ACCOUNT_START == 10#$ZONES_BENCH_ACCOUNTS )) ||
+    die "topology account range does not match ZONES_BENCH_ACCOUNTS"
 
-(( 10#$ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT >= 10#$ZONES_BENCH_COUNT )) ||
-    die "transactions-per-account must cover the full count because sender selection is random"
+export \
+    L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
+    ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
+    ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_INBOX ZONES_BENCH_OUTBOX \
+    ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_L1_MAX_PRIORITY_FEE_PER_GAS \
+    ZONES_BENCH_ZONE_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS \
+    ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_SEQUENCER_ACCOUNT_END \
+    ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNT_END \
+    ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT ZONES_BENCH_WITHDRAWAL_AMOUNT \
+    ZONES_BENCH_APPROVAL_GAS_LIMIT ZONES_BENCH_DEPOSIT_GAS_LIMIT \
+    ZONES_BENCH_ACTIVITY_GAS_LIMIT ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT \
+    ZONES_BENCH_RECIPIENT_GENERATOR ZONES_BENCH_RECIPIENT_ACCOUNT_START \
+    ZONES_BENCH_RECIPIENT_ACCOUNT_END ZONES_BENCH_RECIPIENT_POOL \
+    ZONES_BENCH_RECIPIENT_SELECT ZONES_BENCH_L1_QUERY_RPC_URL
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
 bench_bin="${TXGEN_BENCH_BIN:-bench}"
@@ -154,18 +186,9 @@ command -v "$txgen_bin" >/dev/null || die "txgen-tempo binary not found: $txgen_
 command -v "$bench_bin" >/dev/null || die "bench binary not found: $bench_bin"
 command -v curl >/dev/null || die "curl is required"
 command -v jq >/dev/null || die "jq is required"
-if [[ "$phase" != activity ]]; then
-    command -v timeout >/dev/null || die "timeout is required"
-fi
-
-if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then
-    [[ -x "$ZONES_XTASK_BIN" ]] || die "ZONES_XTASK_BIN is not executable: $ZONES_XTASK_BIN"
-    preflight_cmd=("$ZONES_XTASK_BIN" benchmark-preflight)
-else
-    preflight_cmd=(cargo run --profile release -p tempo-xtask -- benchmark-preflight)
-fi
 
 mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_REPORT")"
+spec_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/txgen" && pwd)"
 
 auth_pid=""
 auth_map=""
@@ -195,30 +218,10 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-run_preflight() {
-    "${preflight_cmd[@]}" \
-        --l1-rpc-url "$L1_RPC_URL" \
-        --zone-rpc-url "$ZONE_RPC_URL" \
-        --token "$ZONES_BENCH_TOKEN" \
-        --account-start "$ZONES_BENCH_ACCOUNT_START" \
-        --accounts "$ZONES_BENCH_ACCOUNTS" \
-        --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
-        --activity-amount "$ZONES_BENCH_ACTIVITY_AMOUNT" \
-        --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
-        --recipient-mode "$ZONES_BENCH_RECIPIENT_MODE" \
-        --transactions-per-account "$ZONES_BENCH_TRANSACTIONS_PER_ACCOUNT" \
-        --check-phase "$phase" \
-        --fixture-state "$ZONES_BENCH_FIXTURE_STATE" \
-        --output "$ZONES_BENCH_OUTPUT" \
-        "$@"
-}
-
 start_zone_auth_map() {
     local spec="$1"
-    local zone_id zone_chain_id auth_deadline auth_ready=0
+    local auth_deadline auth_ready=0
 
-    zone_id="$(jq -er '.zoneId' "$ZONES_BENCH_OUTPUT/preflight.json")"
-    zone_chain_id="$(jq -er '.zoneChainId' "$ZONES_BENCH_OUTPUT/preflight.json")"
     secret_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/zones-benchmark-auth.XXXXXX")"
     chmod 700 "$secret_dir"
     auth_map="$secret_dir/zone-auth.json"
@@ -226,8 +229,8 @@ start_zone_auth_map() {
     "$txgen_bin" auth-token-map \
         --spec "$spec" \
         --pool users \
-        --zone-id "$zone_id" \
-        --chain-id "$zone_chain_id" \
+        --zone-id "$ZONES_BENCH_EXPECTED_ZONE_ID" \
+        --chain-id "$ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID" \
         --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" \
         --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
         --watch \
@@ -247,121 +250,60 @@ start_zone_auth_map() {
         sleep 1
     done
     (( auth_ready == 1 )) || die "timed out waiting for a complete Zone auth-token map"
+    export ZONES_BENCH_ZONE_AUTH_MAP="$auth_map"
 }
 
-run_parallel_approval_setup() {
+run_approval_scenario() {
     local label="$1"
-    local spec="$2"
-    local query_rpc="$3"
-    local submit_rpc="$4"
-    local expected="$5"
-    shift 5
-    local raw="$ZONES_BENCH_OUTPUT/$label-setup.serial.ndjson"
-    local parallel="$ZONES_BENCH_OUTPUT/$label-setup.ndjson"
-    local actual approval_timeout remaining send_status setup_started
-    local -a generate_command=(
-        "$txgen_bin" generate
-        --spec "$spec"
-        --count 0
+    local scenario="$2"
+    local report="$ZONES_BENCH_OUTPUT/$label-approval-report.json"
+    local -a command=(
+        "$txgen_bin" scenario run
+        --scenario "$scenario"
+        --count "$ZONES_BENCH_ACCOUNTS"
+        --starts-per-second 0
+        --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT"
+        --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT"
+        --failure-policy fail-fast
         --seed "$ZONES_BENCH_SEED"
-        --output "$raw"
+        --report "$report"
     )
-    local -a send_command=(
-        "$bench_bin" send
-        --input "$parallel"
-        --rpc-url "$submit_rpc"
-        --query-rpc-url "$query_rpc"
-        --tps 0
-        --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT"
-        --retries 0
-        --drain-timeout 0
-        --report console
-        "$@"
-    )
-
-    if (( 10#$expected == 0 )); then
-        echo "untimed $label approvals already satisfy preflight"
-        return
-    fi
     if [[ -n "${ZONES_BENCH_CPUSET:-}" ]]; then
-        generate_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${generate_command[@]}")
-        send_command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${send_command[@]}")
+        command=(taskset --cpu-list "$ZONES_BENCH_CPUSET" "${command[@]}")
     fi
-
-    approval_timeout=$((10#$ZONES_BENCH_APPROVAL_TIMEOUT_SECS))
-    setup_started=$SECONDS
-    echo "$label approval setup: generating $expected expiring-nonce transactions"
-    "${generate_command[@]}"
-    actual="$(jq -s -r 'length' "$raw")"
-    [[ "$actual" == "$expected" ]] ||
-        die "$label setup rendered $actual transactions; expected $expected"
-    jq -e -s --argjson expected "$expected" '
-        length == $expected and
-        all(.[];
-            .phase == "setup" and
-            (.submission_keys | length) == 1 and
-            (.inclusion_keys | length) == 1
-        ) and
-        ([.[].submission_keys[]] | unique | length) == $expected and
-        ([.[].inclusion_keys[]] | unique | length) == 1
-    ' "$raw" >/dev/null || die "$label setup stream contains invalid scheduling keys"
-
-    jq -c '.inclusion_keys = []' "$raw" >"$parallel"
-    jq -e -s --argjson expected "$expected" '
-        length == $expected and all(.[]; (.inclusion_keys | length) == 0)
-    ' "$parallel" >/dev/null || die "$label setup inclusion barriers were not removed"
-    rm -f -- "$raw"
-
-    echo "$label approval setup: sending up to $ZONES_BENCH_MAX_CONCURRENT concurrently"
-    remaining=$((approval_timeout - (SECONDS - setup_started)))
-    (( remaining > 0 )) ||
-        die "$label approval generation exhausted its ${ZONES_BENCH_APPROVAL_TIMEOUT_SECS}s setup window"
-    if timeout --foreground --kill-after=5s "${remaining}s" \
-        "${send_command[@]}"; then
-        send_status=0
-    else
-        send_status=$?
-    fi
-    if (( send_status == 124 )); then
-        die "$label approval setup exceeded ${ZONES_BENCH_APPROVAL_TIMEOUT_SECS}s; its 25-second expiring nonces can no longer be included"
-    fi
-    (( send_status == 0 )) || die "$label approval setup failed with status $send_status"
-    echo "$label approval setup: $expected/$expected receipts successful in $((SECONDS - setup_started))s"
+    echo "$label approval setup: running $ZONES_BENCH_ACCOUNTS receipt-checked transactions"
+    "${command[@]}"
+    jq -e --argjson expected "$ZONES_BENCH_ACCOUNTS" \
+        '.started == $expected and .completed == $expected and .failed == 0 and .timed_out == 0' \
+        "$report" >/dev/null ||
+        die "$label approval setup did not complete for every benchmark account"
 }
-
-run_preflight
 
 case "$phase" in
     deposit)
-        spec="$ZONES_BENCH_OUTPUT/deposit.yml"
+        spec="$spec_dir/deposit.yml"
         generate_rpc="$L1_RPC_URL"
         query_rpc="$L1_RPC_URL"
         submit_rpc="${ZONES_BENCH_L1_SUBMIT_RPC_URLS:-$L1_RPC_URL}"
         metrics_url="${ZONES_BENCH_L1_METRICS_URL:-}"
         approval_label=portal
-        approval_count="$(jq -er '.portalApprovalSetupAccounts | length' \
-            "$ZONES_BENCH_OUTPUT/preflight.json")"
-        approval_query_rpc="$L1_RPC_URL"
-        approval_submit_rpc="$L1_RPC_URL"
+        approval_scenario="$spec_dir/portal-approval-scenario.yml"
         ;;
     activity)
-        spec="$ZONES_BENCH_OUTPUT/zone-activity.yml"
+        spec="$spec_dir/zone-activity.yml"
         generate_rpc="$ZONE_RPC_URL"
         query_rpc="$ZONE_RPC_URL"
         submit_rpc="$ZONE_PRIVATE_RPC_URL"
         metrics_url="${ZONES_BENCH_ZONE_METRICS_URL:-}"
         ;;
     withdrawal)
-        spec="$ZONES_BENCH_OUTPUT/withdrawal.yml"
+        spec="$spec_dir/withdrawal.yml"
         generate_rpc="$ZONE_RPC_URL"
         query_rpc="$ZONE_RPC_URL"
         submit_rpc="$ZONE_PRIVATE_RPC_URL"
         metrics_url="${ZONES_BENCH_ZONE_METRICS_URL:-}"
         approval_label=outbox
-        approval_count="$(jq -er '.outboxApprovalSetupAccounts | length' \
-            "$ZONES_BENCH_OUTPUT/preflight.json")"
-        approval_query_rpc="$ZONE_RPC_URL"
-        approval_submit_rpc="$ZONE_PRIVATE_RPC_URL"
+        approval_scenario="$spec_dir/outbox-approval-scenario.yml"
         ;;
 esac
 
@@ -375,16 +317,7 @@ if [[ "$phase" != deposit ]]; then
 fi
 
 if [[ "$phase" == deposit || "$phase" == withdrawal ]]; then
-    run_parallel_approval_setup \
-        "$approval_label" \
-        "$spec" \
-        "$approval_query_rpc" \
-        "$approval_submit_rpc" \
-        "$approval_count" \
-        "${sender_auth_args[@]}"
-
-    # Confirm every allowance landed and render a setup-free measured workload.
-    run_preflight --no-approval-setup
+    run_approval_scenario "$approval_label" "$approval_scenario"
 fi
 
 if (( 10#$ZONES_BENCH_DRAIN_TIMEOUT > 0 )); then
@@ -416,7 +349,6 @@ bench_args=(
     -m "accounts=$ZONES_BENCH_ACCOUNTS"
     -m "transaction_count=$ZONES_BENCH_COUNT"
     -m "txgen_seed=$ZONES_BENCH_SEED"
-    -m "fixture_state=$ZONES_BENCH_FIXTURE_STATE"
 )
 bench_args+=("${sender_auth_args[@]}")
 

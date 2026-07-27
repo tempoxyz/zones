@@ -8,7 +8,7 @@ chains:
     network: tempo
     rpc_url: "${L1_RPC_URL}"
     query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./bootstrap-deposit.yml
 
   zone:
@@ -17,7 +17,7 @@ chains:
     # endpoint in roundtrip-scenario.yml after the token map has been generated.
     rpc_url: "${ZONE_RPC_URL}"
     query_rpc_url: "${ZONE_RPC_URL}"
-    chain_id: __ZONE_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
     workload: ./zone-roundtrip.yml
 
 scenario:
@@ -31,6 +31,14 @@ scenario:
         select: lease
 
   steps:
+    - submit:
+        chain: l1
+        template: control_portal_approval
+        with:
+          from: { var: account.ref }
+        await: receipt
+      save: control_portal_approval
+
     - checkpoint:
         chain: zone
       save: zone_before_deposit
@@ -45,8 +53,8 @@ scenario:
         template: bootstrap_deposit
         sender: { var: account.ref }
         sender_address: { var: account.address }
-        recipient: "__SEQUENCER__"
-        amount: __BOOTSTRAP_DEPOSIT_AMOUNT__
+        recipient: "${ZONES_BENCH_SEQUENCER_ADDRESS}"
+        amount: ${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT}
         zone_from_block: { var: zone_before_deposit.block_number }
 
     # DepositProcessed from the composed fragment is terminal here: it proves

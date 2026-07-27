@@ -1,0 +1,35 @@
+version: 1
+
+chains:
+  zone:
+    network: tempo
+    rpc_url: "${ZONE_PRIVATE_RPC_URL}"
+    query_rpc_url: "${ZONE_RPC_URL}"
+    request_auth:
+      sender_header:
+        name: X-Authorization-Token
+        map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
+        reload_interval: 1s
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
+    workload: ./zone-roundtrip.yml
+
+scenario:
+  name: zones-outbox-approval-setup
+  execution: dag
+  timeout: 2m
+
+  bindings:
+    account:
+      account:
+        pool: users
+        select: lease
+
+  steps:
+    - id: approval
+      submit:
+        chain: zone
+        template: outbox_approval
+        with:
+          from: { var: account.ref }
+        await: receipt
+      save: approval

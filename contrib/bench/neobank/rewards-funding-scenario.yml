@@ -9,7 +9,7 @@ chains:
       mode: auto
       websocket_url: "${L1_WS_RPC_URL}"
       poll_interval: 50ms
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./l1-onramp.yml
 
 scenario:
@@ -30,8 +30,8 @@ scenario:
           from: { var: control.ref }
           call:
             args:
-              - "__REWARDS__"
-              - "__REWARD_FUND_AMOUNT__"
+              - "${ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER}"
+              - "${ZONES_BENCH_REWARD_FUND_AMOUNT}"
         await: receipt
       save: approval
 
@@ -45,8 +45,8 @@ scenario:
           call:
             args:
               - { var: control.address }
-              - "__REWARD_FUND_AMOUNT__"
-              - "__REWARD_MAX_EARN_SHARE_SUPPLY__"
+              - "${ZONES_BENCH_REWARD_FUND_AMOUNT}"
+              - "${ZONES_BENCH_REWARD_MAX_EARN_SHARE_SUPPLY}"
         await: receipt
       save: funding
 
@@ -56,13 +56,13 @@ scenario:
         chain: l1
         transaction_hash: { var: funding.tx_hash }
         sender: { var: funding.sender }
-        address: "__REWARDS__"
+        address: "${ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER}"
         abi: EarnContributionController
         event: Funded
         where:
           funder: { var: control.address }
-          requestedAssets: "__REWARD_FUND_AMOUNT__"
-          fundedAssets: "__REWARD_FUND_AMOUNT__"
+          requestedAssets: "${ZONES_BENCH_REWARD_FUND_AMOUNT}"
+          fundedAssets: "${ZONES_BENCH_REWARD_FUND_AMOUNT}"
         max_block_range: 1000
       timeout: 45s
       save: funded

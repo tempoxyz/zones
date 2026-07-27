@@ -11567,10 +11567,8 @@ dependencies = [
  "tempo-revm",
  "tempo-zone-contracts",
  "tokio",
- "url",
  "zone-precompiles",
  "zone-primitives",
- "zone-rpc",
  "zone-sequencer",
 ]
 

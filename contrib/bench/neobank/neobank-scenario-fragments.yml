@@ -17,7 +17,7 @@ fragments:
         wait_log:
           chain: zone
           from_block: { param: from_block }
-          address: "__INBOX__"
+          address: "${ZONES_BENCH_INBOX}"
           abi: ZoneInbox
           event: EncryptedDepositProcessed
           where:
@@ -54,8 +54,8 @@ fragments:
           action: prepare_encrypted_deposit
           with:
             recipient: { param: recipient }
-            zoneId: __ZONE_ID__
-            portalAddress: "__PORTAL__"
+            zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
+            portalAddress: "${L1_PORTAL_ADDRESS}"
             memo: { param: memo }
         save: encryption
 
@@ -84,7 +84,7 @@ fragments:
           sender: { var: submission.sender }
           events:
             deposit:
-              address: "__PORTAL__"
+              address: "${L1_PORTAL_ADDRESS}"
               abi: ZonePortal
               event: EncryptedDepositMade
               where:
@@ -137,8 +137,8 @@ fragments:
           action: prepare_encrypted_deposit
           with:
             recipient: { param: recipient }
-            zoneId: __ZONE_ID__
-            portalAddress: "__PORTAL__"
+            zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
+            portalAddress: "${L1_PORTAL_ADDRESS}"
             memo: { param: action_id }
         save: encryption
       - id: request
@@ -152,10 +152,10 @@ fragments:
             call:
               args:
                 - { param: input_token }
-                - "__EARN_ROUTER__"
+                - "${ZONES_BENCH_EARN_ROUTER}"
                 - { param: amount }
                 - { param: action_id }
-                - __CALLBACK_GAS_LIMIT__
+                - ${ZONES_BENCH_CALLBACK_GAS_LIMIT}
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
@@ -179,16 +179,16 @@ fragments:
           from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
-          address: "__OUTBOX__"
+          address: "${ZONES_BENCH_OUTBOX}"
           abi: ZoneOutbox
           event: WithdrawalRequested
           where:
             sender: { param: sender_address }
             token: { param: input_token }
-            to: "__EARN_ROUTER__"
+            to: "${ZONES_BENCH_EARN_ROUTER}"
             amount: { param: amount }
             memo: { param: action_id }
-            gasLimit: __CALLBACK_GAS_LIMIT__
+            gasLimit: ${ZONES_BENCH_CALLBACK_GAS_LIMIT}
           max_block_range: 1000
         timeout: 45s
         save: request_result
@@ -197,11 +197,11 @@ fragments:
         wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
-          address: "__PORTAL__"
+          address: "${L1_PORTAL_ADDRESS}"
           abi: ZonePortal
           event: WithdrawalProcessed
           where:
-            to: "__EARN_ROUTER__"
+            to: "${ZONES_BENCH_EARN_ROUTER}"
             senderTag:
               keccak256_packed:
                 types: [address, bytes32]
@@ -218,11 +218,11 @@ fragments:
           transaction_hash: { var: l1_processed_locator.transaction_hash }
           events:
             withdrawal:
-              address: "__PORTAL__"
+              address: "${L1_PORTAL_ADDRESS}"
               abi: ZonePortal
               event: WithdrawalProcessed
               where:
-                to: "__EARN_ROUTER__"
+                to: "${ZONES_BENCH_EARN_ROUTER}"
                 senderTag:
                   keccak256_packed:
                     types: [address, bytes32]
@@ -231,12 +231,12 @@ fragments:
                 amount: { param: amount }
                 callbackSuccess: true
             callback:
-              address: "__EARN_ROUTER__"
+              address: "${ZONES_BENCH_EARN_ROUTER}"
               abi: EarnRouter
               event: EarnDeposit
               where:
                 actionId: { param: action_id }
-                earnVault: "__EARN_VAULT__"
+                earnVault: "${ZONES_BENCH_EARN_VAULT}"
                 inputToken: { param: input_token }
                 inputAmount: { param: amount }
         save: l1_result
@@ -246,9 +246,9 @@ fragments:
         with:
           from_block: { var: zone_before.block_number }
           deposit_hash: { var: l1_result.events.callback.args.zoneDepositHash }
-          sender: "__EARN_ROUTER__"
+          sender: "${ZONES_BENCH_EARN_ROUTER}"
           recipient: { param: recipient }
-          token: "__EARN_TOKEN__"
+          token: "${ZONES_BENCH_EARN_TOKEN}"
           amount: { var: l1_result.events.callback.args.earnShares }
           memo: { param: action_id }
 
@@ -284,8 +284,8 @@ fragments:
           action: prepare_encrypted_deposit
           with:
             recipient: { param: recipient }
-            zoneId: __ZONE_ID__
-            portalAddress: "__PORTAL__"
+            zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
+            portalAddress: "${L1_PORTAL_ADDRESS}"
             memo: { param: action_id }
         save: encryption
       - id: request
@@ -298,11 +298,11 @@ fragments:
             fee_token: { param: fee_token }
             call:
               args:
-                - "__EARN_TOKEN__"
-                - "__EARN_ROUTER__"
+                - "${ZONES_BENCH_EARN_TOKEN}"
+                - "${ZONES_BENCH_EARN_ROUTER}"
                 - { param: amount }
                 - { param: action_id }
-                - __CALLBACK_GAS_LIMIT__
+                - ${ZONES_BENCH_CALLBACK_GAS_LIMIT}
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
@@ -326,16 +326,16 @@ fragments:
           from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
-          address: "__OUTBOX__"
+          address: "${ZONES_BENCH_OUTBOX}"
           abi: ZoneOutbox
           event: WithdrawalRequested
           where:
             sender: { param: sender_address }
-            token: "__EARN_TOKEN__"
-            to: "__EARN_ROUTER__"
+            token: "${ZONES_BENCH_EARN_TOKEN}"
+            to: "${ZONES_BENCH_EARN_ROUTER}"
             amount: { param: amount }
             memo: { param: action_id }
-            gasLimit: __CALLBACK_GAS_LIMIT__
+            gasLimit: ${ZONES_BENCH_CALLBACK_GAS_LIMIT}
           max_block_range: 1000
         timeout: 45s
         save: request_result
@@ -344,16 +344,16 @@ fragments:
         wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
-          address: "__PORTAL__"
+          address: "${L1_PORTAL_ADDRESS}"
           abi: ZonePortal
           event: WithdrawalProcessed
           where:
-            to: "__EARN_ROUTER__"
+            to: "${ZONES_BENCH_EARN_ROUTER}"
             senderTag:
               keccak256_packed:
                 types: [address, bytes32]
                 values: [{ param: sender_address }, { var: request.tx_hash }]
-            token: "__EARN_TOKEN__"
+            token: "${ZONES_BENCH_EARN_TOKEN}"
             amount: { param: amount }
             callbackSuccess: true
           max_block_range: 1000
@@ -365,25 +365,25 @@ fragments:
           transaction_hash: { var: l1_processed_locator.transaction_hash }
           events:
             withdrawal:
-              address: "__PORTAL__"
+              address: "${L1_PORTAL_ADDRESS}"
               abi: ZonePortal
               event: WithdrawalProcessed
               where:
-                to: "__EARN_ROUTER__"
+                to: "${ZONES_BENCH_EARN_ROUTER}"
                 senderTag:
                   keccak256_packed:
                     types: [address, bytes32]
                     values: [{ param: sender_address }, { var: request.tx_hash }]
-                token: "__EARN_TOKEN__"
+                token: "${ZONES_BENCH_EARN_TOKEN}"
                 amount: { param: amount }
                 callbackSuccess: true
             callback:
-              address: "__EARN_ROUTER__"
+              address: "${ZONES_BENCH_EARN_ROUTER}"
               abi: EarnRouter
               event: EarnRedeem
               where:
                 actionId: { param: action_id }
-                earnVault: "__EARN_VAULT__"
+                earnVault: "${ZONES_BENCH_EARN_VAULT}"
                 outputToken: { param: output_token }
                 earnShares: { param: amount }
         save: l1_result
@@ -393,7 +393,7 @@ fragments:
         with:
           from_block: { var: zone_before.block_number }
           deposit_hash: { var: l1_result.events.callback.args.zoneDepositHash }
-          sender: "__EARN_ROUTER__"
+          sender: "${ZONES_BENCH_EARN_ROUTER}"
           recipient: { param: recipient }
           token: { param: output_token }
           amount: { var: l1_result.events.callback.args.outputAmount }
@@ -429,8 +429,8 @@ fragments:
           action: prepare_encrypted_deposit
           with:
             recipient: { param: recipient }
-            zoneId: __ZONE_ID__
-            portalAddress: "__PORTAL__"
+            zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
+            portalAddress: "${L1_PORTAL_ADDRESS}"
             memo: { param: action_id }
         save: encryption
       - id: request
@@ -444,10 +444,10 @@ fragments:
             call:
               args:
                 - { param: input_token }
-                - "__EARN_ROUTER__"
+                - "${ZONES_BENCH_EARN_ROUTER}"
                 - { param: amount }
                 - { param: action_id }
-                - __CALLBACK_GAS_LIMIT__
+                - ${ZONES_BENCH_CALLBACK_GAS_LIMIT}
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
@@ -471,16 +471,16 @@ fragments:
           from_block: { var: zone_before.block_number }
           transaction_hash: { var: request.tx_hash }
           sender: { var: request.sender }
-          address: "__OUTBOX__"
+          address: "${ZONES_BENCH_OUTBOX}"
           abi: ZoneOutbox
           event: WithdrawalRequested
           where:
             sender: { param: sender_address }
             token: { param: input_token }
-            to: "__EARN_ROUTER__"
+            to: "${ZONES_BENCH_EARN_ROUTER}"
             amount: { param: amount }
             memo: { param: action_id }
-            gasLimit: __CALLBACK_GAS_LIMIT__
+            gasLimit: ${ZONES_BENCH_CALLBACK_GAS_LIMIT}
           max_block_range: 1000
         timeout: 45s
         save: request_result
@@ -489,11 +489,11 @@ fragments:
         wait_log:
           chain: l1
           from_block: { var: l1_before.block_number }
-          address: "__PORTAL__"
+          address: "${L1_PORTAL_ADDRESS}"
           abi: ZonePortal
           event: WithdrawalProcessed
           where:
-            to: "__EARN_ROUTER__"
+            to: "${ZONES_BENCH_EARN_ROUTER}"
             senderTag:
               keccak256_packed:
                 types: [address, bytes32]
@@ -510,11 +510,11 @@ fragments:
           transaction_hash: { var: l1_processed_locator.transaction_hash }
           events:
             withdrawal:
-              address: "__PORTAL__"
+              address: "${L1_PORTAL_ADDRESS}"
               abi: ZonePortal
               event: WithdrawalProcessed
               where:
-                to: "__EARN_ROUTER__"
+                to: "${ZONES_BENCH_EARN_ROUTER}"
                 senderTag:
                   keccak256_packed:
                     types: [address, bytes32]
@@ -523,7 +523,7 @@ fragments:
                 amount: { param: amount }
                 callbackSuccess: false
             bounceback:
-              address: "__PORTAL__"
+              address: "${L1_PORTAL_ADDRESS}"
               abi: ZonePortal
               event: WithdrawalBounceBack
               where:
@@ -536,7 +536,7 @@ fragments:
         wait_log:
           chain: zone
           from_block: { var: zone_before.block_number }
-          address: "__INBOX__"
+          address: "${ZONES_BENCH_INBOX}"
           abi: ZoneInbox
           event: WithdrawalBounceBackProcessed
           where:

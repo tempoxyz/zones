@@ -21,7 +21,7 @@ fragments:
             from: { param: sender }
             call:
               args:
-                - "__TOKEN__"
+                - "${ZONES_BENCH_TOKEN}"
                 - { param: recipient }
                 - { param: amount }
                 - { random_bytes: 32 }
@@ -33,26 +33,26 @@ fragments:
           chain: l1
           transaction_hash: { var: submission.tx_hash }
           sender: { var: submission.sender }
-          address: "__PORTAL__"
+          address: "${L1_PORTAL_ADDRESS}"
           abi: ZonePortal
           event: DepositMade
           where:
             sender: { param: sender_address }
-            token: "__TOKEN__"
+            token: "${ZONES_BENCH_TOKEN}"
             to: { param: recipient }
         save: deposit_made
 
       - wait_log:
           chain: zone
           from_block: { param: zone_from_block }
-          address: "__INBOX__"
+          address: "${ZONES_BENCH_INBOX}"
           abi: ZoneInbox
           event: DepositProcessed
           where:
             depositHash: { var: deposit_made.args.newCurrentDepositQueueHash }
             sender: { param: sender_address }
             to: { param: recipient }
-            token: "__TOKEN__"
+            token: "${ZONES_BENCH_TOKEN}"
             amount: { var: deposit_made.args.netAmount }
             memo: { var: deposit_made.args.memo }
           max_block_range: 1000

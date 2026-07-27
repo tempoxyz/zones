@@ -1,34 +1,32 @@
-chain_id: __ZONE_CHAIN_ID__
+chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
 
 gas:
-  max_fee_per_gas: __ZONE_MAX_FEE_PER_GAS__
-  max_priority_fee_per_gas: __ZONE_MAX_PRIORITY_FEE_PER_GAS__
+  max_fee_per_gas: ${ZONES_BENCH_ZONE_MAX_FEE_PER_GAS}
+  max_priority_fee_per_gas: ${ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS}
 
 accounts:
   users:
     mnemonic: "${ZONES_BENCH_MNEMONIC}"
-    range: [__ACCOUNT_START__, __ACCOUNT_END__]
+    range: [${ZONES_BENCH_ACCOUNT_START}, ${ZONES_BENCH_ACCOUNT_END}]
 
 artifacts:
   TIP20: abis/tip20.json
-
-setup: { steps: [] }
 
 templates:
   tip20_transfer:
     type: tempo
     from: { var: sender.ref }
-    gas_limit: __ACTIVITY_GAS_LIMIT__
-    fee_token: "__TOKEN__"
+    gas_limit: ${ZONES_BENCH_ACTIVITY_GAS_LIMIT}
+    fee_token: "${ZONES_BENCH_TOKEN}"
     expiring_nonce: true
     valid_for_secs: 25
     call:
-      to: "__TOKEN__"
+      to: "${ZONES_BENCH_TOKEN}"
       abi: TIP20
       function: "transfer(address,uint256)"
       args:
         - { var: recipient }
-        - __ACTIVITY_AMOUNT__
+        - ${ZONES_BENCH_ACTIVITY_AMOUNT}
 
 sequences:
   activity:
@@ -38,7 +36,7 @@ sequences:
           pool: users
           select: random
       recipient:
-        address: __RECIPIENT_GENERATOR__
+        address: ${ZONES_BENCH_RECIPIENT_GENERATOR}
     steps:
       - name: transfer
         template: tip20_transfer

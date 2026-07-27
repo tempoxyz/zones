@@ -678,6 +678,8 @@ provision_up() {
     local l1_chain_id="${ZONES_BENCH_L1_CHAIN_ID:-1337}"
     local l1_gas_limit="${ZONES_BENCH_L1_GAS_LIMIT:-30000000}"
     local l1_general_gas_limit="${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-$l1_gas_limit}"
+    local l1_max_fee_per_gas="${ZONES_BENCH_L1_MAX_FEE_PER_GAS:-12000000000}"
+    local zone_max_fee_per_gas="${ZONES_BENCH_ZONE_MAX_FEE_PER_GAS:-10000000000}"
     local bloat_mib="${ZONES_BENCH_BLOAT_MIB:-1024}"
     local bloat_balance="${ZONES_BENCH_BLOAT_BALANCE:-18446744073709551615}"
     local rpc_timeout="${ZONES_BENCH_RPC_TIMEOUT_SECS:-300}"
@@ -716,6 +718,8 @@ provision_up() {
     ZONES_BENCH_L1_CHAIN_ID="$l1_chain_id"
     ZONES_BENCH_L1_GAS_LIMIT="$l1_gas_limit"
     ZONES_BENCH_L1_GENERAL_GAS_LIMIT="$l1_general_gas_limit"
+    ZONES_BENCH_L1_MAX_FEE_PER_GAS="$l1_max_fee_per_gas"
+    ZONES_BENCH_ZONE_MAX_FEE_PER_GAS="$zone_max_fee_per_gas"
     ZONES_BENCH_BLOAT_MIB="$bloat_mib"
     ZONES_BENCH_BLOAT_BALANCE="$bloat_balance"
     ZONES_BENCH_RPC_TIMEOUT_SECS="$rpc_timeout"
@@ -737,6 +741,7 @@ provision_up() {
         ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY \
         ZONES_BENCH_L1_CHAIN_ID \
         ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
+        ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS \
         ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE \
         ZONES_BENCH_RPC_TIMEOUT_SECS ZONES_BENCH_ZONE_TIMEOUT_SECS \
         ZONES_BENCH_SWAP_LIQUIDITY ZONES_BENCH_COUNT ZONES_BENCH_MAX_CONCURRENT \
@@ -753,6 +758,8 @@ provision_up() {
     l1_chain_id=$((10#$l1_chain_id))
     l1_gas_limit=$((10#$l1_gas_limit))
     l1_general_gas_limit=$((10#$l1_general_gas_limit))
+    l1_max_fee_per_gas=$((10#$l1_max_fee_per_gas))
+    zone_max_fee_per_gas=$((10#$zone_max_fee_per_gas))
     bloat_mib=$((10#$bloat_mib))
     rpc_timeout=$((10#$rpc_timeout))
     zone_timeout=$((10#$zone_timeout))
@@ -779,6 +786,10 @@ provision_up() {
         || die "ZONES_BENCH_L1_GAS_LIMIT cannot exceed 30000000"
     (( l1_general_gas_limit <= l1_gas_limit )) \
         || die "ZONES_BENCH_L1_GENERAL_GAS_LIMIT cannot exceed ZONES_BENCH_L1_GAS_LIMIT"
+    (( l1_max_fee_per_gas > 0 )) \
+        || die "ZONES_BENCH_L1_MAX_FEE_PER_GAS must be greater than zero"
+    (( zone_max_fee_per_gas > 0 )) \
+        || die "ZONES_BENCH_ZONE_MAX_FEE_PER_GAS must be greater than zero"
     (( rpc_timeout > 0 )) || die "ZONES_BENCH_RPC_TIMEOUT_SECS must be greater than zero"
     (( zone_timeout > 0 )) || die "ZONES_BENCH_ZONE_TIMEOUT_SECS must be greater than zero"
     case "$swap_mechanism" in
@@ -866,6 +877,7 @@ provision_up() {
 
     export ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_ACCOUNT_CAPACITY
     export ZONES_BENCH_L1_CHAIN_ID ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT
+    export ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS
     export ZONES_BENCH_BLOAT_MIB ZONES_BENCH_BLOAT_BALANCE
     export ZONES_BENCH_SWAP_MECHANISM ZONES_BENCH_RECIPIENT_MODE ZONES_BENCH_SWAP_LIQUIDITY
     export ZONES_BENCH_CALLBACK_GAS_LIMIT
@@ -1161,6 +1173,19 @@ provision_up() {
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \
         ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID "$queried_zone_chain_id" \
         ZONES_BENCH_EXPECTED_ZONE_ID "$zone_id" \
+        ZONES_BENCH_ACCOUNT_END "$((account_start + accounts))" \
+        ZONES_BENCH_CONTROL_ACCOUNT_INDEX 0 \
+        ZONES_BENCH_CONTROL_ACCOUNT_END 1 \
+        ZONES_BENCH_CONTROL_ADDRESS "$owner_address" \
+        ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX 4 \
+        ZONES_BENCH_SEQUENCER_ACCOUNT_END 5 \
+        ZONES_BENCH_SEQUENCER_ADDRESS "$sequencer_address" \
+        ZONES_BENCH_INBOX "0x1c00000000000000000000000000000000000001" \
+        ZONES_BENCH_OUTBOX "0x1c00000000000000000000000000000000000002" \
+        ZONES_BENCH_L1_MAX_FEE_PER_GAS "$l1_max_fee_per_gas" \
+        ZONES_BENCH_L1_MAX_PRIORITY_FEE_PER_GAS 0 \
+        ZONES_BENCH_ZONE_MAX_FEE_PER_GAS "$zone_max_fee_per_gas" \
+        ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS 0 \
         ZONES_BENCH_L1_GAS_LIMIT "$l1_gas_limit" \
         ZONES_BENCH_L1_GENERAL_GAS_LIMIT "$l1_general_gas_limit" \
         ZONES_BENCH_SWAP_MECHANISM "$swap_mechanism" \

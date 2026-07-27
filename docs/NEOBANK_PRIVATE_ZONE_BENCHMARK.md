@@ -95,8 +95,8 @@ balance in at least one enabled Zone token. Before untimed Zone approvals, the
 runner therefore executes one 1-unit encrypted onramp per benchmark account and
 waits for its exact `EncryptedDepositMade` and `EncryptedDepositProcessed`
 events. This admission seed and its latency report are setup artifacts, not part
-of the measured journey; preflight reserves its L1 principal and fee capacity
-and then verifies every account received the balance.
+of the measured journey. The setup scenario requires every account's exact
+terminal event before approvals or measured traffic begin.
 
 The portal role model does not make the bridge wallet an exclusive plaintext
 withdrawal recipient. Every admitted benchmark user has the same `Account`

@@ -8,7 +8,7 @@ chains:
     network: tempo
     rpc_url: "${L1_RPC_URL}"
     query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./deposit.yml
 
   zone:
@@ -20,7 +20,7 @@ chains:
         name: X-Authorization-Token
         map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
         reload_interval: 1s
-    chain_id: __ZONE_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
     workload: ./zone-roundtrip.yml
 
 scenario:
@@ -34,8 +34,8 @@ scenario:
         select: lease
     recipient:
       account:
-        pool: __RECIPIENT_POOL__
-        select: __RECIPIENT_SELECT__
+        pool: ${ZONES_BENCH_RECIPIENT_POOL}
+        select: ${ZONES_BENCH_RECIPIENT_SELECT}
 
   steps:
     - checkpoint:
@@ -49,7 +49,7 @@ scenario:
         sender: { var: account.ref }
         sender_address: { var: account.address }
         recipient: { var: account.address }
-        amount: __DEPOSIT_AMOUNT__
+        amount: ${ZONES_BENCH_DEPOSIT_AMOUNT}
         zone_from_block: { var: zone_before_deposit.block_number }
 
     - submit:
@@ -60,7 +60,7 @@ scenario:
           call:
             args:
               - { var: recipient.address }
-              - __ACTIVITY_AMOUNT__
+              - ${ZONES_BENCH_ACTIVITY_AMOUNT}
       save: activity
 
     - wait_receipt:
@@ -89,9 +89,9 @@ scenario:
           from: { var: account.ref }
           call:
             args:
-              - "__TOKEN__"
+              - "${ZONES_BENCH_TOKEN}"
               - { var: recipient.address }
-              - __WITHDRAWAL_AMOUNT__
+              - ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
               - { random_bytes: 32 }
               - 0
               - { var: account.address }
@@ -106,21 +106,21 @@ scenario:
         from_block: { var: zone_before_withdrawal.block_number }
         transaction_hash: { var: withdrawal.tx_hash }
         sender: { var: withdrawal.sender }
-        address: "__OUTBOX__"
+        address: "${ZONES_BENCH_OUTBOX}"
         abi: ZoneOutbox
         event: WithdrawalRequested
         where:
           sender: { var: account.address }
-          token: "__TOKEN__"
+          token: "${ZONES_BENCH_TOKEN}"
           to: { var: recipient.address }
-          amount: __WITHDRAWAL_AMOUNT__
+          amount: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
           gasLimit: 0
       save: withdrawal_requested
 
     - wait_log:
         chain: l1
         from_block: { var: l1_before_withdrawal.block_number }
-        address: "__PORTAL__"
+        address: "${L1_PORTAL_ADDRESS}"
         abi: ZonePortal
         event: WithdrawalProcessed
         where:
@@ -131,8 +131,8 @@ scenario:
               values:
                 - { var: account.address }
                 - { var: withdrawal.tx_hash }
-          token: "__TOKEN__"
-          amount: __WITHDRAWAL_AMOUNT__
+          token: "${ZONES_BENCH_TOKEN}"
+          amount: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
           callbackSuccess: true
         max_block_range: 1000
       save: withdrawal_processed

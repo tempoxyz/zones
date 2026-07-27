@@ -56,7 +56,9 @@ ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER="${ZONES_BENCH_EARN_CONTRIBUTION_CONTRO
 for name in L1_RPC_URL L1_WS_RPC_URL ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL \
     L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
     ZONES_BENCH_EARN_ROUTER ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_VAULT ZONES_BENCH_ENGINE \
-    ZONES_BENCH_EARN_VAULT ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER ZONES_BENCH_SEED
+    ZONES_BENCH_EARN_VAULT ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER ZONES_BENCH_SEED \
+    ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
+    ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_SEQUENCER_ADDRESS
 do need "$name"; done
 
 ZONES_BENCH_CONTROL_ACCOUNT_INDEX="${ZONES_BENCH_CONTROL_ACCOUNT_INDEX:-0}"
@@ -82,13 +84,31 @@ l1_measurement_rpc="${ZONES_BENCH_L1_QUERY_RPC_URL:-$L1_RPC_URL}"
 ZONES_BENCH_AUTH_TTL_SECS="${ZONES_BENCH_AUTH_TTL_SECS:-600}"
 ZONES_BENCH_AUTH_REFRESH_SECS="${ZONES_BENCH_AUTH_REFRESH_SECS:-60}"
 ZONES_BENCH_STEP_TIMEOUT="${ZONES_BENCH_STEP_TIMEOUT:-10m}"
-ZONES_BENCH_APPROVAL_TIMEOUT_SECS="${ZONES_BENCH_APPROVAL_TIMEOUT_SECS:-20}"
-ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS="${ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS:-120}"
 ZONES_BENCH_SAMPLE_INSTANCES="${ZONES_BENCH_SAMPLE_INSTANCES:-10}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
 ZONES_BENCH_RECIPIENT_MODE="${ZONES_BENCH_RECIPIENT_MODE:-existing}"
 ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-full-journey}"
 ZONES_BENCH_SWAP_MECHANISM="${ZONES_BENCH_SWAP_MECHANISM:-direct-swap}"
+ZONES_BENCH_L1_QUERY_RPC_URL="${ZONES_BENCH_L1_QUERY_RPC_URL:-$L1_RPC_URL}"
+ZONES_BENCH_ACCOUNT_END="${ZONES_BENCH_ACCOUNT_END:-$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))}"
+ZONES_BENCH_CONTROL_ACCOUNT_END="${ZONES_BENCH_CONTROL_ACCOUNT_END:-$((10#$ZONES_BENCH_CONTROL_ACCOUNT_INDEX + 1))}"
+ZONES_BENCH_SEQUENCER_ACCOUNT_END="${ZONES_BENCH_SEQUENCER_ACCOUNT_END:-$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))}"
+ZONES_BENCH_INBOX="${ZONES_BENCH_INBOX:-0x1c00000000000000000000000000000000000001}"
+ZONES_BENCH_OUTBOX="${ZONES_BENCH_OUTBOX:-0x1c00000000000000000000000000000000000002}"
+ZONES_BENCH_L1_MAX_FEE_PER_GAS="${ZONES_BENCH_L1_MAX_FEE_PER_GAS:-12000000000}"
+ZONES_BENCH_L1_MAX_PRIORITY_FEE_PER_GAS=0
+ZONES_BENCH_ZONE_MAX_FEE_PER_GAS="${ZONES_BENCH_ZONE_MAX_FEE_PER_GAS:-10000000000}"
+ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS=0
+ZONES_BENCH_DEPOSIT_GAS_LIMIT="${ZONES_BENCH_DEPOSIT_GAS_LIMIT:-2000000}"
+ZONES_BENCH_ACTIVITY_GAS_LIMIT="${ZONES_BENCH_ACTIVITY_GAS_LIMIT:-500000}"
+ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT="${ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT:-10000000}"
+ZONES_BENCH_APPROVAL_GAS_LIMIT="${ZONES_BENCH_APPROVAL_GAS_LIMIT:-2000000}"
+ZONES_BENCH_ADMISSION_SEED_AMOUNT="${ZONES_BENCH_ADMISSION_SEED_AMOUNT:-1}"
+ZONES_BENCH_RECIPIENT_ACCOUNT_START="${ZONES_BENCH_RECIPIENT_ACCOUNT_START:-$ZONES_BENCH_ACCOUNT_START}"
+ZONES_BENCH_RECIPIENT_ACCOUNT_END="${ZONES_BENCH_RECIPIENT_ACCOUNT_END:-$ZONES_BENCH_ACCOUNT_END}"
+if [[ -z "${ZONES_BENCH_RECIPIENT_GENERATOR:-}" ]]; then
+    ZONES_BENCH_RECIPIENT_GENERATOR='{ pool: { pool: users, select: random } }'
+fi
 withdrawals_per_journey=0
 earn_deposits_per_journey=0
 earn_redeems_per_journey=0
@@ -96,8 +116,8 @@ offramps_per_journey=0
 earn_deposit_callback_successes_per_journey=0
 earn_redeem_callback_successes_per_journey=0
 case "$ZONES_BENCH_RECIPIENT_MODE" in
-    existing) private_transfer_recipient='{ var: recipient.address }' ;;
-    random) private_transfer_recipient=random ;;
+    existing) ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT='{ var: recipient.address }' ;;
+    random) ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT=random ;;
     *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
 esac
 case "$ZONES_BENCH_NEOBANK_PRESET" in
@@ -199,15 +219,19 @@ esac
 for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT \
     ZONES_BENCH_MAX_CONCURRENT ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT \
     ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT \
-    ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_APPROVAL_TIMEOUT_SECS \
-    ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS ZONES_BENCH_SAMPLE_INSTANCES ZONES_BENCH_SEED
+    ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_SAMPLE_INSTANCES ZONES_BENCH_SEED \
+    ZONES_BENCH_ACCOUNT_END ZONES_BENCH_CONTROL_ACCOUNT_END \
+    ZONES_BENCH_SEQUENCER_ACCOUNT_END ZONES_BENCH_EXPECTED_L1_CHAIN_ID \
+    ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_ID \
+    ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_FEE_PER_GAS \
+    ZONES_BENCH_DEPOSIT_GAS_LIMIT ZONES_BENCH_ACTIVITY_GAS_LIMIT \
+    ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT ZONES_BENCH_APPROVAL_GAS_LIMIT \
+    ZONES_BENCH_ADMISSION_SEED_AMOUNT ZONES_BENCH_RECIPIENT_ACCOUNT_START \
+    ZONES_BENCH_RECIPIENT_ACCOUNT_END
 do uint "$name"; done
 positive_rate ZONES_BENCH_TPS
 (( 10#$ZONES_BENCH_ACCOUNTS > 0 && 10#$ZONES_BENCH_COUNT > 0 )) || die "accounts and count must be positive"
-(( 10#$ZONES_BENCH_MAX_CONCURRENT > 0 && 10#$ZONES_BENCH_APPROVAL_TIMEOUT_SECS > 0 )) ||
-    die "max concurrency and approval timeout must be positive"
-(( 10#$ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS > 0 )) ||
-    die "setup settlement timeout must be positive"
+(( 10#$ZONES_BENCH_MAX_CONCURRENT > 0 )) || die "max concurrency must be positive"
 (( 10#$ZONES_BENCH_SAMPLE_INSTANCES > 0 )) ||
     die "sample instances must be positive"
 sample_instances="$ZONES_BENCH_SAMPLE_INSTANCES"
@@ -221,12 +245,6 @@ fi
 required_accounts=$((10#$ZONES_BENCH_MAX_CONCURRENT * leases_per_journey))
 (( required_accounts <= 10#$ZONES_BENCH_ACCOUNTS )) ||
     die "$ZONES_BENCH_NEOBANK_PRESET requires at least $required_accounts accounts for max-concurrent=$ZONES_BENCH_MAX_CONCURRENT"
-account_journeys=$((10#$ZONES_BENCH_COUNT * leases_per_journey))
-journeys_per_account=$(((account_journeys + 10#$ZONES_BENCH_ACCOUNTS - 1) / 10#$ZONES_BENCH_ACCOUNTS))
-admission_seed_amount=0
-if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
-    admission_seed_amount=1
-fi
 
 # Reward sizing uses arbitrary-precision arithmetic so configured uint128
 # amounts cannot silently wrap in the shell.
@@ -237,7 +255,6 @@ reward_fund_amount=1
 reward_first_redeem_amount=1
 reward_second_redeem_amount=1
 reward_expected_remaining=0
-reward_fund_gas_limit=5000000
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
     command -v python3 >/dev/null || die "missing python3"
     reward_sizing="$(python3 - \
@@ -329,6 +346,41 @@ PY
     swapped_redemption_expected_remaining="${swapped_redemption_values[3]}"
 fi
 
+ZONES_BENCH_REWARD_ONRAMP_PER_ACCOUNT="$reward_onramp_per_account"
+ZONES_BENCH_REWARD_POSITION_PER_ACCOUNT="$reward_position_per_account"
+ZONES_BENCH_REWARD_FUND_AMOUNT="$reward_fund_amount"
+ZONES_BENCH_REWARD_MAX_EARN_SHARE_SUPPLY="$reward_total_position"
+ZONES_BENCH_REWARD_FIRST_REDEEM_AMOUNT="$reward_first_redeem_amount"
+ZONES_BENCH_REWARD_SECOND_REDEEM_AMOUNT="$reward_second_redeem_amount"
+ZONES_BENCH_SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT="$swapped_redemption_onramp_per_account"
+ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT="$swapped_redemption_position_per_account"
+export L1_RPC_URL L1_WS_RPC_URL ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL
+export L1_PORTAL_ADDRESS ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_MNEMONIC
+export ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNT_END ZONES_BENCH_ACCOUNTS
+export ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_CONTROL_ACCOUNT_END
+export ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_SEQUENCER_ACCOUNT_END
+export ZONES_BENCH_SEQUENCER_ADDRESS
+export ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID
+export ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_INBOX ZONES_BENCH_OUTBOX
+export ZONES_BENCH_L1_MAX_FEE_PER_GAS ZONES_BENCH_L1_MAX_PRIORITY_FEE_PER_GAS
+export ZONES_BENCH_ZONE_MAX_FEE_PER_GAS ZONES_BENCH_ZONE_MAX_PRIORITY_FEE_PER_GAS
+export ZONES_BENCH_DEPOSIT_GAS_LIMIT ZONES_BENCH_ACTIVITY_GAS_LIMIT
+export ZONES_BENCH_WITHDRAWAL_TX_GAS_LIMIT ZONES_BENCH_APPROVAL_GAS_LIMIT
+export ZONES_BENCH_ADMISSION_SEED_AMOUNT
+export ZONES_BENCH_RECIPIENT_ACCOUNT_START ZONES_BENCH_RECIPIENT_ACCOUNT_END
+export ZONES_BENCH_RECIPIENT_GENERATOR
+export ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN
+export ZONES_BENCH_EARN_ROUTER ZONES_BENCH_EARN_VAULT
+export ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER ZONES_BENCH_BRIDGE_WALLET
+export ZONES_BENCH_DEPOSIT_AMOUNT ZONES_BENCH_ACTIVITY_AMOUNT
+export ZONES_BENCH_WITHDRAWAL_AMOUNT ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT
+export ZONES_BENCH_CALLBACK_GAS_LIMIT ZONES_BENCH_PRIVATE_TRANSFER_RECIPIENT
+export ZONES_BENCH_REWARD_ONRAMP_PER_ACCOUNT ZONES_BENCH_REWARD_POSITION_PER_ACCOUNT
+export ZONES_BENCH_REWARD_FUND_AMOUNT ZONES_BENCH_REWARD_MAX_EARN_SHARE_SUPPLY
+export ZONES_BENCH_REWARD_FIRST_REDEEM_AMOUNT ZONES_BENCH_REWARD_SECOND_REDEEM_AMOUNT
+export ZONES_BENCH_SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT
+export ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT
+
 stage_start() { echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 stage_end() { echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$1"; }
 
@@ -358,7 +410,7 @@ verify_reward_zone_balances() {
     local maximum_unit="${4:-$expected_unit}"
     python3 - \
         "$ZONE_PRIVATE_RPC_URL" "$ZONES_BENCH_ZONE_AUTH_MAP" \
-        "$ZONES_BENCH_OUTPUT/preflight.json" "$ZONES_BENCH_EARN_TOKEN" \
+        "$ZONES_BENCH_OUTPUT/accounts.json" "$ZONES_BENCH_EARN_TOKEN" \
         "$ZONES_BENCH_ACCOUNTS" "$mode" "$expected_total" "$expected_unit" \
         "$maximum_unit" <<'PY'
 import json
@@ -366,23 +418,22 @@ import sys
 import urllib.error
 import urllib.request
 
-rpc_url, auth_path, preflight_path, token, expected_accounts, mode, expected_total, expected_unit, maximum_unit = sys.argv[1:]
+rpc_url, auth_path, accounts_path, token, expected_accounts, mode, expected_total, expected_unit, maximum_unit = sys.argv[1:]
 expected_accounts = int(expected_accounts)
 expected_total = int(expected_total)
 expected_unit = int(expected_unit)
 maximum_unit = int(maximum_unit)
 with open(auth_path, encoding="utf-8") as handle:
     auth = json.load(handle)
-with open(preflight_path, encoding="utf-8") as handle:
-    accounts = json.load(handle)["accounts"]
+with open(accounts_path, encoding="utf-8") as handle:
+    accounts = json.load(handle)
 if len(accounts) != expected_accounts:
     raise SystemExit(
-        f"preflight contains {len(accounts)} accounts, expected {expected_accounts}"
+        f"account list contains {len(accounts)} accounts, expected {expected_accounts}"
     )
 
 balances = []
-for request_id, account in enumerate(accounts, 1):
-    address = account["address"]
+for request_id, address in enumerate(accounts, 1):
     authorization = auth.get(address.lower())
     if not authorization:
         raise SystemExit(f"authorization map has no entry for benchmark account {address}")
@@ -451,9 +502,22 @@ PY
 }
 
 txgen_bin="${TXGEN_TEMPO_BIN:-txgen-tempo}"
-bench_bin="${TXGEN_BENCH_BIN:-bench}"
-for command in "$txgen_bin" "$bench_bin" awk cast grep jq python3 sed timeout; do command -v "$command" >/dev/null || die "missing $command"; done
-if [[ -n "${ZONES_XTASK_BIN:-}" ]]; then preflight=("$ZONES_XTASK_BIN" benchmark-preflight); else preflight=(cargo run --profile release -p tempo-xtask -- benchmark-preflight); fi
+for command in "$txgen_bin" awk cast jq python3; do
+    command -v "$command" >/dev/null || die "missing $command"
+done
+
+neobank_specs="$bench_dir/neobank"
+generic_specs="$bench_dir/txgen"
+scenario_path="$neobank_specs/$scenario_file"
+bootstrap_scenario="$generic_specs/bootstrap-scenario.yml"
+portal_approval_scenario="$neobank_specs/l1-portal-approval-scenario.yml"
+zone_approval_scenario="$neobank_specs/zone-outbox-approvals-scenario.yml"
+admission_seed_scenario="$neobank_specs/admission-seed-scenario.yml"
+for file in "$scenario_path" "$bootstrap_scenario" "$portal_approval_scenario" \
+    "$zone_approval_scenario" "$admission_seed_scenario"
+do
+    [[ -f "$file" ]] || die "missing txgen scenario $file"
+done
 
 mkdir -p "$ZONES_BENCH_OUTPUT" "$(dirname "$ZONES_BENCH_RENDERED_SCENARIO")"
 rm -f -- "$ZONES_BENCH_WITHDRAWAL_BLOCKS_REPORT" "$ZONES_BENCH_WITHDRAWAL_BLOCKS_SUMMARY"
@@ -471,108 +535,19 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-preflight_phase() {
-    local phase="$1" fixture="$2" require_existing_approvals="${3:-false}"
-    local -a command=("${preflight[@]}" --l1-rpc-url "$L1_RPC_URL" --zone-rpc-url "$ZONE_RPC_URL" \
-        --token "$ZONES_BENCH_TOKEN" --account-start "$ZONES_BENCH_ACCOUNT_START" \
-        --accounts "$ZONES_BENCH_ACCOUNTS" --deposit-amount "$ZONES_BENCH_DEPOSIT_AMOUNT" \
-        --admission-seed-amount "$admission_seed_amount" \
-        --activity-amount "$ZONES_BENCH_ACTIVITY_AMOUNT" --withdrawal-amount "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
-        --bootstrap-deposit-amount "$ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT" --transactions-per-account "$journeys_per_account" \
-        --recipient-mode "$ZONES_BENCH_RECIPIENT_MODE" \
-        --sponsored-approval-rounds 2 \
-        --check-phase "$phase" --output "$ZONES_BENCH_OUTPUT")
-    [[ -z "$fixture" ]] || command+=(--fixture-state "$fixture")
-    [[ "$require_existing_approvals" != true ]] || command+=(--no-approval-setup)
-    "${command[@]}"
-}
+run_setup_scenario() {
+    local stage="$1" scenario="$2" count="$3" report="$4" context="${5:-}"
+    local concurrency="$ZONES_BENCH_MAX_CONCURRENT"
+    if (( 10#$concurrency > 10#$count )); then concurrency="$count"; fi
 
-# Send one expiring-nonce approval per account. Generate and submit no more than
-# max-concurrent at a time so every transaction receives its full validity
-# window, even when the account pool is much larger than the sender concurrency.
-# txgen gives setup steps a shared inclusion key, which is right for dependent
-# deployment setup but serializes unrelated account approvals; drop only that
-# synthetic barrier.
-send_zone_approval_round() {
-    local token_label="$1" token="$2"
-    local spec="$ZONES_BENCH_OUTPUT/zone-approval-${token_label}.yml"
-    local raw="$ZONES_BENCH_OUTPUT/zone-approval-${token_label}.serial.ndjson"
-    local stream="$ZONES_BENCH_OUTPUT/zone-approval-${token_label}.ndjson"
-    local total=$((10#$ZONES_BENCH_ACCOUNTS))
-    local chunk_size=$((10#$ZONES_BENCH_MAX_CONCURRENT))
-    local chunk_total
-    local offset chunk_count chunk_account_start chunk_account_end chunk_account_last
-    local chunk_number global_index index actual send_status
-    local signed_deadline remaining send_timeout
-
-    if (( chunk_size > 12 )); then chunk_size=12; fi
-    chunk_total=$(((total + chunk_size - 1) / chunk_size))
-
-    echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID stage=zone_approval approval_round=$token_label"
-    for ((offset = 0; offset < total; offset += chunk_size)); do
-        chunk_count=$((total - offset))
-        if (( chunk_count > chunk_size )); then chunk_count=$chunk_size; fi
-        chunk_account_start=$((10#$ZONES_BENCH_ACCOUNT_START + offset))
-        chunk_account_end=$((chunk_account_start + chunk_count))
-        chunk_account_last=$((chunk_account_end - 1))
-        (( chunk_account_end - chunk_account_start == chunk_count )) ||
-            die "Zone $token_label approval chunk account range is not end-exclusive"
-        chunk_number=$((offset / chunk_size + 1))
-
-        {
-            printf 'chain_id: %s\n\n' "$zone_chain_id"
-            printf 'gas:\n  max_fee_per_gas: %s\n  max_priority_fee_per_gas: %s\n\n' "$zone_fee" "$zone_priority_fee"
-            printf 'accounts:\n  users:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    range: [%s, %s]\n  sponsor:\n    mnemonic: "${ZONES_BENCH_MNEMONIC}"\n    index: %s\n\n' "$chunk_account_start" "$chunk_account_end" "$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX"
-            printf 'artifacts:\n  TIP20: txgen/abis/tip20.json\n\nsetup:\n  steps:\n'
-            for ((index = 0; index < chunk_count; index++)); do
-                global_index=$((offset + index))
-                printf '    - id: approve-%s-%s\n      tx:\n        type: tempo\n        from: { pool: users, select: { index: %s } }\n        sponsor: { pool: sponsor, select: { index: 0 } }\n        expiring_nonce: true\n        valid_for_secs: 25\n        gas_limit: 500000\n        fee_token: "%s"\n        call:\n          to: "%s"\n          abi: TIP20\n          function: "approve(address,uint256)"\n          args: ["0x1c00000000000000000000000000000000000002", "115792089237316195423570985008687907853269984665640564039457584007913129639935"]\n' "$token_label" "$global_index" "$index" "$ZONES_BENCH_TOKEN" "$token"
-            done
-            # The txgen generator requires a positive mix even with --count 0.
-            printf '\ntemplates:\n  approval_probe:\n    type: tempo\n    from: { pool: users, select: { index: 0 } }\n    sponsor: { pool: sponsor, select: { index: 0 } }\n    expiring_nonce: true\n    valid_for_secs: 25\n    gas_limit: 500000\n    fee_token: "%s"\n    call:\n      to: "%s"\n      abi: TIP20\n      function: "approve(address,uint256)"\n      args: ["0x1c00000000000000000000000000000000000002", "0"]\nmix:\n  - template: approval_probe\n    weight: 1\n' "$ZONES_BENCH_TOKEN" "$token"
-        } >"$spec"
-
-        rm -f -- "$raw" "$stream"
-        echo "Zone $token_label approval setup: chunk $chunk_number/$chunk_total accounts=$chunk_account_start-$chunk_account_last generating=$chunk_count"
-        # Start a conservative clock before signing. The send must finish five
-        # seconds before the 25-second transaction validity window closes.
-        signed_deadline=$((SECONDS + 20))
-        "$txgen_bin" generate --spec "$spec" --count 0 --seed "$ZONES_BENCH_SEED" --output "$raw"
-        actual="$(jq -s -r 'length' "$raw")"
-        [[ "$actual" == "$chunk_count" ]] ||
-            die "Zone $token_label approval chunk rendered $actual transactions; expected $chunk_count"
-        jq -e -s --argjson expected "$chunk_count" '
-            length == $expected and
-            all(.[]; .phase == "setup" and (.submission_keys | length) == 1 and (.inclusion_keys | length) == 1) and
-            ([.[].submission_keys[]] | unique | length) == $expected and
-            ([.[].inclusion_keys[]] | unique | length) == 1
-        ' "$raw" >/dev/null || die "Zone $token_label approval chunk has invalid scheduling keys"
-        jq -c '.inclusion_keys = []' "$raw" >"$stream"
-        rm -f -- "$raw"
-
-        remaining=$((signed_deadline - SECONDS))
-        (( remaining > 0 )) ||
-            die "Zone $token_label approval chunk generation exhausted its safe expiring-nonce window"
-        send_timeout=$((10#$ZONES_BENCH_APPROVAL_TIMEOUT_SECS))
-        if (( send_timeout > remaining )); then send_timeout=$remaining; fi
-        send_status=0
-        if timeout --foreground --kill-after=5s "${send_timeout}s" \
-            "$bench_bin" send --input "$stream" --rpc-url "$ZONE_PRIVATE_RPC_URL" --query-rpc-url "$ZONE_RPC_URL" \
-            --sender-header-name X-Authorization-Token --sender-header-map "$secret_dir/zone-auth.json" \
-            --tps 0 --max-concurrent "$chunk_count" --retries 0 --drain-timeout 0 --report console; then
-            send_status=0
-        else
-            send_status=$?
-        fi
-        if (( send_status == 124 )); then
-            die "Zone $token_label approval chunk $chunk_number/$chunk_total exceeded its ${send_timeout}s safe send window"
-        fi
-        (( send_status == 0 )) ||
-            die "Zone $token_label approval chunk $chunk_number/$chunk_total failed with status $send_status"
-        echo "Zone $token_label approval setup: chunk $chunk_number/$chunk_total completed=$chunk_count/$chunk_count"
-    done
-    rm -f -- "$spec" "$raw" "$stream"
-    echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID stage=zone_approval approval_round=$token_label"
+    echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$stage${context:+ $context}"
+    "$txgen_bin" scenario run \
+        --scenario "$scenario" --count "$count" --starts-per-second 0 \
+        --max-in-flight "$concurrency" --max-rpc-in-flight "$concurrency" \
+        --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
+        --seed "$ZONES_BENCH_SEED" --report "$report"
+    assert_scenario_report "$report" "$count" "$stage"
+    echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID preset=$ZONES_BENCH_NEOBANK_PRESET stage=$stage${context:+ $context}"
 }
 
 # Zone transaction-pool admission requires every sender to hold a nonzero
@@ -581,295 +556,31 @@ send_zone_approval_round() {
 # leases, so count=accounts touches every account exactly once while respecting
 # the configured max-in-flight cap.
 seed_zone_admission_balances() {
-    local seed_dir="$ZONES_BENCH_OUTPUT/admission-seed"
-    local seed_scenario="$seed_dir/admission-seed-scenario.yml"
-    local seed_rendered="$seed_dir/admission-seed-scenario.rendered.yml"
-    local seed_report="$seed_dir/admission-seed-report.json"
+    local seed_report="$ZONES_BENCH_OUTPUT/admission-seed-report.json"
     local total=$((10#$ZONES_BENCH_ACCOUNTS))
 
-    mkdir -p "$seed_dir"
-    cp "$ZONES_BENCH_OUTPUT/l1-onramp.yml" \
-        "$ZONES_BENCH_OUTPUT/zone-flow.yml" \
-        "$ZONES_BENCH_OUTPUT/neobank-scenario-fragments.yml" \
-        "$seed_dir/"
-    cp -R "$ZONES_BENCH_OUTPUT/abis" "$ZONES_BENCH_OUTPUT/txgen" "$seed_dir/"
-    sed \
-        -e "s|__L1_CHAIN_ID__|$l1_chain_id|g" \
-        -e "s|__ZONE_CHAIN_ID__|$zone_chain_id|g" \
-        -e "s|__DLUSD__|$ZONES_BENCH_TOKEN|g" \
-        -e 's|__ONRAMP_AMOUNT__|1|g' \
-        "$ZONES_BENCH_OUTPUT/neobank/encrypted-deposit-scenario.yml" >"$seed_scenario"
-    if grep -En '__[A-Z0-9_]+__' "$seed_scenario"; then
-        die "unresolved placeholder in Zone admission seed scenario"
-    fi
-    "$txgen_bin" scenario render \
-        --scenario "$seed_scenario" \
-        --output "$seed_rendered"
-
-    echo "neobank stage=start run_id=$ZONES_BENCH_RUN_ID stage=zone_admission_seed"
-    "$txgen_bin" scenario run \
-        --scenario "$seed_scenario" \
-        --count "$total" --starts-per-second 0 \
-        --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
-        --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
-        --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
-        --seed "$ZONES_BENCH_SEED" --report "$seed_report"
-    assert_scenario_report "$seed_report" "$total" "Zone admission seed"
-
-    preflight_phase bootstrap ""
-    jq -e --argjson expected "$total" '
-        (.accounts | length) == $expected and
-        all(.accounts[]; (.zoneBalance | tonumber) >= 1)
-    ' "$ZONES_BENCH_OUTPUT/preflight.json" >/dev/null ||
-        die "not every benchmark account received its enabled-token admission seed"
+    run_setup_scenario \
+        zone_admission_seed "$admission_seed_scenario" "$total" "$seed_report"
     echo "Zone admission seed verified: $total/$total exact encrypted deposits processed"
-    echo "neobank stage=end run_id=$ZONES_BENCH_RUN_ID stage=zone_admission_seed"
 }
-
-# The bootstrap gives the sequencer the preset's Zone fee token for sponsored,
-# untimed Zone approvals.
-stage_start bootstrap
-preflight_phase bootstrap empty
-"$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/bootstrap-scenario.yml" --count 1 \
-    --max-in-flight 1 --max-rpc-in-flight 4 --failure-policy fail-fast --seed "$ZONES_BENCH_SEED" \
-    --report "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
-stage_end bootstrap
-# Refresh preflight after bootstrap so the rendered report reflects its funded
-# sponsor state. Setup approvals themselves are deliberately non-expiring.
-stage_start post_bootstrap_preflight
-preflight_phase bootstrap ""
-jq -e '.depositFee == 0 and .bouncebackFee == 0 and .withdrawalFee == 0' \
-    "$ZONES_BENCH_OUTPUT/preflight.json" >/dev/null ||
-    die "neobank benchmark requires zero deposit, bounceback, and withdrawal fees"
-stage_end post_bootstrap_preflight
-
-# The generic preflight renders one portal approval per user. It is outside timing.
-stage_start portal_approval
-"$txgen_bin" generate --spec "$ZONES_BENCH_OUTPUT/deposit.yml" --count 0 --seed "$ZONES_BENCH_SEED" \
-    --output "$ZONES_BENCH_OUTPUT/portal-approvals.ndjson"
-"$bench_bin" send --input "$ZONES_BENCH_OUTPUT/portal-approvals.ndjson" --rpc-url "$L1_RPC_URL" \
-    --query-rpc-url "$L1_RPC_URL" --tps 0 --max-concurrent "$ZONES_BENCH_MAX_CONCURRENT" --retries 0 --drain-timeout 0 --report console
-stage_end portal_approval
 
 stage_start render_scenario
-cp -R contrib/bench/neobank "$ZONES_BENCH_OUTPUT/neobank"
-mkdir -p "$ZONES_BENCH_OUTPUT/txgen"
-cp -R contrib/bench/txgen/abis "$ZONES_BENCH_OUTPUT/txgen/abis"
-# Preflight already renders its portal artifacts into this directory. Copy the
-# fixture artifacts into that existing directory rather than nesting them at
-# abis/abis/, which would leave EarnRouter unresolved by the scenario loader.
-cp contrib/bench/neobank/abis/*.json "$ZONES_BENCH_OUTPUT/abis/"
-zone_id="$(jq -er '.zoneId' "$ZONES_BENCH_OUTPUT/preflight.json")"
-l1_chain_id="$(cast chain-id --rpc-url "$L1_RPC_URL")"
-zone_chain_id="$(cast chain-id --rpc-url "$ZONE_RPC_URL")"
-l1_fee="$(jq -er '.l1MaxFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
-l1_priority_fee="$(jq -er '.l1MaxPriorityFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
-zone_fee="$(jq -er '.zoneMaxFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
-zone_priority_fee="$(jq -er '.zoneMaxPriorityFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
-
-python3 - \
-    "$ZONES_BENCH_NEOBANK_PRESET" "$ZONES_BENCH_ACCOUNTS" "$ZONES_BENCH_COUNT" \
-    "$journeys_per_account" "$ZONES_BENCH_DEPOSIT_AMOUNT" "$admission_seed_amount" \
-    "$l1_fee" "$ZONES_BENCH_OUTPUT/preflight.json" <<'PY'
-import json
-import sys
-
-preset = sys.argv[1]
-accounts, journeys, per_account, deposit, admission_seed, l1_fee = map(
-    int, sys.argv[2:8]
-)
-preflight_path = sys.argv[8]
-scale = 10**12
-deposit_gas = 2_000_000
-approval_gas = 2_000_000
-
-
-def fee(gas_limit: int, gas_price: int) -> int:
-    return (gas_limit * gas_price + scale - 1) // scale
-
-
-# Every listed L1 submit is an expiring encrypted onramp. txgen assigns scenario
-# identities across all submits on a chain, so the highest fee bump is 2*S*J.
-measured_l1_submits = {
-    "encrypted-deposit": 1,
-    "private-withdrawal": 0,
-    "rewards-redemption": 0,
-    "swapped-redemption": 0,
-    "direct-lifecycle": 1,
-    "third-party-recipient": 2,
-    "full-journey": 1,
-    "slippage-bounce": 1,
-    "swapped-lifecycle": 1,
-}[preset]
-measured_bump = 2 * measured_l1_submits * journeys
-has_position_onramp = preset in {
-    "private-withdrawal",
-    "rewards-redemption",
-    "swapped-redemption",
-}
-setup_bump = 2 * accounts if admission_seed or has_position_onramp else 0
-
-with open(preflight_path, encoding="utf-8") as handle:
-    report = json.load(handle)
-approval_accounts = set(report["portalApprovalSetupAccounts"])
-base_deposit_fee = fee(deposit_gas, l1_fee)
-base_approval_fee = fee(approval_gas, l1_fee)
-measured_fee_delta = fee(deposit_gas, l1_fee + measured_bump) - base_deposit_fee
-setup_fee_delta = fee(deposit_gas, l1_fee + setup_bump) - base_deposit_fee
-
-for account in report["accounts"]:
-    required = per_account * deposit
-    if measured_l1_submits:
-        required += per_account * (base_deposit_fee + measured_fee_delta)
-    elif has_position_onramp:
-        required += base_deposit_fee + setup_fee_delta
-    if admission_seed:
-        required += admission_seed + base_deposit_fee + setup_fee_delta
-    if account["index"] in approval_accounts:
-        required += base_approval_fee
-    balance = int(account["l1Balance"])
-    if balance < required:
-        raise SystemExit(
-            f"account {account['address']} L1 balance {balance} is below "
-            f"the {preset} principal and expiring-fee cap {required}"
-        )
-
-print(
-    f"{preset} L1 expiring-fee capacity verified: "
-    f"measured_bump={measured_bump}, setup_bump={setup_bump}"
-)
-PY
-
-case "$ZONES_BENCH_NEOBANK_PRESET" in
-    direct-lifecycle|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle)
-        python3 - \
-            "$ZONES_BENCH_NEOBANK_PRESET" "$ZONES_BENCH_DEPOSIT_AMOUNT" \
-            "$ZONES_BENCH_ACTIVITY_AMOUNT" "$ZONES_BENCH_WITHDRAWAL_AMOUNT" \
-            "$zone_fee" "$ZONES_BENCH_COUNT" <<'PY'
-import sys
-
-preset = sys.argv[1]
-deposit, activity, withdrawal, zone_fee, journeys = map(int, sys.argv[2:])
-scale = 10**12
-
-def fee(gas_limit: int, gas_price: int) -> int:
-    return (gas_limit * gas_price + scale - 1) // scale
-
-# txgen assigns deterministic identities across all Zone submits in a scenario.
-# Every measured Zone template uses an expiring nonce, so the largest bump is
-# 2*S*J for S Zone submits per journey and J instances.
-zone_submits = {
-    "direct-lifecycle": 2,
-    "third-party-recipient": 2,
-    "full-journey": 4,
-    "slippage-bounce": 1,
-    "swapped-lifecycle": 2,
-}[preset]
-worst_gas_price = zone_fee + 2 * zone_submits * journeys
-activity_fee = fee(500_000, worst_gas_price)
-withdrawal_fee = fee(10_000_000, worst_gas_price)
-if preset in {"direct-lifecycle", "swapped-lifecycle"}:
-    required = withdrawal + 2 * withdrawal_fee
-elif preset == "third-party-recipient":
-    required = withdrawal + withdrawal_fee
-elif preset == "full-journey":
-    required = activity + withdrawal + activity_fee + 3 * withdrawal_fee
-elif preset == "slippage-bounce":
-    required = withdrawal + withdrawal_fee
-else:
-    raise SystemExit(f"unsupported capacity preset {preset}")
-
-if deposit < required:
-    raise SystemExit(
-        f"{preset} deposit amount {deposit} cannot cover measured principal "
-        f"and Zone transaction fee caps totaling {required}"
-    )
-print(
-    f"{preset} per-journey Zone capacity verified: "
-    f"deposit={deposit}, required={required}"
-)
-PY
-        ;;
-esac
-
-account_end=$((10#$ZONES_BENCH_ACCOUNT_START + 10#$ZONES_BENCH_ACCOUNTS))
-control_account_end=$((10#$ZONES_BENCH_CONTROL_ACCOUNT_INDEX + 1))
-sequencer_account_end=$((10#$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX + 1))
-render_sources=(l1-onramp.yml zone-flow.yml neobank-scenario-fragments.yml "$scenario_file")
-if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
-    render_sources+=(rewards-position-scenario.yml rewards-funding-scenario.yml)
-elif [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
-        "$ZONES_BENCH_NEOBANK_PRESET" == "swapped-redemption" ]]; then
-    render_sources+=(swapped-redemption-position-scenario.yml)
-fi
-rendered_documents=()
-for source in "${render_sources[@]}"; do
-    destination="$source"
-    [[ "$source" != "$scenario_file" ]] || destination=private-flow-scenario.yml
-    rendered_documents+=("$ZONES_BENCH_OUTPUT/$destination")
-    sed \
-        -e "s|__L1_CHAIN_ID__|$l1_chain_id|g" -e "s|__ZONE_CHAIN_ID__|$zone_chain_id|g" \
-        -e "s|__ZONE_ID__|$zone_id|g" -e "s|__ACCOUNT_START__|$ZONES_BENCH_ACCOUNT_START|g" -e "s|__ACCOUNT_END__|$account_end|g" \
-        -e "s|__CONTROL_ACCOUNT_INDEX__|$ZONES_BENCH_CONTROL_ACCOUNT_INDEX|g" -e "s|__CONTROL_ACCOUNT_END__|$control_account_end|g" \
-        -e "s|__SEQUENCER_ACCOUNT_INDEX__|$ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX|g" -e "s|__SEQUENCER_ACCOUNT_END__|$sequencer_account_end|g" \
-        -e "s|__L1_MAX_FEE_PER_GAS__|$l1_fee|g" -e "s|__L1_MAX_PRIORITY_FEE_PER_GAS__|$l1_priority_fee|g" \
-        -e "s|__ZONE_MAX_FEE_PER_GAS__|$zone_fee|g" -e "s|__ZONE_MAX_PRIORITY_FEE_PER_GAS__|$zone_priority_fee|g" \
-        -e "s|__PORTAL__|$L1_PORTAL_ADDRESS|g" -e "s|__INBOX__|0x1c00000000000000000000000000000000000001|g" -e "s|__OUTBOX__|0x1c00000000000000000000000000000000000002|g" \
-        -e "s|__ZONE_TOKEN__|$ZONES_BENCH_TOKEN|g" \
-        -e "s|__DLUSD__|$ZONES_BENCH_DLUSD|g" -e "s|__PATHUSD__|$ZONES_BENCH_PATHUSD|g" -e "s|__EARN_TOKEN__|$ZONES_BENCH_EARN_TOKEN|g" \
-        -e "s|__EARN_ROUTER__|$ZONES_BENCH_EARN_ROUTER|g" -e "s|__EARN_VAULT__|$ZONES_BENCH_EARN_VAULT|g" \
-        -e "s|__BRIDGE_WALLET__|$ZONES_BENCH_BRIDGE_WALLET|g" -e "s|__REWARDS__|$ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER|g" \
-        -e "s|__ONRAMP_AMOUNT__|$ZONES_BENCH_DEPOSIT_AMOUNT|g" -e "s|__PRIVATE_TRANSFER_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" \
-        -e "s|__PRIVATE_TRANSFER_RECIPIENT__|$private_transfer_recipient|g" \
-        -e "s|__EARN_DEPOSIT_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" -e "s|__EARN_REDEEM_AMOUNT__|$ZONES_BENCH_WITHDRAWAL_AMOUNT|g" \
-        -e "s|__OFFRAMP_AMOUNT__|$ZONES_BENCH_ACTIVITY_AMOUNT|g" -e "s|__CALLBACK_GAS_LIMIT__|$ZONES_BENCH_CALLBACK_GAS_LIMIT|g" \
-        -e "s|__REWARD_ONRAMP_PER_ACCOUNT__|$reward_onramp_per_account|g" -e "s|__REWARD_POSITION_PER_ACCOUNT__|$reward_position_per_account|g" \
-        -e "s|__REWARD_FUND_AMOUNT__|$reward_fund_amount|g" -e "s|__REWARD_FUND_GAS_LIMIT__|$reward_fund_gas_limit|g" \
-        -e "s|__REWARD_MAX_EARN_SHARE_SUPPLY__|$reward_total_position|g" \
-        -e "s|__REWARD_FIRST_REDEEM_AMOUNT__|$reward_first_redeem_amount|g" -e "s|__REWARD_SECOND_REDEEM_AMOUNT__|$reward_second_redeem_amount|g" \
-        -e "s|__SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT__|$swapped_redemption_onramp_per_account|g" \
-        -e "s|__SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT__|$swapped_redemption_position_per_account|g" \
-        -e 's|__DEPOSIT_GAS_LIMIT__|2000000|g' -e 's|__ACTIVITY_GAS_LIMIT__|500000|g' -e 's|__WITHDRAWAL_TX_GAS_LIMIT__|10000000|g' \
-        "$ZONES_BENCH_OUTPUT/neobank/$source" >"$ZONES_BENCH_OUTPUT/$destination"
-done
-if grep -En '__[A-Z0-9_]+__' "${rendered_documents[@]}"
-then
-    die "unresolved placeholder in rendered private-flow spec"
-fi
-# Run the composed source document so txgen retains fragment provenance in the
-# report. Results consume the deterministic flattened copy below.
 "$txgen_bin" scenario render \
-    --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" \
+    --scenario "$scenario_path" \
     --output "$ZONES_BENCH_RENDERED_SCENARIO"
 [[ -s "$ZONES_BENCH_RENDERED_SCENARIO" ]] ||
     die "txgen did not render the composed private-flow scenario"
-if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
-    for setup in rewards-position rewards-funding; do
-        "$txgen_bin" scenario render \
-            --scenario "$ZONES_BENCH_OUTPUT/${setup}-scenario.yml" \
-            --output "$ZONES_BENCH_OUTPUT/${setup}-scenario.rendered.yml"
-        [[ -s "$ZONES_BENCH_OUTPUT/${setup}-scenario.rendered.yml" ]] ||
-            die "txgen did not render the composed $setup scenario"
-    done
-elif [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
-        "$ZONES_BENCH_NEOBANK_PRESET" == "swapped-redemption" ]]; then
-    "$txgen_bin" scenario render \
-        --scenario "$ZONES_BENCH_OUTPUT/swapped-redemption-position-scenario.yml" \
-        --output "$ZONES_BENCH_OUTPUT/swapped-redemption-position-scenario.rendered.yml"
-    [[ -s "$ZONES_BENCH_OUTPUT/swapped-redemption-position-scenario.rendered.yml" ]] ||
-        die "txgen did not render the swapped-redemption position scenario"
-fi
 stage_end render_scenario
 
-# The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
-stage_start auth_token_map
-"$txgen_bin" auth-token-map --spec "$ZONES_BENCH_OUTPUT/zone-flow.yml" --pool users --zone-id "$zone_id" \
-    --chain-id "$zone_chain_id" --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
-    --watch --output "$secret_dir/zone-auth.json" >"$secret_dir/auth-token-map.log" 2>&1 &
-auth_pid=$!
-for _ in $(seq 1 60); do [[ -f "$secret_dir/zone-auth.json" ]] && break; sleep 1; done
-[[ -f "$secret_dir/zone-auth.json" ]] || die "timed out creating private Zone auth map"
-stage_end auth_token_map
+# The bootstrap scenario approves the control account before depositing the
+# Zone fee token to the sequencer.
+run_setup_scenario \
+    bootstrap "$bootstrap_scenario" 1 \
+    "$ZONES_BENCH_OUTPUT/bootstrap-report.json"
+
+run_setup_scenario \
+    portal_approval "$portal_approval_scenario" "$ZONES_BENCH_ACCOUNTS" \
+    "$ZONES_BENCH_OUTPUT/portal-approval-report.json" "approval_round=portal"
 
 # Deposit-only never submits a user transaction to the Zone. Every other preset
 # seeds the enabled-token balance required by current Zone txpool admission.
@@ -877,64 +588,43 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
     seed_zone_admission_balances
 fi
 
+# The auth map is intentionally mode 0600 and is never copied to benchmark artifacts.
+stage_start auth_token_map
+"$txgen_bin" auth-token-map --spec "$neobank_specs/zone-flow.yml" --pool users \
+    --zone-id "$ZONES_BENCH_EXPECTED_ZONE_ID" \
+    --chain-id "$ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID" \
+    --ttl-secs "$ZONES_BENCH_AUTH_TTL_SECS" \
+    --refresh-before-secs "$ZONES_BENCH_AUTH_REFRESH_SECS" \
+    --watch --output "$secret_dir/zone-auth.json" >"$secret_dir/auth-token-map.log" 2>&1 &
+auth_pid=$!
+for _ in $(seq 1 60); do [[ -f "$secret_dir/zone-auth.json" ]] && break; sleep 1; done
+[[ -f "$secret_dir/zone-auth.json" ]] || die "timed out creating private Zone auth map"
+jq -e 'to_entries | all(.[]; (.key | type) == "string" and (.value | type) == "string")' \
+    "$secret_dir/zone-auth.json" >/dev/null ||
+    die "private Zone auth map is malformed"
+jq -S 'keys | sort' "$secret_dir/zone-auth.json" >"$ZONES_BENCH_OUTPUT/accounts.json"
+jq -e --argjson expected "$ZONES_BENCH_ACCOUNTS" '
+    length == $expected and
+    all(.[]; type == "string") and
+    (unique | length) == $expected
+' "$ZONES_BENCH_OUTPUT/accounts.json" >/dev/null ||
+    die "auth map did not derive the expected unique benchmark account pool"
+stage_end auth_token_map
+
 # Approvals are untimed. Deposit-only submits no user Zone transaction.
-# Redemption-focused and lifecycle presets approve both assets.
-case "$ZONES_BENCH_NEOBANK_PRESET" in
-    encrypted-deposit) ;;
-    *)
-        send_zone_approval_round "$base_token_label" "$ZONES_BENCH_TOKEN"
-        send_zone_approval_round earn "$ZONES_BENCH_EARN_TOKEN"
-        ;;
-esac
+# The fixed scenario approves both enabled assets for each leased account.
+if [[ "$ZONES_BENCH_NEOBANK_PRESET" != "encrypted-deposit" ]]; then
+    run_setup_scenario \
+        zone_approvals "$zone_approval_scenario" "$ZONES_BENCH_ACCOUNTS" \
+        "$ZONES_BENCH_OUTPUT/zone-approvals-report.json" \
+        "approval_round=base_and_earn"
+fi
 
 if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "rewards-redemption" ]]; then
-    control_address="$(cast wallet address \
-        --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
-        --mnemonic-index "$ZONES_BENCH_CONTROL_ACCOUNT_INDEX")"
-    control_pathusd_balance="$(read_l1_uint "$ZONES_BENCH_PATHUSD" 'balanceOf(address)(uint256)' "$control_address")"
     initial_share_supply="$(read_l1_uint "$ZONES_BENCH_EARN_VAULT" 'totalEarnShares()(uint256)')"
     initial_earn_supply="$(read_l1_uint "$ZONES_BENCH_EARN_TOKEN" 'totalSupply()(uint256)')"
     [[ "$initial_share_supply" == 0 && "$initial_earn_supply" == 0 ]] ||
         die "reward position setup requires zero initial EarnToken supply"
-
-    python3 - \
-        "$ZONES_BENCH_ACCOUNTS" "$ZONES_BENCH_COUNT" "$journeys_per_account" \
-        "$reward_onramp_per_account" "$reward_position_per_account" "$reward_fund_amount" \
-        "$control_pathusd_balance" "$l1_fee" "$zone_fee" "$reward_fund_gas_limit" <<'PY'
-import sys
-
-a, j, n, onramp, position, reward, control_balance, l1_fee, zone_fee, fund_gas = map(
-    int, sys.argv[1:]
-)
-scale = 10**12
-withdrawal_gas = 10_000_000
-approval_gas = 2_000_000
-
-def fee(gas_limit: int, gas_price: int) -> int:
-    return (gas_limit * gas_price + scale - 1) // scale
-
-# Position setup has one Zone submit per account. Each measured journey has two
-# redemption submits. Scenario fee bumps are 2*S*J.
-setup_fee = fee(withdrawal_gas, zone_fee + 2 * a)
-measured_fee = fee(withdrawal_gas, zone_fee + 4 * j)
-zone_required = setup_fee + 2 * n * measured_fee
-zone_reserve = onramp - position
-if zone_reserve < zone_required:
-    raise SystemExit(
-        f"per-account pathUSD fee reserve {zone_reserve} is below required cap {zone_required}"
-    )
-
-control_required = reward + fee(approval_gas, l1_fee) + fee(fund_gas, l1_fee)
-if control_balance < control_required:
-    raise SystemExit(
-        f"control pathUSD balance {control_balance} is below reward plus fee cap {control_required}"
-    )
-print(
-    "reward setup capacity verified: "
-    f"per-account Zone reserve={zone_reserve}/{zone_required}, "
-    f"control L1 balance={control_balance}/{control_required}"
-)
-PY
 
     stage_start rewards_position_setup
     position_concurrency="$ZONES_BENCH_MAX_CONCURRENT"
@@ -942,7 +632,7 @@ PY
         position_concurrency="$ZONES_BENCH_ACCOUNTS"
     fi
     "$txgen_bin" scenario run \
-        --scenario "$ZONES_BENCH_OUTPUT/rewards-position-scenario.yml" \
+        --scenario "$neobank_specs/rewards-position-scenario.yml" \
         --count "$ZONES_BENCH_ACCOUNTS" \
         --max-in-flight "$position_concurrency" --max-rpc-in-flight "$position_concurrency" \
         --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
@@ -968,7 +658,7 @@ PY
 
     stage_start rewards_funding
     "$txgen_bin" scenario run \
-        --scenario "$ZONES_BENCH_OUTPUT/rewards-funding-scenario.yml" \
+        --scenario "$neobank_specs/rewards-funding-scenario.yml" \
         --count 1 --max-in-flight 1 --max-rpc-in-flight 2 \
         --failure-policy fail-fast --step-timeout 2m \
         --seed "$ZONES_BENCH_SEED" \
@@ -1005,44 +695,13 @@ if [[ "$ZONES_BENCH_NEOBANK_PRESET" == "private-withdrawal" ||
     [[ "$initial_share_supply" == 0 && "$initial_earn_supply" == 0 ]] ||
         die "$ZONES_BENCH_NEOBANK_PRESET position setup requires zero initial EarnToken supply"
 
-    python3 - \
-        "$ZONES_BENCH_ACCOUNTS" "$ZONES_BENCH_COUNT" "$journeys_per_account" \
-        "$swapped_redemption_onramp_per_account" \
-        "$swapped_redemption_position_per_account" "$l1_fee" "$zone_fee" <<'PY'
-import sys
-
-accounts, journeys, per_account, onramp, position, l1_fee, zone_fee = map(
-    int, sys.argv[1:]
-)
-scale = 10**12
-withdrawal_gas = 10_000_000
-
-def fee(gas_limit: int, gas_price: int) -> int:
-    return (gas_limit * gas_price + scale - 1) // scale
-
-# The setup creates one aggregated position per account. The measured scenario
-# may then reuse each account up to `per_account` times.
-setup_fee = fee(withdrawal_gas, zone_fee + 2 * accounts)
-measured_fee = fee(withdrawal_gas, zone_fee + 2 * journeys)
-required = setup_fee + per_account * measured_fee
-reserve = onramp - position
-if reserve < required:
-    raise SystemExit(
-        f"per-account DLUSD fee reserve {reserve} is below required cap {required}"
-    )
-print(
-    "redemption setup capacity verified: "
-    f"per-account Zone reserve={reserve}/{required}"
-)
-PY
-
     stage_start redemption_position_setup
     position_concurrency="$ZONES_BENCH_MAX_CONCURRENT"
     if (( 10#$position_concurrency > 10#$ZONES_BENCH_ACCOUNTS )); then
         position_concurrency="$ZONES_BENCH_ACCOUNTS"
     fi
     "$txgen_bin" scenario run \
-        --scenario "$ZONES_BENCH_OUTPUT/swapped-redemption-position-scenario.yml" \
+        --scenario "$neobank_specs/swapped-redemption-position-scenario.yml" \
         --count "$ZONES_BENCH_ACCOUNTS" \
         --max-in-flight "$position_concurrency" --max-rpc-in-flight "$position_concurrency" \
         --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" \
@@ -1096,7 +755,7 @@ echo "neobank measured L1 start block: $l1_measurement_start_block"
 stage_start private_flow
 scenario_report_args=()
 build_scenario_report_args scenario_report_args "$ZONES_BENCH_REPORT"
-"$txgen_bin" scenario run --scenario "$ZONES_BENCH_OUTPUT/private-flow-scenario.yml" --count "$ZONES_BENCH_COUNT" \
+"$txgen_bin" scenario run --scenario "$scenario_path" --count "$ZONES_BENCH_COUNT" \
     --starts-per-second "$ZONES_BENCH_TPS" --max-in-flight "$ZONES_BENCH_MAX_CONCURRENT" --max-rpc-in-flight "$ZONES_BENCH_MAX_CONCURRENT" \
     --failure-policy fail-fast --step-timeout "$ZONES_BENCH_STEP_TIMEOUT" --seed "$ZONES_BENCH_SEED" \
     --sample-instances "$sample_instances" "${scenario_report_args[@]}"

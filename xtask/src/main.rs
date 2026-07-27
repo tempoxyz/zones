@@ -1,18 +1,16 @@
 //! xtask is a Swiss army knife of tools that help with running and testing tempo.
 use crate::{
-    benchmark_preflight::BenchmarkPreflight, benchmark_results::BenchmarkResults,
-    configure_benchmark_fees::ConfigureBenchmarkFees, create_zone::CreateZone,
-    demo_blacklist::DemoBlacklist, demo_swap_and_deposit::DemoSwapAndDeposit,
-    deploy_neobank_fixtures::DeployNeobankFixtures, deploy_router::DeployRouter,
-    encrypted_deposit::EncryptedDeposit, generate_p2p_key::GenerateP2pKey,
-    generate_zone_genesis::GenerateZoneGenesis,
+    benchmark_results::BenchmarkResults, configure_benchmark_fees::ConfigureBenchmarkFees,
+    create_zone::CreateZone, demo_blacklist::DemoBlacklist,
+    demo_swap_and_deposit::DemoSwapAndDeposit, deploy_neobank_fixtures::DeployNeobankFixtures,
+    deploy_router::DeployRouter, encrypted_deposit::EncryptedDeposit,
+    generate_p2p_key::GenerateP2pKey, generate_zone_genesis::GenerateZoneGenesis,
     install_reference_zone_factory::InstallReferenceZoneFactory,
     set_encryption_key::SetEncryptionKey, spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
 
-mod benchmark_preflight;
 mod benchmark_results;
 mod configure_benchmark_fees;
 mod create_zone;
@@ -37,9 +35,6 @@ async fn main() -> eyre::Result<()> {
 
     let args = Args::parse();
     match args.action {
-        Action::BenchmarkPreflight(args) => {
-            (*args).run().await.wrap_err("benchmark preflight failed")
-        }
         Action::BenchmarkResults(args) => args.run().wrap_err("failed to render benchmark results"),
         Action::ConfigureBenchmarkFees(args) => args
             .run()
@@ -85,7 +80,6 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Action {
-    BenchmarkPreflight(Box<BenchmarkPreflight>),
     BenchmarkResults(BenchmarkResults),
     ConfigureBenchmarkFees(ConfigureBenchmarkFees),
     CreateZone(CreateZone),

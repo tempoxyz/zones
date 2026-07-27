@@ -12,7 +12,7 @@ chains:
       mode: auto
       websocket_url: "${L1_WS_RPC_URL}"
       poll_interval: 50ms
-    chain_id: __L1_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
     workload: ./l1-onramp.yml
 
   zone:
@@ -28,7 +28,7 @@ chains:
         name: X-Authorization-Token
         map: "${ZONES_BENCH_ZONE_AUTH_MAP}"
         reload_interval: 1s
-    chain_id: __ZONE_CHAIN_ID__
+    chain_id: ${ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID}
     workload: ./zone-flow.yml
 
 scenario:
@@ -57,9 +57,9 @@ scenario:
         sender: { var: account_a.ref }
         sender_address: { var: account_a.address }
         recipient: { var: account_a.address }
-        token: "__PATHUSD__"
-        fee_token: "__PATHUSD__"
-        amount: __ONRAMP_AMOUNT__
+        token: "${ZONES_BENCH_PATHUSD}"
+        fee_token: "${ZONES_BENCH_PATHUSD}"
+        amount: ${ZONES_BENCH_DEPOSIT_AMOUNT}
         memo: { var: account_a_entry_action_id }
 
     - use: encrypted-zone-entry
@@ -68,9 +68,9 @@ scenario:
         sender: { var: account_b.ref }
         sender_address: { var: account_b.address }
         recipient: { var: account_b.address }
-        token: "__PATHUSD__"
-        fee_token: "__PATHUSD__"
-        amount: __ONRAMP_AMOUNT__
+        token: "${ZONES_BENCH_PATHUSD}"
+        fee_token: "${ZONES_BENCH_PATHUSD}"
+        amount: ${ZONES_BENCH_DEPOSIT_AMOUNT}
         memo: { var: account_b_fee_action_id }
 
     - use: earn-deposit-and-return
@@ -80,11 +80,11 @@ scenario:
         sender: { var: account_a.ref }
         sender_address: { var: account_a.address }
         recipient: { var: account_b.address }
-        input_token: "__PATHUSD__"
-        fee_token: "__PATHUSD__"
-        amount: __EARN_DEPOSIT_AMOUNT__
-        min_vault_assets: __EARN_DEPOSIT_AMOUNT__
-        min_vault_shares: __EARN_DEPOSIT_AMOUNT__
+        input_token: "${ZONES_BENCH_PATHUSD}"
+        fee_token: "${ZONES_BENCH_PATHUSD}"
+        amount: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
+        min_vault_assets: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
+        min_vault_shares: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
         action_id: { var: earn_deposit_action_id }
         fallback_recipient: { var: account_a.address }
         refund_recipient: { var: account_a.address }
@@ -98,11 +98,11 @@ scenario:
         sender: { var: account_b.ref }
         sender_address: { var: account_b.address }
         recipient: { var: account_a.address }
-        output_token: "__PATHUSD__"
-        fee_token: "__PATHUSD__"
+        output_token: "${ZONES_BENCH_PATHUSD}"
+        fee_token: "${ZONES_BENCH_PATHUSD}"
         amount: { var: earn_deposit.zone_return.processed.args.amount }
-        min_vault_assets: __EARN_REDEEM_AMOUNT__
-        min_output_amount: __EARN_REDEEM_AMOUNT__
+        min_vault_assets: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
+        min_output_amount: ${ZONES_BENCH_WITHDRAWAL_AMOUNT}
         action_id: { var: earn_redeem_action_id }
         fallback_recipient: { var: account_b.address }
         refund_recipient: { var: account_b.address }

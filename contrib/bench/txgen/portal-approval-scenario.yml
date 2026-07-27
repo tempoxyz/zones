@@ -1,0 +1,30 @@
+version: 1
+
+chains:
+  l1:
+    network: tempo
+    rpc_url: "${L1_RPC_URL}"
+    query_rpc_url: "${ZONES_BENCH_L1_QUERY_RPC_URL}"
+    chain_id: ${ZONES_BENCH_EXPECTED_L1_CHAIN_ID}
+    workload: ./deposit.yml
+
+scenario:
+  name: zones-portal-approval-setup
+  execution: dag
+  timeout: 2m
+
+  bindings:
+    account:
+      account:
+        pool: users
+        select: lease
+
+  steps:
+    - id: approval
+      submit:
+        chain: l1
+        template: portal_approval
+        with:
+          from: { var: account.ref }
+        await: receipt
+      save: approval
