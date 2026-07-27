@@ -16,11 +16,7 @@ use tempo_contracts::precompiles::{IRolesAuth, IStablecoinDEX, ITIP20, ITIP20Fac
 use tempo_precompiles::{STABLECOIN_DEX_ADDRESS, TIP20_FACTORY_ADDRESS};
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role as PortalRole};
 
-use crate::{
-    create_zone::read_private_address_file,
-    earn_fixture_lock::{earn_fixture_revision, verify_earn_fixture_lock},
-    zone_utils::check,
-};
+use crate::{create_zone::read_private_address_file, zone_utils::check};
 
 alloy::sol! {
     #[sol(rpc)]
@@ -81,16 +77,13 @@ alloy::sol! {
     }
 
     #[sol(rpc)]
-    interface FixtureEarnVaultRoutes {
-        function setDepositSwapOverride(address inputToken, address swapAdapter) external;
-        function setRedeemSwapOverride(address outputToken, address swapAdapter) external;
-    }
-
-    #[sol(rpc)]
     interface BridgeTIP20Controller {
         function initialize(address admin) external;
+        function MINT_RATE_LIMIT_SETTER_ROLE() external view returns (bytes32);
         function UNWRAPPER_ROLE() external view returns (bytes32);
         function BRIDGE_ECOSYSTEM_CONTRACT_ROLE() external view returns (bytes32);
+        function setTxnMintLimit(address stablecoinContract, uint256 mintTxnLimit) external;
+        function getStablecoinTxnMintLimit(address stablecoinContract) external view returns (uint256);
         function mintBridgeEcosystem(address stablecoinContract, address to, uint256 amount) external;
         function getReserveStore(address stablecoinContract) external view returns (address);
     }
@@ -130,20 +123,25 @@ alloy::sol! {
             address authRegistry_,
             uint64 allowedCallerPolicyId_
         );
+
+        function getTransactionLimit() external view returns (uint256);
     }
 
-    contract FixtureBridgeDirectSwapAdapter {
-        constructor(address directSwap_, address tokenA_, address tokenB_);
+    contract FixtureSingleZoneEarnRouter {
+        constructor(uint32 allowedZoneId_, address earnVault_, address privateAsset_);
     }
 
-    contract FixtureMinimalDirectSwapAdapter {
+    contract FixtureSingleZoneBridgeEarnRouter {
         constructor(
-            address earnRouter_,
-            address tokenAuthority_,
-            address reserveToken_,
-            address tokenA_,
-            address tokenB_
+            uint32 allowedZoneId_,
+            address earnVault_,
+            address privateAsset_,
+            address directSwap_
         );
+    }
+
+    contract FixtureSingleZoneMinimalEarnRouter {
+        constructor(uint32 allowedZoneId_, address earnVault_, address privateAsset_, address tokenAuthority_);
     }
 
     contract FixtureEarnFactoryConstructor {
@@ -166,8 +164,8 @@ const STABLECOIN_DEX_LIQUIDITY_TICK: i16 = 0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum SwapMechanism {
-    DirectSwap,
     #[default]
+    DirectSwap,
     Simple,
     StablecoinDex,
 }
@@ -200,9 +198,17 @@ pub(crate) struct DeployNeobankFixtures {
     #[arg(long, env = "ZONES_BENCH_PATHUSD")]
     pathusd: Address,
 
-    /// Directory containing Foundry artifacts for the copied Earn fixtures and bridge wallet.
+    /// Native TIP-20 used as the private asset for this benchmark preset.
+    #[arg(long, env = "ZONES_BENCH_PRIVATE_ASSET")]
+    private_asset: Address,
+
+    /// Directory containing Foundry artifacts from the external Earn checkout and local fixtures.
     #[arg(long, default_value = "specs/ref-impls/out")]
     specs_out: PathBuf,
+
+    /// Exact revision of the external Earn checkout used to build the Foundry artifacts.
+    #[arg(long, env = "ZONES_BENCH_EARN_REVISION")]
+    earn_revision: String,
 
     /// Non-secret fixture metadata written for rendering the runtime scenario.
     #[arg(long)]
@@ -221,7 +227,7 @@ pub(crate) struct DeployNeobankFixtures {
         long,
         env = "ZONES_BENCH_SWAP_MECHANISM",
         value_enum,
-        default_value_t = SwapMechanism::Simple
+        default_value_t = SwapMechanism::DirectSwap
     )]
     swap_mechanism: SwapMechanism,
 }
@@ -234,6 +240,7 @@ struct FixtureMetadata {
     zone_id: u32,
     dlusd: String,
     pathusd: String,
+    private_asset: String,
     earn_token: String,
     earn_share: String,
     swap_mechanism: SwapMechanism,
@@ -250,7 +257,7 @@ struct FixtureMetadata {
     reserve_ledger: Option<String>,
     liquidity: u128,
     liquidity_tick: i16,
-    earn_fixture_revision: &'static str,
+    earn_fixture_revision: String,
     vault: String,
     engine: String,
     earn_factory: String,
@@ -279,8 +286,12 @@ struct SwapSetup {
 
 impl DeployNeobankFixtures {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        verify_earn_fixture_lock()?;
+        validate_earn_revision(&self.earn_revision)?;
         validate_liquidity(self.swap_mechanism, self.liquidity)?;
+        ensure!(
+            self.private_asset == self.dlusd || self.private_asset == self.pathusd,
+            "--private-asset must match either --dlusd or --pathusd"
+        );
         let deployer = signer_from_env("FIXTURE_DEPLOYER_KEY")?;
         let deployer_address = deployer.address();
         let portal_admin = signer_from_env("PORTAL_ADMIN_KEY")?;
@@ -342,13 +353,7 @@ impl DeployNeobankFixtures {
             "ZonePortal gateway enforcement must remain disabled until fixture roles are configured"
         );
 
-        let earn_router = deploy(
-            &deployer_provider,
-            load_bytecode(&self.specs_out, "EarnRouter.sol/EarnRouter")?,
-            "EarnRouter",
-        )
-        .await?;
-        let swap_setup = match self.swap_mechanism {
+        let mut swap_setup = match self.swap_mechanism {
             SwapMechanism::DirectSwap => {
                 configure_direct_swap(
                     &deployer_provider,
@@ -364,7 +369,6 @@ impl DeployNeobankFixtures {
                 configure_simple_swap(
                     &deployer_provider,
                     &self.specs_out,
-                    earn_router,
                     deployer_address,
                     self.dlusd,
                     self.pathusd,
@@ -488,6 +492,108 @@ impl DeployNeobankFixtures {
             .await
             .wrap_err("failed waiting for canonical ERC4626 engine initialization")?;
         check(&receipt, "initialize canonical ERC4626 engine")?;
+
+        let earn_router = if self.private_asset == self.pathusd {
+            deploy(
+                &deployer_provider,
+                with_constructor(
+                    load_bytecode(
+                        &self.specs_out,
+                        "SingleZoneEarnRouter.sol/SingleZoneEarnRouter",
+                    )?,
+                    FixtureSingleZoneEarnRouter::constructorCall {
+                        allowedZoneId_: zone_id,
+                        earnVault_: earn_vault,
+                        privateAsset_: self.private_asset,
+                    }
+                    .abi_encode(),
+                ),
+                "SingleZoneEarnRouter",
+            )
+            .await?
+        } else {
+            match self.swap_mechanism {
+                SwapMechanism::DirectSwap => {
+                    let direct_swap = swap_setup.direct_swap.ok_or_else(|| {
+                        eyre!("DirectSwap setup did not return a DirectSwap address")
+                    })?;
+                    deploy(
+                        &deployer_provider,
+                        with_constructor(
+                            load_bytecode(
+                                &self.specs_out,
+                                "SingleZoneBridgeEarnRouter.sol/SingleZoneBridgeEarnRouter",
+                            )?,
+                            FixtureSingleZoneBridgeEarnRouter::constructorCall {
+                                allowedZoneId_: zone_id,
+                                earnVault_: earn_vault,
+                                privateAsset_: self.dlusd,
+                                directSwap_: direct_swap,
+                            }
+                            .abi_encode(),
+                        ),
+                        "SingleZoneBridgeEarnRouter",
+                    )
+                    .await?
+                }
+                SwapMechanism::Simple => {
+                    let controller = swap_setup.tip20_controller.ok_or_else(|| {
+                        eyre!("minimal swap setup did not return a token authority")
+                    })?;
+                    let router = deploy(
+                        &deployer_provider,
+                        with_constructor(
+                            load_bytecode(
+                                &self.specs_out,
+                                "SingleZoneMinimalEarnRouter.sol/SingleZoneMinimalEarnRouter",
+                            )?,
+                            FixtureSingleZoneMinimalEarnRouter::constructorCall {
+                                allowedZoneId_: zone_id,
+                                earnVault_: earn_vault,
+                                privateAsset_: self.dlusd,
+                                tokenAuthority_: controller,
+                            }
+                            .abi_encode(),
+                        ),
+                        "SingleZoneMinimalEarnRouter",
+                    )
+                    .await?;
+                    grant_controller_unwrapper(
+                        &deployer_provider,
+                        controller,
+                        router,
+                        self.pathusd,
+                    )
+                    .await?;
+                    router
+                }
+                SwapMechanism::StablecoinDex => {
+                    deploy(
+                        &deployer_provider,
+                        with_constructor(
+                            load_bytecode(
+                                &self.specs_out,
+                                "SingleZoneEarnRouter.sol/SingleZoneEarnRouter",
+                            )?,
+                            FixtureSingleZoneEarnRouter::constructorCall {
+                                allowedZoneId_: zone_id,
+                                earnVault_: earn_vault,
+                                privateAsset_: self.dlusd,
+                            }
+                            .abi_encode(),
+                        ),
+                        "SingleZoneEarnRouter",
+                    )
+                    .await?
+                }
+            }
+        };
+        if self.private_asset == self.dlusd && self.swap_mechanism != SwapMechanism::StablecoinDex {
+            swap_setup.route_swapper = Some(earn_router);
+            swap_setup.simple_swap =
+                (self.swap_mechanism == SwapMechanism::Simple).then_some(earn_router);
+        }
+
         let contribution_controller = deploy(
             &deployer_provider,
             with_constructor(
@@ -515,30 +621,6 @@ impl DeployNeobankFixtures {
         .await?;
         let role_assignments =
             portal_role_assignments(&allowed_accounts, bridge_wallet, earn_router, messenger)?;
-
-        if let Some(route_swapper) = swap_setup.route_swapper {
-            let earn_vault_routes = FixtureEarnVaultRoutes::new(earn_vault, &deployer_provider);
-            let receipt = earn_vault_routes
-                .setDepositSwapOverride(self.dlusd, route_swapper)
-                .fee_token(self.pathusd)
-                .send()
-                .await
-                .wrap_err("failed to configure DLUSD deposit route")?
-                .get_receipt()
-                .await
-                .wrap_err("failed waiting to configure DLUSD deposit route")?;
-            check(&receipt, "configure DLUSD deposit route")?;
-            let receipt = earn_vault_routes
-                .setRedeemSwapOverride(self.dlusd, route_swapper)
-                .fee_token(self.pathusd)
-                .send()
-                .await
-                .wrap_err("failed to configure DLUSD redeem route")?
-                .get_receipt()
-                .await
-                .wrap_err("failed waiting to configure DLUSD redeem route")?;
-            check(&receipt, "configure DLUSD redeem route")?;
-        }
 
         if !admin_portal
             .isTokenEnabled(earn_share)
@@ -571,6 +653,7 @@ impl DeployNeobankFixtures {
             zone_id,
             dlusd: self.dlusd.to_string(),
             pathusd: self.pathusd.to_string(),
+            private_asset: self.private_asset.to_string(),
             earn_token: earn_share.to_string(),
             earn_share: earn_share.to_string(),
             swap_mechanism: self.swap_mechanism,
@@ -589,7 +672,7 @@ impl DeployNeobankFixtures {
             reserve_ledger: swap_setup.reserve_ledger.map(|address| address.to_string()),
             liquidity: self.liquidity,
             liquidity_tick: STABLECOIN_DEX_LIQUIDITY_TICK,
-            earn_fixture_revision: earn_fixture_revision()?,
+            earn_fixture_revision: self.earn_revision.clone(),
             vault: vault.to_string(),
             engine: engine.to_string(),
             earn_factory: earn_factory.to_string(),
@@ -768,10 +851,18 @@ fn validate_liquidity(mechanism: SwapMechanism, liquidity: u128) -> eyre::Result
     }
     if matches!(mechanism, SwapMechanism::DirectSwap | SwapMechanism::Simple) {
         ensure!(
-            liquidity <= DIRECT_SWAP_ABSOLUTE_MAX,
-            "--liquidity exceeds the Bridge controller absolute mint limit of {DIRECT_SWAP_ABSOLUTE_MAX}"
+            liquidity < DIRECT_SWAP_ABSOLUTE_MAX,
+            "--liquidity must be below the Bridge controller absolute mint limit of {DIRECT_SWAP_ABSOLUTE_MAX}"
         );
     }
+    Ok(())
+}
+
+fn validate_earn_revision(revision: &str) -> eyre::Result<()> {
+    ensure!(
+        revision.len() == 40 && revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "ZONES_BENCH_EARN_REVISION must be the exact 40-character commit SHA of the external Earn checkout"
+    );
     Ok(())
 }
 
@@ -881,6 +972,15 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
             deployer,
             "grant Bridge deployer ecosystem role",
         ),
+        (
+            controller_contract
+                .MINT_RATE_LIMIT_SETTER_ROLE()
+                .call()
+                .await
+                .wrap_err("failed querying Bridge controller limit setter role")?,
+            deployer,
+            "grant Bridge deployer limit setter role",
+        ),
     ] {
         let receipt = IRolesAuth::new(controller, provider)
             .grantRole(role, account)
@@ -924,11 +1024,24 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed waiting to configure Bridge DirectSwap handler")?;
     check(&receipt, "configure Bridge DirectSwap handler")?;
-    let route_swapper =
-        deploy_bridge_swap_adapter(provider, specs_out, direct_swap, dlusd, pathusd).await?;
     let reserve_capacity =
         Uint::<256, 4>::from_limbs([liquidity as u64, (liquidity >> 64) as u64, 0, 0]);
     for (token, label) in [(dlusd, "DLUSD"), (pathusd, "pathUSD")] {
+        let receipt = controller_contract
+            .setTxnMintLimit(token, reserve_capacity)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed setting DirectSwap {label} transaction limit"))?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| {
+                format!("failed waiting to set DirectSwap {label} transaction limit")
+            })?;
+        check(
+            &receipt,
+            &format!("set DirectSwap {label} transaction limit"),
+        )?;
         let receipt = controller_contract
             .mintBridgeEcosystem(token, deployer, reserve_capacity)
             .fee_token(pathusd)
@@ -951,7 +1064,7 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
     }
 
     Ok(SwapSetup {
-        route_swapper: Some(route_swapper),
+        route_swapper: None,
         direct_swap: Some(direct_swap),
         simple_swap: None,
         tip20_controller: Some(controller),
@@ -964,7 +1077,6 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
 async fn configure_simple_swap<P: Provider<TempoNetwork>>(
     provider: &P,
     specs_out: &std::path::Path,
-    earn_router: Address,
     deployer: Address,
     dlusd: Address,
     pathusd: Address,
@@ -1026,35 +1138,15 @@ async fn configure_simple_swap<P: Provider<TempoNetwork>>(
         )?;
     }
 
-    let minimal_adapter = deploy(
-        provider,
-        with_constructor(
-            load_bytecode(
-                specs_out,
-                "MinimalDirectSwapAdapter.sol/MinimalDirectSwapAdapter",
-            )?,
-            FixtureMinimalDirectSwapAdapter::constructorCall {
-                earnRouter_: earn_router,
-                tokenAuthority_: controller,
-                reserveToken_: reserve_ledger,
-                tokenA_: dlusd,
-                tokenB_: pathusd,
-            }
-            .abi_encode(),
-        ),
-        "MinimalDirectSwapAdapter",
-    )
-    .await?;
     let controller_contract = BridgeTIP20Controller::new(controller, provider);
-    for (role, account, label) in [
+    for (role, label) in [
         (
             controller_contract
-                .UNWRAPPER_ROLE()
+                .MINT_RATE_LIMIT_SETTER_ROLE()
                 .call()
                 .await
-                .wrap_err("failed querying Bridge controller unwrapper role")?,
-            minimal_adapter,
-            "grant MinimalDirectSwapAdapter unwrapper role",
+                .wrap_err("failed querying Bridge controller limit setter role")?,
+            "grant Bridge deployer limit setter role",
         ),
         (
             controller_contract
@@ -1062,12 +1154,11 @@ async fn configure_simple_swap<P: Provider<TempoNetwork>>(
                 .call()
                 .await
                 .wrap_err("failed querying Bridge controller ecosystem role")?,
-            deployer,
             "grant Bridge deployer ecosystem role",
         ),
     ] {
         let receipt = IRolesAuth::new(controller, provider)
-            .grantRole(role, account)
+            .grantRole(role, deployer)
             .fee_token(pathusd)
             .send()
             .await
@@ -1079,6 +1170,16 @@ async fn configure_simple_swap<P: Provider<TempoNetwork>>(
     }
     let reserve_capacity = Uint::<256, 4>::from(liquidity);
     for (token, label) in [(dlusd, "DLUSD"), (pathusd, "pathUSD")] {
+        let receipt = controller_contract
+            .setTxnMintLimit(token, reserve_capacity)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed setting minimal {label} transaction limit"))?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| format!("failed waiting to set minimal {label} transaction limit"))?;
+        check(&receipt, &format!("set minimal {label} transaction limit"))?;
         let receipt = controller_contract
             .mintBridgeEcosystem(token, deployer, reserve_capacity)
             .fee_token(pathusd)
@@ -1101,38 +1202,33 @@ async fn configure_simple_swap<P: Provider<TempoNetwork>>(
     }
 
     Ok(SwapSetup {
-        route_swapper: Some(minimal_adapter),
-        simple_swap: Some(minimal_adapter),
         tip20_controller: Some(controller),
         reserve_ledger: Some(reserve_ledger),
         ..SwapSetup::default()
     })
 }
 
-async fn deploy_bridge_swap_adapter<P: Provider<TempoNetwork>>(
+async fn grant_controller_unwrapper<P: Provider<TempoNetwork>>(
     provider: &P,
-    specs_out: &std::path::Path,
-    direct_swap: Address,
-    dlusd: Address,
+    controller: Address,
+    router: Address,
     pathusd: Address,
-) -> eyre::Result<Address> {
-    deploy(
-        provider,
-        with_constructor(
-            load_bytecode(
-                specs_out,
-                "BridgeDirectSwapAdapter.sol/BridgeDirectSwapAdapter",
-            )?,
-            FixtureBridgeDirectSwapAdapter::constructorCall {
-                directSwap_: direct_swap,
-                tokenA_: dlusd,
-                tokenB_: pathusd,
-            }
-            .abi_encode(),
-        ),
-        "BridgeDirectSwapAdapter",
-    )
-    .await
+) -> eyre::Result<()> {
+    let role = BridgeTIP20Controller::new(controller, provider)
+        .UNWRAPPER_ROLE()
+        .call()
+        .await
+        .wrap_err("failed querying Bridge controller unwrapper role")?;
+    let receipt = IRolesAuth::new(controller, provider)
+        .grantRole(role, router)
+        .fee_token(pathusd)
+        .send()
+        .await
+        .wrap_err("failed granting SingleZoneMinimalEarnRouter unwrapper role")?
+        .get_receipt()
+        .await
+        .wrap_err("failed waiting to grant SingleZoneMinimalEarnRouter unwrapper role")?;
+    check(&receipt, "grant SingleZoneMinimalEarnRouter unwrapper role")
 }
 
 async fn configure_stablecoin_dex<P: Provider<TempoNetwork>>(
@@ -1420,16 +1516,6 @@ mod tests {
             .collect()
     }
 
-    fn function_io_shapes(abi: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
-        function_shapes(abi, name)
-            .into_iter()
-            .map(|mut shape| {
-                shape.as_object_mut().unwrap().remove("stateMutability");
-                shape
-            })
-            .collect()
-    }
-
     fn event_shapes(abi: &serde_json::Value, name: &str) -> Vec<serde_json::Value> {
         abi.as_array()
             .unwrap()
@@ -1453,7 +1539,7 @@ mod tests {
             .collect()
     }
 
-    fn required_args() -> [&'static str; 13] {
+    fn required_args() -> [&'static str; 17] {
         [
             "deploy-neobank-fixtures",
             "--l1-rpc-url",
@@ -1464,6 +1550,10 @@ mod tests {
             "0x20c0000000000000000000000000000000000001",
             "--pathusd",
             "0x20c0000000000000000000000000000000000000",
+            "--private-asset",
+            "0x20c0000000000000000000000000000000000001",
+            "--earn-revision",
+            "8bd48a68617713ec5b5828fffbde9c0b8185946e",
             "--allowed-accounts-file",
             "/tmp/zones-benchmark-allowed-accounts",
             "--output",
@@ -1486,7 +1576,7 @@ mod tests {
     fn fixture_deployment_uses_native_tip20_addresses() {
         let command = DeployNeobankFixtures::try_parse_from(required_args()).unwrap();
         assert_eq!(command.liquidity, 10_000_000_000);
-        assert_eq!(command.swap_mechanism, SwapMechanism::Simple);
+        assert_eq!(command.swap_mechanism, SwapMechanism::DirectSwap);
         assert_eq!(
             command.dlusd.to_string(),
             "0x20C0000000000000000000000000000000000001"
@@ -1548,8 +1638,10 @@ mod tests {
 
     #[test]
     fn controller_backed_swap_liquidity_respects_the_pinned_cap() {
-        validate_liquidity(SwapMechanism::DirectSwap, DIRECT_SWAP_ABSOLUTE_MAX).unwrap();
-        validate_liquidity(SwapMechanism::Simple, DIRECT_SWAP_ABSOLUTE_MAX).unwrap();
+        validate_liquidity(SwapMechanism::DirectSwap, DIRECT_SWAP_ABSOLUTE_MAX - 1).unwrap();
+        validate_liquidity(SwapMechanism::Simple, DIRECT_SWAP_ABSOLUTE_MAX - 1).unwrap();
+        assert!(validate_liquidity(SwapMechanism::DirectSwap, DIRECT_SWAP_ABSOLUTE_MAX).is_err());
+        assert!(validate_liquidity(SwapMechanism::Simple, DIRECT_SWAP_ABSOLUTE_MAX).is_err());
         assert!(
             validate_liquidity(SwapMechanism::DirectSwap, DIRECT_SWAP_ABSOLUTE_MAX + 1).is_err()
         );
@@ -1570,6 +1662,7 @@ mod tests {
             zone_id: 1,
             dlusd: address.clone(),
             pathusd: address.clone(),
+            private_asset: address.clone(),
             earn_token: address.clone(),
             earn_share: address.clone(),
             swap_mechanism: SwapMechanism::StablecoinDex,
@@ -1586,7 +1679,7 @@ mod tests {
             reserve_ledger: None,
             liquidity: 10_000_000_000,
             liquidity_tick: 0,
-            earn_fixture_revision: earn_fixture_revision().unwrap(),
+            earn_fixture_revision: "8bd48a68617713ec5b5828fffbde9c0b8185946e".to_owned(),
             vault: address.clone(),
             engine: address.clone(),
             earn_factory: address.clone(),
@@ -1616,11 +1709,29 @@ mod tests {
     }
 
     #[test]
-    fn fixture_deployment_uses_checked_in_earn_fixture_artifacts() {
+    fn fixture_deployment_uses_external_earn_artifacts() {
         let out = PathBuf::from("specs/ref-impls/out");
         assert_eq!(
-            artifact_path(&out, "EarnRouter.sol/EarnRouter"),
-            PathBuf::from("specs/ref-impls/out/EarnRouter.sol/EarnRouter.json")
+            artifact_path(&out, "SingleZoneEarnRouter.sol/SingleZoneEarnRouter"),
+            PathBuf::from("specs/ref-impls/out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json")
+        );
+        assert_eq!(
+            artifact_path(
+                &out,
+                "SingleZoneBridgeEarnRouter.sol/SingleZoneBridgeEarnRouter"
+            ),
+            PathBuf::from(
+                "specs/ref-impls/out/SingleZoneBridgeEarnRouter.sol/SingleZoneBridgeEarnRouter.json"
+            )
+        );
+        assert_eq!(
+            artifact_path(
+                &out,
+                "SingleZoneMinimalEarnRouter.sol/SingleZoneMinimalEarnRouter"
+            ),
+            PathBuf::from(
+                "specs/ref-impls/out/SingleZoneMinimalEarnRouter.sol/SingleZoneMinimalEarnRouter.json"
+            )
         );
         assert_eq!(
             artifact_path(&out, "EarnVault.sol/EarnVault"),
@@ -1647,25 +1758,10 @@ mod tests {
             artifact_path(&out, "DirectSwapV2.sol/DirectSwapV2"),
             PathBuf::from("specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json")
         );
-        assert_eq!(
-            artifact_path(&out, "BridgeDirectSwapAdapter.sol/BridgeDirectSwapAdapter"),
-            PathBuf::from(
-                "specs/ref-impls/out/BridgeDirectSwapAdapter.sol/BridgeDirectSwapAdapter.json"
-            )
-        );
-        assert_eq!(
-            artifact_path(
-                &out,
-                "MinimalDirectSwapAdapter.sol/MinimalDirectSwapAdapter"
-            ),
-            PathBuf::from(
-                "specs/ref-impls/out/MinimalDirectSwapAdapter.sol/MinimalDirectSwapAdapter.json"
-            )
-        );
     }
 
     #[test]
-    fn deployment_bindings_match_the_pinned_earn_selectors() {
+    fn deployment_bindings_match_external_earn_selectors() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let factory: serde_json::Value = serde_json::from_slice(
             &fs::read(root.join("specs/ref-impls/out/EarnFactory.sol/EarnFactory.json")).unwrap(),
@@ -1692,87 +1788,10 @@ mod tests {
                 .as_str()
                 .unwrap()
         );
-
-        let earn_vault: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join("specs/ref-impls/out/EarnVault.sol/EarnVault.json")).unwrap(),
-        )
-        .unwrap();
-        for (signature, selector) in [
-            (
-                FixtureEarnVaultRoutes::setDepositSwapOverrideCall::SIGNATURE,
-                FixtureEarnVaultRoutes::setDepositSwapOverrideCall::SELECTOR,
-            ),
-            (
-                FixtureEarnVaultRoutes::setRedeemSwapOverrideCall::SIGNATURE,
-                FixtureEarnVaultRoutes::setRedeemSwapOverrideCall::SELECTOR,
-            ),
-        ] {
-            assert_eq!(
-                alloy::primitives::hex::encode(selector),
-                earn_vault["methodIdentifiers"][signature].as_str().unwrap()
-            );
-        }
     }
 
     #[test]
-    fn vendored_earn_router_decodes_the_canonical_zone_info() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let canonical: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join("specs/ref-impls/out/IZone.sol/IZoneFactory.json")).unwrap(),
-        )
-        .unwrap();
-        let earn: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join("specs/ref-impls/out/tempo/IZone.sol/IZoneFactory.json")).unwrap(),
-        )
-        .unwrap();
-        let zone_info_shape = |artifact: &serde_json::Value| {
-            artifact["abi"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|entry| entry["type"] == "function" && entry["name"] == "zones")
-                .unwrap()["outputs"][0]["components"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|component| {
-                    serde_json::json!({
-                        "name": component["name"],
-                        "type": component["type"],
-                    })
-                })
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(
-            zone_info_shape(&earn),
-            zone_info_shape(&canonical),
-            "EarnRouter ZoneInfo must match the canonical Zones factory response"
-        );
-    }
-
-    #[test]
-    fn minimal_swap_adapter_matches_the_pinned_swap_interface() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        let interface: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join("specs/ref-impls/out/ISwapAdapter.sol/ISwapAdapter.json")).unwrap(),
-        )
-        .unwrap();
-        let adapter: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join(
-                "specs/ref-impls/out/MinimalDirectSwapAdapter.sol/MinimalDirectSwapAdapter.json",
-            ))
-            .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            function_io_shapes(&adapter["abi"], "swapExactIn"),
-            function_io_shapes(&interface["abi"], "swapExactIn"),
-            "MinimalDirectSwapAdapter diverges from ISwapAdapter"
-        );
-    }
-
-    #[test]
-    fn benchmark_abis_match_pinned_earn_interfaces() {
+    fn benchmark_abis_match_external_earn_interfaces() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         for (minimal, artifact, functions) in [
             (
@@ -1794,7 +1813,7 @@ mod tests {
                 assert_eq!(
                     function_shapes(&minimal, function),
                     function_shapes(&artifact["abi"], function),
-                    "minimal {function} ABI diverges from its pinned artifact"
+                    "minimal {function} ABI diverges from the external Earn artifact"
                 );
             }
             if minimal
@@ -1806,7 +1825,7 @@ mod tests {
                 assert_eq!(
                     event_shapes(&minimal, "Funded"),
                     event_shapes(&artifact["abi"], "Funded"),
-                    "minimal Funded ABI diverges from its pinned artifact"
+                    "minimal Funded ABI diverges from the external Earn artifact"
                 );
             }
         }
@@ -1815,14 +1834,17 @@ mod tests {
         )
         .unwrap();
         let artifact: serde_json::Value = serde_json::from_slice(
-            &fs::read(root.join("specs/ref-impls/out/EarnRouter.sol/EarnRouter.json")).unwrap(),
+            &fs::read(
+                root.join("specs/ref-impls/out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json"),
+            )
+            .unwrap(),
         )
         .unwrap();
         for event in ["EarnDeposit", "EarnRedeem"] {
             assert_eq!(
                 event_shapes(&minimal, event),
                 event_shapes(&artifact["abi"], event),
-                "minimal {event} ABI diverges from its pinned artifact"
+                "minimal {event} ABI diverges from the external Earn artifact"
             );
         }
     }

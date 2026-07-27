@@ -74,7 +74,7 @@ on:
         description: L1 swap implementation used by the neobank fixture.
         type: choice
         required: true
-        default: simple
+        default: direct-swap
         options:
           - direct-swap
           - simple
@@ -268,7 +268,7 @@ jobs:
           INPUT_BOOTSTRAP_DEPOSIT_AMOUNT: ${{ inputs.bootstrap-deposit-amount || '10000000' }}
           INPUT_ACTIVITY_AMOUNT: ${{ inputs.activity-amount || '1' }}
           INPUT_WITHDRAWAL_AMOUNT: ${{ inputs.withdrawal-amount || '1000000' }}
-          INPUT_SWAP_MECHANISM: ${{ inputs.swap-mechanism || 'simple' }}
+          INPUT_SWAP_MECHANISM: ${{ inputs.swap-mechanism || 'direct-swap' }}
           INPUT_RECIPIENT_MODE: ${{ inputs.recipient-mode || 'existing' }}
           INPUT_CALLBACK_GAS_LIMIT: ${{ inputs.callback-gas-limit || '10000000' }}
           INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
@@ -406,14 +406,6 @@ jobs:
             direct-swap|simple|stablecoin-dex) ;;
             *) echo "::error::swap-mechanism must be direct-swap, simple, or stablecoin-dex"; exit 1 ;;
           esac
-          if [ "$INPUT_SWAP_MECHANISM" = direct-swap ]; then
-            case "$neobank_preset" in
-              full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle|swapped-redemption)
-                echo "::error::direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
-                exit 1
-                ;;
-            esac
-          fi
           case "$INPUT_RECIPIENT_MODE" in
             existing|random) ;;
             *) echo "::error::recipient-mode must be existing or random"; exit 1 ;;
@@ -496,8 +488,8 @@ jobs:
             exit 1
           fi
           if [ "$phase" = neobank-e2e ]; then
-            if [ "$INPUT_SWAP_MECHANISM" = direct-swap ] && (( swap_liquidity > 1000000000000000 )); then
-              echo "::error::direct-swap liquidity cannot exceed the Bridge controller absolute mint limit of 1000000000000000"
+            if [ "$INPUT_SWAP_MECHANISM" = direct-swap ] && (( swap_liquidity >= 1000000000000000 )); then
+              echo "::error::direct-swap liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
               exit 1
             fi
             if [ "$INPUT_SWAP_MECHANISM" = stablecoin-dex ] && (( swap_liquidity < 100000000 )); then
@@ -640,6 +632,17 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Check out Earn contracts
+        if: needs.authorize.outputs.phase == 'neobank-e2e'
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: tempoxyz/earn
+          ref: main
+          path: earn
+          ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
+          persist-credentials: false
+          submodules: true
+
       - name: Prepare persistent topology control path
         env:
           RUNNER_TOOL_CACHE_DIR: ${{ runner.tool_cache }}
@@ -688,6 +691,31 @@ jobs:
           toolchain: stable
 
       - uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          version: nightly
+
+      - name: Resolve Solidity cache key
+        if: needs.authorize.outputs.phase == 'neobank-e2e'
+        id: solidity-key
+        run: |
+          set -euo pipefail
+          earn_sha="$(git -C earn rev-parse HEAD)"
+          {
+            echo "forge-sha=$(forge --version | sed -n 's/^Commit SHA: //p')"
+            echo "specs-tree=$(git rev-parse HEAD:specs/ref-impls)"
+            echo "earn-sha=$earn_sha"
+          } >> "$GITHUB_OUTPUT"
+          echo "ZONES_BENCH_EARN_REVISION=$earn_sha" >> "$GITHUB_ENV"
+
+      - name: Restore Solidity artifacts
+        if: needs.authorize.outputs.phase == 'neobank-e2e'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            earn/cache
+            specs/ref-impls/cache
+            specs/ref-impls/out
+          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
       - name: Add file-backed mnemonic support to pinned Tempo xtask
         run: |
@@ -783,20 +811,36 @@ jobs:
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
           } >> "$GITHUB_ENV"
 
-      - name: Build pinned neobank fixture contracts
+      - name: Build neobank fixture contracts
         if: needs.authorize.outputs.phase == 'neobank-e2e'
         run: |
           set -euo pipefail
-          forge build --root specs/ref-impls
-          test -s specs/ref-impls/out/EarnRouter.sol/EarnRouter.json
+          forge build --root specs/ref-impls --no-lint
+          forge build \
+            --root earn \
+            --skip test \
+            --skip script \
+            --no-lint \
+            --out "$GITHUB_WORKSPACE/specs/ref-impls/out"
+          forge build \
+            --root earn \
+            --skip test \
+            --skip script \
+            --no-lint \
+            --out "$GITHUB_WORKSPACE/specs/ref-impls/out" \
+            vendor/bridge/auth-registry/AuthRegistry.sol \
+            vendor/bridge/direct-swaps/direct-swaps/DirectSwapV2.sol \
+            vendor/bridge/direct-swaps/token-handler/TIP20DirectSwapHandler.sol \
+            vendor/bridge/tip20-controller/TIP20Controller.sol
+          test -s specs/ref-impls/out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json
+          test -s specs/ref-impls/out/SingleZoneBridgeEarnRouter.sol/SingleZoneBridgeEarnRouter.json
+          test -s specs/ref-impls/out/SingleZoneMinimalEarnRouter.sol/SingleZoneMinimalEarnRouter.json
           test -s specs/ref-impls/out/EarnVault.sol/EarnVault.json
           test -s specs/ref-impls/out/EarnFees.sol/EarnFees.json
           test -s specs/ref-impls/out/EarnFactory.sol/EarnFactory.json
           test -s specs/ref-impls/out/EarnContributionController.sol/EarnContributionController.json
           test -s specs/ref-impls/out/ERC4626Engine.sol/ERC4626Engine.json
           test -s specs/ref-impls/out/Simple4626Vault.sol/Simple4626Vault.json
-          test -s specs/ref-impls/out/BridgeDirectSwapAdapter.sol/BridgeDirectSwapAdapter.json
-          test -s specs/ref-impls/out/MinimalDirectSwapAdapter.sol/MinimalDirectSwapAdapter.json
           test -s specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json
           test -s specs/ref-impls/out/TIP20Controller.sol/TIP20Controller.json
           test -s specs/ref-impls/out/TIP20DirectSwapHandler.sol/TIP20DirectSwapHandler.json
@@ -955,6 +999,9 @@ jobs:
             echo "- Zones revision: \`$ZONES_BENCH_ZONES_REF\`"
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
+            if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
+              echo "- Earn revision: \`$ZONES_BENCH_EARN_REVISION\`"
+            fi
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
             echo "- Withdrawal scheduler (batch gas / in-flight / Zone blocks / poll): \`$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS\` / \`$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES\` / \`$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS\` / \`${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS}s\`"
@@ -974,6 +1021,7 @@ jobs:
             --arg zonesRevision "$ZONES_BENCH_ZONES_REF" \
             --arg tempoRevision "$ZONES_BENCH_TEMPO_REF" \
             --arg txgenRevision "$ZONES_BENCH_TXGEN_REF" \
+            --arg earnRevision "${ZONES_BENCH_EARN_REVISION:-}" \
             --arg buildProfile "$ZONES_BENCH_BUILD_PROFILE" \
             --arg rustflags "$RUSTFLAGS" \
             --arg targetId "${ZONES_BENCH_TARGET_ID:-}" \
@@ -1017,6 +1065,7 @@ jobs:
               zonesRevision: $zonesRevision,
               tempoRevision: $tempoRevision,
               txgenRevision: $txgenRevision,
+              earnRevision: $earnRevision,
               buildProfile: $buildProfile,
               rustflags: $rustflags,
               targetId: $targetId,

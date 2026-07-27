@@ -412,14 +412,14 @@ verify_neobank_fixture_topology() {
     local expected_owner="$3"
     local expected_asset="$4"
     local expected_swap_mechanism="$5"
+    local expected_private_asset="$6"
     local field address code vault engine earn_factory earn_vault earn_fees earn_router
-    local contribution_controller earn_share dlusd pathusd bridge_wallet
+    local contribution_controller earn_share dlusd pathusd private_asset bridge_wallet zone_id
     local swap_mechanism route_swapper route_override stablecoin_dex
     local direct_swap simple_swap swap_adapter controller handler auth_registry reserve_ledger
-    local observed observed_asset observed_owner observed_engine observed_vault
+    local observed observed_asset observed_owner observed_engine observed_vault transaction_limit
     local observed_earn_vault observed_earn_share observed_earn_fees
     local earn_vault_implementation earn_fees_implementation
-    local zero_address="0x0000000000000000000000000000000000000000"
     local tip20_factory="0x20FC000000000000000000000000000000000000"
 
     vault="$(jq -er '.vault' "$metadata")"
@@ -433,6 +433,8 @@ verify_neobank_fixture_topology() {
     bridge_wallet="$(jq -er '.bridgeWallet' "$metadata")"
     dlusd="$(jq -er '.dlusd' "$metadata")"
     pathusd="$(jq -er '.pathusd' "$metadata")"
+    private_asset="$(jq -er '.privateAsset' "$metadata")"
+    zone_id="$(jq -er '.zoneId' "$metadata")"
     swap_mechanism="$(jq -er '.swapMechanism' "$metadata")"
     route_swapper="$(jq -r '.routeSwapper // empty' "$metadata")"
     route_override="$(jq -er \
@@ -441,6 +443,8 @@ verify_neobank_fixture_topology() {
     stablecoin_dex="$(jq -er '.stablecoinDex' "$metadata")"
     [[ "$swap_mechanism" == "$expected_swap_mechanism" ]] \
         || die "fixture swap mechanism $swap_mechanism does not match requested $expected_swap_mechanism"
+    [[ "${private_asset,,}" == "${expected_private_asset,,}" ]] \
+        || die "fixture private asset does not match the preset Zone token"
 
     for field in \
         vault engine earn_factory earn_vault earn_fees earn_router \
@@ -513,88 +517,109 @@ verify_neobank_fixture_topology() {
         [[ "$code" != "0x" ]] || die "EarnFactory implementation has no code at $address"
     done
 
-    observed="$(cast call "$earn_vault" 'depositSwapOverride(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
-    if [[ "$route_override" == "true" ]]; then
-        [[ -n "$route_swapper" ]] || die "$swap_mechanism metadata is missing routeSwapper"
-        [[ "${observed,,}" == "${route_swapper,,}" ]] \
-            || die "DLUSD deposit route does not use the configured route swapper"
-    else
-        [[ -z "$route_swapper" ]] || die "$swap_mechanism metadata unexpectedly sets routeSwapper"
-        [[ "${observed,,}" == "${zero_address,,}" ]] \
-            || die "DLUSD deposit route unexpectedly overrides the default swapper"
-    fi
-    observed="$(cast call "$earn_vault" 'redeemSwapOverride(address)(address)' "$dlusd" --rpc-url "$l1_rpc" | awk '{print $1}')"
-    if [[ "$route_override" == "true" ]]; then
-        [[ "${observed,,}" == "${route_swapper,,}" ]] \
-            || die "DLUSD redeem route does not use the configured route swapper"
-    else
-        [[ "${observed,,}" == "${zero_address,,}" ]] \
-            || die "DLUSD redeem route unexpectedly overrides the default swapper"
-    fi
+    observed="$(cast call "$earn_router" 'earnVault()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${earn_vault,,}" ]] ||
+        die "single-Zone Earn router vault does not match fixture metadata"
+    observed="$(cast call "$earn_router" 'privateAsset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${private_asset,,}" ]] ||
+        die "single-Zone Earn router private asset does not match fixture metadata"
+    observed="$(cast call "$earn_router" 'vaultAsset()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${pathusd,,}" ]] ||
+        die "single-Zone Earn router vault asset does not match pathUSD"
+    observed="$(cast call "$earn_router" 'earnShare()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "${observed,,}" == "${earn_share,,}" ]] ||
+        die "single-Zone Earn router EarnShare does not match fixture metadata"
+    observed="$(cast call "$earn_router" 'allowedZoneId()(uint32)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+    [[ "$observed" == "$zone_id" ]] ||
+        die "single-Zone Earn router Zone ID does not match fixture metadata"
 
     case "$swap_mechanism" in
         direct-swap)
-            [[ "$route_override" == "true" ]] || die "direct-swap requires a DLUSD route override"
             direct_swap="$(jq -er '.directSwap' "$metadata")"
-            swap_adapter="$(jq -er '.swapAdapter' "$metadata")"
+            swap_adapter="$(jq -r '.swapAdapter // empty' "$metadata")"
             controller="$(jq -er '.tip20Controller' "$metadata")"
             handler="$(jq -er '.tip20Handler' "$metadata")"
             auth_registry="$(jq -er '.authRegistry' "$metadata")"
             reserve_ledger="$(jq -er '.reserveLedger' "$metadata")"
-            [[ "${swap_adapter,,}" == "${route_swapper,,}" ]] \
-                || die "DirectSwap routeSwapper and swapAdapter metadata differ"
-            for field in direct_swap swap_adapter controller handler auth_registry reserve_ledger; do
+            for field in direct_swap controller handler auth_registry reserve_ledger; do
                 address="${!field}"
                 code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
                 [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
             done
-            observed="$(cast call "$swap_adapter" 'directSwap()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${direct_swap,,}" ]] || die "Bridge swap adapter does not use DirectSwap"
-            observed="$(cast call "$swap_adapter" 'tokenA()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${dlusd,,}" ]] || die "Bridge swap adapter tokenA does not match DLUSD"
-            observed="$(cast call "$swap_adapter" 'tokenB()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${pathusd,,}" ]] || die "Bridge swap adapter tokenB does not match pathUSD"
             observed="$(cast call "$direct_swap" 'STABLECOIN_HANDLER_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "${observed,,}" == "${handler,,}" ]] || die "DirectSwap does not use the TIP20 handler"
             observed="$(cast call "$direct_swap" 'RESERVE_LEDGER_TOKEN_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "${observed,,}" == "${reserve_ledger,,}" ]] || die "DirectSwap does not use the Bridge reserve ledger"
             observed="$(cast call "$handler" 'CONTROLLER()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "${observed,,}" == "${controller,,}" ]] || die "TIP20 handler does not use the Bridge controller"
+            transaction_limit="$(cast call "$direct_swap" 'getTransactionLimit()(uint256)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "$transaction_limit" == "$(jq -er '.liquidity' "$metadata")" ]] ||
+                die "DirectSwap transaction limit does not match fixture liquidity"
+            for address in "$dlusd" "$pathusd"; do
+                observed="$(cast call "$controller" 'getStablecoinTxnMintLimit(address)(uint256)' \
+                    "$address" --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "$observed" == "$transaction_limit" ]] ||
+                    die "Bridge controller transaction limit does not match DirectSwap"
+            done
+            if [[ "${private_asset,,}" == "${dlusd,,}" ]]; then
+                [[ "$route_override" == "true" ]] ||
+                    die "DLUSD DirectSwap requires its immutable router route"
+                [[ "${swap_adapter,,}" == "${route_swapper,,}" ]] \
+                    || die "DirectSwap router metadata addresses differ"
+                [[ "${swap_adapter,,}" == "${earn_router,,}" ]] \
+                    || die "DirectSwap route is not the configured single-Zone Earn router"
+                observed="$(cast call "$earn_router" 'directSwap()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "${observed,,}" == "${direct_swap,,}" ]] ||
+                    die "single-Zone Bridge router does not use DirectSwap"
+            else
+                [[ "$route_override" == "false" && -z "$route_swapper" && -z "$swap_adapter" ]] ||
+                    die "pathUSD lifecycle must use the no-swap single-Zone Earn router"
+            fi
             ;;
         simple)
-            [[ "$route_override" == "true" ]] || die "simple swap requires a DLUSD route override"
-            simple_swap="$(jq -er '.simpleSwap' "$metadata")"
-            swap_adapter="$(jq -er '.swapAdapter' "$metadata")"
+            simple_swap="$(jq -r '.simpleSwap // empty' "$metadata")"
+            swap_adapter="$(jq -r '.swapAdapter // empty' "$metadata")"
             controller="$(jq -er '.tip20Controller' "$metadata")"
             reserve_ledger="$(jq -er '.reserveLedger' "$metadata")"
-            [[ "${swap_adapter,,}" == "${route_swapper,,}" ]] \
-                || die "simple routeSwapper and swapAdapter metadata differ"
-            for field in simple_swap swap_adapter controller reserve_ledger; do
+            for field in controller reserve_ledger; do
                 address="${!field}"
                 code="$(rpc "$l1_rpc" eth_getCode "[\"$address\",\"latest\"]")"
                 [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
             done
-            [[ "${simple_swap,,}" == "${swap_adapter,,}" ]] ||
-                die "minimal swap metadata addresses differ"
-            observed="$(cast call "$swap_adapter" 'earnRouter()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${earn_router,,}" ]] ||
-                die "MinimalDirectSwapAdapter EarnRouter does not match fixture metadata"
-            observed="$(cast call "$swap_adapter" 'tokenAuthority()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${controller,,}" ]] ||
-                die "MinimalDirectSwapAdapter token authority does not match fixture metadata"
-            observed="$(cast call "$swap_adapter" 'reserveToken()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${reserve_ledger,,}" ]] ||
-                die "MinimalDirectSwapAdapter reserve token does not match fixture metadata"
-            observed="$(cast call "$swap_adapter" 'tokenA()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${dlusd,,}" ]] ||
-                die "MinimalDirectSwapAdapter tokenA does not match DLUSD"
-            observed="$(cast call "$swap_adapter" 'tokenB()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${pathusd,,}" ]] ||
-                die "MinimalDirectSwapAdapter tokenB does not match pathUSD"
+            transaction_limit="$(jq -er '.liquidity' "$metadata")"
+            for address in "$dlusd" "$pathusd"; do
+                observed="$(cast call "$controller" 'getStablecoinTxnMintLimit(address)(uint256)' \
+                    "$address" --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "$observed" == "$transaction_limit" ]] ||
+                    die "minimal Bridge controller transaction limit does not match fixture liquidity"
+            done
+            if [[ "${private_asset,,}" == "${dlusd,,}" ]]; then
+                [[ "$route_override" == "true" ]] ||
+                    die "DLUSD simple swap requires its immutable router route"
+                [[ "${simple_swap,,}" == "${swap_adapter,,}" &&
+                    "${swap_adapter,,}" == "${route_swapper,,}" &&
+                    "${swap_adapter,,}" == "${earn_router,,}" ]] ||
+                    die "minimal router metadata addresses differ"
+                observed="$(cast call "$earn_router" 'tokenAuthority()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "${observed,,}" == "${controller,,}" ]] ||
+                    die "SingleZoneMinimalEarnRouter token authority does not match fixture metadata"
+                observed="$(cast call "$earn_router" 'reserveToken()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "${observed,,}" == "${reserve_ledger,,}" ]] ||
+                    die "SingleZoneMinimalEarnRouter reserve token does not match fixture metadata"
+                observed="$(cast call "$earn_router" 'transactionLimit()(uint256)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "$observed" == "$transaction_limit" ]] ||
+                    die "SingleZoneMinimalEarnRouter transaction limit does not match fixture liquidity"
+            else
+                [[ "$route_override" == "false" && -z "$route_swapper" &&
+                    -z "$simple_swap" && -z "$swap_adapter" ]] ||
+                    die "pathUSD lifecycle must use the no-swap single-Zone Earn router"
+            fi
             ;;
         stablecoin-dex)
             [[ "$route_override" == "false" ]] \
-                || die "stablecoin-dex must use EarnRouter's built-in swap path"
+                || die "stablecoin-dex must use the single-Zone router's built-in swap path"
+            [[ -z "$route_swapper" ]] ||
+                die "stablecoin-dex metadata unexpectedly sets routeSwapper"
             [[ "${stablecoin_dex,,}" == "0xdec0000000000000000000000000000000000000" ]] ||
                 die "stablecoin-dex metadata does not match EarnRouter's canonical precompile"
             ;;
@@ -657,7 +682,7 @@ provision_up() {
     local bloat_balance="${ZONES_BENCH_BLOAT_BALANCE:-18446744073709551615}"
     local rpc_timeout="${ZONES_BENCH_RPC_TIMEOUT_SECS:-300}"
     local zone_timeout="${ZONES_BENCH_ZONE_TIMEOUT_SECS:-300}"
-    local swap_mechanism="${ZONES_BENCH_SWAP_MECHANISM:-simple}"
+    local swap_mechanism="${ZONES_BENCH_SWAP_MECHANISM:-direct-swap}"
     local recipient_mode="${ZONES_BENCH_RECIPIENT_MODE:-existing}"
     local swap_liquidity="${ZONES_BENCH_SWAP_LIQUIDITY:-10000000000}"
     local count="${ZONES_BENCH_COUNT:-100}"
@@ -760,13 +785,6 @@ provision_up() {
         direct-swap|simple|stablecoin-dex) ;;
         *) die "ZONES_BENCH_SWAP_MECHANISM must be direct-swap, simple, or stablecoin-dex" ;;
     esac
-    if [[ "$swap_mechanism" == direct-swap ]]; then
-        case "$neobank_preset" in
-            full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle|swapped-redemption)
-                die "direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
-                ;;
-        esac
-    fi
     case "$recipient_mode" in
         existing|random) ;;
         *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
@@ -776,8 +794,8 @@ provision_up() {
     (( max_concurrent > 0 )) || die "ZONES_BENCH_MAX_CONCURRENT must be greater than zero"
     (( withdrawal_amount > 0 )) || die "ZONES_BENCH_WITHDRAWAL_AMOUNT must be greater than zero"
     if [[ "$profile" == neobank ]]; then
-        if [[ "$swap_mechanism" == direct-swap ]] && (( swap_liquidity > 1000000000000000 )); then
-            die "DirectSwap liquidity cannot exceed the Bridge controller absolute mint limit of 1000000000000000"
+        if [[ "$swap_mechanism" == direct-swap ]] && (( swap_liquidity >= 1000000000000000 )); then
+            die "DirectSwap liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
         fi
         if [[ "$swap_mechanism" == stablecoin-dex ]] && (( swap_liquidity < 100000000 )); then
             die "StablecoinDEX liquidity must be at least its 100000000 minimum order amount"
@@ -1054,6 +1072,8 @@ provision_up() {
                 --portal "$portal" \
                 --dlusd "$DLUSD" \
                 --pathusd "$PATH_USD" \
+                --private-asset "$zone_token" \
+                --earn-revision "${ZONES_BENCH_EARN_REVISION:?external Earn revision is required}" \
                 --swap-mechanism "$swap_mechanism" \
                 --liquidity "$swap_liquidity" \
                 --allowed-accounts-file "$neobank_allowed_accounts_file" \
@@ -1062,7 +1082,8 @@ provision_up() {
         provision_secret_files=()
         require_file "$fixture_metadata"
         verify_neobank_fixture_topology \
-            "$l1_a_rpc" "$fixture_metadata" "$owner_address" "$PATH_USD" "$swap_mechanism"
+            "$l1_a_rpc" "$fixture_metadata" "$owner_address" "$PATH_USD" \
+            "$swap_mechanism" "$zone_token"
         verify_neobank_token_topology \
             "$l1_a_rpc" "$portal" "$zone_token" "$(jq -er '.earnToken' "$fixture_metadata")"
         echo "configuring zero user bridge and withdrawal protocol fees"
@@ -1169,6 +1190,7 @@ provision_up() {
             ZONES_BENCH_NEOBANK_PRESET "$neobank_preset"
             ZONES_BENCH_DLUSD "$DLUSD"
             ZONES_BENCH_PATHUSD "$PATH_USD"
+            ZONES_BENCH_EARN_REVISION "$(jq -er '.earnFixtureRevision' "$fixture_metadata")"
             ZONES_BENCH_EARN_TOKEN "$(jq -er '.earnToken' "$fixture_metadata")"
             ZONES_BENCH_EARN_ROUTER "$(jq -er '.earnRouter' "$fixture_metadata")"
             ZONES_BENCH_EARN_VAULT "$(jq -er '.earnVault' "$fixture_metadata")"

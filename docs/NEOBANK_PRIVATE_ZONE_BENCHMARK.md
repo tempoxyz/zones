@@ -22,14 +22,11 @@ private EarnShare position outside measurement, then measure one composable
 EarnShare withdrawal, vault redemption, configured swap, and encrypted DLUSD
 return.
 
-The canonical `EarnFactory`, `EarnVault`, `EarnFees`, `EarnRouter`,
-`EarnContributionController`, engine, and swap adapters are vendored from the
-revision in `contrib/bench/earn.lock` under
-`specs/ref-impls/test/fixtures/earn`. Foundry builds their artifacts alongside
-the Zone specs; benchmark provisioning never fetches or clones external
-source. These assets, the generic topology, scenario runtime, reporting, and CI
-workflow are one main-based benchmark implementation rather than a stack of
-benchmark branches.
+The workflow checks out `tempoxyz/earn` at `main` into `earn/` with the same
+credential-isolated `actions/checkout` step used by the Zones e2e tests. It
+builds that checkout with Earn's Foundry configuration and writes the artifacts
+into `specs/ref-impls/out` after building the local Zone fixtures. The exact
+Earn commit is recorded in fixture metadata and the workflow report.
 
 ### Swap mechanism
 
@@ -38,29 +35,32 @@ provisioning:
 
 | Value | Provisioned path | Intended comparison |
 | --- | --- | --- |
-| `simple` (default) | Earn's canonical experimental `MinimalDirectSwapAdapter`, backed by the vendored Bridge TIP-20 controller and reserve token, installed as both DLUSD swap overrides on `EarnVault`. | The complete private swapped lifecycle that fits the current Zone callback cap. This is not a production swap venue. |
-| `stablecoin-dex` | Tempo's native StablecoinDEX at tick zero through `EarnRouter`'s built-in path, with no `EarnVault` override. | Experimental native order-book comparison; the upstream private lifecycle profile has not yet proven this path end to end. |
-| `direct-swap` | The full DirectSwap V2 controller, handler, authorization registry, reserve ledger, and canonical `BridgeDirectSwapAdapter`. | Contract-boundary and non-swapped-flow comparison only: the complete Bridge private callback exceeds the current Zone 10M callback cap. |
+| `direct-swap` (default) | Earn's `SingleZoneBridgeEarnRouter` with the full DirectSwap V2 controller, handler, authorization registry, and reserve ledger. | The canonical closed-loop Bridge route for complete private Earn journeys. |
+| `simple` | Earn's `SingleZoneMinimalEarnRouter`, backed by the Bridge TIP-20 controller and reserve token. | A lower-overhead controller-backed comparison; this is not a production swap venue. |
+| `stablecoin-dex` | Tempo's native StablecoinDEX at tick zero through `SingleZoneEarnRouter`. | Native order-book comparison. |
+
+Presets that intentionally keep pathUSD on both sides of Earn use a
+pathUSD-scoped `SingleZoneEarnRouter` and execute no swap. The selected swap
+mechanism applies to DLUSD-scoped routes.
 
 `ZONES_BENCH_SWAP_LIQUIDITY` sets the token-base-unit liquidity provisioned for
 the selected path: DirectSwap reserve capacity, balances held by the simple
 fixture, or bid/ask liquidity in StablecoinDEX. Deployment, approvals, pair
 creation, and liquidity seeding are setup traffic outside measured latency.
-Fixture metadata and the workflow report record the mechanism, adapter and
-route selection, and seeded liquidity.
+Fixture metadata and the workflow report record the mechanism, scoped router,
+route selection, seeded liquidity, and exact Earn revision.
 
-For `full-journey` and `swapped-lifecycle`, the minimal adapter must cover at
+For `full-journey` and `swapped-lifecycle`, the selected route must cover at
 least `max-concurrent * withdrawal-amount` of transient inventory.
 StablecoinDEX orders are consumed rather than replenished, so each
 seeded side must cover `count * withdrawal-amount`. The isolated
 `swapped-redemption` setup creates every account's position before measurement:
-the minimal and StablecoinDEX paths therefore cover
+the controller-backed and StablecoinDEX paths therefore cover
 `accounts * ceil(count/accounts) * withdrawal-amount`.
 The slippage-bounce preset needs one withdrawal amount. Configuration rejects
-smaller capacities, DirectSwap liquidity above the vendored controller's
+smaller capacities, DirectSwap liquidity at or above the external controller's
 `1,000,000,000,000,000` mint cap, and StablecoinDEX liquidity below its
-`100,000,000` minimum order size. It rejects DirectSwap for every preset that
-requires a private swap, before provisioning starts.
+`100,000,000` minimum order size.
 
 ## Topology and policy
 
@@ -70,7 +70,7 @@ EarnShare through the canonical `EarnFactory` and native TIP-20 factory, then se
 for the requested preset: DLUSD for the full, swapped lifecycle,
 swapped-redemption, slippage-bounce, encrypted-deposit, and private-withdrawal
 flows, or pathUSD for the direct, third-party-recipient, and rewards redemption
-flows. It deploys the vendored Earn proxy stack outside the measured interval and
+flows. It deploys the externally built Earn proxy stack outside the measured interval and
 enables EarnShare on the portal. The stable asset not selected by the preset
 remains L1-only. The profile does not replace these assets with ordinary ERC-20
 test contracts.
@@ -182,17 +182,21 @@ the scenario report or an artifact.
 
 The pinned transaction generator supports the required in-memory encrypted
 deposit preparation and named-tuple ABI encoding. The topology provisioner has
-a `neobank` profile which deploys and seeds the vendored Earn stack and selected
+a `neobank` profile which deploys and seeds the externally built Earn stack and selected
 swap mechanism outside the measured interval, enables EarnShare, sets the
 bridge rates to zero, waits for Zone token ingestion, and writes only
 non-secret runtime metadata:
 
 ```bash
-forge build --root specs/ref-impls
+git clone --recurse-submodules git@github.com:tempoxyz/earn.git earn
+forge build --root specs/ref-impls --no-lint
+forge build --root earn --skip test --skip script --no-lint \
+  --out "$PWD/specs/ref-impls/out"
+export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/neobank-topology.env
 export ZONES_BENCH_PROFILE=neobank
 export ZONES_BENCH_NEOBANK_PRESET=full-journey
-export ZONES_BENCH_SWAP_MECHANISM=simple
+export ZONES_BENCH_SWAP_MECHANISM=direct-swap
 export ZONES_BENCH_SWAP_LIQUIDITY=10000000000
 export ZONES_BENCH_RECIPIENT_MODE=existing
 contrib/bench/provision-topology.sh up
@@ -351,7 +355,7 @@ Run the isolated path locally:
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/swapped-redemption-topology.env
 export ZONES_BENCH_PROFILE=neobank
 export ZONES_BENCH_NEOBANK_PRESET=swapped-redemption
-export ZONES_BENCH_SWAP_MECHANISM=simple
+export ZONES_BENCH_SWAP_MECHANISM=direct-swap
 export ZONES_BENCH_ACCOUNTS=100
 export ZONES_BENCH_COUNT=100
 export ZONES_BENCH_TPS=20
@@ -364,7 +368,7 @@ contrib/bench/run-neobank-private-flow.sh
 The equivalent one-command CI invocation is:
 
 ```bash
-gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-swapped-redemption -f swap-mechanism=simple -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=12
+gh workflow run zones-benchmark.yml --ref '<branch-or-tag>' -f phase=neobank-swapped-redemption -f swap-mechanism=direct-swap -f accounts=100 -f count=100 -f tps=20 -f max-concurrent=12
 ```
 
 The default 12-journey in-flight cap gives a fast correctness run. A withdrawal-capacity
@@ -384,7 +388,7 @@ To provision and run the direct path independently, use the same preset for
 both commands so provisioning selects pathUSD as the enabled Zone stable asset:
 
 ```bash
-forge build --root specs/ref-impls
+export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/direct-topology.env
 export ZONES_BENCH_PROFILE=neobank
 export ZONES_BENCH_NEOBANK_PRESET=direct-lifecycle
@@ -397,7 +401,7 @@ To run the third-party-recipient path independently, provision its pathUSD plus
 EarnShare topology and keep the same preset selected for the scenario runner:
 
 ```bash
-forge build --root specs/ref-impls
+export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/third-party-topology.env
 export ZONES_BENCH_PROFILE=neobank
 export ZONES_BENCH_NEOBANK_PRESET=third-party-recipient
@@ -418,7 +422,7 @@ To run the slippage-bounce path independently, provision DLUSD plus EarnShare
 and keep the same preset selected for the scenario runner:
 
 ```bash
-forge build --root specs/ref-impls
+export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/slippage-bounce-topology.env
 export ZONES_BENCH_PROFILE=neobank
 export ZONES_BENCH_NEOBANK_PRESET=slippage-bounce
@@ -443,7 +447,7 @@ To run the rewards-redemption path independently, provision pathUSD plus
 EarnShare and select the same preset for the runner:
 
 ```bash
-forge build --root specs/ref-impls
+export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/rewards-topology.env
 export ZONES_BENCH_PROFILE=neobank
 export ZONES_BENCH_NEOBANK_PRESET=rewards-redemption
@@ -484,24 +488,14 @@ duration, and receipt gas. It removes the temporary material on exit.
 
 The topology exercises real L1 and Zone nodes, portal deposits, outbox batches,
 authenticated private RPC, and receipt-scoped cross-chain correlation. The
-Bridge controller reserves, `MinimalDirectSwapAdapter`, and the
-`Simple4626Vault` venue are benchmark fixtures. StablecoinDEX mode uses the
-native contract through `EarnRouter`, but its tick-zero order-book liquidity is created by
-provisioning. These paths do not represent final production economics,
-liquidity, policy administration, or a final vault venue.
+Bridge controller reserves and `Simple4626Vault` venue are benchmark fixtures.
+StablecoinDEX mode uses the native contract through the scoped Earn router, but
+its tick-zero order-book liquidity is created by provisioning. These paths do
+not represent final production economics, liquidity, policy administration, or
+a final vault venue.
 
-The full vendored Earn stack comes from the single revision in
-`contrib/bench/earn.lock`. The vendored Zone interface contains the current
-canonical `ZoneInfo.accessMode` and `ZoneInfo.gatewayMode` fields, which are
-missing from that Earn revision; without those fields, `EarnRouter` would
-decode `ZoneFactory.zones(zoneId)` with an obsolete tuple.
-Four exact-version Bridge source pragmas are relaxed to accept the repository's
-Tempo Solidity compiler. The benchmark therefore exercises the pinned contract
-logic through artifacts built by the Zones Foundry project, rather than
-byte-for-byte production deployment artifacts.
-
-The canonical Bridge DirectSwap contracts and adapter are deployable for
-contract-boundary and non-swapped-flow comparisons, but their complete private
-swap callback exceeds Zones' current 10M callback limit. The benchmark rejects
-that unsupported combination instead of reporting callback timeouts as load
-results.
+Each run follows Earn `main` at checkout time and records the resolved commit
+SHA. Earn is compiled with its own Foundry configuration rather than a copied
+or patched source tree. The benchmark deploys Earn's current scoped routers and
+full DirectSwap contracts, but the local assets, seeded liquidity, vault venue,
+and policy administration remain benchmark fixtures.

@@ -159,24 +159,17 @@ fragments:
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
-                      - "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)"
+                      - "tuple(uint8 flow,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient) zoneReturn)"
                     values:
                       - flow: 0
-                        earnVault: "__EARN_VAULT__"
-                        destination: 0
-                        outputToken: "__EARN_TOKEN__"
                         minVaultAssets: { param: min_vault_assets }
                         minEarnShares: { param: min_vault_shares }
                         minOutputAmount: 0
                         actionId: { param: action_id }
-                        destinationData:
-                          abi_encode:
-                            types:
-                              - "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)"
-                            values:
-                              - keyIndex: { var: encryption.keyIndex }
-                                encrypted: { var: encryption.encrypted }
-                                refundRecipient: { param: refund_recipient }
+                        zoneReturn:
+                          keyIndex: { var: encryption.keyIndex }
+                          encrypted: { var: encryption.encrypted }
+                          refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
       - id: request_result
@@ -313,24 +306,17 @@ fragments:
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
-                      - "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)"
+                      - "tuple(uint8 flow,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient) zoneReturn)"
                     values:
                       - flow: 1
-                        earnVault: "__EARN_VAULT__"
-                        destination: 0
-                        outputToken: { param: output_token }
                         minVaultAssets: { param: min_vault_assets }
                         minEarnShares: 0
                         minOutputAmount: { param: min_output_amount }
                         actionId: { param: action_id }
-                        destinationData:
-                          abi_encode:
-                            types:
-                              - "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)"
-                            values:
-                              - keyIndex: { var: encryption.keyIndex }
-                                encrypted: { var: encryption.encrypted }
-                                refundRecipient: { param: refund_recipient }
+                        zoneReturn:
+                          keyIndex: { var: encryption.keyIndex }
+                          encrypted: { var: encryption.encrypted }
+                          refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
       - id: request_result
@@ -465,24 +451,17 @@ fragments:
                 - { param: fallback_recipient }
                 - abi_encode:
                     types:
-                      - "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)"
+                      - "tuple(uint8 flow,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient) zoneReturn)"
                     values:
                       - flow: 0
-                        earnVault: "__EARN_VAULT__"
-                        destination: 0
-                        outputToken: "__EARN_TOKEN__"
                         minVaultAssets: "340282366920938463463374607431768211455"
                         minEarnShares: { param: amount }
                         minOutputAmount: 0
                         actionId: { param: action_id }
-                        destinationData:
-                          abi_encode:
-                            types:
-                              - "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)"
-                            values:
-                              - keyIndex: { var: encryption.keyIndex }
-                                encrypted: { var: encryption.encrypted }
-                                refundRecipient: { param: refund_recipient }
+                        zoneReturn:
+                          keyIndex: { var: encryption.keyIndex }
+                          encrypted: { var: encryption.encrypted }
+                          refundRecipient: { param: refund_recipient }
                 - "0x"
         save: request
       - id: request_result

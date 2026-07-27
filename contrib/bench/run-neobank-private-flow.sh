@@ -88,7 +88,7 @@ ZONES_BENCH_SAMPLE_INSTANCES="${ZONES_BENCH_SAMPLE_INSTANCES:-10}"
 ZONES_BENCH_RUN_ID="${ZONES_BENCH_RUN_ID:-local}"
 ZONES_BENCH_RECIPIENT_MODE="${ZONES_BENCH_RECIPIENT_MODE:-existing}"
 ZONES_BENCH_NEOBANK_PRESET="${ZONES_BENCH_NEOBANK_PRESET:-full-journey}"
-ZONES_BENCH_SWAP_MECHANISM="${ZONES_BENCH_SWAP_MECHANISM:-simple}"
+ZONES_BENCH_SWAP_MECHANISM="${ZONES_BENCH_SWAP_MECHANISM:-direct-swap}"
 withdrawals_per_journey=0
 earn_deposits_per_journey=0
 earn_redeems_per_journey=0
@@ -194,13 +194,6 @@ case "$ZONES_BENCH_SWAP_MECHANISM" in
     direct-swap|simple|stablecoin-dex) ;;
     *) die "ZONES_BENCH_SWAP_MECHANISM must be direct-swap, simple, or stablecoin-dex" ;;
 esac
-if [[ "$ZONES_BENCH_SWAP_MECHANISM" == direct-swap ]]; then
-    case "$ZONES_BENCH_NEOBANK_PRESET" in
-        full-journey|private-withdrawal|slippage-bounce|swapped-lifecycle|swapped-redemption)
-            die "direct-swap cannot execute a complete private swapped callback within the Zone protocol's 10000000 gas cap; select simple, or stablecoin-dex for an experimental run"
-            ;;
-    esac
-fi
 [[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
     die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"
 for name in ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNTS ZONES_BENCH_SEQUENCER_ACCOUNT_INDEX ZONES_BENCH_COUNT \

@@ -759,7 +759,7 @@ mechanism comparison:
 | --- | --- |
 | Workload | `phase=neobank-full-journey`, `accounts=100`, `count=100`, `tps=20`, `max-concurrent=12`, and an optional `seed` derived from the workflow run when empty |
 | Transaction amounts | `deposit-amount=2000000`, `activity-amount=1`, `withdrawal-amount=1000000`, and `bootstrap-deposit-amount=10000000` |
-| Route and destination | `swap-mechanism=simple`, `swap-liquidity=10000000000`, `recipient-mode=existing`, and `callback-gas-limit=10000000` |
+| Route and destination | `swap-mechanism=direct-swap`, `swap-liquidity=10000000000`, `recipient-mode=existing`, and `callback-gas-limit=10000000` |
 | L1 state | `state-bloat-gib=1` and `force-bloat=false` |
 | L1 capacity | `l1-gas-limit=30000000` and `l1-general-gas-limit=30000000` |
 | Withdrawal scheduler | `withdrawal-max-batch-gas=30000000`, `withdrawal-max-in-flight-batches=12`, `zone-batch-interval-blocks=120`, and `withdrawal-poll-interval-secs=5` |
@@ -802,9 +802,11 @@ the other. The Schelk cache contains initialized Tempo L1 state only; every run
 still creates a new Zone, portal, fee configuration, bootstrap fixture, and
 Zone state.
 
-Tempo and txgen are fetched from public repositories at exact commits, so no
-dependency-access secret is required. No mnemonic, portal, chain ID, token,
-target ID, or RPC URL needs to be configured externally. A runner-local private
+Tempo and txgen are fetched from public repositories at exact commits. Neobank
+runs use the repository's existing `EARN_DEPLOY_KEY` to check out
+`tempoxyz/earn@main`; the resolved Earn SHA is recorded in the results. No
+mnemonic, portal, chain ID, token, target ID, or RPC URL needs to be configured
+externally. A runner-local private
 mnemonic is generated once when its identity file does not exist. An operator
 may instead pre-provision the mode-0600
 `zones-benchmark/identity/mnemonic` file under `runner.tool_cache`. The workflow
@@ -827,7 +829,7 @@ gh workflow run zones-benchmark.yml \
   -f max-concurrent=13 \
   -f state-bloat-gib=1 \
   -f force-bloat=false \
-  -f swap-mechanism=simple \
+  -f swap-mechanism=direct-swap \
   -f swap-liquidity=10000000000 \
   -f recipient-mode=existing
 ```

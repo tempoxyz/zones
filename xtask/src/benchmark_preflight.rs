@@ -3130,35 +3130,16 @@ mod tests {
                 [6]["abi_encode"];
             assert_eq!(
                 encoded["types"][0],
-                "tuple(uint8 flow,address earnVault,uint8 destination,address outputToken,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,bytes destinationData)",
-                "wrong canonical EarnRouter callback tuple for {fragment}"
+                "tuple(uint8 flow,uint128 minVaultAssets,uint128 minEarnShares,uint128 minOutputAmount,bytes32 actionId,(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient) zoneReturn)",
+                "wrong canonical SingleZoneEarnRouter callback tuple for {fragment}"
             );
             assert_eq!(encoded["values"][0]["flow"], flow);
             assert_eq!(encoded["values"][0]["actionId"]["param"], "action_id");
             assert_eq!(
-                encoded["values"][0]["earnVault"],
-                "0x3000000000000000000000000000000000000004"
-            );
-            assert_eq!(
-                encoded["values"][0]["destinationData"]["abi_encode"]["values"][0]["encrypted"]["var"],
+                encoded["values"][0]["zoneReturn"]["encrypted"]["var"],
                 "encryption.encrypted"
             );
-            assert_eq!(
-                encoded["values"][0]["destinationData"]["abi_encode"]["types"][0],
-                "tuple(uint256 keyIndex,(bytes32 ephemeralPubkeyX,uint8 ephemeralPubkeyYParity,bytes ciphertext,bytes12 nonce,bytes16 tag) encrypted,address refundRecipient)",
-                "wrong canonical EarnRouter ZoneReturn tuple for {fragment}"
-            );
         }
-        assert_eq!(
-            fragments["fragments"]["earn-deposit-and-return"]["steps"][3]["submit"]["with"]["call"]
-                ["args"][6]["abi_encode"]["values"][0]["outputToken"],
-            "0x2000000000000000000000000000000000000003"
-        );
-        assert_eq!(
-            fragments["fragments"]["earn-redeem-and-return"]["steps"][3]["submit"]["with"]["call"]
-                ["args"][6]["abi_encode"]["values"][0]["outputToken"]["param"],
-            "output_token"
-        );
         for fragment in [
             "encrypted-zone-entry",
             "earn-deposit-and-return",
