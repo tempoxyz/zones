@@ -20,7 +20,7 @@ use tempo_zone_contracts::{IZoneOutbox, ZONE_OUTBOX_ADDRESS};
 
 use crate::utils::{
     DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox,
-    local_dev_zone_account, start_local_zone_with_fixture,
+    approve_self_transfer, local_dev_zone_account, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to the dev account, then transfer a portion to Bob.
@@ -53,6 +53,14 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     // Dev transfers 400,000 to Bob.
     // Submit the tx then inject an L1 block so the zone produces a block including it.
     let transfer_amount: u128 = 400_000;
+    approve_self_transfer(
+        &mut fixture,
+        &zone,
+        PATH_USD_ADDRESS,
+        dev_address,
+        provider.clone(),
+    )
+    .await?;
     // Seed the current anchor before estimation/pool validation. The next empty block inherits it.
     fixture.seed_no_receive_policy(bob)?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
@@ -64,14 +72,14 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     );
 
     let estimated_gas = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .estimate_gas()
         .await?;
     assert!(estimated_gas > 0, "transfer gas estimate should be nonzero");
 
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .send()
         .await?;
@@ -100,7 +108,7 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
         dev_balance <= U256::from(expected_remaining),
         "dev should have at most {expected_remaining} (got {dev_balance})"
     );
-    let gas_buffer = 100_000u128;
+    let gas_buffer = 200_000u128;
     assert!(
         dev_balance >= U256::from(expected_remaining.saturating_sub(gas_buffer)),
         "dev balance {dev_balance} too low — unexpected gas usage"
@@ -239,11 +247,19 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let alice_provider = ProviderBuilder::new()
         .wallet(alice_signer)
         .connect_http(zone.http_url().clone());
+    approve_self_transfer(
+        &mut fixture,
+        &zone,
+        PATH_USD_ADDRESS,
+        alice,
+        alice_provider.clone(),
+    )
+    .await?;
     fixture.seed_no_receive_policy(bob)?;
     let tip20_alice = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
 
     let pending = tip20_alice
-        .transfer(bob, U256::from(alice_to_bob))
+        .transferFrom(alice, bob, U256::from(alice_to_bob))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -268,11 +284,19 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let bob_provider = ProviderBuilder::new()
         .wallet(bob_signer)
         .connect_http(zone.http_url().clone());
+    approve_self_transfer(
+        &mut fixture,
+        &zone,
+        PATH_USD_ADDRESS,
+        bob,
+        bob_provider.clone(),
+    )
+    .await?;
     fixture.seed_no_receive_policy(charlie)?;
     let tip20_bob = ITIP20::new(PATH_USD_ADDRESS, &bob_provider);
 
     let pending = tip20_bob
-        .transfer(charlie, U256::from(bob_to_charlie))
+        .transferFrom(bob, charlie, U256::from(bob_to_charlie))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -293,7 +317,7 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     .await?;
 
     // Verify final balances
-    let gas_buffer = 100_000u128;
+    let gas_buffer = 200_000u128;
 
     let alice_balance = zone.balance_of(PATH_USD_ADDRESS, alice).await?;
     let alice_expected = deposit_amount - alice_to_bob;
@@ -352,11 +376,19 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     .await?;
 
     // Transfer to Bob. Seed its receive-policy baseline before pool validation.
+    approve_self_transfer(
+        &mut fixture,
+        &zone,
+        PATH_USD_ADDRESS,
+        dev_address,
+        provider.clone(),
+    )
+    .await?;
     fixture.seed_no_receive_policy(bob)?;
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(dev_address, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()

@@ -3,8 +3,10 @@
 //! This is a lightweight L2 node built on reth's node builder infrastructure.
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
+pub use crate::pool::{CalldataFilter, ZonePoolBuilder};
 use crate::{
     ZoneEngine,
+    pool::validate_zone_pool_calldata,
     replication::{AttestationContext, broadcast_persisted_blocks, run_block_sync},
     rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
     settlement_attestation::collect_leader_settlements,
@@ -24,7 +26,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PoolBuilder, spawn_maintenance_tasks,
+        NoopNetworkBuilder,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, NoopEngineApiBuilder,
@@ -35,35 +37,18 @@ use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
-use reth_storage_api::{
-    BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
-};
-use reth_transaction_pool::{
-    Pool, PoolTransaction, TransactionPool as _, TransactionValidationTaskExecutor,
-    blobstore::InMemoryBlobStore, error::InvalidPoolTransactionError,
-};
+use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
+use reth_transaction_pool::TransactionPool as _;
 use std::{num::NonZeroU32, sync::Arc, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
-use tempo_evm::TempoInvalidTransaction;
-use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
-};
-use tempo_precompiles::tip20::TIP20Token;
-use tempo_primitives::{
-    self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
-};
-use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
-    amm::AmmLiquidityCache,
-    ordering::TempoTipOrdering,
-    transaction::{TempoPoolTransactionError, TempoPooledTransaction},
-    validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
-};
+use tempo_node::{engine::TempoEngineValidator, rpc::TempoEthApiBuilder};
+use tempo_primitives::{self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope};
+use tempo_transaction_pool::transaction::TempoPooledTransaction;
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tracing::{debug, info, warn};
+use tracing::info;
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
@@ -367,9 +352,10 @@ impl ZoneNode {
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(ZonePoolBuilder::new(
-                executor_builder.enabled_tokens.clone(),
-            ))
+            .pool(
+                ZonePoolBuilder::new(executor_builder.enabled_tokens.clone())
+                    .with_calldata_filter(validate_zone_pool_calldata),
+            )
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
@@ -1086,177 +1072,10 @@ where
     }
 }
 
-/// Transaction pool builder for Zone - uses Tempo pool with defaults.
-#[derive(Debug, Default, Clone)]
-#[non_exhaustive]
-pub struct ZonePoolBuilder {
-    enabled_tokens: EnabledTokenRegistry,
-}
-
-impl ZonePoolBuilder {
-    /// Create a pool builder using the shared enabled-token registry.
-    pub fn new(enabled_tokens: EnabledTokenRegistry) -> Self {
-        Self { enabled_tokens }
-    }
-}
-
-fn validate_has_enabled_token_balance(
-    provider: &impl StateProviderFactory,
-    enabled_tokens: &EnabledTokenRegistry,
-    sender: Address,
-) -> Result<(), InvalidPoolTransactionError> {
-    let state = provider.latest().map_err(|err| {
-        warn!(%err, "Failed to read latest state for zone token-balance admission check");
-        InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-            TempoInvalidTransaction::EthInvalidTransaction(
-                "could not verify balance of an enabled zone token".into(),
-            ),
-        ))
-    })?;
-
-    for token in enabled_tokens.read().iter().copied() {
-        let slot = TIP20Token::from_address_unchecked(token).balances[sender].slot();
-        let balance = state.storage(token, slot.into()).map_err(|err| {
-            warn!(%err, %sender, "Failed to read zone token balance during pool admission");
-            InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(
-                TempoInvalidTransaction::EthInvalidTransaction(
-                    "could not verify balance of an enabled zone token".into(),
-                ),
-            ))
-        })?;
-        if balance.is_some_and(|balance| !balance.is_zero()) {
-            return Ok(());
-        }
-    }
-
-    Err(InvalidPoolTransactionError::other(
-        TempoPoolTransactionError::Evm(TempoInvalidTransaction::EthInvalidTransaction(
-            "sender must hold a nonzero balance of an enabled zone token".into(),
-        )),
-    ))
-}
-
-impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
-where
-    Node: FullNodeTypes<Types = ZoneNode>,
-{
-    type Pool = TempoTransactionPool<Node::Provider, ZoneEvmConfig>;
-
-    async fn build_pool(
-        self,
-        ctx: &BuilderContext<Node>,
-        evm_config: ZoneEvmConfig,
-    ) -> eyre::Result<Self::Pool> {
-        // Zone blocks have no protocol base fee, so allow zero-fee transactions into the pool.
-        let mut pool_config = ctx.pool_config().with_disabled_protocol_base_fee();
-        pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
-
-        // this store is effectively a noop
-        let blob_store = InMemoryBlobStore::default();
-        let additional_tasks = ctx.config().txpool.additional_validation_tasks;
-        let task_executor = ctx.task_executor().clone();
-        let mut validator =
-            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config)
-                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-                .with_local_transactions_config(pool_config.local_transactions_config.clone())
-                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-                .set_block_gas_limit(ctx.chain_spec().genesis().gas_limit)
-                .disable_balance_check()
-                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-                .with_custom_tx_type(TempoTxType::AA as u8)
-                .no_eip7702()
-                .no_eip4844()
-                .build::<TempoPooledTransaction, _>(blob_store.clone());
-
-        validator.set_additional_stateless_validation(|_origin, tx| {
-            zone_evm::validate_transaction(
-                tx.tx_env(),
-                zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST,
-            )
-            .map_err(|err| InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(err)))
-        });
-
-        let provider = ctx.provider().clone();
-        let enabled_tokens = self.enabled_tokens;
-        validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
-            validate_has_enabled_token_balance(&provider, &enabled_tokens, *tx.sender_ref())
-        });
-
-        let validator =
-            TransactionValidationTaskExecutor::spawn(validator, &task_executor, additional_tasks);
-
-        let aa_2d_config = AA2dPoolConfig {
-            price_bump_config: pool_config.price_bumps,
-            pending_limit: pool_config.pending_limit,
-            queued_limit: pool_config.queued_limit,
-            max_txs_per_sender: pool_config.max_account_slots,
-        };
-        let aa_2d_pool = AA2dPool::new(aa_2d_config);
-        let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
-
-        let validator = validator.map(|v| {
-            TempoTransactionValidator::new(
-                v,
-                DEFAULT_AA_VALID_AFTER_MAX_SECS,
-                DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
-                amm_liquidity_cache.clone(),
-            )
-            // Zones collect the selected fee token directly and never route through FeeAMM.
-            .with_disable_fee_amm_check(true)
-        });
-        let protocol_pool = Pool::new(
-            validator,
-            TempoTipOrdering::default(),
-            blob_store,
-            pool_config.clone(),
-        );
-
-        let transaction_pool = TempoTransactionPool::new(protocol_pool, aa_2d_pool);
-
-        spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
-
-        // Spawn unified Tempo pool maintenance task
-        // This consolidates: expired AA txs, 2D nonce updates, AMM cache, and keychain revocations
-        ctx.task_executor().spawn_critical_task(
-            "txpool maintenance - tempo pool",
-            tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
-        );
-
-        info!(target: "reth::cli", "Transaction pool initialized");
-        debug!(target: "reth::cli", "Spawned txpool maintenance task");
-
-        Ok(transaction_pool)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_consensus::{Signed, TxEip1559};
-    use alloy_primitives::{Bytes, Signature, TxKind, U256};
     use reth_chainspec::EthChainSpec;
-    use reth_primitives_traits::Recovered;
-    use tempo_primitives::transaction::{
-        AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
-    };
-
-    fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
-        TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))
-    }
-
-    fn aa_transaction(sender: Address, calls: Vec<Call>) -> TempoPooledTransaction {
-        let transaction = TempoTransaction {
-            calls,
-            ..Default::default()
-        };
-        let signature =
-            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature()));
-        pooled_transaction(
-            AASigned::new_unhashed(transaction, signature).into(),
-            sender,
-        )
-    }
 
     #[test]
     fn resolves_public_and_local_tempo_l1_specs() {
@@ -1272,46 +1091,5 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
-    }
-
-    #[test]
-    fn pool_policy_allows_allowlisted_plain_create() {
-        let sender = Address::repeat_byte(0x11);
-        let envelope = TempoTxEnvelope::Eip1559(Signed::new_unhashed(
-            TxEip1559 {
-                to: TxKind::Create,
-                ..Default::default()
-            },
-            Signature::test_signature(),
-        ));
-        let transaction = pooled_transaction(envelope, sender);
-
-        let err = zone_evm::validate_transaction(transaction.tx_env(), &[]).unwrap_err();
-        assert!(matches!(
-            err,
-            tempo_revm::TempoInvalidTransaction::CallsValidation(_)
-        ));
-        assert!(zone_evm::validate_transaction(transaction.tx_env(), &[sender]).is_ok());
-    }
-
-    #[test]
-    fn pool_policy_rejects_create_in_non_first_aa_call() {
-        let transaction = aa_transaction(
-            Address::repeat_byte(0x11),
-            vec![
-                Call {
-                    to: TxKind::Call(Address::repeat_byte(0x22)),
-                    value: U256::ZERO,
-                    input: Bytes::new(),
-                },
-                Call {
-                    to: TxKind::Create,
-                    value: U256::ZERO,
-                    input: Bytes::new(),
-                },
-            ],
-        );
-
-        assert!(zone_evm::validate_transaction(transaction.tx_env(), &[]).is_err());
     }
 }

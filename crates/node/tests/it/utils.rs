@@ -1,7 +1,7 @@
 use alloy::genesis::{Genesis, GenesisAccount};
 use alloy_consensus::Header;
 use alloy_eips::NumHash;
-use alloy_network::{EthereumWallet, ReceiptResponse};
+use alloy_network::{EthereumWallet, Network, ReceiptResponse};
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rlp::Encodable;
@@ -162,6 +162,32 @@ where
     fixture.inject_empty_block(zone.deposit_queue());
     let approve_receipt = approve_pending.get_receipt().await?;
     assert!(approve_receipt.status(), "approve should succeed");
+    Ok(())
+}
+
+pub(crate) async fn approve_self_transfer<N, P>(
+    fixture: &mut L1Fixture,
+    zone: &ZoneTestNode,
+    token: Address,
+    owner: Address,
+    provider: P,
+) -> eyre::Result<()>
+where
+    N: Network,
+    P: Provider<N> + Clone,
+{
+    let approve_pending = ITIP20::new(token, provider)
+        .approve(owner, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let approve_receipt = approve_pending.get_receipt().await?;
+    assert!(
+        approve_receipt.status(),
+        "self-transfer approval should succeed"
+    );
     Ok(())
 }
 

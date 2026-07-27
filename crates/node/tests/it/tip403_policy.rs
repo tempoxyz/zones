@@ -17,8 +17,8 @@ use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
-    seed_raw_tip403_token_policy, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, approve_self_transfer,
+    seed_raw_tip403_policy, seed_raw_tip403_token_policy, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
@@ -55,6 +55,14 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     let alice_provider = ProviderBuilder::new()
         .wallet(alice_signer)
         .connect_http(zone.http_url().clone());
+    approve_self_transfer(
+        &mut fixture,
+        &zone,
+        PATH_USD_ADDRESS,
+        alice,
+        alice_provider.clone(),
+    )
+    .await?;
 
     // T6+ transfers also consult the recipient's address-level receive policy on L1.
     // Seed the anchor before pool validation; the next execution block inherits this baseline.
@@ -62,7 +70,7 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
 
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
     let pending = tip20
-        .transfer(bob, U256::from(transfer_amount))
+        .transferFrom(alice, bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()

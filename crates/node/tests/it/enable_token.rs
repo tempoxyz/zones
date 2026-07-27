@@ -153,7 +153,6 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
         DEFAULT_TIMEOUT,
     )
     .await?;
-    fixture.seed_no_receive_policy(recipient)?;
 
     let token = ITIP20::new(token_address, &provider);
     assert_eq!(
@@ -161,6 +160,22 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
         1,
         "execution should observe the anchored allow-all policy"
     );
+
+    let approval = token
+        .approve(sender, U256::MAX)
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    assert!(
+        approval.get_receipt().await?.status(),
+        "self-transfer approval should succeed"
+    );
+
+    fixture.seed_no_receive_policy(recipient)?;
 
     // Stateful RPC simulation uses ZoneEvmConfig and therefore the L1 overlay.
     let simulated = token
@@ -174,7 +189,7 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
     assert!(simulated, "the anchored policy should allow execution");
 
     let pending = token
-        .transfer(recipient, U256::from(transfer_amount))
+        .transferFrom(sender, recipient, U256::from(transfer_amount))
         .fee_token(token_address)
         .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
         .max_priority_fee_per_gas(0)

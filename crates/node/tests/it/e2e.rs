@@ -117,8 +117,15 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
         .await?;
 
     let transfer_amount = 123_456_u128;
-    let pending = ITIP20::new(PATH_USD_ADDRESS, follower_wallet)
-        .transfer(transfer_recipient, U256::from(transfer_amount))
+    let tip20 = ITIP20::new(PATH_USD_ADDRESS, follower_wallet);
+    let approval = tip20
+        .approve(sender, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+    let pending = tip20
+        .transferFrom(sender, transfer_recipient, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -174,6 +181,13 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let follower_receipt = tokio::time::timeout(DEFAULT_TIMEOUT, pending.get_receipt())
         .await
         .map_err(|_| eyre::eyre!("timed out waiting for follower transaction receipt"))??;
+    let approval_receipt = tokio::time::timeout(DEFAULT_TIMEOUT, approval.get_receipt())
+        .await
+        .map_err(|_| eyre::eyre!("timed out waiting for follower approval receipt"))??;
+    assert!(
+        approval_receipt.status(),
+        "forwarded self-transfer approval should succeed"
+    );
     assert!(
         follower_receipt.status(),
         "forwarded transfer should succeed"
@@ -298,14 +312,20 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
         );
     }
 
-    // --- Block 2: Alice's transfer is submitted, then the anchoring L1 block is
-    // injected to trigger the build that includes it. ---
+    // --- Block 2: Alice's self-transfer approval and transfer are submitted, then the anchoring
+    // L1 block is injected to trigger the build that includes them. ---
     let alice_provider = ProviderBuilder::new()
         .wallet(alice_signer)
         .connect_http(leader.http_url().clone());
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &alice_provider);
+    let approval = tip20
+        .approve(alice, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
     let pending = tip20
-        .transfer(bob, U256::from(200_000u128))
+        .transferFrom(alice, bob, U256::from(200_000u128))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(TIP20_TX_GAS)
         .send()
@@ -318,6 +338,10 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
 
     // The leader, resolving policy at height 2, must revert Alice's transfer
     // (proves the exact-anchor policy behavior and that the tx was included, not dropped).
+    assert!(
+        approval.get_receipt().await?.status(),
+        "self-transfer approval should succeed"
+    );
     let receipt = pending.get_receipt().await?;
     assert!(
         !receipt.status(),
