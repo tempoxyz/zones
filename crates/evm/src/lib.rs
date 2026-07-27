@@ -53,10 +53,10 @@ use tempo_evm::{
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
-    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
-    TIP20_CHANNEL_RESERVE_ADDRESS, account_keychain::AccountKeychain, error::Result as TempoResult,
-    nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
-    storage::actions::StorageActions, tip20::is_tip20_prefix,
+    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS,
+    TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, account_keychain::AccountKeychain,
+    error::Result as TempoResult, nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
+    storage::actions::StorageActions, storage_credits::StorageCredits, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -139,14 +139,14 @@ where
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
                 Some(create_tip20_precompile(*address, &env, tip20_l1.clone()))
-            } else if *address == STABLECOIN_DEX_ADDRESS {
-                None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
                 Some(NonceManager::create_precompile(&tempo_env))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
                 Some(AccountKeychain::create_precompile(&tempo_env))
             } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
                 Some(ReceivePolicyGuard::create_precompile(&tempo_env))
+            } else if *address == STORAGE_CREDITS_ADDRESS {
+                Some(StorageCredits::create_precompile(&tempo_env))
             } else {
                 None
             }
