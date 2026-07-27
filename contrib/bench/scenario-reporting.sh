@@ -27,6 +27,10 @@ build_scenario_report_args() {
         "setup-settlement-timeout-secs:ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS"
         "drain-timeout-secs:ZONES_BENCH_DRAIN_TIMEOUT"
         "seed:ZONES_BENCH_SEED"
+        "force-bloat:ZONES_BENCH_FORCE_BLOAT"
+        "tempo-revision:ZONES_BENCH_TEMPO_REF"
+        "txgen-revision:ZONES_BENCH_TXGEN_REF"
+        "earn-revision:ZONES_BENCH_EARN_REVISION"
     )
 
     destination=(--report "$json_report")

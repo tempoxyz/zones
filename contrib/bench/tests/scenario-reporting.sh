@@ -47,6 +47,10 @@ ZONES_BENCH_STEP_TIMEOUT=10m
 ZONES_BENCH_SETUP_SETTLEMENT_TIMEOUT_SECS=120
 ZONES_BENCH_DRAIN_TIMEOUT=300
 ZONES_BENCH_SEED=123456
+ZONES_BENCH_FORCE_BLOAT=0
+ZONES_BENCH_TEMPO_REF=2222222222222222222222222222222222222222
+ZONES_BENCH_TXGEN_REF=3333333333333333333333333333333333333333
+ZONES_BENCH_EARN_REVISION=4444444444444444444444444444444444444444
 ZONES_BENCH_RUN_ID=123-1
 ZONES_BENCH_BLOAT_GIB=1
 ZONES_BENCH_GITHUB_REPOSITORY=tempoxyz/zones
@@ -78,6 +82,10 @@ joined=" ${args[*]} "
 [[ "$joined" == *" --metadata setup-settlement-timeout-secs=120 "* ]]
 [[ "$joined" == *" --metadata drain-timeout-secs=300 "* ]]
 [[ "$joined" == *" --metadata seed=123456 "* ]]
+[[ "$joined" == *" --metadata force-bloat=0 "* ]]
+[[ "$joined" == *" --metadata tempo-revision=$ZONES_BENCH_TEMPO_REF "* ]]
+[[ "$joined" == *" --metadata txgen-revision=$ZONES_BENCH_TXGEN_REF "* ]]
+[[ "$joined" == *" --metadata earn-revision=$ZONES_BENCH_EARN_REVISION "* ]]
 [[ "$joined" == *" --metadata state-bloat-gib=1 "* ]]
 [[ "$joined" == *" --metadata github-run-id=123 "* ]]
 [[ "$joined" == *" --metadata github-pr-number=742 "* ]]

@@ -794,8 +794,8 @@ provision_up() {
     (( max_concurrent > 0 )) || die "ZONES_BENCH_MAX_CONCURRENT must be greater than zero"
     (( withdrawal_amount > 0 )) || die "ZONES_BENCH_WITHDRAWAL_AMOUNT must be greater than zero"
     if [[ "$profile" == neobank ]]; then
-        if [[ "$swap_mechanism" == direct-swap ]] && (( swap_liquidity >= 1000000000000000 )); then
-            die "DirectSwap liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
+        if [[ "$swap_mechanism" =~ ^(direct-swap|simple)$ ]] && (( swap_liquidity >= 1000000000000000 )); then
+            die "$swap_mechanism liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
         fi
         if [[ "$swap_mechanism" == stablecoin-dex ]] && (( swap_liquidity < 100000000 )); then
             die "StablecoinDEX liquidity must be at least its 100000000 minimum order amount"

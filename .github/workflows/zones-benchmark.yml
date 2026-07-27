@@ -153,14 +153,16 @@ on:
         required: false
         default: ""
 
-  # workflow_dispatch is unavailable until this file reaches the default branch.
-  # Until then, benchmark-harness changes run the selected validation preset on PR updates.
+  # Benchmark-harness changes exercise the default validation preset on PR updates.
+  # Once this workflow is on the default branch, workflow_dispatch selects targeted runs.
   pull_request:
     types: [opened, synchronize, reopened]
     paths:
       - ".github/workflows/zones-benchmark.yml"
       - "contrib/bench/**"
+      - "crates/contracts/**"
       - "crates/node/**"
+      - "crates/sequencer/**"
       - "docs/NEOBANK_PRIVATE_ZONE_BENCHMARK.md"
       - "docs/ZONES_BENCHMARK.md"
       - "specs/ref-impls/**"
@@ -488,8 +490,8 @@ jobs:
             exit 1
           fi
           if [ "$phase" = neobank-e2e ]; then
-            if [ "$INPUT_SWAP_MECHANISM" = direct-swap ] && (( swap_liquidity >= 1000000000000000 )); then
-              echo "::error::direct-swap liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
+            if [[ "$INPUT_SWAP_MECHANISM" =~ ^(direct-swap|simple)$ ]] && (( swap_liquidity >= 1000000000000000 )); then
+              echo "::error::$INPUT_SWAP_MECHANISM liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
               exit 1
             fi
             if [ "$INPUT_SWAP_MECHANISM" = stablecoin-dex ] && (( swap_liquidity < 100000000 )); then
@@ -611,10 +613,6 @@ jobs:
       ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
       ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
       ZONES_BENCH_GITHUB_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
-      CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
-      CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
-      CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
-      ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
       ZONES_BENCH_BUILD_PROFILE: profiling
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
@@ -659,6 +657,10 @@ jobs:
 
       - name: Configure ClickHouse scenario reporting
         if: needs.authorize.outputs.phase == 'roundtrip' || needs.authorize.outputs.phase == 'neobank-e2e'
+        env:
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
         run: |
           set -euo pipefail
           for name in CLICKHOUSE_URL CLICKHOUSE_USER CLICKHOUSE_PASSWORD; do
@@ -896,6 +898,11 @@ jobs:
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
       - name: Provision topology and run ${{ needs.authorize.outputs.phase }} workload
+        env:
+          CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
+          CLICKHOUSE_USER: ${{ secrets.CLICKHOUSE_USER }}
+          CLICKHOUSE_PASSWORD: ${{ secrets.CLICKHOUSE_PASSWORD }}
+          ZONES_BENCH_REQUIRE_CLICKHOUSE: "1"
         run: |
           set -euo pipefail
           export ZONES_BENCH_ENV_FILE="$ZONES_BENCH_TOPOLOGY_ENV"
@@ -1000,7 +1007,7 @@ jobs:
             echo "- Tempo revision: \`$ZONES_BENCH_TEMPO_REF\`"
             echo "- Txgen revision: \`$ZONES_BENCH_TXGEN_REF\`"
             if [ "$ZONES_BENCH_PHASE" = neobank-e2e ]; then
-              echo "- Earn revision: \`$ZONES_BENCH_EARN_REVISION\`"
+              echo "- Earn revision: \`${ZONES_BENCH_EARN_REVISION:-unavailable}\`"
             fi
             echo "- Build: \`$ZONES_BENCH_BUILD_PROFILE\`, \`RUSTFLAGS=$RUSTFLAGS\`"
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"

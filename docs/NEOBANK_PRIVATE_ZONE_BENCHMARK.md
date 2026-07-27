@@ -192,6 +192,12 @@ git clone --recurse-submodules git@github.com:tempoxyz/earn.git earn
 forge build --root specs/ref-impls --no-lint
 forge build --root earn --skip test --skip script --no-lint \
   --out "$PWD/specs/ref-impls/out"
+forge build --root earn --skip test --skip script --no-lint \
+  --out "$PWD/specs/ref-impls/out" \
+  vendor/bridge/auth-registry/AuthRegistry.sol \
+  vendor/bridge/direct-swaps/direct-swaps/DirectSwapV2.sol \
+  vendor/bridge/direct-swaps/token-handler/TIP20DirectSwapHandler.sol \
+  vendor/bridge/tip20-controller/TIP20Controller.sol
 export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/neobank-topology.env
 export ZONES_BENCH_PROFILE=neobank
