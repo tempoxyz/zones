@@ -227,7 +227,7 @@ l1_snapshot_load_config() {
 
 l1_snapshot_prepare_expectations() {
     echo "building native ZoneFactory shared runtime artifacts"
-    forge build --root "$L1_SNAPSHOT_ZONES_ROOT/specs/ref-impls" --skip test >/dev/null
+    forge build --root "$L1_SNAPSHOT_ZONES_ROOT/specs/ref-impls" --skip test --no-lint >/dev/null
 
     local factory_hash portal_hash verifier_hash messenger_hash genesis_inputs_hash tempo_patch_hash
     factory_hash="$(l1_snapshot_sha256 "$L1_SNAPSHOT_ZONES_ROOT/crates/contracts/src/precompiles/zone_factory.rs")"
