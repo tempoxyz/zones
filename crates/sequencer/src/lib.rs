@@ -94,9 +94,13 @@ pub struct ZoneSequencerHandle {
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
+///
+/// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
+/// in-flight L1 transaction resolves before teardown.
 pub async fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
     let sequencer_address = signer.address();
     // Build a single shared L1 provider with the sequencer wallet.
@@ -141,6 +145,7 @@ pub async fn spawn_zone_sequencer(
         withdrawal_store.clone(),
         withdrawal_notify.clone(),
         withdrawal_repair_notify.clone(),
+        shutdown.clone(),
     );
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
@@ -149,6 +154,7 @@ pub async fn spawn_zone_sequencer(
         withdrawal_store,
         withdrawal_notify,
         withdrawal_repair_notify,
+        shutdown,
     );
 
     ZoneSequencerHandle {

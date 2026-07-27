@@ -13,9 +13,10 @@ pub mod engine;
 pub mod genesis;
 pub mod node;
 mod replication;
+pub mod role;
 pub mod rpc;
 mod settlement_attestation;
 mod tx_forwarding;
 
-pub use engine::ZoneEngine;
+pub use engine::{EngineExit, PermitDecision, ProductionPermit, ZoneEngine};
 pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};

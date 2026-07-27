@@ -166,6 +166,7 @@ fn test_subscriber(
             retain_observations: true,
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
+            leadership_sink: None,
         },
         local_state,
         deposit_sink: DepositSink::Queue(DepositQueue::default()),
@@ -223,6 +224,7 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
             symbol: "aUSD".to_owned(),
             currency: "USD".to_owned(),
         }],
+        leader_transitions: vec![],
     };
     let deposits: Vec<_> = events
         .deposits
@@ -1422,4 +1424,256 @@ fn finalized_queue_rejects_confirmation_mismatch_without_mutation() {
             .hash(),
         h10_hash
     );
+}
+
+fn leader_updated_log(
+    portal: Address,
+    previous: Address,
+    new_leader: Address,
+    epoch: u64,
+    activation: u64,
+) -> Log {
+    let event = crate::abi::ZonePortal::LeaderUpdated {
+        previousLeader: previous,
+        newLeader: new_leader,
+        epoch,
+        activationTempoBlock: activation,
+    };
+    Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn decodes_leader_updated_into_portal_events() {
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let previous = address!("0x0000000000000000000000000000000000001111");
+    let new_leader = address!("0x0000000000000000000000000000000000002222");
+
+    let mut events = L1PortalEvents::default();
+    events
+        .push_log(&leader_updated_log(portal, previous, new_leader, 4, 77), 77)
+        .unwrap();
+
+    assert_eq!(
+        events.leader_transitions,
+        vec![LeaderTransition {
+            previous_leader: previous,
+            new_leader,
+            epoch: 4,
+            activation_tempo_block: 77,
+        }]
+    );
+    let transition = events.final_leader_transition().unwrap().unwrap();
+    assert_eq!(transition.new_leader, new_leader);
+    assert_eq!(transition.epoch, 4);
+}
+
+#[test]
+fn rejects_multiple_leader_transitions_in_one_block() {
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let a = address!("0x0000000000000000000000000000000000001111");
+    let b = address!("0x0000000000000000000000000000000000002222");
+    let c = address!("0x0000000000000000000000000000000000003333");
+
+    let mut events = L1PortalEvents::default();
+    events
+        .push_log(&leader_updated_log(portal, a, b, 4, 77), 77)
+        .unwrap();
+    events
+        .push_log(&leader_updated_log(portal, b, c, 5, 77), 77)
+        .unwrap();
+
+    let err = events.final_leader_transition().unwrap_err();
+    assert!(err.to_string().contains("at most one"));
+}
+
+fn make_receipt_with_logs(
+    block_number: u64,
+    block_hash: B256,
+    logs: Vec<Log>,
+) -> TempoTransactionReceipt {
+    let mut bloom = Bloom::ZERO;
+    for log in &logs {
+        bloom.accrue_log(&log.inner);
+    }
+    TempoTransactionReceipt {
+        inner: TransactionReceipt {
+            inner: ReceiptWithBloom::new(
+                TempoReceipt {
+                    tx_type: TempoTxType::Legacy,
+                    success: true,
+                    cumulative_gas_used: 21_000,
+                    logs,
+                },
+                bloom,
+            ),
+            transaction_hash: B256::with_last_byte(0xaa),
+            transaction_index: Some(0),
+            block_hash: Some(block_hash),
+            block_number: Some(block_number),
+            gas_used: 21_000,
+            effective_gas_price: 0,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::ZERO,
+            to: Some(Address::ZERO),
+            contract_address: None,
+        },
+        fee_token: None,
+        fee_payer: Address::ZERO,
+    }
+}
+
+#[test]
+fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let portal = subscriber.config.portal_address;
+
+    // A recognized topic0 with garbage payload must fence the whole block, never be skipped.
+    let corrupt = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: alloy_primitives::LogData::new_unchecked(
+                vec![crate::abi::ZonePortal::LeaderUpdated::SIGNATURE_HASH],
+                Bytes::from_static(b"garbage"),
+            ),
+        },
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
+
+    let err = subscriber.extract_events(10, &[receipt]).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("failed to decode a portal event in L1 block 10")
+    );
+
+    // Unknown signatures are still skipped: a pre-upgrade contract event cannot fence us.
+    let unknown = Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: alloy_primitives::LogData::new_unchecked(
+                vec![B256::with_last_byte(0x77)],
+                Bytes::from_static(b"whatever"),
+            ),
+        },
+        ..Default::default()
+    };
+    let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
+    let (events, _) = subscriber.extract_events(10, &[receipt]).unwrap();
+    assert!(events.deposits.is_empty());
+    assert!(events.leader_transitions.is_empty());
+}
+
+#[derive(Debug)]
+struct RecordingLeadershipSink {
+    queue: DepositQueue,
+    seen: parking_lot::Mutex<Vec<(LeaderTransition, Option<NumHash>)>>,
+    fail: bool,
+}
+
+impl LeadershipSink for RecordingLeadershipSink {
+    fn apply_leader_transition(&self, transition: &LeaderTransition) -> eyre::Result<()> {
+        if self.fail {
+            eyre::bail!("injected leadership sink failure");
+        }
+        self.seen
+            .lock()
+            .push((transition.clone(), self.queue.last_enqueued()));
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn sync_applies_leadership_transition_before_enqueueing_the_activation_block() {
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let portal = subscriber.config.portal_address;
+    let DepositSink::Queue(queue) = subscriber.deposit_sink.clone() else {
+        panic!("test subscriber must retain deposits");
+    };
+    let sink = Arc::new(RecordingLeadershipSink {
+        queue: queue.clone(),
+        seen: parking_lot::Mutex::new(Vec::new()),
+        fail: false,
+    });
+    subscriber.config.leadership_sink = Some(sink.clone());
+
+    let new_leader = address!("0x0000000000000000000000000000000000002222");
+    let log = leader_updated_log(portal, Address::ZERO, new_leader, 2, 10);
+    let mut header_10 = make_test_header(10);
+    let receipt = make_receipt_with_logs(10, B256::ZERO, vec![log]);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(vec![receipt]));
+
+    assert_eq!(
+        subscriber
+            .sync_finalized_once(&l1_provider, 10)
+            .await
+            .unwrap(),
+        11
+    );
+
+    let seen = sink.seen.lock();
+    assert_eq!(seen.len(), 1);
+    let (transition, queue_tip_at_apply) = &seen[0];
+    assert_eq!(transition.new_leader, new_leader);
+    assert_eq!(transition.epoch, 2);
+    assert_eq!(transition.activation_tempo_block, 10);
+    assert_eq!(
+        *queue_tip_at_apply, None,
+        "the transition must be applied before the activation block is enqueued"
+    );
+    assert_eq!(queue.last_enqueued().unwrap().number, 10);
+}
+
+#[tokio::test]
+async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition() {
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let portal = subscriber.config.portal_address;
+    let DepositSink::Queue(queue) = subscriber.deposit_sink.clone() else {
+        panic!("test subscriber must retain deposits");
+    };
+    subscriber.config.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
+        queue: queue.clone(),
+        seen: parking_lot::Mutex::new(Vec::new()),
+        fail: true,
+    }));
+
+    let new_leader = address!("0x0000000000000000000000000000000000002222");
+    let log = leader_updated_log(portal, Address::ZERO, new_leader, 2, 10);
+    let mut header_10 = make_test_header(10);
+    let receipt = make_receipt_with_logs(10, B256::ZERO, vec![log]);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(vec![receipt]));
+
+    let err = subscriber
+        .sync_finalized_once(&l1_provider, 10)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("leadership transition"));
+
+    // Nothing was enqueued and no observation advanced: the block is fenced, not half-applied.
+    assert_eq!(queue.last_enqueued(), None);
+    assert_eq!(subscriber.config.block_tracker.latest(), None);
 }

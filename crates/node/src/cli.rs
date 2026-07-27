@@ -128,11 +128,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 )
             })
             .transpose()?;
-        let manifest_role = p2p_config.as_ref().map(P2pConfig::role);
         if let Some(config) = p2p_config.as_ref() {
             info!(
                 target: "reth::cli",
-                role = %config.role(),
                 ed25519_public_key = %config.ed25519_public_key(),
                 secp256k1_address = %config.secp256k1_address(),
                 listen = %config.listen(),
@@ -147,8 +145,11 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = 0;
         }
-        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_role);
-        let sequencer_signer = if should_sequence_blocks || manifest_mode {
+        // Every node constructs all the sequencer resources: activation
+        // is gated at runtime by the leadership schedule, so a follower must be
+        // able to become a leader without a restart.
+        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_mode);
+        let sequencer_signer = if should_sequence_blocks {
             Some(
                 load_sequencer_signer(args.sequencer_key, args.sequencer_key_file.as_deref())
                     .await?,
@@ -181,10 +182,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
                 .expect("sequencer signer is parsed whenever sequencing is enabled");
-            let l1_transaction_signer = p2p_config
-                .as_ref()
-                .filter(|config| config.role() == Role::Leader)
-                .map(P2pConfig::block_attestation_signer);
+            let l1_transaction_signer =
+                p2p_config.as_ref().map(P2pConfig::block_attestation_signer);
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,
@@ -198,9 +197,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     max_in_flight_batches: args.withdrawal_max_in_flight_batches,
                 },
             });
-        }
-        if manifest_role == Some(Role::Follower) {
-            info!(target: "reth::cli", "Starting in follower mode");
         }
         if let Some(config) = p2p_config {
             node = node.with_p2p(config);
@@ -450,12 +446,9 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
     }
 }
 
-fn sequencer_enabled(cli_flag: bool, manifest_role: Option<Role>) -> bool {
-    match manifest_role {
-        Some(Role::Leader) => true,
-        Some(Role::Follower) => false,
-        None => cli_flag,
-    }
+/// Whether the sequencer add-on is configured at boot.
+const fn sequencer_enabled(cli_flag: bool, manifest_mode: bool) -> bool {
+    manifest_mode || cli_flag
 }
 
 fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
@@ -488,7 +481,6 @@ mod tests {
         ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url,
         validate_portal_address,
     };
-    use zone_p2p::Role;
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
     #[derive(Debug, clap::Parser)]
@@ -735,11 +727,13 @@ mod tests {
     }
 
     #[test]
-    fn manifest_role_is_authoritative_for_sequencer_startup() {
-        assert!(sequencer_enabled(false, Some(Role::Leader)));
-        assert!(!sequencer_enabled(true, Some(Role::Follower)));
-        assert!(sequencer_enabled(true, None));
-        assert!(!sequencer_enabled(false, None));
+    fn manifest_mode_always_configures_sequencer_resources() {
+        // Followers must hold the complete leader construction so runtime promotion never
+        // requires a restart; activation is gated by the leadership schedule instead.
+        assert!(sequencer_enabled(false, true));
+        assert!(sequencer_enabled(true, true));
+        assert!(sequencer_enabled(true, false));
+        assert!(!sequencer_enabled(false, false));
     }
 
     #[test]

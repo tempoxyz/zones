@@ -167,6 +167,19 @@ contract ZonePortal is IZonePortal {
     /// @dev Defaults to zero and is read from finalized Tempo state by ZoneConfig.
     uint128 public maxTempoGasRate;
 
+    /// @notice Individual sequencer address of the active block-producing leader.
+    /// @dev Appended after maxTempoGasRate; do not reorder existing storage. Zone nodes derive
+    ///      leadership exclusively from finalized reads of these fields and the LeaderUpdated
+    ///      event. Reads as zero for portals initialized before leadership landed; the first
+    ///      setLeader from that state bootstraps epoch 1.
+    address public leader;
+
+    /// @notice Monotonic fencing epoch, incremented exactly once per real leader change.
+    uint64 public leaderEpoch;
+
+    /// @notice Tempo block number that recorded the most recent leader transition.
+    uint64 public leaderActivationTempoBlock;
+
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
     //////////////////////////////////////////////////////////////*/
@@ -202,6 +215,13 @@ contract ZonePortal is IZonePortal {
         emit EnforcementModesUpdated(accessEnforced, gatewayEnforced);
 
         _replaceSequencerSet(initialSequencers, _threshold, false);
+        // The first sequencer bootstraps leadership so a fresh zone has a producer without a
+        // separate setLeader call. The creation block is replayed by every zone node because
+        // zone genesis anchors before createZone.
+        leader = initialSequencers[0];
+        leaderEpoch = 1;
+        leaderActivationTempoBlock = uint64(block.number);
+        emit LeaderUpdated(address(0), initialSequencers[0], 1, uint64(block.number));
 
         for (uint256 i; i < _zoneGateways.length; ++i) {
             _setRole(_zoneGateways[i], Role.CallbackGateway);
@@ -269,14 +289,19 @@ contract ZonePortal is IZonePortal {
             revert InvalidSequencerSet();
         }
 
+        bool retainsLeader = leader == address(0);
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
+            if (signer == leader) retainsLeader = true;
 
             for (uint256 j = 0; j < i; ++j) {
                 if (newSequencers[j] == signer) revert InvalidSequencerSet();
             }
         }
+        // Rotating out the active leader would strand block production: transfer leadership
+        // first (add the replacement, setLeader, then remove the old member).
+        if (!retainsLeader) revert ActiveLeaderRemoved();
 
         bool membersUnchanged = length == _sequencers.length;
         if (membersUnchanged) {
@@ -315,6 +340,29 @@ contract ZonePortal is IZonePortal {
     /// @inheritdoc IZonePortal
     function sequencerAt(uint256 index) external view returns (address) {
         return _sequencers[index];
+    }
+
+    /// @inheritdoc IZonePortal
+    function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencer {
+        if (!isSequencer[newLeader]) revert InvalidLeader();
+        // Idempotent fanout: every node relays the same target, only the first call transitions.
+        if (newLeader == leader) return;
+        // Compare-and-set: a delayed duplicate carrying a pre-handoff epoch cannot roll
+        // leadership back after a later transition.
+        if (leaderEpoch != expectedEpoch) {
+            revert StaleLeadershipEpoch(expectedEpoch, leaderEpoch);
+        }
+        // One distinct leader per Tempo block keeps exactly one authorized producer for the
+        // corresponding zone block.
+        if (leaderActivationTempoBlock == uint64(block.number)) {
+            revert LeaderAlreadyUpdatedThisBlock();
+        }
+
+        address previous = leader;
+        leader = newLeader;
+        leaderEpoch += 1;
+        leaderActivationTempoBlock = uint64(block.number);
+        emit LeaderUpdated(previous, newLeader, leaderEpoch, uint64(block.number));
     }
 
     /// @notice Set zone gas rate. Only callable by admin.

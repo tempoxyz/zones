@@ -7,6 +7,24 @@ pub struct L1PortalEvents {
     pub deposits: Vec<L1Deposit>,
     /// Tokens newly enabled for bridging in this block, with metadata.
     pub enabled_tokens: Vec<EnabledToken>,
+    /// Leadership transitions in this block, in canonical log order.
+    ///
+    /// The portal allows at most one distinct transition per Tempo block.
+    #[serde(default)]
+    pub leader_transitions: Vec<LeaderTransition>,
+}
+
+/// A decoded `LeaderUpdated` portal event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LeaderTransition {
+    /// The leader being replaced (`Address::ZERO` at initialization).
+    pub previous_leader: Address,
+    /// Individual sequencer address of the new block-production leader.
+    pub new_leader: Address,
+    /// New monotonic leadership epoch.
+    pub epoch: u64,
+    /// Tempo block that recorded the transition — the first anchor for the new leader.
+    pub activation_tempo_block: u64,
 }
 
 /// A token newly enabled for bridging, with metadata for L2 creation.
@@ -36,11 +54,12 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 4] = [
+    const SIGNATURE_HASHES: [B256; 5] = [
         DepositMade::SIGNATURE_HASH,
         EncryptedDepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
+        LeaderUpdated::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -155,9 +174,35 @@ impl L1PortalEvents {
                     currency: event.currency,
                 });
             }
+            ZonePortalEvents::LeaderUpdated(event) => {
+                info!(
+                    l1_block = block_number,
+                    previous_leader = %event.previousLeader,
+                    new_leader = %event.newLeader,
+                    epoch = event.epoch,
+                    activation_tempo_block = event.activationTempoBlock,
+                    "Leadership transition on L1"
+                );
+                self.leader_transitions.push(LeaderTransition {
+                    previous_leader: event.previousLeader,
+                    new_leader: event.newLeader,
+                    epoch: event.epoch,
+                    activation_tempo_block: event.activationTempoBlock,
+                });
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Return the leadership transition in this block, if any.
+    pub fn final_leader_transition(&self) -> eyre::Result<Option<&LeaderTransition>> {
+        eyre::ensure!(
+            self.leader_transitions.len() <= 1,
+            "L1 block contains {} leadership transitions; the portal permits at most one",
+            self.leader_transitions.len()
+        );
+        Ok(self.leader_transitions.first())
     }
 
     fn is_known_event(log: &Log) -> bool {

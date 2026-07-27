@@ -25,7 +25,7 @@ use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
     approve_outbox, leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
-    start_chain_id_rpc, start_local_p2p_pair, start_local_zone_with_fixture,
+    start_chain_id_rpc, start_local_p2p_cluster, start_local_zone_with_fixture,
 };
 
 const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
@@ -37,12 +37,19 @@ const P2P_RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let (leader, follower, mut fixture) = start_local_p2p_pair(10).await?;
+    let mut cluster = start_local_p2p_cluster(10).await?;
 
     // Commonware deliberately drops messages for offline peers. Wait for
     // peer dial/handshake (loopback dials every 500ms) before producing the
-    // first block.
+    // first block. The bootstrap leader also needs tip evidence from both
+    // followers before its first promotion.
     tokio::time::sleep(Duration::from_secs(1)).await;
+
+    let mut fixture = std::mem::replace(&mut cluster.fixture, L1Fixture::new());
+    let [leader, follower, _third] = cluster
+        .nodes
+        .try_into()
+        .map_err(|_| eyre::eyre!("cluster must have three nodes"))?;
 
     let anchor = fixture.inject_empty_block(leader.deposit_queue());
     leader.wait_for_block_number(1, DEFAULT_TIMEOUT).await?;
@@ -220,11 +227,19 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
 
     reth_tracing::init_test_tracing();
 
-    let (leader, follower, mut fixture) = start_local_p2p_pair(10).await?;
+    let mut cluster = start_local_p2p_cluster(10).await?;
 
     // Commonware drops messages for offline peers; wait for the dial/handshake
     // before producing the first block (mirrors the sibling P2P test).
     tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // The block producer (fee recipient) must be covered by the seeded policy below.
+    let producer = cluster.sequencer_signers[0].address();
+    let mut fixture = std::mem::replace(&mut cluster.fixture, L1Fixture::new());
+    let [leader, follower, _third] = cluster
+        .nodes
+        .try_into()
+        .map_err(|_| eyre::eyre!("cluster must have three nodes"))?;
 
     // Alice funds the transfer; Bob becomes blacklisted at the next L1 anchor.
     let alice_signer = MnemonicBuilder::<English>::default()
@@ -232,10 +247,6 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
         .index(1)?
         .build()?;
     let alice = alice_signer.address();
-    let sequencer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?
-        .address();
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
     // --- Block 1: fund Alice while pathUSD is still allow-all (anchor L1#1). ---
@@ -285,7 +296,7 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
                 &[
                     (alice, false),
                     (bob, true),
-                    (sequencer, false),
+                    (producer, false),
                     (TIP_FEE_MANAGER_ADDRESS, false),
                 ],
             )],

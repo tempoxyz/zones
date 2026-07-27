@@ -359,6 +359,8 @@ interface IZoneTxContext {
 //   slot 20: role (mapping(address => Role))
 //   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //   slot 22: maxTempoGasRate (uint128)
+//   slot 23: leader (address) + leaderEpoch (uint64) [packed]
+//   slot 24: leaderActivationTempoBlock (uint64)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -377,6 +379,9 @@ bytes32 constant PORTAL_MAX_TEMPO_GAS_RATE_SLOT =
     bytes32(uint256(PORTAL_ENFORCEMENT_MODES_SLOT) + 1);
 bytes32 constant PORTAL_ACCESS_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
 bytes32 constant PORTAL_GATEWAY_MODE_SLOT = PORTAL_ENFORCEMENT_MODES_SLOT;
+bytes32 constant PORTAL_LEADER_SLOT = bytes32(uint256(PORTAL_MAX_TEMPO_GAS_RATE_SLOT) + 1);
+bytes32 constant PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT =
+    bytes32(uint256(PORTAL_LEADER_SLOT) + 1);
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -599,6 +604,19 @@ interface IZonePortal {
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
+    /// @notice Emitted when block-production leadership transitions to a new sequencer.
+    /// @dev Zone nodes derive leadership exclusively from finalized observations of this event.
+    /// @param previousLeader The leader being replaced (address(0) at initialization).
+    /// @param newLeader The individual sequencer address taking over block production.
+    /// @param epoch The new monotonic leadership epoch.
+    /// @param activationTempoBlock The Tempo block that recorded the transition.
+    event LeaderUpdated(
+        address indexed previousLeader,
+        address indexed newLeader,
+        uint64 indexed epoch,
+        uint64 activationTempoBlock
+    );
+
     /// @notice Emitted when the independently mutable enforcement flags are initialized or updated.
     event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
 
@@ -631,6 +649,10 @@ interface IZonePortal {
     error InvalidDepositTransition();
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
+    error InvalidLeader();
+    error ActiveLeaderRemoved();
+    error LeaderAlreadyUpdatedThisBlock();
+    error StaleLeadershipEpoch(uint64 expected, uint64 actual);
     error InvalidQuorumCertificate();
     error InvalidCallbackTarget();
     error CallbackDidNotReturnToZone();
@@ -736,6 +758,22 @@ interface IZonePortal {
 
     /// @notice Return a signer-set member by index.
     function sequencerAt(uint256 index) external view returns (address);
+
+    /// @notice Individual sequencer address of the active block-producing leader.
+    function leader() external view returns (address);
+
+    /// @notice Monotonic fencing epoch, incremented exactly once per real leader change.
+    function leaderEpoch() external view returns (uint64);
+
+    /// @notice Tempo block number that recorded the most recent leader transition.
+    function leaderActivationTempoBlock() external view returns (uint64);
+
+    /// @notice Transfer block-production leadership to another sequencer-set member.
+    /// @dev Only callable by an active sequencer. A call naming the already-active leader is a
+    ///      successful no-op so operators can fan the same request out to every node.
+    /// @param newLeader The individual sequencer address of the new leader.
+    /// @param expectedEpoch The finalized leaderEpoch the caller observed (compare-and-set).
+    function setLeader(address newLeader, uint64 expectedEpoch) external;
 
     /*//////////////////////////////////////////////////////////////
                           TOKEN REGISTRY

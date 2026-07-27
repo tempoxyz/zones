@@ -353,11 +353,21 @@ impl WithdrawalProcessor {
     /// Waits for a notification from the batch submitter (or a fallback timeout) before
     /// checking the L1 withdrawal queue.
     #[instrument(skip_all, fields(portal = %self.config.portal_address))]
-    pub async fn run(&mut self) -> eyre::Result<()> {
+    /// Run the processing loop. Returns `Ok(())` only when `shutdown` fires; the token is
+    /// observed at the wait boundary so an in-flight processing cycle completes first.
+    pub async fn run(
+        &mut self,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) -> eyre::Result<()> {
         info!(l1_rpc = %self.config.l1_rpc_url, "Withdrawal processor started");
 
         loop {
             tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    debug!("Withdrawal processor observed shutdown at the poll boundary");
+                    return Ok(());
+                }
                 _ = self.notify.notified() => {
                     debug!("Woken by batch submission notification");
                 }
@@ -732,14 +742,27 @@ pub fn spawn_withdrawal_processor(
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut processor =
             WithdrawalProcessor::new(config, provider, store, notify, repair_notify);
         loop {
-            if let Err(e) = processor.run().await {
-                error!(error = %e, "Withdrawal processor failed, restarting in 5s");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+            match processor.run(&shutdown).await {
+                Ok(()) => {
+                    info!("Withdrawal processor stopped");
+                    return;
+                }
+                Err(e) => {
+                    error!(error = %e, "Withdrawal processor failed, restarting in 5s");
+                    tokio::select! {
+                        () = shutdown.cancelled() => {
+                            info!("Withdrawal processor stopped");
+                            return;
+                        }
+                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
+                }
             }
         }
     })

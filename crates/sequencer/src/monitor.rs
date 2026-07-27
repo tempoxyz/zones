@@ -271,7 +271,9 @@ impl ZoneMonitor {
         outbox = %self.config.outbox_address,
         inbox = %self.config.inbox_address,
     ))]
-    pub async fn run(&mut self) -> Result<()> {
+    /// Returns `Ok(())` only when `shutdown` fires; the token is observed at the poll
+    /// boundary so an in-flight batch submission resolves before teardown.
+    pub async fn run(&mut self, shutdown: &tokio_util::sync::CancellationToken) -> Result<()> {
         info!(
             zone_rpc = %self.config.zone_rpc_url,
             batch_interval_blocks = self.config.batch_interval_blocks,
@@ -283,6 +285,11 @@ impl ZoneMonitor {
 
         loop {
             tokio::select! {
+                biased;
+                () = shutdown.cancelled() => {
+                    info!("Zone monitor observed shutdown");
+                    return Ok(());
+                }
                 _ = poll.tick() => {}
                 _ = self.repair_notify.notified() => {
                     self.repair_missing_withdrawal_slot().await;
@@ -910,9 +917,14 @@ pub fn spawn_zone_monitor(
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut monitor = loop {
+            if shutdown.is_cancelled() {
+                info!("Zone monitor stopped before start");
+                return;
+            }
             match ZoneMonitor::new(
                 config.clone(),
                 l1_provider.clone(),
@@ -926,15 +938,33 @@ pub fn spawn_zone_monitor(
                 Ok(monitor) => break monitor,
                 Err(e) => {
                     error!(error = %e, "Zone monitor failed to start, retrying in 5s");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        () = shutdown.cancelled() => {
+                            info!("Zone monitor stopped before start");
+                            return;
+                        }
+                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
                 }
             }
         };
 
         loop {
-            if let Err(e) = monitor.run().await {
-                error!(error = %e, "Zone monitor failed, restarting in 5s");
-                tokio::time::sleep(Duration::from_secs(5)).await;
+            match monitor.run(&shutdown).await {
+                Ok(()) => {
+                    info!("Zone monitor stopped");
+                    return;
+                }
+                Err(e) => {
+                    error!(error = %e, "Zone monitor failed, restarting in 5s");
+                    tokio::select! {
+                        () = shutdown.cancelled() => {
+                            info!("Zone monitor stopped");
+                            return;
+                        }
+                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    }
+                }
             }
         }
     })

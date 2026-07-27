@@ -33,7 +33,7 @@ use reth_rpc_eth_api::{
 use reth_rpc_eth_types::logs_utils;
 use tempo_alloy::{
     TempoNetwork,
-    rpc::{TempoHeaderResponse, TempoTransactionRequest},
+    rpc::{TempoCallBuilderExt as _, TempoHeaderResponse, TempoTransactionRequest},
 };
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
@@ -50,13 +50,63 @@ use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneConfig, ZonePortal,
 };
+use zone_p2p::{LeadershipSchedule, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
     types::{
-        AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError, ZoneInfoResponse,
-        internal, raw_null, raw_zero, to_raw,
+        ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
+        LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
+        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneInfoResponse, internal,
+        raw_null, raw_zero, to_raw,
     },
 };
+
+use crate::{replication::PeerTipRegistry, role::SharedRoleStatus};
+
+/// Multi-sequencer handles for the operator RPC methods.
+///
+/// The private RPC launches before the role controller, so the node installs this context
+/// through an [`std::sync::OnceLock`] indirection once the leadership machinery exists.
+#[derive(Debug)]
+pub struct SequencerRpcContext {
+    /// Shared finalized leadership schedule.
+    pub schedule: LeadershipSchedule,
+    /// Live role and promotion-readiness snapshot from the role controller.
+    pub status: SharedRoleStatus,
+    /// Hash-carrying peer tip evidence.
+    pub(crate) peer_tips: PeerTipRegistry,
+    /// Validated static topology manifest.
+    pub manifest: Arc<ZoneManifest>,
+    /// This node's individual secp256k1 address (the `setLeader` relayer identity).
+    pub local_secp256k1_address: Address,
+    /// This node's Ed25519 public key.
+    pub local_ed25519_public_key: zone_p2p::P2pPeerId,
+    /// Wallet-backed L1 provider signing with the individual key.
+    pub relayer: DynProvider<TempoNetwork>,
+}
+
+impl SequencerRpcContext {
+    /// Create the operator RPC context for a multi-sequencer node.
+    pub(crate) fn new(
+        schedule: LeadershipSchedule,
+        status: SharedRoleStatus,
+        peer_tips: PeerTipRegistry,
+        manifest: Arc<ZoneManifest>,
+        local_secp256k1_address: Address,
+        local_ed25519_public_key: zone_p2p::P2pPeerId,
+        relayer: DynProvider<TempoNetwork>,
+    ) -> Self {
+        Self {
+            schedule,
+            status,
+            peer_tips,
+            manifest,
+            local_secp256k1_address,
+            local_ed25519_public_key,
+            relayer,
+        }
+    }
+}
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
@@ -148,6 +198,8 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     /// Maps filter IDs to the authenticated account that created them.
     /// The reth filter registry remains the source of truth for filter liveness.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
+    /// Multi-sequencer operator handles, installed once the role controller exists.
+    sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
 }
 
 impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
@@ -155,6 +207,15 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     pub async fn new(
         eth: EthHandlers<Api>,
         config: zone_rpc::PrivateRpcConfig,
+    ) -> eyre::Result<Self> {
+        Self::with_sequencer_context(eth, config, Arc::new(std::sync::OnceLock::new())).await
+    }
+
+    /// Wrap reth's [`EthHandlers`] with a multi-sequencer operator context slot.
+    pub async fn with_sequencer_context(
+        eth: EthHandlers<Api>,
+        config: zone_rpc::PrivateRpcConfig,
+        sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
     ) -> eyre::Result<Self> {
         let l1_rpc_url = config.l1_rpc_url.clone();
         let zone_rpc_url = config.zone_rpc_url.clone();
@@ -183,6 +244,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
+            sequencer,
         };
         rpc.spawn_filter_owner_pruner();
         Ok(rpc)
@@ -850,6 +912,203 @@ where
                 .map_err(internal)?;
 
             to_raw(&key)
+        })
+    }
+
+    fn zone_get_sequencer_info(&self, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let Some(context) = self.sequencer.get() else {
+                // Single-sequencer (or not yet initialized) node: report the minimal view.
+                return to_raw(&SequencerInfoResponse {
+                    mode: "single".to_owned(),
+                    portal: self.config.zone_portal,
+                    local: None,
+                    active_leader: None,
+                    peers: Vec::new(),
+                    progress: None,
+                    readiness: None,
+                });
+            };
+
+            let status = context.status.lock().expect("poisoned").clone();
+            let latest = context.schedule.latest();
+            let active_leader = latest.as_ref().map(|record| {
+                let node = context.manifest.node_by_ed25519_public_key(&record.leader);
+                ActiveLeaderInfo {
+                    name: node.map(|node| node.name().to_owned()),
+                    sequencer_address: node
+                        .map(|node| node.secp256k1_address())
+                        .unwrap_or_default(),
+                    p2p_public_key: record.leader.to_string(),
+                    epoch: U64::from(record.epoch),
+                    activation_tempo_block: U64::from(record.activation_tempo_block),
+                }
+            });
+
+            let tips: HashMap<_, _> = context
+                .peer_tips
+                .snapshot()
+                .into_iter()
+                .map(|(peer, tip, _)| (peer, tip))
+                .collect();
+            let peers = context
+                .manifest
+                .nodes()
+                .iter()
+                .map(|node| SequencerPeerInfo {
+                    name: node.name().to_owned(),
+                    sequencer_address: node.secp256k1_address(),
+                    is_local: node.ed25519_public_key() == &context.local_ed25519_public_key,
+                    tip: tips.get(node.ed25519_public_key()).map(|tip| PeerTipInfo {
+                        zone_height: U64::from(tip.zone_height),
+                        zone_hash: tip.zone_hash,
+                        tempo_block_number: U64::from(tip.tempo_block_number),
+                        tempo_block_hash: tip.tempo_block_hash,
+                    }),
+                })
+                .collect();
+
+            let zone_height = self
+                .zone_provider
+                .get_block_number()
+                .await
+                .map_err(internal)?;
+            let tempo_block_number = self
+                .tempo_state
+                .tempoBlockNumber()
+                .call()
+                .await
+                .map_err(internal)?;
+
+            let local_node = context
+                .manifest
+                .node_by_ed25519_public_key(&context.local_ed25519_public_key);
+            to_raw(&SequencerInfoResponse {
+                mode: "multi".to_owned(),
+                portal: self.config.zone_portal,
+                local: Some(LocalSequencerInfo {
+                    name: local_node
+                        .map(|node| node.name().to_owned())
+                        .unwrap_or_default(),
+                    sequencer_address: context.local_secp256k1_address,
+                    p2p_public_key: context.local_ed25519_public_key.to_string(),
+                    role: status.role.to_owned(),
+                }),
+                active_leader,
+                peers,
+                progress: Some(SequencerProgress {
+                    zone_height: U64::from(zone_height),
+                    tempo_block_number: U64::from(tempo_block_number),
+                    latest_observed_leadership_epoch: context
+                        .schedule
+                        .latest_observed_epoch()
+                        .map(U64::from),
+                    locally_applied_leadership_epoch: context
+                        .schedule
+                        .locally_applied_epoch()
+                        .map(U64::from),
+                    pending_transitions: U64::from(context.schedule.pending_transitions() as u64),
+                }),
+                readiness: Some(SequencerReadiness {
+                    ready_for_promotion: status.ready_for_promotion,
+                    reasons: status.promotion_reasons.clone(),
+                }),
+            })
+        })
+    }
+
+    fn zone_set_leader(&self, target: Address, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let Some(context) = self.sequencer.get() else {
+                return Err(JsonRpcError::invalid_params(
+                    "zone_setLeader requires multi-sequencer mode",
+                ));
+            };
+            if self.config.zone_portal.is_zero() {
+                return Err(JsonRpcError::invalid_params(
+                    "zone_setLeader requires a nonzero portal",
+                ));
+            }
+
+            // Only the portal admin may move leadership through this endpoint. The portal
+            // additionally requires the relaying transaction to come from an active
+            // sequencer (this node's individual key).
+            let portal = ZonePortal::new(self.config.zone_portal, &context.relayer);
+            let admin = portal
+                .admin()
+                .block(BlockId::finalized())
+                .call()
+                .await
+                .map_err(internal)?;
+            if auth.caller != admin {
+                return Err(JsonRpcError {
+                    code: -32005,
+                    message: "caller is not the portal admin".to_owned(),
+                    data: None,
+                });
+            }
+
+            // The target must be a manifest member and a registered portal sequencer.
+            if context.manifest.node_by_secp256k1_address(target).is_none() {
+                return Err(JsonRpcError::invalid_params(
+                    "target is not a manifest member",
+                ));
+            }
+            let is_sequencer = portal
+                .isSequencer(target)
+                .block(BlockId::finalized())
+                .call()
+                .await
+                .map_err(internal)?;
+            if !is_sequencer {
+                return Err(JsonRpcError::invalid_params(
+                    "target is not a registered portal sequencer",
+                ));
+            }
+
+            // Read the finalized epoch for the compare-and-set guard. A duplicate fanout to
+            // the already-active leader is answered without a transaction; races remain safe
+            // because same-target calls no-op on chain and the epoch guard rejects delayed
+            // stale calls.
+            let leader_call = portal.leader().block(BlockId::finalized());
+            let epoch_call = portal.leaderEpoch().block(BlockId::finalized());
+            let (leader, expected_epoch) =
+                tokio::try_join!(leader_call.call(), epoch_call.call()).map_err(internal)?;
+            if leader == target {
+                return to_raw(&SetLeaderResponse {
+                    status: "alreadyActive".to_owned(),
+                    tx_hash: None,
+                    relayer: context.local_secp256k1_address,
+                    requested_leader: target,
+                });
+            }
+
+            // Relay with the individual key on the reserved admin-operations nonce lane and
+            // return immediately: the node's role changes only when its finalized L1
+            // subscriber observes the resulting transition (I6).
+            let pending = portal
+                .setLeader(target, expected_epoch)
+                .nonce_key(zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY)
+                .send()
+                .await
+                .map_err(internal)?;
+            let tx_hash = *pending.tx_hash();
+            metrics::counter!("zone_set_leader_submissions_total", "result" => "submitted")
+                .increment(1);
+            tracing::info!(
+                target: "zone::rpc",
+                %target,
+                %tx_hash,
+                caller = %auth.caller,
+                expected_epoch,
+                "Relayed setLeader to the ZonePortal"
+            );
+            to_raw(&SetLeaderResponse {
+                status: "submitted".to_owned(),
+                tx_hash: Some(tx_hash),
+                relayer: context.local_secp256k1_address,
+                requested_leader: target,
+            })
         })
     }
 }

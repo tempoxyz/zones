@@ -243,6 +243,17 @@ fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Addr
     (topic0 == Some(&TokenEnabled::SIGNATURE_HASH)).then_some(TIP403_REGISTRY_ADDRESS)
 }
 
+/// Sink for leadership transitions decoded from verified finalized receipts.
+///
+/// Implemented by the node over its `LeadershipSchedule`. The subscriber applies every
+/// transition **before** enqueueing the block that recorded it — enqueueing notifies the
+/// engine internally, so append-after-enqueue could race a producer waking on that notify.
+/// An error fences ingestion of the whole L1 block.
+pub trait LeadershipSink: Send + Sync + std::fmt::Debug {
+    /// Apply one decoded leadership transition.
+    fn apply_leader_transition(&self, transition: &crate::LeaderTransition) -> eyre::Result<()>;
+}
+
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
@@ -266,6 +277,9 @@ pub struct L1SubscriberConfig {
     pub l1_fetch_concurrency: usize,
     /// Interval between L1 connection attempts.
     pub retry_connection_interval: std::time::Duration,
+    /// Optional sink that receives leadership transitions before the block that
+    /// recorded them is enqueued.
+    pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
@@ -677,19 +691,39 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, invalidated) = self.extract_events(block_number, &receipts);
+            // Decoding fails closed: a decode failure of a recognized portal log aborts this
+            // block before anything is enqueued or any cache advances. Ingestion halts here (fenced)
+            // instead of continuing under a partial event view.
+            let (events, invalidated) =
+                self.extract_events(block_number, &receipts)
+                    .map_err(|err| {
+                        self.subscriber_metrics.decode_fence_failures.increment(1);
+                        error!(
+                            block_number,
+                            %err,
+                            "Halting L1 ingestion: portal event decoding failed; refusing to \
+                             process the block under a partial event view"
+                        );
+                        err
+                    })?;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
+            // Publish the leadership transition _before_ the activation block becomes
+            // consumable.
+            if let Some(sink) = &self.config.leadership_sink
+                && let Some(transition) = events.final_leader_transition()?
+            {
+                sink.apply_leader_transition(transition).wrap_err_with(|| {
+                    format!("cannot apply the leadership transition from block {block_number}")
+                })?;
+            }
             let appended = self
                 .deposit_sink
                 .enqueue(sealed, events.clone())
                 .wrap_err_with(|| {
-                    format!(
-                        "unexpected discontinuity while enqueueing finalized L1 block \
-                         {block_number}"
-                    )
+                    format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
             self.config
                 .block_tracker
@@ -749,11 +783,14 @@ impl L1Subscriber {
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.
-    fn extract_events(
+    ///
+    /// A decode failure of a portal log is an error for the whole block. A silently dropped
+    /// event would diverge this node from its peers.
+    pub(crate) fn extract_events(
         &self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> L1ProcessedEvents {
+    ) -> eyre::Result<L1ProcessedEvents> {
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
@@ -769,9 +806,11 @@ impl L1Subscriber {
                     {
                         invalidated.insert(address);
                     }
-                    if let Err(e) = portal_events.push_log(log, block_number) {
-                        warn!(block_number, %e, "Failed to decode portal event from receipt");
-                    }
+                    portal_events
+                        .push_log(log, block_number)
+                        .wrap_err_with(|| {
+                            format!("failed to decode a portal event in L1 block {block_number}")
+                        })?;
                 } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
                     invalidated.extend([address, log.address()]);
                 }
@@ -783,7 +822,7 @@ impl L1Subscriber {
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, invalidated)
+        Ok((portal_events, invalidated))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -818,6 +857,11 @@ impl L1Subscriber {
             self.subscriber_metrics
                 .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
+        }
+        if !portal_events.leader_transitions.is_empty() {
+            self.subscriber_metrics
+                .leader_updated_events
+                .increment(portal_events.leader_transitions.len() as u64);
         }
     }
 

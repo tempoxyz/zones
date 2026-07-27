@@ -23,6 +23,8 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_ENFORCEMENT_MODES_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT,
+    PORTAL_LEADER_SLOT,
     PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
     PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_ROLE_SLOT,
@@ -366,6 +368,8 @@ contract ZonePortalProxyStorageTest is Test {
         emit IZonePortal.EnforcementModesUpdated(true, true);
         vm.expectEmit(true, false, false, true, proxy);
         emit IZonePortal.SequencerSetUpdated(0, 1, sequencers);
+        vm.expectEmit(true, true, true, true, proxy);
+        emit IZonePortal.LeaderUpdated(address(0), makeAddr("sequencer 1"), 1, uint64(block.number));
         vm.expectEmit(true, false, false, true, proxy);
         emit IZonePortal.RoleUpdated(portalMessenger, Role.None, Role.CallbackGateway);
         vm.expectEmit(true, false, false, true, proxy);
@@ -469,6 +473,15 @@ contract ZonePortalProxyStorageTest is Test {
         );
         bytes32 membershipSlot = keccak256(abi.encode(initialSequencer, uint256(19)));
         assertEq(uint256(vm.load(target, membershipSlot)), 1, "slot 19: membership mismatch");
+
+        bytes32 slot23 = vm.load(target, bytes32(uint256(23)));
+        assertEq(address(uint160(uint256(slot23))), initialSequencer, "slot 23: leader mismatch");
+        assertEq(uint64(uint256(slot23) >> 160), 1, "slot 23: leaderEpoch mismatch");
+        assertEq(
+            uint64(uint256(vm.load(target, bytes32(uint256(24))))),
+            uint64(block.number),
+            "slot 24: leaderActivationTempoBlock mismatch"
+        );
     }
 
 }
@@ -550,6 +563,18 @@ contract ZonePortalTest is BaseTest {
 
     function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
         signers = _sequencerSet();
+        // The portal rejects a set that drops the active leader, so rotation is three steps:
+        // add the replacements, transfer leadership, then remove the old leader.
+        address[] memory joint = new address[](signers.length + 1);
+        for (uint256 i; i < signers.length; ++i) {
+            joint[i] = signers[i];
+        }
+        joint[signers.length] = sequencer;
+        vm.prank(admin);
+        portal.setSequencerSet(joint, quorum);
+        vm.roll(block.number + 1);
+        vm.prank(sequencer);
+        portal.setLeader(signers[0], portal.leaderEpoch());
         vm.prank(admin);
         portal.setSequencerSet(signers, quorum);
     }
@@ -660,18 +685,24 @@ contract ZonePortalTest is BaseTest {
 
     function test_setSequencerSet_incrementsConfigurationNonce() public {
         address[] memory signers = _sequencerSet();
+        // Keep the active leader in the set; dropping it is rejected (ActiveLeaderRemoved).
+        address[] memory joint = new address[](4);
+        joint[0] = signers[0];
+        joint[1] = signers[1];
+        joint[2] = signers[2];
+        joint[3] = sequencer;
 
         vm.expectEmit(true, false, false, true);
-        emit IZonePortal.SequencerSetUpdated(1, 2, signers);
+        emit IZonePortal.SequencerSetUpdated(1, 2, joint);
         vm.prank(admin);
-        portal.setSequencerSet(signers, 2);
+        portal.setSequencerSet(joint, 2);
 
         assertEq(portal.sequencerSetVersion(), 1);
         assertEq(portal.sequencerThreshold(), 2);
-        assertEq(portal.sequencerCount(), 3);
-        for (uint256 i; i < signers.length; ++i) {
-            assertEq(portal.sequencerAt(i), signers[i]);
-            assertTrue(portal.isSequencer(signers[i]));
+        assertEq(portal.sequencerCount(), 4);
+        for (uint256 i; i < joint.length; ++i) {
+            assertEq(portal.sequencerAt(i), joint[i]);
+            assertTrue(portal.isSequencer(joint[i]));
         }
     }
 
@@ -701,7 +732,13 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_setSequencerSet_acceptsAnyOrderAndComparesMembership() public {
-        address[] memory signers = _sequencerSet();
+        address[] memory base = _sequencerSet();
+        // Keep the active leader in the set; dropping it is rejected (ActiveLeaderRemoved).
+        address[] memory signers = new address[](4);
+        signers[0] = base[0];
+        signers[1] = base[1];
+        signers[2] = base[2];
+        signers[3] = sequencer;
         (signers[0], signers[2]) = (signers[2], signers[0]);
 
         vm.prank(admin);
@@ -720,6 +757,10 @@ contract ZonePortalTest is BaseTest {
 
     function test_setSequencerSet_revertsIfUnchangedAndRotatesMembership() public {
         address[] memory signers = _activateSequencerSet(2);
+        // _activateSequencerSet performs a leadership rotation: two set updates around a
+        // setLeader, so the configuration nonce is already at 2 and signers[0] leads.
+        assertEq(portal.sequencerSetVersion(), 2);
+        assertEq(portal.leader(), signers[0]);
 
         vm.prank(admin);
         vm.expectRevert(IZonePortal.SequencerConfigurationUnchanged.selector);
@@ -732,7 +773,7 @@ contract ZonePortalTest is BaseTest {
         vm.prank(admin);
         portal.setSequencerSet(replacement, 2);
 
-        assertEq(portal.sequencerSetVersion(), 2);
+        assertEq(portal.sequencerSetVersion(), 3);
         assertFalse(portal.isSequencer(removed));
     }
 
@@ -748,6 +789,146 @@ contract ZonePortalTest is BaseTest {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotSequencer.selector);
         portal.setRpcUrl("https://not-a-sequencer.example");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           LEADERSHIP TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_initialize_bootstrapsFirstSequencerAsLeader() public view {
+        assertEq(portal.leader(), sequencer, "initial leader should be first sequencer");
+        assertEq(portal.leaderEpoch(), 1, "initial epoch should be 1");
+        assertEq(
+            portal.leaderActivationTempoBlock(),
+            genesisTempoBlockNumber,
+            "activation block should be the creation block"
+        );
+    }
+
+    function test_setLeader_transitionsAndIncrementsEpochOnce() public {
+        address[] memory signers = _activateSequencerSet(2);
+        // Post-rotation state from the helper: leader = signers[0], epoch = 2.
+        assertEq(portal.leaderEpoch(), 2);
+
+        vm.roll(block.number + 1);
+        vm.expectEmit(true, true, true, true);
+        emit IZonePortal.LeaderUpdated(signers[0], signers[1], 3, uint64(block.number));
+        vm.prank(signers[2]);
+        portal.setLeader(signers[1], 2);
+
+        assertEq(portal.leader(), signers[1]);
+        assertEq(portal.leaderEpoch(), 3);
+        assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
+    }
+
+    function test_setLeader_revertsForNonSequencerCaller() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epoch = portal.leaderEpoch();
+
+        vm.roll(block.number + 1);
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setLeader(signers[1], epoch);
+    }
+
+    function test_setLeader_revertsForNonMemberTarget() public {
+        _activateSequencerSet(2);
+        address activeLeader = portal.leader();
+        uint64 epoch = portal.leaderEpoch();
+
+        vm.roll(block.number + 1);
+        vm.prank(activeLeader);
+        vm.expectRevert(IZonePortal.InvalidLeader.selector);
+        portal.setLeader(alice, epoch);
+    }
+
+    function test_setLeader_duplicateTargetIsNoOpWithoutEventOrEpochChange() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epochBefore = portal.leaderEpoch();
+        uint64 activationBefore = portal.leaderActivationTempoBlock();
+
+        // Fanned-out duplicates succeed as no-ops even with a stale expected epoch.
+        vm.roll(block.number + 1);
+        vm.recordLogs();
+        vm.prank(signers[1]);
+        portal.setLeader(signers[0], epochBefore - 1);
+
+        assertEq(vm.getRecordedLogs().length, 0, "duplicate must not emit");
+        assertEq(portal.leader(), signers[0]);
+        assertEq(portal.leaderEpoch(), epochBefore);
+        assertEq(portal.leaderActivationTempoBlock(), activationBefore);
+    }
+
+    function test_setLeader_rejectsStaleEpochAfterLaterHandoff() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epochAtB = portal.leaderEpoch();
+
+        // signers[0] -> signers[1], then signers[1] -> signers[2].
+        vm.roll(block.number + 1);
+        vm.prank(signers[0]);
+        portal.setLeader(signers[1], epochAtB);
+        vm.roll(block.number + 1);
+        vm.prank(signers[0]);
+        portal.setLeader(signers[2], epochAtB + 1);
+
+        // A delayed duplicate of the first handoff cannot move leadership back.
+        vm.roll(block.number + 1);
+        vm.prank(signers[0]);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.StaleLeadershipEpoch.selector, epochAtB, epochAtB + 2
+            )
+        );
+        portal.setLeader(signers[1], epochAtB);
+
+        assertEq(portal.leader(), signers[2]);
+        assertEq(portal.leaderEpoch(), epochAtB + 2);
+    }
+
+    function test_setLeader_rejectsSecondDistinctTargetInOneBlock() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epoch = portal.leaderEpoch();
+
+        vm.roll(block.number + 1);
+        vm.prank(signers[0]);
+        portal.setLeader(signers[1], epoch);
+
+        // Same target again in the same block: still a successful no-op.
+        vm.prank(signers[2]);
+        portal.setLeader(signers[1], epoch + 1);
+
+        // A different target in the same Tempo block is ambiguous and rejected.
+        vm.prank(signers[0]);
+        vm.expectRevert(IZonePortal.LeaderAlreadyUpdatedThisBlock.selector);
+        portal.setLeader(signers[2], epoch + 1);
+    }
+
+    function test_setLeader_bootstrapsLegacyZeroState() public {
+        // Portals initialized before leadership landed read the appended slots as zero.
+        vm.store(address(portal), PORTAL_LEADER_SLOT, bytes32(0));
+        vm.store(address(portal), PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT, bytes32(0));
+        assertEq(portal.leader(), address(0));
+        assertEq(portal.leaderEpoch(), 0);
+
+        vm.expectEmit(true, true, true, true);
+        emit IZonePortal.LeaderUpdated(address(0), sequencer, 1, uint64(block.number));
+        vm.prank(sequencer);
+        portal.setLeader(sequencer, 0);
+
+        assertEq(portal.leader(), sequencer);
+        assertEq(portal.leaderEpoch(), 1);
+    }
+
+    function test_setSequencerSet_rejectsRemovingActiveLeader() public {
+        address[] memory signers = _activateSequencerSet(2);
+        assertEq(portal.leader(), signers[0]);
+
+        address[] memory withoutLeader = new address[](2);
+        withoutLeader[0] = signers[1];
+        withoutLeader[1] = signers[2];
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.ActiveLeaderRemoved.selector);
+        portal.setSequencerSet(withoutLeader, 2);
     }
 
     function test_submitBatch_acceptsQuorumCertificateFromRegisteredSequencer() public {
@@ -2525,8 +2706,10 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        address[] memory receiverSet = new address[](1);
+        // Keep the active leader in the set; dropping it is rejected (ActiveLeaderRemoved).
+        address[] memory receiverSet = new address[](2);
         receiverSet[0] = address(receiver);
+        receiverSet[1] = sequencer;
         vm.prank(admin);
         portal.setSequencerSet(receiverSet, 1);
 
@@ -3986,6 +4169,8 @@ contract ZonePortalTest is BaseTest {
     ///        slot 20: role mapping
     ///        slot 21: account/gateway enforcement booleans [packed]
     ///        slot 22: maxTempoGasRate (uint128)
+    ///        slot 23: leader (address) + leaderEpoch (uint64) [packed]
+    ///        slot 24: leaderActivationTempoBlock (uint64)
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: admin ---
         bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
@@ -4097,6 +4282,23 @@ contract ZonePortalTest is BaseTest {
             uint128(uint256(maxTempoGasRateSlot)),
             portal.maxTempoGasRate(),
             "slot 22: maxTempoGasRate mismatch"
+        );
+
+        // --- Slot 23: leader (address) + leaderEpoch (uint64) packed ---
+        bytes32 leaderSlot = vm.load(address(portal), PORTAL_LEADER_SLOT);
+        assertEq(address(uint160(uint256(leaderSlot))), portal.leader(), "slot 23: leader mismatch");
+        assertEq(
+            uint64(uint256(leaderSlot) >> 160),
+            portal.leaderEpoch(),
+            "slot 23: leaderEpoch mismatch"
+        );
+
+        // --- Slot 24: leaderActivationTempoBlock (uint64) ---
+        bytes32 activationSlot = vm.load(address(portal), PORTAL_LEADER_ACTIVATION_TEMPO_BLOCK_SLOT);
+        assertEq(
+            uint64(uint256(activationSlot)),
+            portal.leaderActivationTempoBlock(),
+            "slot 24: leaderActivationTempoBlock mismatch"
         );
     }
 

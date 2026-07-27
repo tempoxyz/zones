@@ -18,26 +18,6 @@ use tokio::{
 use tracing::{debug, warn};
 use zone_p2p::{P2pCommand, P2pEvent};
 
-/// Split leader-side P2P events so block catch-up and transaction admission can run independently.
-pub(crate) async fn route_p2p_events(
-    mut events: mpsc::Receiver<P2pEvent>,
-    block_events: mpsc::Sender<P2pEvent>,
-    transaction_events: mpsc::Sender<P2pEvent>,
-) {
-    while let Some(event) = events.recv().await {
-        let destination = if matches!(event, P2pEvent::TransactionReceived { .. }) {
-            &transaction_events
-        } else {
-            &block_events
-        };
-        if destination.send(event).await.is_err() {
-            tracing::error!(target: "zone::p2p", "P2P event consumer closed");
-            return;
-        }
-    }
-    tracing::error!(target: "zone::p2p", "P2P event channel closed");
-}
-
 #[cfg(not(test))]
 const RECONCILIATION_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(test)]
