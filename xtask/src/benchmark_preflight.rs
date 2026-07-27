@@ -35,6 +35,7 @@ const MAX_UINT256: &str =
     "115792089237316195423570985008687907853269984665640564039457584007913129639935";
 const AUTH_TOKEN_TTL_SECS: u64 = 300;
 const FRESH_RECIPIENT_START: u32 = 1_000_000;
+const MAX_EXPIRING_APPROVAL_CHUNK: u32 = 12;
 alloy::sol! {
     #[sol(rpc)]
     interface ZoneBenchmarkConfig {
@@ -721,12 +722,22 @@ impl BenchmarkPreflight {
         let activity_transaction_capacity = u64::from(self.accounts)
             .checked_mul(self.transactions_per_account)
             .ok_or_else(|| eyre!("activity transaction capacity overflows u64"))?;
-        let approval_fee_bump = u128::from(self.accounts);
-        let l1_approval_max_fee_per_gas =
-            expiring_max_fee_cap(l1_max_fee_per_gas, approval_fee_bump)?;
+        // Neobank approval setup signs at most twelve expiring transactions per generator
+        // invocation. Ordinary generation uses odd fee bumps: 1, 3, ..., 2N-1.
+        let approval_transaction_capacity =
+            u128::from(self.accounts.min(MAX_EXPIRING_APPROVAL_CHUNK));
+        let approval_fee_bump = ordinary_expiring_fee_bump(approval_transaction_capacity)?;
+        // Portal approvals use regular nonces and retain the configured L1 fee cap.
+        let l1_approval_max_fee_per_gas = l1_max_fee_per_gas;
         let zone_approval_max_fee_per_gas =
             expiring_max_fee_cap(zone_max_fee_per_gas, approval_fee_bump)?;
-        let activity_fee_bump = u128::from(activity_transaction_capacity);
+        let activity_fee_bump = if self.check_phase.roundtrip() {
+            // The roundtrip DAG has two Zone submits. Activity is the first, so its
+            // deterministic identity advances by two submit slots per instance.
+            scenario_expiring_fee_bump(u128::from(activity_transaction_capacity), 2, 0)?
+        } else {
+            ordinary_expiring_fee_bump(u128::from(activity_transaction_capacity))?
+        };
         let activity_max_fee_per_gas =
             expiring_max_fee_cap(zone_max_fee_per_gas, activity_fee_bump)?;
 
@@ -1187,6 +1198,37 @@ fn expiring_max_fee_cap(max_fee: u128, maximum_bump: u128) -> eyre::Result<u128>
     max_fee
         .checked_add(maximum_bump)
         .ok_or_else(|| eyre!("maxFeePerGas overflows the txgen expiring-nonce uniqueness bump"))
+}
+
+fn ordinary_expiring_fee_bump(transaction_count: u128) -> eyre::Result<u128> {
+    if transaction_count == 0 {
+        return Ok(0);
+    }
+    transaction_count
+        .checked_mul(2)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or_else(|| eyre!("txgen ordinary expiring-nonce uniqueness bump overflows u128"))
+}
+
+fn scenario_expiring_fee_bump(
+    instances: u128,
+    submits_per_instance: u128,
+    expiring_submit_rank: u128,
+) -> eyre::Result<u128> {
+    if instances == 0 {
+        return Ok(0);
+    }
+    ensure!(
+        submits_per_instance > 0 && expiring_submit_rank < submits_per_instance,
+        "expiring submit rank must be within the scenario's per-chain submit count"
+    );
+    instances
+        .checked_sub(1)
+        .and_then(|value| value.checked_mul(submits_per_instance))
+        .and_then(|value| value.checked_add(expiring_submit_rank))
+        .and_then(|value| value.checked_mul(2))
+        .and_then(|value| value.checked_add(2))
+        .ok_or_else(|| eyre!("txgen scenario expiring-nonce uniqueness bump overflows u128"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2008,8 +2050,15 @@ mod tests {
 
     #[test]
     fn expiring_max_fee_cap_reserves_txgen_uniqueness_bump() {
-        assert_eq!(expiring_max_fee_cap(100, 25).unwrap(), 125);
+        assert_eq!(ordinary_expiring_fee_bump(0).unwrap(), 0);
+        assert_eq!(ordinary_expiring_fee_bump(1).unwrap(), 1);
+        assert_eq!(ordinary_expiring_fee_bump(25).unwrap(), 49);
+        assert_eq!(scenario_expiring_fee_bump(100, 4, 3).unwrap(), 800);
+        assert_eq!(scenario_expiring_fee_bump(100, 2, 0).unwrap(), 398);
+        assert_eq!(expiring_max_fee_cap(100, 49).unwrap(), 149);
         assert!(expiring_max_fee_cap(u128::MAX, 1).is_err());
+        assert!(ordinary_expiring_fee_bump(u128::MAX).is_err());
+        assert!(scenario_expiring_fee_bump(1, 1, 1).is_err());
     }
 
     #[test]
@@ -3240,11 +3289,14 @@ mod tests {
             assert!(activity.is_expiring_nonce());
             assert_eq!(activity.nonce(), 0);
             assert_eq!(activity.max_priority_fee_per_gas(), Some(0));
-            assert!(activity.max_fee_per_gas() > config.zone_max_fee_per_gas);
         }
-        assert_ne!(
+        assert_eq!(
             activities[0].max_fee_per_gas(),
-            activities[1].max_fee_per_gas()
+            config.zone_max_fee_per_gas + 1
+        );
+        assert_eq!(
+            activities[1].max_fee_per_gas(),
+            config.zone_max_fee_per_gas + 3
         );
         assert_ne!(activities[0].tx_hash(), activities[1].tx_hash());
         let (target, input) = only_call(activity);

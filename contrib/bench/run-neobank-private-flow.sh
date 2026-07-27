@@ -667,6 +667,79 @@ l1_priority_fee="$(jq -er '.l1MaxPriorityFeePerGas' "$ZONES_BENCH_OUTPUT/preflig
 zone_fee="$(jq -er '.zoneMaxFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
 zone_priority_fee="$(jq -er '.zoneMaxPriorityFeePerGas' "$ZONES_BENCH_OUTPUT/preflight.json")"
 
+python3 - \
+    "$ZONES_BENCH_NEOBANK_PRESET" "$ZONES_BENCH_ACCOUNTS" "$ZONES_BENCH_COUNT" \
+    "$journeys_per_account" "$ZONES_BENCH_DEPOSIT_AMOUNT" "$admission_seed_amount" \
+    "$l1_fee" "$ZONES_BENCH_OUTPUT/preflight.json" <<'PY'
+import json
+import sys
+
+preset = sys.argv[1]
+accounts, journeys, per_account, deposit, admission_seed, l1_fee = map(
+    int, sys.argv[2:8]
+)
+preflight_path = sys.argv[8]
+scale = 10**12
+deposit_gas = 2_000_000
+approval_gas = 2_000_000
+
+
+def fee(gas_limit: int, gas_price: int) -> int:
+    return (gas_limit * gas_price + scale - 1) // scale
+
+
+# Every listed L1 submit is an expiring encrypted onramp. txgen assigns scenario
+# identities across all submits on a chain, so the highest fee bump is 2*S*J.
+measured_l1_submits = {
+    "encrypted-deposit": 1,
+    "private-withdrawal": 0,
+    "rewards-redemption": 0,
+    "swapped-redemption": 0,
+    "direct-lifecycle": 1,
+    "third-party-recipient": 2,
+    "full-journey": 1,
+    "slippage-bounce": 1,
+    "swapped-lifecycle": 1,
+}[preset]
+measured_bump = 2 * measured_l1_submits * journeys
+has_position_onramp = preset in {
+    "private-withdrawal",
+    "rewards-redemption",
+    "swapped-redemption",
+}
+setup_bump = 2 * accounts if admission_seed or has_position_onramp else 0
+
+with open(preflight_path, encoding="utf-8") as handle:
+    report = json.load(handle)
+approval_accounts = set(report["portalApprovalSetupAccounts"])
+base_deposit_fee = fee(deposit_gas, l1_fee)
+base_approval_fee = fee(approval_gas, l1_fee)
+measured_fee_delta = fee(deposit_gas, l1_fee + measured_bump) - base_deposit_fee
+setup_fee_delta = fee(deposit_gas, l1_fee + setup_bump) - base_deposit_fee
+
+for account in report["accounts"]:
+    required = per_account * deposit
+    if measured_l1_submits:
+        required += per_account * (base_deposit_fee + measured_fee_delta)
+    elif has_position_onramp:
+        required += base_deposit_fee + setup_fee_delta
+    if admission_seed:
+        required += admission_seed + base_deposit_fee + setup_fee_delta
+    if account["index"] in approval_accounts:
+        required += base_approval_fee
+    balance = int(account["l1Balance"])
+    if balance < required:
+        raise SystemExit(
+            f"account {account['address']} L1 balance {balance} is below "
+            f"the {preset} principal and expiring-fee cap {required}"
+        )
+
+print(
+    f"{preset} L1 expiring-fee capacity verified: "
+    f"measured_bump={measured_bump}, setup_bump={setup_bump}"
+)
+PY
+
 case "$ZONES_BENCH_NEOBANK_PRESET" in
     direct-lifecycle|third-party-recipient|full-journey|slippage-bounce|swapped-lifecycle)
         python3 - \
@@ -682,9 +755,17 @@ scale = 10**12
 def fee(gas_limit: int, gas_price: int) -> int:
     return (gas_limit * gas_price + scale - 1) // scale
 
-# Reserve the largest expiring-nonce uniqueness bump the measured run can use,
-# even though the composable withdrawals currently use regular nonces.
-worst_gas_price = zone_fee + 4 * journeys
+# txgen assigns deterministic identities across all Zone submits in a scenario.
+# Every measured Zone template uses an expiring nonce, so the largest bump is
+# 2*S*J for S Zone submits per journey and J instances.
+zone_submits = {
+    "direct-lifecycle": 2,
+    "third-party-recipient": 2,
+    "full-journey": 4,
+    "slippage-bounce": 1,
+    "swapped-lifecycle": 2,
+}[preset]
+worst_gas_price = zone_fee + 2 * zone_submits * journeys
 activity_fee = fee(500_000, worst_gas_price)
 withdrawal_fee = fee(10_000_000, worst_gas_price)
 if preset in {"direct-lifecycle", "swapped-lifecycle"}:
@@ -692,9 +773,7 @@ if preset in {"direct-lifecycle", "swapped-lifecycle"}:
 elif preset == "third-party-recipient":
     required = withdrawal + withdrawal_fee
 elif preset == "full-journey":
-    before_redeem = activity + withdrawal + activity_fee + 2 * withdrawal_fee
-    after_redeem = 2 * activity + activity_fee + 3 * withdrawal_fee
-    required = max(before_redeem, after_redeem)
+    required = activity + withdrawal + activity_fee + 3 * withdrawal_fee
 elif preset == "slippage-bounce":
     required = withdrawal + withdrawal_fee
 else:
@@ -834,11 +913,10 @@ approval_gas = 2_000_000
 def fee(gas_limit: int, gas_price: int) -> int:
     return (gas_limit * gas_price + scale - 1) // scale
 
-# Each scenario engine starts its own expiring-fee uniqueness counter. Reserve
-# the worst setup bump and every one of the 2*N measured redemptions at the
-# measured run's worst global bump.
-setup_fee = fee(withdrawal_gas, zone_fee + a)
-measured_fee = fee(withdrawal_gas, zone_fee + 2 * j)
+# Position setup has one Zone submit per account. Each measured journey has two
+# redemption submits. Scenario fee bumps are 2*S*J.
+setup_fee = fee(withdrawal_gas, zone_fee + 2 * a)
+measured_fee = fee(withdrawal_gas, zone_fee + 4 * j)
 zone_required = setup_fee + 2 * n * measured_fee
 zone_reserve = onramp - position
 if zone_reserve < zone_required:
@@ -944,8 +1022,8 @@ def fee(gas_limit: int, gas_price: int) -> int:
 
 # The setup creates one aggregated position per account. The measured scenario
 # may then reuse each account up to `per_account` times.
-setup_fee = fee(withdrawal_gas, zone_fee + accounts)
-measured_fee = fee(withdrawal_gas, zone_fee + journeys)
+setup_fee = fee(withdrawal_gas, zone_fee + 2 * accounts)
+measured_fee = fee(withdrawal_gas, zone_fee + 2 * journeys)
 required = setup_fee + per_account * measured_fee
 reserve = onramp - position
 if reserve < required:
