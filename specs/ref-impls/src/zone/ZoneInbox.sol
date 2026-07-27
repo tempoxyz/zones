@@ -54,7 +54,7 @@ contract ZoneInbox is IZoneInbox {
     uint64 public processedDepositNumber;
 
     /// @notice Refunds parked after a withdrawal-bounce-back mint reverts on the zone.
-    mapping(address token => mapping(address owner => uint128 amount)) public refunds;
+    mapping(address token => mapping(address owner => uint128 amount)) private _refunds;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -66,9 +66,30 @@ contract ZoneInbox is IZoneInbox {
         _tempoState = TempoState(_tempoStateAddr);
     }
 
+    modifier onlyRefundOwnerOrSequencer(address owner) {
+        if (msg.sender != owner && !config.isSequencer(msg.sender)) {
+            revert Unauthorized();
+        }
+        _;
+    }
+
     /// @notice The TempoState predeploy address
     function tempoState() external view returns (ITempoState) {
         return _tempoState;
+    }
+
+    /// @notice Return a parked refund to its owner or an active sequencer.
+    /// @dev Authorization is enforced here so internal calls cannot bypass RPC policy.
+    function refunds(
+        address token,
+        address owner
+    )
+        external
+        view
+        onlyRefundOwnerOrSequencer(owner)
+        returns (uint128)
+    {
+        return _refunds[token][owner];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -398,14 +419,14 @@ contract ZoneInbox is IZoneInbox {
         try IZoneToken(d.token).mint(zoneFallbackRecipient, d.amount) {
             emit WithdrawalBounceBackProcessed(zoneFallbackRecipient, d.token, d.amount);
         } catch {
-            refunds[d.token][zoneFallbackRecipient] += d.amount;
+            _refunds[d.token][zoneFallbackRecipient] += d.amount;
             emit WithdrawalBounceBackPending(zoneFallbackRecipient, d.token, d.amount);
         }
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
-        amount = refunds[token][msg.sender];
-        refunds[token][msg.sender] = 0;
+        amount = _refunds[token][msg.sender];
+        _refunds[token][msg.sender] = 0;
 
         IZoneToken(token).mint(msg.sender, amount);
         emit RefundClaimed(msg.sender, token, amount);

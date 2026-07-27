@@ -77,7 +77,7 @@ pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecomp
     )
 }
 
-/// Creates the native ZoneOutbox over ordinary Zone storage and direct finalized portal reads.
+/// Creates the native ZoneOutbox over ordinary Zone storage and the L1-mirrored portal account.
 #[cfg(feature = "std")]
 pub fn create_outbox_precompile<P>(l1: L1State<P>, env: &ZonePrecompileEnv) -> DynPrecompile
 where

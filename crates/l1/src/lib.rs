@@ -11,7 +11,7 @@
 //!   [`L1Deposit`]).
 //! - [`event`] — portal event types extracted per L1 block.
 //! - [`block`] — per-block deposit grouping and prepared payload types.
-//! - [`queue`] — the deposit hash-chain queue consumed by the engine.
+//! - [`queue`] — the finalized L1 block queue consumed by the engine.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -91,8 +91,6 @@ pub use state::L1StateCache;
 pub use subscriber::{
     L1BlockTracker, L1Subscriber, L1SubscriberConfig, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
 };
-
-pub(crate) use event::EnqueueOutcome;
 
 #[cfg(test)]
 pub(crate) use queue::PendingDeposits;

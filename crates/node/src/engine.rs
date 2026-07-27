@@ -49,7 +49,7 @@ use reth_primitives_traits::SealedHeader;
 use std::{sync::Arc, time::Duration};
 use tempo_primitives::TempoHeader;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
@@ -76,8 +76,7 @@ pub struct ZoneEngine {
     payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
     /// Queue of L1 blocks with their deposits.
     deposit_queue: DepositQueue,
-    /// Independently observed L1 blocks. Entries are retained until the
-    /// corresponding zone payload is accepted.
+    /// Independently observed L1 blocks retained until their zone payload is accepted.
     l1_block_tracker: L1BlockTracker,
     /// Latest block header — used as parent for the next payload and as the
     /// head/safe/finalized hash in FCU (instant finality).
@@ -115,19 +114,12 @@ impl ZoneEngine {
         }
     }
 
-    /// Runs the main Zone engine loop until cancelled.
+    /// Runs the main Zone engine loop until cancelled at a block boundary.
     ///
-    /// This method never returns unless `stop` is cancelled. It:
+    /// This method never returns under normal operation. It:
     /// 1. Waits for L1 blocks to arrive in the deposit queue
     /// 2. Advances the zone chain for each available L1 block (no delay between blocks)
     /// 3. Sends periodic FCU heartbeats
-    ///
-    /// Cancellation is only ever observed *between* zone blocks. [`Self::build_next_block`]
-    /// consumes an L1 block from the deposit queue and canonicalizes the resulting zone
-    /// block in several awaits that must all run or none; tearing the task down partway
-    /// through would leave the queue cursor and the local head disagreeing about which L1
-    /// block was consumed. So the caller must cancel and await rather than abort, and this
-    /// loop finishes the block in flight first.
     pub async fn run_until(mut self, stop: CancellationToken) {
         let mut fcu_interval = tokio::time::interval(Duration::from_secs(1));
         fcu_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -139,8 +131,6 @@ impl ZoneEngine {
 
         loop {
             tokio::select! {
-                // Stop at a block boundary. Biased so a pending cancellation wins over a
-                // queue notification and we don't start a block we were asked not to build.
                 biased;
                 () = stop.cancelled() => {
                     info!(target: "zone::engine", "ZoneEngine stopped at a block boundary");
@@ -161,7 +151,7 @@ impl ZoneEngine {
         }
     }
 
-    /// Runs the engine loop forever. See [`Self::run_until`].
+    /// Runs the engine loop forever.
     pub async fn run(self) {
         self.run_until(CancellationToken::new()).await
     }
@@ -277,13 +267,9 @@ impl ZoneEngine {
             eyre::bail!("Invalid payload for block {block_number}");
         }
 
-        // newPayload succeeded — confirm the L1 block in the queue so it is
-        // removed. If the queue was reorged between peek and confirm, the
-        // block was already purged; log a warning but still update
-        // last_header since the zone chain has advanced.
-        if self.deposit_queue.confirm(l1_num_hash).is_none() {
-            warn!(target: "zone::engine", ?l1_num_hash, "L1 block was purged from queue during build");
-        }
+        // newPayload succeeded — remove the exact finalized L1 block that
+        // produced it. A mismatch indicates an internal consumer-ordering bug.
+        self.deposit_queue.confirm(l1_num_hash)?;
         self.l1_block_tracker.prune_through(l1_num_hash.number);
 
         self.last_header = header;

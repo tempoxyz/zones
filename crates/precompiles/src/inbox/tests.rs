@@ -6,10 +6,11 @@ use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS,
-    storage::{ContractStorage, StorageCtx},
+    PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS,
+    storage::{ContractStorage, Handler, StorageCtx},
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
+    zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
 use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
@@ -91,12 +92,13 @@ impl Harness {
     }
 
     fn set_queue_hash(&self, hash: B256) {
-        self.l1.set_u256(
-            PORTAL,
-            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT.into(),
-            1,
-            U256::from_be_bytes(hash.0),
-        );
+        self.l1
+            .with_storage(1, || {
+                ZonePortalStorage::new(PORTAL)
+                    .current_deposit_queue_hash
+                    .write(hash)
+            })
+            .unwrap();
     }
 
     fn advance_call(
@@ -204,11 +206,10 @@ fn system_advance_selects_child_anchor_and_reads_queue() -> eyre::Result<()> {
     )?;
 
     assert_eq!(harness.l1_state.get_anchor(), Some(1));
-    assert!(harness.l1.storage_requests().contains(&(
-        PORTAL,
-        PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    assert!(harness.l1.requested(
         1,
-    )));
+        &ZonePortalStorage::new(PORTAL).current_deposit_queue_hash,
+    ));
     Ok(())
 }
 
@@ -506,12 +507,12 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
     let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
 
-    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
-        .set_u256(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
-    harness.l1.set_u256(
+        .insert(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(
         portal,
         slot_x + U256::ONE,
         1,
@@ -576,12 +577,12 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
     let fixture = EncryptedDepositFixture::new();
     let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
     let portal = PORTAL;
-    let base = U256::from_be_bytes(keccak256(PORTAL_ENCRYPTION_KEYS_SLOT.as_slice()).0);
+    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
     let slot_x = base + fixture.key_index * U256::from(2);
     harness
         .l1
-        .set_u256(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
-    harness.l1.set_u256(
+        .insert(portal, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(
         portal,
         slot_x + U256::ONE,
         1,
@@ -691,6 +692,45 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
     assert_eq!(
         output.bytes,
         IZoneInbox::ExtraDecryptionData {}.abi_encode()
+    );
+    Ok(())
+}
+
+#[test]
+fn refund_reads_are_limited_to_owner_and_active_sequencer() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    harness.l1.seed_active_sequencer(PORTAL, 0, SEQUENCER);
+    {
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
+            ZoneInbox::new().withdrawal_bounce_backs[PATH_USD_ADDRESS][BOB].write(444)?;
+            Ok(())
+        })?;
+    }
+
+    let calldata = IZoneInbox::refundsCall {
+        token: PATH_USD_ADDRESS,
+        owner: BOB,
+    }
+    .abi_encode();
+
+    let owner_output = harness.call(BOB, &calldata)?;
+    assert_eq!(
+        IZoneInbox::refundsCall::abi_decode_returns(&owner_output.bytes)?,
+        444
+    );
+
+    let outsider_output = harness.call(ALICE, &calldata)?;
+    assert!(outsider_output.is_revert());
+    assert_eq!(
+        outsider_output.bytes,
+        IZoneInbox::Unauthorized {}.abi_encode()
+    );
+
+    let sequencer_output = harness.call(SEQUENCER, &calldata)?;
+    assert_eq!(
+        IZoneInbox::refundsCall::abi_decode_returns(&sequencer_output.bytes)?,
+        444
     );
     Ok(())
 }

@@ -260,12 +260,6 @@ pub struct L1SubscriberConfig {
     /// Validated and applied L1 anchors shared with follower block import.
     pub block_tracker: L1BlockTracker,
     /// Whether observations must be retained until a consumer releases them.
-    ///
-    /// Only multi-sequencer members gate work on the tracker: follower block import waits
-    /// for the anchor of each peer block, and the [`crate::DepositQueue`] consumer
-    /// (`ZoneEngine` or follower import) prunes it afterwards. A node with neither has no
-    /// consumer, so the subscriber must prune as it goes or it would stall forever once
-    /// [`MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS`] observations accumulate.
     pub retain_observations: bool,
     /// Maximum number of concurrent header and receipt fetches while syncing a
     /// finalized L1 range.
@@ -464,9 +458,8 @@ impl L1Subscriber {
         let next = resolved.into_iter().chain(queued).chain(observed).max();
         match next {
             Some(next) => {
-                // `resolved` is derived from local zone state (or the
-                // genesis checkpoint), so it is the only cursor here that proves L1 blocks
-                // were consumed. `queued` and `observed` are fetch high-water marks.
+                // Only the persisted zone checkpoint proves consumption.
+                // Queue and observation cursors are fetch high-water marks.
                 if let Some(resolved) = resolved {
                     self.config
                         .block_tracker
@@ -475,9 +468,6 @@ impl L1Subscriber {
                 Ok(next)
             }
             None => {
-                // With no checkpoint and no in-memory fetch cursor, start at the finalized tip.
-                // This is the initial floor only. Once anything has been observed, reconnects
-                // will have a `next` so they take the above branch.
                 let next = self
                     .finalized_block_number(l1_provider)
                     .await?
@@ -641,7 +631,8 @@ impl L1Subscriber {
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
-            self.deposit_queue
+            let appended = self
+                .deposit_queue
                 .try_enqueue_sealed(sealed, events.clone())
                 .wrap_err_with(|| {
                     format!(
@@ -652,14 +643,14 @@ impl L1Subscriber {
             self.config
                 .block_tracker
                 .record_with_portal_events(anchor, events.clone())?;
-            // Publish derived L1 state only after the header has been admitted to the
-            // contiguous deposit queue. A rejected header must not advance local caches.
+            // Publish derived L1 state only after the header has been admitted
+            // to the contiguous deposit queue.
             self.apply_enabled_token_events(&events);
             self.update_l1_state_anchor(block_number, &invalidated);
-            self.subscriber_metrics.blocks_enqueued.increment(1);
+            if appended {
+                self.subscriber_metrics.blocks_enqueued.increment(1);
+            }
             if !self.config.retain_observations {
-                // Nobody gates imports on this tracker. Retain only its monotonic cursor
-                // and let the deposit queue own the pending data.
                 self.config.block_tracker.prune_through(anchor.number);
             }
             processed += 1;

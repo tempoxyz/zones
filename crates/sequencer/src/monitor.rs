@@ -489,19 +489,6 @@ impl ZoneMonitor {
             fetch_finalized_batch(&self.outbox, &self.provider, from, &boundary).await?;
         let end_state = self.fetch_block_snapshot(to).await?;
 
-        let expected_l2_index = self
-            .batch_submitter
-            .read_portal_withdrawal_batch_index()
-            .await?
-            .checked_add(1)
-            .ok_or_else(|| eyre::eyre!("portal withdrawal batch index overflow"))?;
-        if finalized_batch.finalized_index != expected_l2_index {
-            eyre::bail!(
-                "withdrawal batch index mismatch for zone block {to}: L2 finalized index {}, expected portal index + 1 ({expected_l2_index})",
-                finalized_batch.finalized_index
-            );
-        }
-
         if !finalized_batch.withdrawals.is_empty() {
             info!(
                 from,
@@ -523,7 +510,7 @@ impl ZoneMonitor {
             prev_deposit_number: self.prev_processed_deposit_number,
             next_deposit_number: end_state.processed_deposit_number,
             withdrawal_queue_hash: finalized_batch.finalized_hash,
-            withdrawal_batch_index: expected_l2_index,
+            withdrawal_batch_index: finalized_batch.finalized_index,
         };
 
         self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals)
@@ -973,6 +960,7 @@ mod tests {
     use alloy_network::Network;
     use alloy_primitives::{Bytes, U256};
     use alloy_rpc_types_eth::{Block, Header};
+    use alloy_sol_types::SolValue;
     use alloy_transport::mock::Asserter;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
@@ -1002,6 +990,10 @@ mod tests {
 
     fn abi_encode_u64(value: u64) -> Bytes {
         Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
+    }
+
+    fn abi_encode_multicall(values: Vec<Bytes>) -> Bytes {
+        (U256::ZERO, values).abi_encode_params().into()
     }
 
     fn mock_block(hash: B256, number: u64) -> <TempoNetwork as Network>::BlockResponse {
@@ -1110,8 +1102,10 @@ mod tests {
         let confirmed_deposit_hash = B256::repeat_byte(0x33);
 
         l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_u64(7));
-        l1.push_success(&abi_encode_u64(7));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(7),
+            abi_encode_u64(7),
+        ]));
 
         zone.push_success(&Some(mock_block(portal_hash, confirmed_zone_block)));
         zone.push_success(&abi_encode_b256(confirmed_deposit_hash));
@@ -1136,8 +1130,10 @@ mod tests {
         let confirmed_deposit_hash = B256::repeat_byte(0x33);
 
         l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_u64(7));
-        l1.push_success(&abi_encode_u64(7));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(7),
+            abi_encode_u64(7),
+        ]));
 
         zone.push_success(&Some(mock_block(portal_hash, confirmed_zone_block)));
         zone.push_success(&abi_encode_b256(confirmed_deposit_hash));
@@ -1221,8 +1217,10 @@ mod tests {
 
         l1.push_success(&abi_encode_b256(portal_hash));
         l1.push_success(&abi_encode_b256(portal_hash));
-        l1.push_success(&abi_encode_u64(7));
-        l1.push_success(&abi_encode_u64(7));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(7),
+            abi_encode_u64(7),
+        ]));
 
         zone.push_success(&Some(mock_block(portal_hash, confirmed_zone_block)));
         zone.push_success(&abi_encode_b256(confirmed_deposit_hash));
