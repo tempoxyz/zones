@@ -3061,13 +3061,11 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
 
-    /// A callback that reverts with an oversized blob must not consume more than its declared
-    /// `gasLimit` plus fixed overhead. Before the messenger bounded the copy, the blob was copied
-    /// into the messenger frame and again into the portal's delivery frame, so one attacker
-    /// withdrawal could exhaust a `processWithdrawals` transaction sized from the queue's declared
-    /// gas limits. The batch then reverted, the dequeue was rolled back, and because the sequencer
-    /// deterministically rebuilds the same batch from the same queue, the FIFO stalled
-    /// permanently — the failure mode named in TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS.
+    /// A reverting callback must not outspend its declared `gasLimit` plus fixed overhead.
+    /// The blob used to be copied into the messenger frame and again into the portal's, so one
+    /// attacker withdrawal could exhaust a batch sized from the queue's declared limits. The batch
+    /// reverted, the dequeue rolled back, and since the sequencer rebuilds the same batch
+    /// deterministically the FIFO stalled for good — TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS.
     function test_withdrawal_revertBombDoesNotStallWithdrawalQueue() public {
         MockRevertingReceiver bomb = new MockRevertingReceiver(900_000);
         vm.prank(admin);
@@ -3108,10 +3106,8 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        // Exactly what the sequencer's planner budgets for this pair, using its own allowances
-        // (crates/sequencer/src/withdrawals.rs): a per-transaction overhead, a callback item's
-        // fixed allowance plus its declared gasLimit, and a simple item's allowance. The bomb
-        // must not be able to push the batch past this.
+        // Exactly what the sequencer's planner budgets for this pair, per its own allowances in
+        // crates/sequencer/src/withdrawals.rs. The bomb must not push the batch past it.
         uint256 plannedGas = 500_000 + (1_750_000 + uint256(bombGasLimit)) + 1_000_000;
 
         uint256 bobBefore = pathUSD.balanceOf(bob);

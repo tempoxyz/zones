@@ -59,11 +59,9 @@ contract ZoneMessenger is IZoneMessenger {
             revert TransferFailed();
         }
 
-        // A callback target is untrusted: never copy its revert data into this frame. Propagating
-        // makes solc's revert-forwarder `returndatacopy` the whole blob, charging quadratic
-        // memory-expansion gas here and again in the portal's delivery frame, so one withdrawal
-        // could burn many times its own `gasLimit` and starve the rest of the batch. The
-        // parameterless `catch` discards it.
+        // A callback target is untrusted, so never copy its revert data. Propagating it charges
+        // quadratic memory gas here and again in the portal's delivery frame, letting one
+        // withdrawal burn many times its `gasLimit`. The parameterless `catch` discards it.
         // Invariant: TEMPO-ZONE-WITHDRAWAL-CALLBACK-RETURNDATA-BOUND.
         try IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
             zoneId, msg.sender, senderTag, token, amount, data

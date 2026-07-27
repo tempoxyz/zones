@@ -12,9 +12,9 @@ bytes32 constant DIRTY_PADDED_CALLBACK_WORD =
     ACCEPTED_CALLBACK_WORD | (bytes32(type(uint256).max) >> 32);
 
 /// @notice Callback receiver that reverts with `size` bytes of revert data.
-/// @dev Producing the blob costs only this frame's memory expansion, charged against the gas the
-///      messenger forwarded. A caller that propagates the revert must `returndatacopy` the whole
-///      blob into its own frame at quadratic cost, which is the amplification this models.
+/// @dev The blob costs only this frame's memory expansion, charged against the forwarded gas. A
+///      caller that propagates the revert copies the whole blob at quadratic cost — the
+///      amplification this models.
 contract MockRevertingReceiver is IWithdrawalReceiver {
 
     uint256 internal immutable _size;
@@ -44,9 +44,9 @@ contract MockRevertingReceiver is IWithdrawalReceiver {
 }
 
 /// @notice Callback receiver that returns `word` followed by padding out to `size` bytes.
-/// @dev Lets a test pin an exact response shape: `size` below 32 models a short return, above 32
-///      an overlong one, and the second word is deliberately dirty so an overlong response proves
-///      trailing junk is ignored rather than merely tolerated when zeroed.
+/// @dev Pins an exact response shape: `size` under 32 is a short return, over 32 an overlong one.
+///      The second word is deliberately dirty, so an overlong response proves trailing junk is
+///      ignored rather than merely tolerated when zeroed.
 contract MockRawReturnReceiver is IWithdrawalReceiver {
 
     bytes32 internal immutable _word;
