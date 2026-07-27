@@ -584,6 +584,9 @@ mod tests {
         }
         .abi_encode();
 
+        // Driving the EVM directly skips the block executor, which is what normally authorizes
+        // the block's `advanceTempo`. Stand in for it here.
+        evm.authorize_system_advance();
         let result = evm
             .transact_system_call(Address::ZERO, ZONE_INBOX_ADDRESS, calldata.into())
             .expect("advanceTempo execution must not fail");

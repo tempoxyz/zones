@@ -109,6 +109,12 @@ where
 
         // ensure `advance_tempo` system transaction is the first in the block.
         let is_advance_tempo = validate_advance_tempo(self.has_advanced_tempo, recovered.tx())?;
+        if is_advance_tempo {
+            // Only a transaction that carries the Tempo system signature reaches this point, so
+            // this is what separates the real block-opening call from an `eth_call` that merely
+            // sets `from` to the zero address.
+            self.evm_mut().authorize_system_advance();
+        }
 
         let _tx_context_guard = tx_context::set_current_transaction(
             *recovered.tx().tx_hash(),

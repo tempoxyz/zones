@@ -81,7 +81,10 @@ impl ZoneInbox {
         caller: Address,
         call: IZoneInbox::advanceTempoCall,
     ) -> ZoneResult<()> {
-        if !caller.is_zero() {
+        // `caller == address(0)` identifies a system call, but does not prove one: an `eth_call`
+        // can set `from` freely. The executor authorizes only the transaction it classified as the
+        // block's `advanceTempo`, so a simulation cannot reach this consensus path.
+        if !caller.is_zero() || !l1.is_system_advance_authorized() {
             return Err(ZoneInboxError::only_sequencer().into());
         }
 

@@ -59,6 +59,18 @@ impl<DB: Database, I, L1: L1StorageReader> ZoneEvm<DB, I, L1> {
             .database
             .reset_transaction_state();
     }
+
+    /// Authorizes the transaction about to execute as the block's `advanceTempo` system call.
+    ///
+    /// Cleared by [`clear_l1_overlay_state`](Self::clear_l1_overlay_state) once it completes.
+    pub(crate) fn authorize_system_advance(&mut self) {
+        self.inner
+            .ctx_mut()
+            .journaled_state
+            .database
+            .l1_state()
+            .authorize_system_advance();
+    }
 }
 
 impl<DB, I, L1> ZoneEvm<DB, I, L1>

@@ -67,6 +67,9 @@ impl Harness {
         l1.set_u256(PORTAL, PORTAL_ADMIN_SLOT.into(), 1, U256::ONE);
         l1.seed_active_sequencer(PORTAL, 1, SEQUENCER);
         let l1_state = L1State::new(l1.clone(), PORTAL);
+        // Stand in for the block executor, which authorizes the block's `advanceTempo` before
+        // executing it. Tests exercising the unauthorized path clear this first.
+        l1_state.authorize_system_advance();
         let env = test_env(&ctx);
         let precompile = ZoneInbox::create(l1_state.clone(), &env);
         let outbox_precompile = crate::create_outbox_precompile(l1_state.clone(), &env);
@@ -223,6 +226,26 @@ fn non_system_advance_reverts_before_selecting_or_reading_l1() -> eyre::Result<(
 
     assert!(output.is_revert());
     assert_eq!(output.bytes, IZoneInbox::OnlySequencer {}.abi_encode());
+    assert_eq!(harness.l1_state.get_anchor(), None);
+    assert!(harness.l1.storage_requests().is_empty());
+    Ok(())
+}
+
+#[test]
+fn unauthorized_advance_reverts_even_from_the_zero_address() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    // An `eth_call` can set `from` to the zero address, but it never reaches the block executor,
+    // so it never gets authorized. Model that by clearing the authorization the harness seeded.
+    harness.l1_state.reset_anchor();
+
+    let output = harness.call(
+        Address::ZERO,
+        harness.advance_call(Vec::new(), Vec::new()).abi_encode(),
+    )?;
+
+    assert!(output.is_revert());
+    assert_eq!(output.bytes, IZoneInbox::OnlySequencer {}.abi_encode());
+    // Nothing was read at the caller-supplied header height, and no anchor was selected.
     assert_eq!(harness.l1_state.get_anchor(), None);
     assert!(harness.l1.storage_requests().is_empty());
     Ok(())

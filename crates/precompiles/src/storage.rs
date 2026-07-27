@@ -54,6 +54,8 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.
     anchor: Rc<Cell<Option<u64>>>,
+    /// Whether the current transaction is the block's sanctioned `advanceTempo` system call.
+    system_advance_authorized: Rc<Cell<bool>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
     /// ZonePortal read through the L1 provider by explicit storage operations.
@@ -65,14 +67,31 @@ impl<P> L1State<P> {
     pub fn new(provider: P, portal_address: Address) -> Self {
         Self {
             anchor: Rc::new(Cell::new(None)),
+            system_advance_authorized: Rc::new(Cell::new(false)),
             provider,
             portal_address,
         }
     }
 
-    /// Clears the selected anchor after the current transaction attempt completes.
+    /// Marks the current transaction as the block's sanctioned `advanceTempo` system call.
+    ///
+    /// Only the block executor calls this, after classifying the transaction as a Tempo system
+    /// transaction. `msg.sender == address(0)` alone is not sufficient authorization: an
+    /// `eth_call` may set `from` freely, and without this gate a simulation could execute a
+    /// consensus operation — writing a checkpoint and driving L1 reads at a caller-chosen height.
+    pub fn authorize_system_advance(&self) {
+        self.system_advance_authorized.set(true);
+    }
+
+    /// Whether the current transaction may execute `advanceTempo`.
+    pub fn is_system_advance_authorized(&self) -> bool {
+        self.system_advance_authorized.get()
+    }
+
+    /// Clears state that is valid only for the current transaction attempt.
     pub fn reset_anchor(&self) {
         self.anchor.set(None);
+        self.system_advance_authorized.set(false);
     }
 
     /// Returns the anchor selected for the current transaction, if any.
