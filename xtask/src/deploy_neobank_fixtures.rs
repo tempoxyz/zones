@@ -90,6 +90,11 @@ alloy::sol! {
 
     #[sol(rpc)]
     interface BridgeDirectSwapHandler {
+        function DIRECT_SWAP_SETTER_ROLE() external view returns (bytes32);
+        function STABLECOIN_CONFIG_ROLE() external view returns (bytes32);
+        function PAUSER_ROLE() external view returns (bytes32);
+        function TOKEN_AUTHORITY() external view returns (address);
+        function registerStablecoin(address stablecoin, bool registered) external;
         function setDirectSwapContract(address directSwap) external;
     }
 
@@ -109,8 +114,8 @@ alloy::sol! {
         constructor(address implementation, bytes initialization);
     }
 
-    contract FixtureTIP20DirectSwapHandler {
-        constructor(address admin_, address controller_, address reserveLedgerToken_);
+    contract FixtureReserveLedgerWrappedHandler {
+        constructor(address admin_, address tokenAuthority_, address reserveLedgerToken_);
     }
 
     contract FixtureDirectSwapV2 {
@@ -940,16 +945,16 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
         with_constructor(
             load_bytecode(
                 specs_out,
-                "TIP20DirectSwapHandler.sol/TIP20DirectSwapHandler",
+                "ReserveLedgerWrappedHandler.sol/ReserveLedgerWrappedHandler",
             )?,
-            FixtureTIP20DirectSwapHandler::constructorCall {
+            FixtureReserveLedgerWrappedHandler::constructorCall {
                 admin_: deployer,
-                controller_: controller,
+                tokenAuthority_: controller,
                 reserveLedgerToken_: reserve_ledger,
             }
             .abi_encode(),
         ),
-        "Bridge TIP20DirectSwapHandler",
+        "Bridge ReserveLedgerWrappedHandler",
     )
     .await?;
     let controller_contract = BridgeTIP20Controller::new(controller, provider);
@@ -993,6 +998,56 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
             .wrap_err_with(|| format!("failed waiting to {label}"))?;
         check(&receipt, label)?;
     }
+    let handler_contract = BridgeDirectSwapHandler::new(handler, provider);
+    for (role, label) in [
+        (
+            handler_contract
+                .DIRECT_SWAP_SETTER_ROLE()
+                .call()
+                .await
+                .wrap_err("failed querying Bridge handler DirectSwap setter role")?,
+            "grant Bridge handler DirectSwap setter role",
+        ),
+        (
+            handler_contract
+                .STABLECOIN_CONFIG_ROLE()
+                .call()
+                .await
+                .wrap_err("failed querying Bridge handler stablecoin config role")?,
+            "grant Bridge handler stablecoin config role",
+        ),
+        (
+            handler_contract
+                .PAUSER_ROLE()
+                .call()
+                .await
+                .wrap_err("failed querying Bridge handler pauser role")?,
+            "grant Bridge handler pauser role",
+        ),
+    ] {
+        let receipt = IRolesAuth::new(handler, provider)
+            .grantRole(role, deployer)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err(label)?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| format!("failed waiting to {label}"))?;
+        check(&receipt, label)?;
+    }
+    for (token, label) in [(dlusd, "DLUSD"), (pathusd, "pathUSD")] {
+        let receipt = handler_contract
+            .registerStablecoin(token, true)
+            .fee_token(pathusd)
+            .send()
+            .await
+            .wrap_err_with(|| format!("failed registering Bridge handler {label}"))?
+            .get_receipt()
+            .await
+            .wrap_err_with(|| format!("failed waiting to register Bridge handler {label}"))?;
+        check(&receipt, &format!("register Bridge handler {label}"))?;
+    }
     let direct_swap = deploy(
         provider,
         with_constructor(
@@ -1014,7 +1069,7 @@ async fn configure_direct_swap<P: Provider<TempoNetwork>>(
         "Bridge DirectSwapV2",
     )
     .await?;
-    let receipt = BridgeDirectSwapHandler::new(handler, provider)
+    let receipt = handler_contract
         .setDirectSwapContract(direct_swap)
         .fee_token(pathusd)
         .send()
@@ -1758,6 +1813,15 @@ mod tests {
             artifact_path(&out, "DirectSwapV2.sol/DirectSwapV2"),
             PathBuf::from("specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json")
         );
+        assert_eq!(
+            artifact_path(
+                &out,
+                "ReserveLedgerWrappedHandler.sol/ReserveLedgerWrappedHandler"
+            ),
+            PathBuf::from(
+                "specs/ref-impls/out/ReserveLedgerWrappedHandler.sol/ReserveLedgerWrappedHandler.json"
+            )
+        );
     }
 
     #[test]
@@ -1788,6 +1852,31 @@ mod tests {
                 .as_str()
                 .unwrap()
         );
+
+        let handler: serde_json::Value = serde_json::from_slice(
+            &fs::read(
+                root.join(
+                    "specs/ref-impls/out/ReserveLedgerWrappedHandler.sol/ReserveLedgerWrappedHandler.json",
+                ),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for (signature, selector) in [
+            (
+                BridgeDirectSwapHandler::registerStablecoinCall::SIGNATURE,
+                BridgeDirectSwapHandler::registerStablecoinCall::SELECTOR,
+            ),
+            (
+                BridgeDirectSwapHandler::setDirectSwapContractCall::SIGNATURE,
+                BridgeDirectSwapHandler::setDirectSwapContractCall::SELECTOR,
+            ),
+        ] {
+            assert_eq!(
+                alloy::primitives::hex::encode(selector),
+                handler["methodIdentifiers"][signature].as_str().unwrap()
+            );
+        }
     }
 
     #[test]

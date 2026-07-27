@@ -547,15 +547,25 @@ verify_neobank_fixture_topology() {
                 [[ "$code" != "0x" ]] || die "neobank $field fixture has no code at $address"
             done
             observed="$(cast call "$direct_swap" 'STABLECOIN_HANDLER_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${handler,,}" ]] || die "DirectSwap does not use the TIP20 handler"
+            [[ "${observed,,}" == "${handler,,}" ]] || die "DirectSwap does not use the reserve-ledger handler"
             observed="$(cast call "$direct_swap" 'RESERVE_LEDGER_TOKEN_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "${observed,,}" == "${reserve_ledger,,}" ]] || die "DirectSwap does not use the Bridge reserve ledger"
-            observed="$(cast call "$handler" 'CONTROLLER()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
-            [[ "${observed,,}" == "${controller,,}" ]] || die "TIP20 handler does not use the Bridge controller"
+            observed="$(cast call "$handler" 'TOKEN_AUTHORITY()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${controller,,}" ]] || die "reserve-ledger handler does not use the Bridge controller"
+            observed="$(cast call "$handler" 'RESERVE_LEDGER_ADDRESS()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${reserve_ledger,,}" ]] ||
+                die "reserve-ledger handler does not use the Bridge reserve ledger"
+            observed="$(cast call "$handler" 'directSwapContract()(address)' --rpc-url "$l1_rpc" | awk '{print $1}')"
+            [[ "${observed,,}" == "${direct_swap,,}" ]] ||
+                die "reserve-ledger handler does not authorize the deployed DirectSwap"
             transaction_limit="$(cast call "$direct_swap" 'getTransactionLimit()(uint256)' --rpc-url "$l1_rpc" | awk '{print $1}')"
             [[ "$transaction_limit" == "$(jq -er '.liquidity' "$metadata")" ]] ||
                 die "DirectSwap transaction limit does not match fixture liquidity"
             for address in "$dlusd" "$pathusd"; do
+                observed="$(cast call "$handler" 'isStablecoinRegistered(address)(bool)' \
+                    "$address" --rpc-url "$l1_rpc" | awk '{print $1}')"
+                [[ "$observed" == "true" ]] ||
+                    die "reserve-ledger handler did not register an enabled stablecoin"
                 observed="$(cast call "$controller" 'getStablecoinTxnMintLimit(address)(uint256)' \
                     "$address" --rpc-url "$l1_rpc" | awk '{print $1}')"
                 [[ "$observed" == "$transaction_limit" ]] ||

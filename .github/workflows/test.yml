@@ -83,6 +83,16 @@ jobs:
             --skip script \
             --no-lint \
             --out "$GITHUB_WORKSPACE/specs/ref-impls/out"
+          forge build \
+            --root earn \
+            --skip test \
+            --skip script \
+            --no-lint \
+            --out "$GITHUB_WORKSPACE/specs/ref-impls/out" \
+            vendor/bridge/auth-registry/AuthRegistry.sol \
+            vendor/bridge/direct-swaps/direct-swaps/DirectSwapV2.sol \
+            vendor/bridge/direct-swaps/token-handler/ReserveLedgerWrappedHandler.sol \
+            vendor/bridge/tip20-controller/TIP20Controller.sol
 
       - name: Build and archive tests
         run: cargo nextest archive --profile ci --archive-file nextest-archive.tar.zst

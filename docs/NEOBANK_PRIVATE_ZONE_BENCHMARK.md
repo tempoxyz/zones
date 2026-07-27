@@ -35,7 +35,7 @@ provisioning:
 
 | Value | Provisioned path | Intended comparison |
 | --- | --- | --- |
-| `direct-swap` (default) | Earn's `SingleZoneBridgeEarnRouter` with the full DirectSwap V2 controller, handler, authorization registry, and reserve ledger. | The canonical closed-loop Bridge route for complete private Earn journeys. |
+| `direct-swap` (default) | Earn's `SingleZoneBridgeEarnRouter` with the full DirectSwap V2 controller, reserve-ledger wrapped handler, authorization registry, and reserve ledger. | The canonical closed-loop Bridge route for complete private Earn journeys. |
 | `simple` | Earn's `SingleZoneMinimalEarnRouter`, backed by the Bridge TIP-20 controller and reserve token. | A lower-overhead controller-backed comparison; this is not a production swap venue. |
 | `stablecoin-dex` | Tempo's native StablecoinDEX at tick zero through `SingleZoneEarnRouter`. | Native order-book comparison. |
 
@@ -196,7 +196,7 @@ forge build --root earn --skip test --skip script --no-lint \
   --out "$PWD/specs/ref-impls/out" \
   vendor/bridge/auth-registry/AuthRegistry.sol \
   vendor/bridge/direct-swaps/direct-swaps/DirectSwapV2.sol \
-  vendor/bridge/direct-swaps/token-handler/TIP20DirectSwapHandler.sol \
+  vendor/bridge/direct-swaps/token-handler/ReserveLedgerWrappedHandler.sol \
   vendor/bridge/tip20-controller/TIP20Controller.sol
 export ZONES_BENCH_EARN_REVISION="$(git -C earn rev-parse HEAD)"
 export ZONES_BENCH_ENV_FILE=target/zones-benchmark/neobank-topology.env

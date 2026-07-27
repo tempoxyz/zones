@@ -831,7 +831,7 @@ jobs:
             --out "$GITHUB_WORKSPACE/specs/ref-impls/out" \
             vendor/bridge/auth-registry/AuthRegistry.sol \
             vendor/bridge/direct-swaps/direct-swaps/DirectSwapV2.sol \
-            vendor/bridge/direct-swaps/token-handler/TIP20DirectSwapHandler.sol \
+            vendor/bridge/direct-swaps/token-handler/ReserveLedgerWrappedHandler.sol \
             vendor/bridge/tip20-controller/TIP20Controller.sol
           test -s specs/ref-impls/out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json
           test -s specs/ref-impls/out/SingleZoneBridgeEarnRouter.sol/SingleZoneBridgeEarnRouter.json
@@ -844,7 +844,7 @@ jobs:
           test -s specs/ref-impls/out/Simple4626Vault.sol/Simple4626Vault.json
           test -s specs/ref-impls/out/DirectSwapV2.sol/DirectSwapV2.json
           test -s specs/ref-impls/out/TIP20Controller.sol/TIP20Controller.json
-          test -s specs/ref-impls/out/TIP20DirectSwapHandler.sol/TIP20DirectSwapHandler.json
+          test -s specs/ref-impls/out/ReserveLedgerWrappedHandler.sol/ReserveLedgerWrappedHandler.json
           test -s specs/ref-impls/out/AuthRegistry.sol/AuthRegistry.json
           test -s specs/ref-impls/out/ERC1967Proxy.sol/ERC1967Proxy.json
 
