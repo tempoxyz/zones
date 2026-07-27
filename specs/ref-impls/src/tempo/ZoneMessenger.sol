@@ -59,11 +59,22 @@ contract ZoneMessenger is IZoneMessenger {
             revert TransferFailed();
         }
 
-        bytes4 selector = IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
+        // A callback target is untrusted, so its revert data must never be copied into this
+        // frame. Letting the revert propagate makes solc's revert-forwarder run
+        // `returndatacopy(pos, 0, returndatasize())`, so a target that reverts with megabytes
+        // charges quadratic memory-expansion gas here and again in the portal's delivery frame.
+        // That lets one withdrawal burn several times its own `gasLimit` and starve the rest of
+        // the `processWithdrawals` batch. A parameterless `catch` discards the revert data, which
+        // keeps delivery within `gasLimit` plus this contract's fixed overhead.
+        try IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
             zoneId, msg.sender, senderTag, token, amount, data
-        );
-
-        if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
+        ) returns (
+            bytes4 selector
+        ) {
+            if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
+                revert CallbackRejected();
+            }
+        } catch {
             revert CallbackRejected();
         }
     }

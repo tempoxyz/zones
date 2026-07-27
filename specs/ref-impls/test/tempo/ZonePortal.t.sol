@@ -130,6 +130,38 @@ contract GasConsumingReceiver is IWithdrawalReceiver {
 
 }
 
+/// @notice Mock receiver that reverts with an oversized blob of revert data.
+/// @dev Producing the blob costs only this frame's memory expansion, charged against the gas the
+///      messenger forwarded. A caller that propagates the revert must copy the whole blob into
+///      its own frame at quadratic cost, which is the amplification this models.
+contract RevertBombReceiver is IWithdrawalReceiver {
+
+    uint256 public bombSize;
+
+    constructor(uint256 size) {
+        bombSize = size;
+    }
+
+    function onWithdrawalReceived(
+        uint32,
+        address,
+        bytes32,
+        address,
+        uint128,
+        bytes calldata
+    )
+        external
+        view
+        returns (bytes4)
+    {
+        uint256 size = bombSize;
+        assembly {
+            revert(0, size)
+        }
+    }
+
+}
+
 /// @notice Mock receiver that succeeds normally
 contract SuccessfulReceiver is IWithdrawalReceiver {
 
@@ -3058,6 +3090,78 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+    }
+
+    /// A callback that reverts with an oversized blob must not consume more than its declared
+    /// `gasLimit` plus fixed overhead. Before the messenger bounded the copy, the blob was copied
+    /// into the messenger frame and again into the portal's delivery frame, so one attacker
+    /// withdrawal could exhaust a `processWithdrawals` transaction sized from the queue's declared
+    /// gas limits. The batch then reverted, the dequeue was rolled back, and because the sequencer
+    /// deterministically rebuilds the same batch from the same queue, the FIFO stalled
+    /// permanently — the failure mode named in TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS.
+    function test_withdrawal_revertBombDoesNotStallWithdrawalQueue() public {
+        RevertBombReceiver bomb = new RevertBombReceiver(900_000);
+        vm.prank(admin);
+        portal.setRole(address(bomb), Role.CallbackGateway);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 2000e6);
+        portal.deposit(address(pathUSD), alice, 2000e6, bytes32(""), alice);
+        vm.stopPrank();
+
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        uint64 bombGasLimit = 3_000_000;
+        Withdrawal[] memory withdrawals = new Withdrawal[](2);
+        withdrawals[0] = _withdrawal(
+            address(pathUSD), alice, address(bomb), 500e6, bytes32(0), bombGasLimit, alice, ""
+        );
+        // A second, well-behaved withdrawal that must still be delivered.
+        withdrawals[1] = _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
+
+        bytes32 tailHash = keccak256(abi.encode(withdrawals[1], EMPTY_SENTINEL));
+        bytes32 headHash = keccak256(abi.encode(withdrawals[0], tailHash));
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHashBefore,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            headHash,
+            "",
+            ""
+        );
+
+        // Exactly what the sequencer's planner budgets for this pair, using its own allowances
+        // (crates/sequencer/src/withdrawals.rs): a per-transaction overhead, a callback item's
+        // fixed allowance plus its declared gasLimit, and a simple item's allowance. The bomb
+        // must not be able to push the batch past this.
+        uint256 plannedGas = 500_000 + (1_750_000 + uint256(bombGasLimit)) + 1_000_000;
+
+        uint256 bobBefore = pathUSD.balanceOf(bob);
+        (bool success,) = address(portal).call{ gas: plannedGas }(
+            abi.encodeCall(IZonePortal.processWithdrawals, (withdrawals, bytes32(0)))
+        );
+
+        assertTrue(success, "batch must not revert");
+        assertEq(portal.withdrawalQueueHead(), 1, "the queue slot must be consumed");
+        assertEq(
+            portal.withdrawalQueueSlot(0), EMPTY_SENTINEL, "both items must have been dequeued"
+        );
+        assertEq(pathUSD.balanceOf(address(bomb)), 0, "bomb must not keep the tokens");
+        assertEq(
+            pathUSD.balanceOf(bob) - bobBefore, 500e6, "honest withdrawal must still be delivered"
+        );
+        assertTrue(
+            portal.currentDepositQueueHash() != depositHashBefore, "bomb must have bounced back"
+        );
     }
 
     function test_withdrawal_zeroGasLimit_noCallback() public {
