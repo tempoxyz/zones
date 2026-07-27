@@ -208,6 +208,8 @@ pub struct ZoneNode {
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
+    /// Whether a consumer outside this builder drains the deposit queue.
+    external_deposit_consumer: bool,
 }
 
 impl ZoneNode {
@@ -233,6 +235,7 @@ impl ZoneNode {
             block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
+            retain_observations: false,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -255,6 +258,7 @@ impl ZoneNode {
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
             p2p_config: None,
+            external_deposit_consumer: false,
         }
     }
 
@@ -276,8 +280,21 @@ impl ZoneNode {
         self
     }
 
+    /// Declare that a consumer outside this builder drains [`Self::deposit_queue`].
+    ///
+    /// Without a sequencer or P2P config the node assumes nothing consumes deposits and
+    /// launches a sink-less L1 observer. Callers that drive their own [`crate::ZoneEngine`]
+    /// against the shared queue — such as test harnesses — must opt back into retention.
+    pub fn with_external_deposit_consumer(mut self) -> Self {
+        self.external_deposit_consumer = true;
+        self
+    }
+
     /// Enable static Zone P2P networking for this node.
     pub fn with_p2p(mut self, config: P2pConfig) -> Self {
+        // Multi-sequencer members gate follower block import on independently observed L1
+        // anchors, so observations must survive until their zone block is consumed.
+        self.l1_config.retain_observations = true;
         self.p2p_config = Some(config);
         self
     }
@@ -410,6 +427,8 @@ where
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
+    /// Whether a consumer outside this builder drains the deposit queue.
+    external_deposit_consumer: bool,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -434,6 +453,7 @@ where
         private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
+        external_deposit_consumer: bool,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -450,6 +470,7 @@ where
             private_rpc_config,
             sequencer_config,
             p2p_config,
+            external_deposit_consumer,
         }
     }
 }
@@ -484,8 +505,7 @@ where
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
 
-        let p2p_role = self.p2p_config.as_ref().map(P2pConfig::role);
-        self.spawn_l1_subscriber(&ctx, p2p_role == Some(Role::Follower));
+        self.spawn_l1_subscriber(&ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         let attestation_store = self
@@ -524,6 +544,7 @@ where
                 ctx.node.pool().clone(),
                 ctx.beacon_engine_handle.clone(),
                 self.l1_config.block_tracker.clone(),
+                self.deposit_queue.clone(),
             )?;
         }
 
@@ -584,8 +605,11 @@ where
         pool: N::Pool,
         engine: ConsensusEngineHandle<ZonePayloadTypes>,
         l1_block_tracker: L1BlockTracker,
+        deposit_queue: DepositQueue,
     ) -> eyre::Result<()> {
-        let role = config.role();
+        let local_ed25519_public_key = config.ed25519_public_key();
+        let leadership = config.leadership();
+        let role = leadership.role_of(&local_ed25519_public_key);
         // Subscribe before starting Commonware (and, importantly, before RPC launch) so a
         // follower cannot admit a transaction in a startup gap.
         let new_transactions = (role == Role::Follower).then(|| pool.new_transactions_listener());
@@ -631,12 +655,14 @@ where
         task_executor.spawn_critical_task(
             "zone-p2p-block-sync",
             run_block_sync(
-                role,
+                local_ed25519_public_key,
+                leadership,
                 provider.clone(),
                 engine,
                 sync_events,
                 commands.clone(),
                 l1_block_tracker,
+                deposit_queue,
                 attestation.clone(),
             ),
         );
@@ -734,16 +760,16 @@ where
         Ok(())
     }
 
-    /// Spawn shared L1 observation, with deposit enqueueing only on leaders.
-    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>, observer_only: bool) {
-        if observer_only {
-            L1Subscriber::spawn_observer(
-                self.l1_config.clone(),
-                ctx.node.provider().clone(),
-                ctx.node.task_executor().clone(),
-            );
-            info!(target: "reth::cli", "L1 observer started for follower");
-        } else {
+    /// Spawn shared L1 observation.
+    ///
+    /// Sequencers, P2P replicas, and externally driven queue consumers retain finalized blocks
+    /// in the deposit queue. A node with none of those only maintains its L1-derived caches and
+    /// must not accumulate an unconsumed queue.
+    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
+        if self.sequencer_config.is_some()
+            || self.p2p_config.is_some()
+            || self.external_deposit_consumer
+        {
             L1Subscriber::spawn(
                 self.l1_config.clone(),
                 ctx.node.provider().clone(),
@@ -751,6 +777,13 @@ where
                 ctx.node.task_executor().clone(),
             );
             info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        } else {
+            L1Subscriber::spawn_observer(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 observer started without a deposit sink");
         }
     }
 
@@ -770,6 +803,7 @@ where
             ctx.beacon_engine_handle.clone(),
             ctx.node.payload_builder_handle().clone(),
             self.deposit_queue.clone(),
+            self.l1_config.block_tracker.clone(),
             last_header,
             fee_recipient,
             sequencer_key,
@@ -975,6 +1009,7 @@ where
             self.private_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
+            self.external_deposit_consumer,
         )
     }
 }

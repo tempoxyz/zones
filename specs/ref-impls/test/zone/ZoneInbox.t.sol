@@ -13,17 +13,16 @@ import {
     EncryptedDepositPayload,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
-    ITIP20ZoneFactory,
     IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
     IZonePortal,
+    IZoneToken,
     PORTAL_ACCESS_MODE_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
-    TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
@@ -47,6 +46,14 @@ contract ZoneInboxHarness is ZoneInbox {
 
     function readEncryptionKey(uint256 keyIndex) external view returns (bytes32 x, uint8 yParity) {
         return _readEncryptionKey(keyIndex);
+    }
+
+}
+
+contract RefundCallForwarder {
+
+    function refunds(address inbox, address token, address owner) external view returns (uint128) {
+        return IZoneInbox(inbox).refunds(token, owner);
     }
 
 }
@@ -1159,15 +1166,20 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decryptions, enabledTokens);
     }
 
+    function _mockTokenActivation(address token) internal {
+        bytes32 issuerRole = keccak256("ISSUER_ROLE");
+        vm.mockCall(token, abi.encodeWithSelector(IZoneToken.initialize.selector), abi.encode());
+        vm.mockCall(
+            token, abi.encodeWithSelector(IZoneToken.ISSUER_ROLE.selector), abi.encode(issuerRole)
+        );
+        vm.mockCall(token, abi.encodeWithSelector(IZoneToken.grantRole.selector), abi.encode());
+    }
+
     /// @notice Advancing accepts an enabled token even if the portal has not enabled it.
     function test_advanceTempo_enabledTokenNotPortalEnabled_accepts() public {
         address token = address(0x777);
-        vm.etch(TIP20_FACTORY_ADDRESS, hex"00");
-        vm.mockCall(
-            TIP20_FACTORY_ADDRESS,
-            abi.encodeWithSelector(ITIP20ZoneFactory.enableToken.selector),
-            abi.encode()
-        );
+        vm.etch(token, hex"00");
+        _mockTokenActivation(token);
 
         EnabledToken[] memory enabledTokens = new EnabledToken[](1);
         enabledTokens[0] =
@@ -1180,12 +1192,8 @@ contract ZoneInboxTest is Test {
     /// @notice Advancing accepts duplicate enabled token entries.
     function test_advanceTempo_duplicateEnabledToken_accepts() public {
         address token = address(0x777);
-        vm.etch(TIP20_FACTORY_ADDRESS, hex"00");
-        vm.mockCall(
-            TIP20_FACTORY_ADDRESS,
-            abi.encodeWithSelector(ITIP20ZoneFactory.enableToken.selector),
-            abi.encode()
-        );
+        vm.etch(token, hex"00");
+        _mockTokenActivation(token);
 
         EnabledToken[] memory enabledTokens = new EnabledToken[](2);
         enabledTokens[0] =
@@ -1203,6 +1211,30 @@ contract ZoneInboxTest is Test {
 
         assertEq(amount, 0);
         assertEq(zoneToken.balanceOf(alice), 0);
+    }
+
+    function test_refunds_ownerCanRead() public {
+        vm.prank(bob);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+    }
+
+    function test_refunds_sequencerCanRead() public {
+        vm.prank(sequencer);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+    }
+
+    function test_refunds_nonOwnerReverts() public {
+        vm.prank(alice);
+        vm.expectRevert(IZoneInbox.Unauthorized.selector);
+        inbox.refunds(address(zoneToken), bob);
+    }
+
+    function test_refunds_forwardedReadReverts() public {
+        RefundCallForwarder forwarder = new RefundCallForwarder();
+
+        vm.prank(bob);
+        vm.expectRevert(IZoneInbox.Unauthorized.selector);
+        forwarder.refunds(address(inbox), address(zoneToken), bob);
     }
 
     /// @notice Claiming pays a parked withdrawal bounce-back refund and clears it.
@@ -1232,6 +1264,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         _advanceTempo(deposits);
+        vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
 
         zoneToken.setMinter(address(inbox), true);
@@ -1240,6 +1273,7 @@ contract ZoneInboxTest is Test {
         uint128 amount = inbox.claimRefund(address(zoneToken));
 
         assertEq(amount, 100e6);
+        vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
         assertEq(zoneToken.balanceOf(bob), 100e6);
     }
@@ -1275,6 +1309,7 @@ contract ZoneInboxTest is Test {
             inbox.processedDepositQueueHash(),
             keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)))
         );
+        vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
         assertEq(zoneToken.balanceOf(bob), 100e6);
     }
@@ -1337,8 +1372,11 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
-        uint256 parkedRefunds = inbox.refunds(address(zoneToken), bob)
-            + inbox.refunds(address(zoneToken), encryptedRecipient);
+        vm.prank(bob);
+        uint128 bobRefunds = inbox.refunds(address(zoneToken), bob);
+        vm.prank(encryptedRecipient);
+        uint128 encryptedRecipientRefunds = inbox.refunds(address(zoneToken), encryptedRecipient);
+        uint256 parkedRefunds = uint256(bobRefunds) + encryptedRecipientRefunds;
         assertEq(zoneToken.totalSupply() + parkedRefunds, netCredited);
     }
 

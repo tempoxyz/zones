@@ -1,17 +1,5 @@
 use super::*;
 
-/// Result of attempting to enqueue an L1 block into the deposit queue.
-#[derive(Debug)]
-pub(crate) enum EnqueueOutcome {
-    /// Block was appended to the queue.
-    Accepted,
-    /// Block is a duplicate (same number and hash already present, or behind our window).
-    Duplicate,
-    /// Block doesn't connect — subscriber must fetch and enqueue `from..=to` first,
-    /// then retry this block.
-    NeedBackfill { from: u64, to: u64 },
-}
-
 /// Events extracted from the ZonePortal in a single L1 block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct L1PortalEvents {

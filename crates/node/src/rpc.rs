@@ -296,20 +296,12 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
-    async fn enforce_authorized(
+    fn enforce_authorized(
         &self,
         request: &mut TempoTransactionRequest,
         auth: &AuthContext,
     ) -> Result<(), JsonRpcError> {
-        let caller = auth.caller;
-        zone_rpc::policy::enforce_authorized(request, auth, async {
-            ZonePortal::new(self.config.zone_portal, &self.l1_provider)
-                .isSequencer(caller)
-                .call()
-                .await
-                .map_err(internal)
-        })
-        .await
+        zone_rpc::policy::enforce_authorized(request, auth)
     }
 }
 
@@ -541,7 +533,7 @@ where
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            self.enforce_authorized(&mut request, &auth).await?;
+            self.enforce_authorized(&mut request, &auth)?;
 
             let result = EthCall::call(
                 &self.eth.api,
@@ -567,7 +559,7 @@ where
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            self.enforce_authorized(&mut request, &auth).await?;
+            self.enforce_authorized(&mut request, &auth)?;
 
             let result = EthCall::estimate_gas_at(
                 &self.eth.api,
@@ -612,7 +604,7 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            self.enforce_authorized(&mut request, &auth).await?;
+            self.enforce_authorized(&mut request, &auth)?;
 
             // Prefill the users request so the `fill_transaction` doesnt leak dynamic fee estimates via
             // missing fee fields.

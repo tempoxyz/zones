@@ -28,7 +28,7 @@ use tempo_contracts::{
 };
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_precompiles::{
-    PATH_USD_ADDRESS,
+    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard,
@@ -43,7 +43,6 @@ use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneOutbox as NativeZoneOutbox,
-    ZoneTokenFactory,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -142,7 +141,6 @@ impl GenerateZoneGenesis {
         deploy_permit2(&mut evm)?;
 
         initialize_tip403_registry(&mut evm)?;
-        initialize_tip20_factory(&mut evm)?;
         create_path_usd_token(&mut evm, self.admin)?;
         initialize_fee_manager(&mut evm, self.default_fee_token)?;
         initialize_stablecoin_dex(&mut evm)?;
@@ -204,7 +202,7 @@ impl GenerateZoneGenesis {
             .cache
             .accounts
             .iter()
-            .filter(|(addr, _)| **addr != DEPLOYER)
+            .filter(|(addr, _)| **addr != DEPLOYER && **addr != TIP20_FACTORY_ADDRESS)
             .filter(|(addr, _)| {
                 self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
             })
@@ -491,21 +489,6 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
         || TIP403Registry::new().initialize(),
     )?;
     println!("Initialized TIP403Registry");
-    Ok(())
-}
-
-/// Initialize the ZoneTokenFactory precompile (required before creating any TIP20 tokens).
-fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || ZoneTokenFactory::new().initialize(),
-    )?;
-    println!("Initialized ZoneTokenFactory");
     Ok(())
 }
 

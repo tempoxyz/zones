@@ -20,8 +20,8 @@ use tempo_alloy::TempoNetwork;
 use tempo_primitives::{Block, TempoHeader, TempoTxEnvelope};
 use tokio::sync::mpsc;
 use tracing::{debug, info, warn};
-use zone_l1::{L1BlockTracker, L1PortalEvents, TempoStateExt as _};
-use zone_p2p::{P2pCommand, P2pEvent, Role};
+use zone_l1::{DepositQueue, L1BlockTracker, L1PortalEvents, TempoStateExt as _};
+use zone_p2p::{Leadership, P2pCommand, P2pEvent, P2pPeerId, Role};
 use zone_payload::{
     ZonePayloadTypes,
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
@@ -390,12 +390,14 @@ async fn serve_backfill_requests<P>(
 /// zone engine starts. Followers serve catch-up requests and import live/backfilled blocks in
 /// canonical order.
 pub(crate) async fn run_block_sync<P>(
-    role: Role,
+    local_ed25519_public_key: P2pPeerId,
+    leadership: Leadership,
     provider: P,
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
     l1_block_tracker: L1BlockTracker,
+    deposit_queue: DepositQueue,
     attestation: AttestationContext,
 ) where
     P: BlockNumReader
@@ -408,6 +410,7 @@ pub(crate) async fn run_block_sync<P>(
         + Sync
         + 'static,
 {
+    let role = leadership.role_of(&local_ed25519_public_key);
     match role {
         Role::Leader => run_leader_backfill_server(provider, events, commands, attestation).await,
         Role::Follower => {
@@ -417,6 +420,7 @@ pub(crate) async fn run_block_sync<P>(
                 events,
                 commands,
                 l1_block_tracker,
+                deposit_queue,
                 attestation,
             )
             .await
@@ -519,6 +523,7 @@ async fn run_follower_block_sync<P>(
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
     l1_block_tracker: L1BlockTracker,
+    deposit_queue: DepositQueue,
     attestation: AttestationContext,
 ) where
     P: BlockNumReader
@@ -617,6 +622,7 @@ async fn run_follower_block_sync<P>(
                                         &provider,
                                         &engine,
                                         &l1_block_tracker,
+                                        &deposit_queue,
                                         &block,
                                     ).await {
                                         tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
@@ -634,6 +640,7 @@ async fn run_follower_block_sync<P>(
                                     &provider,
                                     &engine,
                                     &l1_block_tracker,
+                                    &deposit_queue,
                                     &mut pending,
                                 ).await {
                                     tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
@@ -730,6 +737,7 @@ async fn drain_pending_blocks<P>(
     provider: &P,
     engine: &ConsensusEngineHandle<ZonePayloadTypes>,
     l1_block_tracker: &L1BlockTracker,
+    deposit_queue: &DepositQueue,
     pending: &mut BTreeMap<u64, Vec<u8>>,
 ) -> eyre::Result<()>
 where
@@ -746,7 +754,7 @@ where
         let Some(block) = pending.remove(&next) else {
             return Ok(());
         };
-        import_peer_block(provider, engine, l1_block_tracker, &block).await?;
+        import_peer_block(provider, engine, l1_block_tracker, deposit_queue, &block).await?;
     }
 }
 
@@ -754,6 +762,7 @@ async fn import_peer_block<P>(
     provider: &P,
     engine: &ConsensusEngineHandle<ZonePayloadTypes>,
     l1_block_tracker: &L1BlockTracker,
+    deposit_queue: &DepositQueue,
     encoded: &[u8],
 ) -> eyre::Result<()>
 where
@@ -820,14 +829,18 @@ where
         .tempo_num_hash()?;
     validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
     let anchor = l1_header.num_hash();
-    loop {
+    let observed = loop {
         match tokio::time::timeout(
             Duration::from_secs(30),
             l1_block_tracker.wait_for_portal_events(anchor),
         )
         .await
         {
-            Ok(observed) => break portal_inputs.validate(&observed?)?,
+            Ok(observed) => {
+                let observed = observed?;
+                portal_inputs.validate(&observed)?;
+                break observed;
+            }
             Err(_) => warn!(
                 target: "zone::p2p",
                 block_number,
@@ -836,7 +849,15 @@ where
                 "Peer block import is waiting for local L1 observation of its anchor"
             ),
         }
-    }
+    };
+
+    // The subscriber normally enqueues immediately after recording this observation. Enqueueing
+    // here as well closes that small scheduling window and makes follower import self-contained;
+    // the queue treats the subscriber's later enqueue as a duplicate. This is peer-driven, so a
+    // gap must surface as a rejected block rather than aborting the node.
+    deposit_queue
+        .try_enqueue_sealed(l1_header, observed)
+        .wrap_err_with(|| format!("cannot queue the anchor of block {block_number}"))?;
 
     // 4. All txns in the block execute properly
     let payload = ZonePayloadTypes::block_to_payload(block, None);
@@ -854,8 +875,14 @@ where
         );
     }
 
-    // Mirror the leader engine only after the block is canonical locally.
+    // Mirror the leader engine only after the block is canonical locally. The block cannot be
+    // un-imported at this point, so the observation must be released unconditionally — leaving it
+    // behind would stall the subscriber once the lookahead window fills. Advancing the queue is
+    // likewise tolerant of drift; it fails only on a genuine hash conflict.
     l1_block_tracker.prune_through(anchor.number);
+    deposit_queue
+        .confirm_through(anchor)
+        .wrap_err_with(|| format!("cannot advance the deposit queue past block {block_number}"))?;
 
     info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
     Ok(())
