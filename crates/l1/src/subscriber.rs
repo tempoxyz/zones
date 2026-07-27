@@ -639,7 +639,13 @@ impl L1Subscriber {
                 .block_tracker
                 .record_with_portal_events(anchor, events.clone())?;
             if let Some(deposit_queue) = &self.deposit_queue {
-                if deposit_queue.enqueue_sealed(sealed, events)? {
+                // A queue discontinuity violates finalized-chain invariants and
+                // must terminate this critical task rather than enter the
+                // reconnect loop with the tracker ahead of the queue.
+                let appended = deposit_queue
+                    .enqueue_sealed(sealed, events)
+                    .unwrap_or_else(|err| panic!("finalized L1 queue invariant violated: {err}"));
+                if appended {
                     self.subscriber_metrics.blocks_enqueued.increment(1);
                 }
                 // Leaders do not gate imports on this tracker. Retain only its
