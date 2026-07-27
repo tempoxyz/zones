@@ -583,8 +583,7 @@ pub(crate) struct ZoneTestNode {
     node_handle: Box<dyn TestNodeHandle>,
     /// Cancels the `ZoneEngine`, when this node runs one.
     ///
-    /// Mirrors how the production supervisor stops the engine on demotion, so tests can
-    /// exercise the same graceful-stop path.
+    /// Exercises the graceful-stop path reserved for the future leadership supervisor.
     engine_stop: Option<CancellationToken>,
     _tasks: Runtime,
 }
@@ -595,8 +594,8 @@ impl ZoneTestNode {
         &self.http_url
     }
 
-    /// Stops the `ZoneEngine` the way the production supervisor does on demotion, and
-    /// waits until block production has actually ceased.
+    /// Stops the `ZoneEngine` at a block boundary and waits until block production has
+    /// actually ceased.
     ///
     /// Returns the head the engine stopped at.
     pub(crate) async fn stop_engine(&self) -> eyre::Result<u64> {
@@ -1130,6 +1129,11 @@ impl ZoneTestNode {
         let p2p_enabled = p2p_config.is_some();
         if let Some(p2p_config) = p2p_config {
             zone_node = zone_node.with_p2p(p2p_config);
+        }
+        if spawn_engine {
+            // The harness drives its own ZoneEngine against the shared queue below, so the
+            // node must keep enqueueing deposits even without a sequencer or P2P config.
+            zone_node = zone_node.with_external_deposit_consumer();
         }
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.

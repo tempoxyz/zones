@@ -177,16 +177,12 @@ impl P2pConfig {
         })
     }
 
-    /// The shared leadership record for this node.
-    ///
-    /// Callers that outlive the P2P runtime should hold on to this handle rather than a
-    /// bare [`tokio::sync::watch::Receiver`], so the channel stays open for as long as
-    /// they are watching it.
+    /// The shared, immutable bootstrap leadership record for this node.
     pub fn leadership(&self) -> Leadership {
         self.leadership.clone()
     }
 
-    /// Role of this node under the current leadership record.
+    /// Manifest-derived bootstrap role of this node.
     pub fn role(&self) -> Role {
         self.leadership.role_of(&self.ed25519_public_key())
     }
@@ -577,8 +573,9 @@ async fn run_commands(
 ) -> eyre::Result<()> {
     while let Some(command) = commands.recv().await {
         let (role, leader) = local_role_and_leader(&leadership, &local_ed25519_public_key);
-        // Built per command so it follows the leadership record, but only in the arms that
-        // actually address a peer set — forwarding a transaction must not allocate one.
+        // Built only in arms that actually address a peer set — forwarding a transaction must
+        // not allocate one. Keeping routing derived from the shared record also leaves one
+        // decision point for the future handoff implementation.
         let followers = || {
             peers
                 .iter()

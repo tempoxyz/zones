@@ -24,54 +24,34 @@ pub enum Role {
     Follower,
 }
 
-/// Shared, updatable leadership record for a zone node.
+/// Shared bootstrap leadership record for a zone node.
 ///
-/// Owns the write side of the record so that whichever component decides leadership — an
-/// admin RPC, or an L1 leadership registry watcher — can publish a new one, while every
-/// role-dependent task observes it through [`Self::subscribe`].
-///
-/// The handle is reference-counted and every observer holds a clone, so the underlying
-/// channel is alive for as long as anyone is watching it. Observers can therefore treat
-/// "the channel closed" as impossible rather than as a fatal condition.
-///
-/// Nothing publishes a new record yet: the value stays at the manifest's bootstrap record
-/// for the lifetime of the process, which keeps the static-leader behaviour unchanged.
+/// Leadership remains immutable for the lifetime of the process. A future handoff implementation
+/// will replace this read-only handle with an activation-boundary-aware schedule and expose
+/// mutation only together with complete role-specific worker switching.
 #[derive(Debug, Clone)]
-pub struct Leadership(std::sync::Arc<tokio::sync::watch::Sender<LeadershipState>>);
+pub struct Leadership(std::sync::Arc<LeadershipState>);
 
 impl Leadership {
-    /// Creates a handle seeded with `initial`.
-    pub fn new(initial: LeadershipState) -> Self {
-        Self(std::sync::Arc::new(tokio::sync::watch::channel(initial).0))
-    }
-
-    /// Observes the current and all future leadership records.
-    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<LeadershipState> {
-        self.0.subscribe()
+    /// Creates an immutable handle seeded from the validated manifest.
+    pub(crate) fn new(initial: LeadershipState) -> Self {
+        Self(std::sync::Arc::new(initial))
     }
 
     /// Returns the record in force right now.
     pub fn current(&self) -> LeadershipState {
-        self.0.borrow().clone()
+        (*self.0).clone()
     }
 
     /// Returns the role of `ed25519_public_key` under the current record.
     pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Role {
-        self.0.borrow().role_of(ed25519_public_key)
-    }
-
-    /// Publishes a new leadership record to every observer.
-    ///
-    /// Callers are responsible for the epoch ordering rules; this is a plain overwrite.
-    pub fn publish(&self, state: LeadershipState) {
-        self.0.send_replace(state);
+        self.0.role_of(ed25519_public_key)
     }
 }
 
-/// The leadership record currently observed by a zone node.
+/// The leadership record bootstrapped by a zone node.
 ///
-/// Epoch zero is bootstrapped from the manifest. Later leadership changes replace this
-/// record through the [`Leadership`] handle.
+/// Epoch zero is derived from the manifest. Later epochs are reserved for the handoff protocol.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeadershipState {
     /// Monotonically increasing fencing epoch.
@@ -374,8 +354,7 @@ impl ZoneManifest {
         &self.leader_ed25519_public_key
     }
 
-    /// Initial leadership record used until a persisted or externally decided
-    /// record is available.
+    /// Static leadership record used for the lifetime of the process.
     pub fn bootstrap_leadership(&self) -> LeadershipState {
         LeadershipState::new(0, self.leader_ed25519_public_key.clone(), 0)
     }

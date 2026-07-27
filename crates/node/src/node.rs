@@ -63,7 +63,6 @@ use tempo_transaction_pool::{
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -71,7 +70,7 @@ use zone_l1::{
     DepositQueue, L1BlockTracker, L1Subscriber, L1SubscriberConfig, TempoStateExt,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
-use zone_p2p::{Leadership, LeadershipState, P2pConfig, P2pNetworkId, P2pPeerId, Role, spawn_p2p};
+use zone_p2p::{P2pConfig, P2pNetworkId, Role, spawn_p2p};
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
@@ -80,189 +79,6 @@ use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
     attestation::AttestationDomain, spawn_zone_sequencer,
 };
-
-/// Watches whether this node is the leader under the current leadership record.
-///
-/// Holds the shared [`Leadership`] handle, not just a receiver, so the channel cannot
-/// close underneath a watcher — a supervisor never has to treat leadership as an error
-/// condition.
-#[derive(Clone)]
-struct LeadershipWatch {
-    local_ed25519_public_key: P2pPeerId,
-    /// Held solely so the watch channel cannot close while this watcher is alive.
-    _leadership: Leadership,
-    receiver: tokio::sync::watch::Receiver<LeadershipState>,
-}
-
-impl LeadershipWatch {
-    fn new(local_ed25519_public_key: P2pPeerId, leadership: Leadership) -> Self {
-        Self {
-            local_ed25519_public_key,
-            receiver: leadership.subscribe(),
-            _leadership: leadership,
-        }
-    }
-
-    fn is_leader(&self) -> bool {
-        self.receiver
-            .borrow()
-            .role_of(&self.local_ed25519_public_key)
-            == Role::Leader
-    }
-
-    /// Resolves once this node's leadership matches `leader`.
-    ///
-    /// Cannot fail: `self._leadership` keeps the sender alive. If the channel somehow does
-    /// close, leadership can never change again, so this parks instead of aborting the
-    /// node — a supervisor waiting for a promotion that will never come is correct, and a
-    /// running leader should keep leading.
-    async fn wait_for(&mut self, leader: bool) {
-        loop {
-            if self.is_leader() == leader {
-                return;
-            }
-            if self.receiver.changed().await.is_err() {
-                debug_assert!(false, "the Leadership handle keeps the channel open");
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-}
-
-/// How a generation of leadership-gated tasks is asked to stop.
-enum StopMode {
-    /// Signal the task to wind down at a safe point of its own choosing.
-    ///
-    /// Required for tasks with a critical section that must not be interrupted.
-    Graceful(Box<dyn Fn() + Send>),
-    /// Abort the tasks outright.
-    ///
-    /// Only sound for tasks that rebuild their state from an authoritative source when
-    /// they next start, rather than resuming from in-memory progress.
-    Abort,
-}
-
-/// A set of leadership-gated tasks that is currently running.
-///
-/// Dropping this aborts the tasks; that is the backstop for supervisor teardown at node
-/// shutdown. Demotion goes through [`Self::shut_down`], which honours [`StopMode`] so a
-/// task that must not be torn down mid-operation reaches a safe point first.
-struct RunningTasks {
-    handles: Vec<tokio::task::JoinHandle<()>>,
-    stop: StopMode,
-    /// Whether a panicking task should bring the node down.
-    ///
-    /// The supervised tasks run under `tokio::spawn`, so their panics surface as a
-    /// [`tokio::task::JoinError`] rather than unwinding through the critical task that
-    /// reth is watching. Re-raising restores that, for tasks whose loss is fatal.
-    propagate_panics: bool,
-}
-
-impl RunningTasks {
-    fn new(
-        handles: Vec<tokio::task::JoinHandle<()>>,
-        stop: StopMode,
-        propagate_panics: bool,
-    ) -> Self {
-        Self {
-            handles,
-            stop,
-            propagate_panics,
-        }
-    }
-
-    /// Resolves as soon as any task in the set exits.
-    async fn any_exited(&mut self) {
-        if self.handles.is_empty() {
-            std::future::pending::<()>().await;
-        }
-        let (result, index, _) = futures::future::select_all(self.handles.iter_mut()).await;
-        tracing::error!(target: "reth::cli", index, ?result, "Leadership-gated task exited");
-        if self.propagate_panics
-            && let Err(err) = result
-            && let Ok(panic) = err.try_into_panic()
-        {
-            std::panic::resume_unwind(panic);
-        }
-    }
-
-    /// Asks every task to stop, then waits for all of them to finish doing so.
-    async fn shut_down(&mut self) {
-        match &self.stop {
-            StopMode::Graceful(stop) => stop(),
-            StopMode::Abort => {
-                for handle in &self.handles {
-                    handle.abort();
-                }
-            }
-        }
-        for handle in &mut self.handles {
-            let _ = handle.await;
-        }
-    }
-}
-
-impl Drop for RunningTasks {
-    fn drop(&mut self) {
-        for handle in &self.handles {
-            handle.abort();
-        }
-    }
-}
-
-/// Why a supervised generation of tasks ended.
-enum SupervisionOutcome {
-    /// A task exited on its own; the supervisor gives up.
-    TaskExited,
-    /// This node was demoted; the tasks should be stopped and awaited.
-    Demoted,
-}
-
-/// Runs a set of tasks while this node is the leader, stopping them again on demotion.
-///
-/// `start` is called on every promotion, so each generation gets a fresh set of tasks. On
-/// demotion the previous generation is stopped and fully awaited before the supervisor
-/// loops, so at most one generation is ever alive.
-///
-/// With `leadership` absent — single-sequencer mode, where there is no manifest and so no
-/// notion of promotion — the tasks are started once and supervised forever. That is exactly
-/// the pre-multi-sequencer behaviour.
-///
-/// Returns when a supervised task exits on its own, since every caller treats that as
-/// terminal.
-async fn supervise_while_leader<Fut>(
-    what: &'static str,
-    mut leadership: Option<LeadershipWatch>,
-    mut start: impl FnMut() -> Fut,
-) where
-    Fut: Future<Output = RunningTasks>,
-{
-    loop {
-        if let Some(leadership) = leadership.as_mut() {
-            leadership.wait_for(true).await;
-        }
-
-        let mut running = start().await;
-        info!(target: "reth::cli", what, "Leadership-gated tasks started");
-
-        let Some(leadership) = leadership.as_mut() else {
-            running.any_exited().await;
-            return;
-        };
-
-        let outcome = tokio::select! {
-            () = running.any_exited() => SupervisionOutcome::TaskExited,
-            () = leadership.wait_for(false) => SupervisionOutcome::Demoted,
-        };
-        match outcome {
-            SupervisionOutcome::TaskExited => return,
-            SupervisionOutcome::Demoted => {
-                running.shut_down().await;
-                info!(target: "reth::cli", what, "Leadership-gated tasks stopped after demotion");
-            }
-        }
-    }
-}
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
@@ -392,6 +208,8 @@ pub struct ZoneNode {
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Optional static Zone P2P networking config.
     p2p_config: Option<P2pConfig>,
+    /// Whether a consumer outside this builder drains the deposit queue.
+    external_deposit_consumer: bool,
 }
 
 impl ZoneNode {
@@ -440,6 +258,7 @@ impl ZoneNode {
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
             p2p_config: None,
+            external_deposit_consumer: false,
         }
     }
 
@@ -458,6 +277,16 @@ impl ZoneNode {
             config.zone_id,
         )));
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Declare that a consumer outside this builder drains [`Self::deposit_queue`].
+    ///
+    /// Without a sequencer or P2P config the node assumes nothing consumes deposits and
+    /// launches a sink-less L1 observer. Callers that drive their own [`crate::ZoneEngine`]
+    /// against the shared queue — such as test harnesses — must opt back into retention.
+    pub fn with_external_deposit_consumer(mut self) -> Self {
+        self.external_deposit_consumer = true;
         self
     }
 
@@ -598,6 +427,8 @@ where
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Static Zone P2P networking configuration.
     p2p_config: Option<P2pConfig>,
+    /// Whether a consumer outside this builder drains the deposit queue.
+    external_deposit_consumer: bool,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -622,6 +453,7 @@ where
         private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
+        external_deposit_consumer: bool,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -638,6 +470,7 @@ where
             private_rpc_config,
             sequencer_config,
             p2p_config,
+            external_deposit_consumer,
         }
     }
 }
@@ -672,16 +505,13 @@ where
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
 
-        let leadership = self
-            .p2p_config
-            .as_ref()
-            .map(|config| LeadershipWatch::new(config.ed25519_public_key(), config.leadership()));
         self.spawn_l1_subscriber(&ctx);
 
         let task_executor = ctx.node.task_executor().clone();
         let attestation_store = self
             .p2p_config
             .as_ref()
+            .filter(|config| config.role() == Role::Leader)
             .map(|_| AttestationStore::default());
         if let Some(config) = self.p2p_config.take() {
             let l1_chain_id = l1_provider.get_chain_id().await?;
@@ -721,7 +551,7 @@ where
         if let Some(ref config) = self.sequencer_config {
             let sequencer_addr = config.sequencer_signer.address();
             let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
-            self.spawn_zone_engine(&ctx, sequencer_addr, sequencer_key, leadership.clone())?;
+            self.spawn_zone_engine(&ctx, sequencer_addr, sequencer_key)?;
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
@@ -750,7 +580,6 @@ where
                 sequencer_addr,
                 chain_id,
                 attestation_store,
-                leadership,
             )
             .await?;
         }
@@ -931,72 +760,59 @@ where
         Ok(())
     }
 
-    /// Spawn shared L1 observation and keep the deposit queue warm on every node.
+    /// Spawn shared L1 observation.
+    ///
+    /// Sequencers, P2P replicas, and externally driven queue consumers retain finalized blocks
+    /// in the deposit queue. A node with none of those only maintains its L1-derived caches and
+    /// must not accumulate an unconsumed queue.
     fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
-        L1Subscriber::spawn(
-            self.l1_config.clone(),
-            ctx.node.provider().clone(),
-            self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
-        );
-        info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        if self.sequencer_config.is_some()
+            || self.p2p_config.is_some()
+            || self.external_deposit_consumer
+        {
+            L1Subscriber::spawn(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                self.deposit_queue.clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
+        } else {
+            L1Subscriber::spawn_observer(
+                self.l1_config.clone(),
+                ctx.node.provider().clone(),
+                ctx.node.task_executor().clone(),
+            );
+            info!(target: "reth::cli", "L1 observer started without a deposit sink");
+        }
     }
 
-    /// Spawn a leadership-supervised [`ZoneEngine`] for L1-event-driven block production.
-    ///
-    /// The engine is stopped by cancelling its token, never by aborting the task: it can be
-    /// midway through consuming an L1 block from the deposit queue and canonicalizing the
-    /// resulting zone block, and cutting that short would desynchronize the queue cursor
-    /// from the local head. See [`ZoneEngine::run_until`].
+    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
     fn spawn_zone_engine(
         &self,
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
         sequencer_key: SecretKey,
-        leadership: Option<LeadershipWatch>,
     ) -> eyre::Result<()> {
-        let provider = ctx.node.provider().clone();
-        let chain_spec = provider.chain_spec();
-        let to_engine = ctx.beacon_engine_handle.clone();
-        let payload_builder = ctx.node.payload_builder_handle().clone();
-        let deposit_queue = self.deposit_queue.clone();
-        let l1_block_tracker = self.l1_config.block_tracker.clone();
-        let portal_address = self.portal_address;
-        ctx.node.task_executor().spawn_critical_task(
-            "zone-engine-supervisor",
-            supervise_while_leader("zone-engine", leadership, move || {
-                // Re-read the head on every promotion: a follower that is being promoted has
-                // been importing peer blocks since this node started.
-                let best = provider
-                    .best_block_number()
-                    .expect("failed reading local head before starting ZoneEngine");
-                let last_header = provider
-                    .sealed_header(best)
-                    .expect("failed reading local header before starting ZoneEngine")
-                    .expect("local head is missing before starting ZoneEngine");
-                let engine = ZoneEngine::new(
-                    chain_spec.clone(),
-                    to_engine.clone(),
-                    payload_builder.clone(),
-                    deposit_queue.clone(),
-                    l1_block_tracker.clone(),
-                    last_header,
-                    fee_recipient,
-                    sequencer_key.clone(),
-                    portal_address,
-                );
-                let stop = CancellationToken::new();
-                let handle = tokio::spawn(engine.run_until(stop.clone()));
-                std::future::ready(RunningTasks::new(
-                    vec![handle],
-                    StopMode::Graceful(Box::new(move || stop.cancel())),
-                    // Losing block production is fatal; it was a reth critical task before
-                    // it gained a supervisor.
-                    true,
-                ))
-            }),
+        let provider = ctx.node.provider();
+        let last_header = provider
+            .sealed_header(provider.best_block_number()?)?
+            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+        let engine = ZoneEngine::new(
+            provider.chain_spec(),
+            ctx.beacon_engine_handle.clone(),
+            ctx.node.payload_builder_handle().clone(),
+            self.deposit_queue.clone(),
+            self.l1_config.block_tracker.clone(),
+            last_header,
+            fee_recipient,
+            sequencer_key,
+            self.portal_address,
         );
-        info!(target: "reth::cli", "ZoneEngine leadership supervisor spawned");
+        ctx.node
+            .task_executor()
+            .spawn_critical_task("zone-engine", engine.run());
+        info!(target: "reth::cli", "ZoneEngine spawned");
         Ok(())
     }
 
@@ -1057,7 +873,6 @@ where
         sequencer_addr: Address,
         chain_id: u64,
         attestation_store: Option<AttestationStore>,
-        leadership: Option<LeadershipWatch>,
     ) -> eyre::Result<()> {
         if config.zone_id != 0 {
             let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
@@ -1096,30 +911,20 @@ where
         let l1_transaction_signer = config
             .l1_transaction_signer
             .unwrap_or(config.sequencer_signer);
-        // Unlike the ZoneEngine these tasks are stopped by aborting them. Both rebuild their
-        // cursors from an authoritative source when they start — the monitor from the portal's
-        // on-chain `blockHash`, the withdrawal processor from the outbox queue — so a
-        // torn-down generation is reconstructed rather than resumed. A graceful stop is still
-        // worth adding before handover goes live, so an in-flight `submitBatch` is not
-        // abandoned.
-        task_executor.spawn_critical_task(
-            "zone-sequencer-supervisor",
-            supervise_while_leader("zone-sequencer", leadership, move || {
-                let config = sequencer_config.clone();
-                let signer = l1_transaction_signer.clone();
-                async move {
-                    let handle = spawn_zone_sequencer(config, signer).await;
-                    RunningTasks::new(
-                        vec![handle.withdrawal_handle, handle.monitor_handle],
-                        StopMode::Abort,
-                        // These were already plain spawned tasks whose exit was logged and
-                        // tolerated; keep that so settlement problems don't halt the node.
-                        false,
-                    )
+        let seq_handle = spawn_zone_sequencer(sequencer_config, l1_transaction_signer).await;
+        info!(target: "reth::cli", "Sequencer tasks spawned");
+
+        // Critical task — node shuts down if either exits.
+        task_executor.spawn_critical_task("zone-monitor", async move {
+            tokio::select! {
+                res = seq_handle.withdrawal_handle => {
+                    tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
                 }
-            }),
-        );
-        info!(target: "reth::cli", "Sequencer leadership supervisor spawned");
+                res = seq_handle.monitor_handle => {
+                    tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
+                }
+            }
+        });
 
         // Flush unpersisted blocks on shutdown.
         let engine_shutdown = handle.engine_shutdown.clone();
@@ -1204,6 +1009,7 @@ where
             self.private_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
+            self.external_deposit_consumer,
         )
     }
 }
@@ -1464,10 +1270,6 @@ mod tests {
     use super::*;
     use alloy_consensus::{Signed, TxEip1559};
     use alloy_primitives::{Bytes, Signature, TxKind, U256};
-    use commonware_cryptography::{
-        Signer as _,
-        ed25519::{PrivateKey, PublicKey},
-    };
     use reth_chainspec::EthChainSpec;
     use reth_primitives_traits::Recovered;
     use tempo_primitives::transaction::{
@@ -1505,251 +1307,6 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
-    }
-
-    /// A leader key, a local key, and a watch over a bootstrap record naming the leader.
-    fn test_leadership() -> (PublicKey, PublicKey, Leadership, LeadershipWatch) {
-        let leader = PrivateKey::from_seed(1).public_key();
-        let local = PrivateKey::from_seed(2).public_key();
-        let leadership = Leadership::new(LeadershipState::new(0, leader.clone(), 0));
-        let watch = LeadershipWatch::new(local.clone(), leadership.clone());
-        (leader, local, leadership, watch)
-    }
-
-    #[tokio::test]
-    async fn leadership_watch_tracks_promotion_and_demotion() {
-        let (leader, local, leadership, mut watch) = test_leadership();
-
-        assert!(!watch.is_leader());
-        leadership.publish(LeadershipState::new(1, local, 120));
-        watch.wait_for(true).await;
-        assert!(watch.is_leader());
-
-        leadership.publish(LeadershipState::new(2, leader, 240));
-        watch.wait_for(false).await;
-        assert!(!watch.is_leader());
-    }
-
-    /// Dropping every [`Leadership`] clone must not make a watcher fail — the watcher owns
-    /// one, so `wait_for` parks rather than returning an error the caller has to handle.
-    #[tokio::test]
-    async fn leadership_watch_survives_dropping_other_handles() {
-        let (_leader, _local, leadership, mut watch) = test_leadership();
-        drop(leadership);
-
-        assert!(!watch.is_leader());
-        // Already a follower, so this resolves immediately even with no other senders.
-        watch.wait_for(false).await;
-        // Waiting for a promotion that can never arrive parks instead of erroring.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), watch.wait_for(true))
-                .await
-                .is_err(),
-            "wait_for must not resolve when leadership can no longer change"
-        );
-    }
-
-    /// Counts generations and reports whether a generation is currently running, so the
-    /// supervisor's start/stop sequencing can be asserted without a real node.
-    #[derive(Clone, Default)]
-    struct TaskSpy(Arc<std::sync::Mutex<(usize, usize)>>);
-
-    impl TaskSpy {
-        fn started(&self) -> usize {
-            self.0.lock().expect("test mutex").0
-        }
-
-        fn running(&self) -> usize {
-            let (started, stopped) = *self.0.lock().expect("test mutex");
-            started - stopped
-        }
-
-        /// Builds a generation that runs until gracefully stopped.
-        fn spawn(&self) -> RunningTasks {
-            self.0.lock().expect("test mutex").0 += 1;
-            let stop = CancellationToken::new();
-            let spy = self.clone();
-            let token = stop.clone();
-            let handle = tokio::spawn(async move {
-                token.cancelled().await;
-                spy.0.lock().expect("test mutex").1 += 1;
-            });
-            RunningTasks::new(
-                vec![handle],
-                StopMode::Graceful(Box::new(move || stop.cancel())),
-                false,
-            )
-        }
-    }
-
-    /// Waits for `predicate`, so the tests never depend on a fixed sleep.
-    async fn eventually(what: &str, predicate: impl Fn() -> bool) {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !predicate() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
-    }
-
-    /// Single-sequencer mode: no manifest, so the tasks start immediately and stay up.
-    #[tokio::test]
-    async fn supervisor_without_leadership_starts_once() {
-        let spy = TaskSpy::default();
-        let supervisor = {
-            let spy = spy.clone();
-            tokio::spawn(supervise_while_leader("test", None, move || {
-                std::future::ready(spy.spawn())
-            }))
-        };
-
-        eventually("the first generation to start", || spy.started() == 1).await;
-        // No leadership watch means nothing can ever demote this node.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(spy.started(), 1);
-        assert_eq!(spy.running(), 1);
-        supervisor.abort();
-    }
-
-    /// A follower must not start the tasks until it is promoted, and must stop them again
-    /// when it is demoted — with exactly one generation alive at a time.
-    #[tokio::test]
-    async fn supervisor_starts_on_promotion_and_stops_on_demotion() {
-        let (leader, local, leadership, watch) = test_leadership();
-        let spy = TaskSpy::default();
-        let supervisor = {
-            let spy = spy.clone();
-            tokio::spawn(supervise_while_leader("test", Some(watch), move || {
-                std::future::ready(spy.spawn())
-            }))
-        };
-
-        // Follower: nothing runs.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(spy.started(), 0, "a follower must not start leader tasks");
-
-        leadership.publish(LeadershipState::new(1, local.clone(), 0));
-        eventually("promotion to start the tasks", || spy.running() == 1).await;
-        assert_eq!(spy.started(), 1);
-
-        leadership.publish(LeadershipState::new(2, leader, 0));
-        eventually("demotion to stop the tasks", || spy.running() == 0).await;
-        assert_eq!(spy.started(), 1, "demotion must not start a new generation");
-
-        // Re-promotion gets a fresh generation, and only one is ever alive.
-        leadership.publish(LeadershipState::new(3, local, 0));
-        eventually("re-promotion to restart the tasks", || spy.started() == 2).await;
-        assert_eq!(spy.running(), 1);
-        supervisor.abort();
-    }
-
-    /// Demotion must let the task reach its own stopping point rather than being aborted,
-    /// because the ZoneEngine has a critical section it cannot be interrupted in.
-    #[tokio::test]
-    async fn supervisor_stops_tasks_gracefully_on_demotion() {
-        let (leader, local, leadership, watch) = test_leadership();
-        leadership.publish(LeadershipState::new(1, local, 0));
-
-        let finished = Arc::new(std::sync::Mutex::new(false));
-        let supervisor = {
-            let finished = finished.clone();
-            tokio::spawn(supervise_while_leader("test", Some(watch), move || {
-                let finished = finished.clone();
-                let stop = CancellationToken::new();
-                let token = stop.clone();
-                let handle = tokio::spawn(async move {
-                    token.cancelled().await;
-                    // Work done after the stop signal must still complete.
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    *finished.lock().expect("test mutex") = true;
-                });
-                std::future::ready(RunningTasks::new(
-                    vec![handle],
-                    StopMode::Graceful(Box::new(move || stop.cancel())),
-                    false,
-                ))
-            }))
-        };
-
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        leadership.publish(LeadershipState::new(2, leader, 0));
-        eventually("the task to finish its shutdown work", || {
-            *finished.lock().expect("test mutex")
-        })
-        .await;
-        supervisor.abort();
-    }
-
-    /// The supervised tasks run under `tokio::spawn`, so their panics would otherwise be
-    /// swallowed as a `JoinError`. Block production was a reth critical task before it
-    /// gained a supervisor, so losing it must still bring the node down.
-    #[tokio::test]
-    async fn supervisor_propagates_a_task_panic_when_asked_to() {
-        let (_leader, local, leadership, watch) = test_leadership();
-        leadership.publish(LeadershipState::new(1, local, 0));
-
-        let supervisor = tokio::spawn(supervise_while_leader("test", Some(watch), || {
-            std::future::ready(RunningTasks::new(
-                vec![tokio::spawn(async { panic!("engine died") })],
-                StopMode::Abort,
-                true,
-            ))
-        }));
-
-        let err = tokio::time::timeout(Duration::from_secs(5), supervisor)
-            .await
-            .expect("supervisor must not hang on a panicking task")
-            .expect_err("the panic must reach the supervisor's caller");
-        assert!(err.is_panic(), "expected a panic, got {err:?}");
-    }
-
-    /// With propagation off, a panicking task is logged and tolerated — the behaviour the
-    /// sequencer monitor and withdrawal processor already had.
-    #[tokio::test]
-    async fn supervisor_tolerates_a_task_panic_by_default() {
-        let (_leader, local, leadership, watch) = test_leadership();
-        leadership.publish(LeadershipState::new(1, local, 0));
-
-        let supervisor = tokio::spawn(supervise_while_leader("test", Some(watch), || {
-            std::future::ready(RunningTasks::new(
-                vec![tokio::spawn(async { panic!("monitor died") })],
-                StopMode::Abort,
-                false,
-            ))
-        }));
-
-        tokio::time::timeout(Duration::from_secs(5), supervisor)
-            .await
-            .expect("supervisor must return")
-            .expect("supervisor must not panic when propagation is off");
-    }
-
-    /// A generation that exits on its own is terminal: the supervisor returns instead of
-    /// silently restarting it, matching the pre-existing "task exited" behaviour.
-    #[tokio::test]
-    async fn supervisor_returns_when_a_task_exits_on_its_own() {
-        let (_leader, local, leadership, watch) = test_leadership();
-        leadership.publish(LeadershipState::new(1, local, 0));
-
-        let started = Arc::new(std::sync::Mutex::new(0usize));
-        let supervisor = {
-            let started = started.clone();
-            tokio::spawn(supervise_while_leader("test", Some(watch), move || {
-                *started.lock().expect("test mutex") += 1;
-                std::future::ready(RunningTasks::new(
-                    vec![tokio::spawn(std::future::ready(()))],
-                    StopMode::Abort,
-                    false,
-                ))
-            }))
-        };
-
-        tokio::time::timeout(Duration::from_secs(5), supervisor)
-            .await
-            .expect("supervisor must return when its task exits")
-            .expect("supervisor must not panic");
-        assert_eq!(*started.lock().expect("test mutex"), 1);
     }
 
     #[test]

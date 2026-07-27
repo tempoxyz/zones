@@ -55,6 +55,39 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
+/// A queue-backed block consumer that can drain all work currently available.
+///
+/// Kept separate from [`ZoneEngine`] so cancellation at the boundary between two advances can
+/// be tested deterministically without mocking the Engine API and payload builder.
+trait AvailableBlockDrain {
+    type Block;
+
+    /// Returns the next available block without consuming it.
+    fn next_available(&self) -> Option<Self::Block>;
+
+    /// Completes and consumes one block.
+    async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()>;
+}
+
+/// Drain available blocks until the queue is empty or cancellation is observed.
+///
+/// Cancellation is checked only before starting a new advance. An advance already in flight is
+/// always allowed to finish so its queue confirmation and canonical head remain consistent.
+async fn drain_all_available<D>(drain: &mut D, stop: &CancellationToken) -> eyre::Result<()>
+where
+    D: AvailableBlockDrain,
+{
+    loop {
+        if stop.is_cancelled() {
+            return Ok(());
+        }
+        let Some(block) = drain.next_available() else {
+            return Ok(());
+        };
+        drain.advance_one(block).await?;
+    }
+}
+
 /// Engine that drives L2 block production from L1 events.
 ///
 /// Waits for L1 blocks in the [`DepositQueue`], then for each block:
@@ -138,11 +171,11 @@ impl ZoneEngine {
                 }
                 // Wait for new L1 blocks in the deposit queue
                 _ = self.deposit_queue.notified() => {
-                    self.advance_all_available().await;
+                    self.advance_all_available(&stop).await;
                 }
                 // Periodic FCU heartbeat — also drains any blocks we missed
                 _ = fcu_interval.tick() => {
-                    self.advance_all_available().await;
+                    self.advance_all_available(&stop).await;
                     if let Err(e) = self.update_forkchoice_state().await {
                         error!(target: "zone::engine", "Error updating fork choice: {:?}", e);
                     }
@@ -182,13 +215,10 @@ impl ZoneEngine {
     ///
     /// Reorg safety is handled upstream by the L1 subscriber, which only
     /// enqueues blocks exposed by L1's `finalized` tag.
-    async fn advance_all_available(&mut self) {
-        while let Some(l1_block) = self.deposit_queue.peek() {
-            if let Err(e) = self.advance(l1_block).await {
-                error!(target: "zone::engine", "Error advancing the chain: {:?}", e);
-                tokio::time::sleep(Duration::from_millis(100)).await;
-                break;
-            }
+    async fn advance_all_available(&mut self, stop: &CancellationToken) {
+        if let Err(e) = drain_all_available(self, stop).await {
+            error!(target: "zone::engine", "Error advancing the chain: {:?}", e);
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     }
 
@@ -282,5 +312,85 @@ impl ZoneEngine {
         }
 
         Ok(())
+    }
+}
+
+impl AvailableBlockDrain for ZoneEngine {
+    type Block = L1BlockDeposits;
+
+    fn next_available(&self) -> Option<Self::Block> {
+        self.deposit_queue.peek()
+    }
+
+    async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
+        self.advance(block).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use tokio::sync::oneshot;
+
+    struct PausedDrain {
+        pending: VecDeque<u64>,
+        advanced: Vec<u64>,
+        first_started: Option<oneshot::Sender<()>>,
+        release_first: Option<oneshot::Receiver<()>>,
+    }
+
+    impl AvailableBlockDrain for PausedDrain {
+        type Block = u64;
+
+        fn next_available(&self) -> Option<Self::Block> {
+            self.pending.front().copied()
+        }
+
+        async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
+            if let Some(started) = self.first_started.take() {
+                let _ = started.send(());
+                self.release_first
+                    .take()
+                    .expect("first advance has a release signal")
+                    .await
+                    .expect("test releases the first advance");
+            }
+
+            assert_eq!(self.pending.pop_front(), Some(block));
+            self.advanced.push(block);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_finishes_the_in_flight_block_without_draining_the_backlog() {
+        let stop = CancellationToken::new();
+        let task_stop = stop.clone();
+        let (first_started, started) = oneshot::channel();
+        let (release, release_first) = oneshot::channel();
+        let mut drain = PausedDrain {
+            pending: VecDeque::from([1, 2, 3]),
+            advanced: Vec::new(),
+            first_started: Some(first_started),
+            release_first: Some(release_first),
+        };
+
+        let task = tokio::spawn(async move {
+            drain_all_available(&mut drain, &task_stop)
+                .await
+                .expect("drain succeeds");
+            drain
+        });
+
+        started.await.expect("the first block starts");
+        stop.cancel();
+        release
+            .send(())
+            .expect("the first block is still in flight");
+
+        let drain = task.await.expect("drain task succeeds");
+        assert_eq!(drain.advanced, [1]);
+        assert_eq!(drain.pending, [2, 3]);
     }
 }

@@ -272,6 +272,36 @@ pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
     fn latest_tempo_block_number(&self) -> eyre::Result<u64>;
 }
 
+/// Optional sink for finalized deposit-bearing L1 blocks.
+///
+/// Sequencers and P2P replicas retain a queue so blocks can be produced or validated later.
+/// Observer-only nodes still apply finalized events to their caches, but retain no queue.
+#[derive(Debug, Clone)]
+pub(crate) enum DepositSink {
+    Queue(DepositQueue),
+    Observer,
+}
+
+impl DepositSink {
+    fn last_enqueued(&self) -> Option<NumHash> {
+        match self {
+            Self::Queue(queue) => queue.last_enqueued(),
+            Self::Observer => None,
+        }
+    }
+
+    fn enqueue(
+        &self,
+        header: SealedHeader<TempoHeader>,
+        events: L1PortalEvents,
+    ) -> eyre::Result<bool> {
+        match self {
+            Self::Queue(queue) => queue.try_enqueue_sealed(header, events),
+            Self::Observer => Ok(false),
+        }
+    }
+}
+
 struct ProviderLocalTempoCheckpointReader<P> {
     provider: P,
 }
@@ -291,9 +321,8 @@ where
 pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
-    /// Deposit sink retained on every multi-sequencer member so a follower's
-    /// queue is warm before promotion.
-    pub(crate) deposit_queue: DepositQueue,
+    /// Optional deposit sink. P2P members retain it so follower queues stay warm.
+    pub(crate) deposit_sink: DepositSink,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
@@ -312,13 +341,35 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        Self::spawn_inner(config, local_state_provider, deposit_queue, task_executor);
+        Self::spawn_inner(
+            config,
+            local_state_provider,
+            DepositSink::Queue(deposit_queue),
+            task_executor,
+        );
+    }
+
+    /// Create and spawn an observer that advances finalized L1-derived caches without
+    /// retaining deposit blocks.
+    pub fn spawn_observer<P>(
+        config: L1SubscriberConfig,
+        local_state_provider: P,
+        task_executor: reth_tasks::Runtime,
+    ) where
+        P: StateProviderFactory + Clone + Send + Sync + 'static,
+    {
+        Self::spawn_inner(
+            config,
+            local_state_provider,
+            DepositSink::Observer,
+            task_executor,
+        );
     }
 
     fn spawn_inner<P>(
         config: L1SubscriberConfig,
         local_state_provider: P,
-        deposit_queue: DepositQueue,
+        deposit_sink: DepositSink,
         task_executor: reth_tasks::Runtime,
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
@@ -328,7 +379,7 @@ impl L1Subscriber {
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
-            deposit_queue,
+            deposit_sink,
             subscriber_metrics: Default::default(),
         };
 
@@ -446,7 +497,7 @@ impl L1Subscriber {
     ) -> eyre::Result<u64> {
         let resolved = self.resolve_start_block().await?;
         let queued = self
-            .deposit_queue
+            .deposit_sink
             .last_enqueued()
             .map(|last| last.number.saturating_add(1));
         let observed = self
@@ -632,8 +683,8 @@ impl L1Subscriber {
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
             let appended = self
-                .deposit_queue
-                .try_enqueue_sealed(sealed, events.clone())
+                .deposit_sink
+                .enqueue(sealed, events.clone())
                 .wrap_err_with(|| {
                     format!(
                         "unexpected discontinuity while enqueueing finalized L1 block \
@@ -643,8 +694,8 @@ impl L1Subscriber {
             self.config
                 .block_tracker
                 .record_with_portal_events(anchor, events.clone())?;
-            // Publish derived L1 state only after the header has been admitted
-            // to the contiguous deposit queue.
+            // Publish derived L1 state only after the header has been admitted to every
+            // configured retention sink and the contiguous observation tracker.
             self.apply_enabled_token_events(&events);
             self.update_l1_state_anchor(block_number, &invalidated);
             if appended {

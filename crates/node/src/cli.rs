@@ -148,8 +148,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             builder.config_mut().engine.memory_block_buffer_target = 0;
         }
         let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_role);
-        let should_configure_sequencer = should_sequence_blocks || manifest_mode;
-        let sequencer_signer = if should_configure_sequencer {
+        let sequencer_signer = if should_sequence_blocks || manifest_mode {
             Some(
                 load_sequencer_signer(args.sequencer_key, args.sequencer_key_file.as_deref())
                     .await?,
@@ -179,11 +178,13 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             ),
         });
 
-        if should_configure_sequencer {
+        if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
-                .expect("sequencer signer is parsed whenever sequencing can be enabled");
-            let l1_transaction_signer =
-                p2p_config.as_ref().map(P2pConfig::block_attestation_signer);
+                .expect("sequencer signer is parsed whenever sequencing is enabled");
+            let l1_transaction_signer = p2p_config
+                .as_ref()
+                .filter(|config| config.role() == Role::Leader)
+                .map(P2pConfig::block_attestation_signer);
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,

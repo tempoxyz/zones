@@ -503,11 +503,10 @@ async fn test_empty_l1_blocks_advance_zone() -> eyre::Result<()> {
 /// Cancelling the `ZoneEngine` must stop it only between zone blocks, leaving the deposit
 /// queue cursor and the local head in agreement.
 ///
-/// This is the invariant that makes leadership handover safe: the supervisor cancels the
-/// engine rather than aborting it, because `build_next_block` consumes an L1 block from the
-/// queue and canonicalizes the resulting zone block across several awaits. Stopping partway
-/// would either replay an L1 anchor (`advanceTempo` rejects it) or skip one, and either way
-/// the node could never build another block.
+/// This is the graceful-stop invariant needed by the future leadership handoff: an advance
+/// consumes an L1 block from the queue and canonicalizes the resulting zone block across several
+/// awaits. Stopping partway would either replay an L1 anchor (`advanceTempo` rejects it) or skip
+/// one, and either way the node could never build another block.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_zone_engine_stops_cleanly_between_blocks() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
