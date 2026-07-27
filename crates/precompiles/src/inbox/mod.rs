@@ -327,12 +327,10 @@ impl ZoneInbox {
         token: Address,
         owner: Address,
     ) -> ZoneResult<u128> {
-        if msg_sender != owner {
-            if !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
-                return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
-                    IZoneInbox::Unauthorized {},
-                )));
-            }
+        if msg_sender != owner && !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
+            return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
+                IZoneInbox::Unauthorized {},
+            )));
         }
         Ok(self.withdrawal_bounce_backs[token][owner].read()?)
     }
