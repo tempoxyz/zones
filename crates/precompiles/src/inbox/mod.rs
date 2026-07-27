@@ -319,6 +319,23 @@ impl ZoneInbox {
         self.emit_event(ZoneInboxEvent::refund_claimed(caller, token, amount))?;
         Ok(amount)
     }
+
+    fn view_refund<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        msg_sender: Address,
+        token: Address,
+        owner: Address,
+    ) -> ZoneResult<u128> {
+        if msg_sender != owner {
+            if !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
+                return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
+                    IZoneInbox::Unauthorized {},
+                )));
+            }
+        }
+        Ok(self.withdrawal_bounce_backs[token][owner].read()?)
+    }
 }
 
 /// A queue entry whose nested ABI payload has been validated before execution begins.

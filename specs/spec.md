@@ -722,6 +722,8 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDe
 
 If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(zoneFallbackRecipient, token, amount)`. If it reverts, the inbox credits the Zone-local refund registry and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
 
+The parked balance is exposed through `ZoneInbox.refunds(token, owner)`, which requires its immediate `msg.sender` to equal `owner` or belong to the active sequencer set. Enforcing this at the getter prevents call-forwarding contracts from exposing another account's refund balance. Owners and sequencers must query the getter directly rather than through a multicall contract.
+
 The recipient claims the parked funds by calling `ZoneInbox.claimRefund(token)`. The inbox zeroes `_refunds[token][msg.sender]` and calls `IZoneToken.mint(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
 The withdrawal fee is burned on the zone regardless of whether the withdrawal succeeds on Tempo or bounces back.
@@ -1980,6 +1982,7 @@ interface IZoneInbox {
     // Refund registry (withdrawal bounce-back mints that reverted on the zone, e.g.
     // because the recipient was rejected by the zone-side TIP-403 policy at mint time)
     /// @notice Outstanding refundable balance for a recipient on a given token.
+    /// @dev Only callable directly by `owner` or an active sequencer.
     function refunds(address token, address owner) external view returns (uint128);
     /// @notice Claim outstanding refunds in `token` for `msg.sender`. Reverts if the
     ///         underlying mint reverts (e.g. policy still forbids the recipient).

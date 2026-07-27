@@ -305,7 +305,7 @@ mod tests {
     fn reward_reads_are_disallowed() {
         let caller = Address::repeat_byte(0x11);
         let account = Address::repeat_byte(0x22);
-        let rules = rules(Address::repeat_byte(0x33));
+        let rules = rules();
 
         assert_unauthorized(&rules, ITIP20::globalRewardPerTokenCall {}, caller);
         assert_unauthorized(&rules, ITIP20::userRewardInfoCall { account }, caller);

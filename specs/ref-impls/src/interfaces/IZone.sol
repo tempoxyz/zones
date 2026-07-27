@@ -1086,6 +1086,7 @@ interface IZoneInbox {
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
+    error Unauthorized();
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);

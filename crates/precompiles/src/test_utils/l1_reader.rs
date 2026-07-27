@@ -93,6 +93,14 @@ impl MockL1Reader {
         self.request_count(block_number, slot) != 0
     }
 
+    pub fn seed_portal<T>(
+        &self,
+        address: Address,
+        seed: impl FnOnce(&mut ZonePortalStorage) -> tempo_precompiles::Result<T>,
+    ) -> tempo_precompiles::Result<T> {
+        self.with_storage(u64::MAX, || seed(&mut ZonePortalStorage::new(address)))
+    }
+
     pub fn seed_active_sequencer(
         &self,
         portal_address: Address,
