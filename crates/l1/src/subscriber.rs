@@ -639,8 +639,9 @@ impl L1Subscriber {
                 .block_tracker
                 .record_with_portal_events(anchor, events.clone())?;
             if let Some(deposit_queue) = &self.deposit_queue {
-                deposit_queue.enqueue_sealed(sealed, events);
-                self.subscriber_metrics.blocks_enqueued.increment(1);
+                if deposit_queue.enqueue_sealed(sealed, events)? {
+                    self.subscriber_metrics.blocks_enqueued.increment(1);
+                }
                 // Leaders do not gate imports on this tracker. Retain only its
                 // monotonic cursor and let the deposit queue own pending data.
                 self.config.block_tracker.prune_through(anchor.number);

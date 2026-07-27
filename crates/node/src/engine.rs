@@ -48,7 +48,7 @@ use reth_payload_primitives::{BuiltPayload, PayloadKind};
 use reth_primitives_traits::SealedHeader;
 use std::{sync::Arc, time::Duration};
 use tempo_primitives::TempoHeader;
-use tracing::{error, warn};
+use tracing::error;
 
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockDeposits, PreparedL1Block};
@@ -252,13 +252,9 @@ impl ZoneEngine {
             eyre::bail!("Invalid payload for block {block_number}");
         }
 
-        // newPayload succeeded — confirm the L1 block in the queue so it is
-        // removed. If the queue was reorged between peek and confirm, the
-        // block was already purged; log a warning but still update
-        // last_header since the zone chain has advanced.
-        if self.deposit_queue.confirm(l1_num_hash).is_none() {
-            warn!(target: "zone::engine", ?l1_num_hash, "L1 block was purged from queue during build");
-        }
+        // newPayload succeeded — remove the exact finalized L1 block that
+        // produced it. A mismatch indicates an internal consumer-ordering bug.
+        self.deposit_queue.confirm(l1_num_hash)?;
 
         self.last_header = header;
 

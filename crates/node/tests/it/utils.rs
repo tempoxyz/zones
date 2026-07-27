@@ -4190,7 +4190,9 @@ impl L1Fixture {
         self.seed_regular_deposit_policy_state(block.header.inner.number, &deposits);
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
-        queue.enqueue(block.header.clone(), events);
+        queue
+            .enqueue(block.header.clone(), events)
+            .expect("fixture finalized block must enqueue");
     }
 
     /// Enqueue a pre-built block into a deposit queue with full portal events.
@@ -4209,7 +4211,9 @@ impl L1Fixture {
                     .expect("event receive-policy fixture seed must be admitted");
             }
         }
-        queue.enqueue(block.header.clone(), events);
+        queue
+            .enqueue(block.header.clone(), events)
+            .expect("fixture finalized block must enqueue");
     }
 
     /// Create a [`Deposit`] for a specific L1 block.
@@ -4243,14 +4247,18 @@ impl L1Fixture {
             deposits: vec![],
             enabled_tokens: tokens,
         };
-        queue.enqueue(header, events);
+        queue
+            .enqueue(header, events)
+            .expect("fixture finalized block must enqueue");
     }
 
     /// Inject an empty L1 block (no deposits) into the queue.
     pub(crate) fn inject_empty_block(&mut self, queue: &DepositQueue) -> NumHash {
         let header = self.next_header();
         let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
-        queue.enqueue(header, L1PortalEvents::default());
+        queue
+            .enqueue(header, L1PortalEvents::default())
+            .expect("fixture finalized block must enqueue");
         anchor
     }
 
@@ -4272,7 +4280,9 @@ impl L1Fixture {
         let anchor = SealedHeader::seal_slow(header.clone()).num_hash();
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
         let events = L1PortalEvents::from_deposits(l1_deposits);
-        queue.enqueue(header, events);
+        queue
+            .enqueue(header, events)
+            .expect("fixture finalized block must enqueue");
         anchor
     }
 
@@ -4281,7 +4291,9 @@ impl L1Fixture {
     pub(crate) fn inject_l1_deposits(&mut self, queue: &DepositQueue, deposits: Vec<L1Deposit>) {
         let header = self.next_header();
         let events = L1PortalEvents::from_deposits(deposits);
-        queue.enqueue(header, events);
+        queue
+            .enqueue(header, events)
+            .expect("fixture finalized block must enqueue");
     }
 
     /// Create an [`EncryptedDeposit`] for testing with dummy ECIES parameters.
