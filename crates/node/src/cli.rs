@@ -699,6 +699,38 @@ mod tests {
     }
 
     #[test]
+    fn withdrawal_batch_limits_keep_defaults_and_accept_benchmark_overrides() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer-key",
+            "0x01",
+        ];
+        let defaults = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert_eq!(defaults.zone.withdrawal_max_batch_gas, 10_000_000);
+        assert_eq!(defaults.zone.withdrawal_max_in_flight_batches, 8);
+
+        let overrides = ZoneArgsParser::try_parse_from(
+            [
+                common.as_slice(),
+                &[
+                    "--withdrawal-max-batch-gas",
+                    "30000000",
+                    "--withdrawal-max-in-flight-batches",
+                    "12",
+                ],
+            ]
+            .concat(),
+        )
+        .unwrap();
+        assert_eq!(overrides.zone.withdrawal_max_batch_gas, 30_000_000);
+        assert_eq!(overrides.zone.withdrawal_max_in_flight_batches, 12);
+    }
+
+    #[test]
     fn p2p_ip_check_bypass_is_explicit_and_requires_manifest_mode() {
         let common = [
             "tempo-zone",

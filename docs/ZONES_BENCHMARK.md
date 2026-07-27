@@ -728,7 +728,8 @@ configured write RPC. Each job:
    the nonzero outbox fee, creates the short-lived sender-auth map, confirms
    sponsored user approvals, and runs the measured
    deposit -> wait -> activity -> withdrawal -> wait scenario;
-8. for `neobank-e2e`, deploys the checked-in Earn boundary fixtures, configures
+8. for `neobank-e2e`, checks out and builds the external Earn contracts using
+   that repository's Foundry configuration, deploys their artifacts, configures
    the selected swap mechanism and closed-loop token and recipient policy,
    applies the file-backed benchmark account map after the 30M-bounded Zone
    creation transaction, prepares approvals and private RPC authorization, and
@@ -772,7 +773,9 @@ transactions and integer transactions per second. The benchmark-side
 `max-concurrent` default is 12 for every phase and preset. It limits txgen
 transactions or journeys and is independent of
 `withdrawal-max-in-flight-batches`, which limits the Zone withdrawal
-scheduler's ordered L1 batches; both happen to default to 12.
+scheduler's ordered L1 batches. The workflow explicitly passes its 30,000,000
+batch-gas and 12-batch settings to the Zone node; it does not change the node's
+10,000,000 batch-gas and 8-batch defaults.
 `step-timeout` accepts a positive duration ending in
 `ms`, `s`, `m`, or `h`; `drain-timeout=0` is the only supported zero-valued
 timeout and skips the independent phase's final txpool drain. The workflow

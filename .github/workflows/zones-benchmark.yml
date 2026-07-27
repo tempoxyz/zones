@@ -113,12 +113,12 @@ on:
         required: true
         default: "30000000"
       withdrawal-max-batch-gas:
-        description: Maximum gas reserved by one L1 withdrawal batch.
+        description: Benchmark override for L1 withdrawal batch gas (node default 10000000; maximum 30000000).
         type: string
         required: true
         default: "30000000"
       withdrawal-max-in-flight-batches:
-        description: Maximum ordered L1 withdrawal batches kept in flight.
+        description: Benchmark override for ordered L1 withdrawal batches in flight (node default 8).
         type: string
         required: true
         default: "12"
