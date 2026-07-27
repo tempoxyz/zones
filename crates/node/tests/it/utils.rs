@@ -33,7 +33,10 @@ use std::{
     },
     time::Duration,
 };
-use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
+use tempo_alloy::{
+    TempoNetwork,
+    rpc::{TempoCallBuilderExt, TempoHeaderResponse},
+};
 use tempo_chainspec::{
     hardfork::TempoHardfork,
     spec::{TEMPO_T0_BASE_FEE, TempoChainSpec},
@@ -64,7 +67,7 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache,
+    L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
 };
 use zone_node::ZoneNode;
 use zone_p2p::{P2pConfig, Role};
@@ -185,15 +188,10 @@ alloy_sol_types::sol! {
     }
 }
 
-/// Deterministic salt for the zone test token.
-pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-]);
-
 /// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
 ///
 /// Requires `forge build` to have been run in `specs/ref-impls`.
-fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
@@ -284,10 +282,132 @@ fn install_native_zone_factory(genesis: &mut Genesis, owner: Address) -> eyre::R
 
 /// Dummy L1 URL used when no real L1 is needed.
 ///
-/// Uses HTTP (not WS) because HTTP providers are lazy — they don't attempt a
-/// connection until the first request, so `L1StateProvider::new` succeeds
-/// without a running L1. The L1Subscriber will fail and retry in the background.
+/// The launch helper recognizes this sentinel and replaces it with a local RPC
+/// server that exposes the enabled-token snapshot required during node startup.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
+
+async fn spawn_test_l1_rpc(chain_id: u64) -> eyre::Result<String> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let enabled_tokens = Arc::new(vec![PATH_USD_ADDRESS]);
+    tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let enabled_tokens = enabled_tokens.clone();
+            tokio::spawn(handle_test_l1_rpc_request(stream, enabled_tokens, chain_id));
+        }
+    });
+    Ok(format!("http://{address}"))
+}
+
+async fn handle_test_l1_rpc_request(
+    mut stream: tokio::net::TcpStream,
+    enabled_tokens: Arc<Vec<Address>>,
+    chain_id: u64,
+) {
+    let mut request = Vec::new();
+    let mut buf = [0u8; 1024];
+    let mut headers_end = None;
+    let mut content_length = 0usize;
+
+    loop {
+        let Ok(read) = stream.read(&mut buf).await else {
+            return;
+        };
+        if read == 0 {
+            return;
+        }
+        request.extend_from_slice(&buf[..read]);
+
+        if headers_end.is_none()
+            && let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n")
+        {
+            headers_end = Some(end + 4);
+            let headers = String::from_utf8_lossy(&request[..end]);
+            content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+        }
+
+        if let Some(end) = headers_end
+            && request.len() >= end + content_length
+        {
+            break;
+        }
+    }
+
+    let request = headers_end
+        .and_then(|end| request.get(end..end + content_length))
+        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!(1));
+    let method = request
+        .get("method")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let result = match method {
+        "eth_chainId" => serde_json::json!(format!("0x{chain_id:x}")),
+        "eth_blockNumber" => serde_json::json!("0x0"),
+        "eth_getCode" => serde_json::json!("0x01"),
+        "eth_newBlockFilter" => serde_json::json!("0x1"),
+        "eth_getFilterChanges" => serde_json::json!([]),
+        "eth_uninstallFilter" => serde_json::json!(true),
+        "eth_getHeaderByNumber" => serde_json::to_value(TempoHeaderResponse {
+            inner: alloy_rpc_types_eth::Header::new(TempoHeader::default()),
+            timestamp_millis: 0,
+        })
+        .expect("test L1 header should serialize"),
+        "eth_call" => {
+            let input = request
+                .pointer("/params/0/input")
+                .or_else(|| request.pointer("/params/0/data"))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|input| const_hex::decode(input.trim_start_matches("0x")).ok())
+                .unwrap_or_default();
+
+            if input.starts_with(&ZonePortal::enabledTokenCountCall::SELECTOR) {
+                serde_json::json!(const_hex::encode_prefixed(
+                    U256::from(enabled_tokens.len()).abi_encode()
+                ))
+            } else if input.starts_with(&ZonePortal::enabledTokenAtCall::SELECTOR) {
+                let index = input
+                    .get(4..36)
+                    .map(U256::from_be_slice)
+                    .map(|index| index.to::<u64>() as usize);
+                index
+                    .and_then(|index| enabled_tokens.get(index))
+                    .map(|token| serde_json::json!(const_hex::encode_prefixed(token.abi_encode())))
+                    .unwrap_or(serde_json::Value::Null)
+            } else {
+                serde_json::Value::Null
+            }
+        }
+        _ => serde_json::Value::Null,
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "result": result,
+    })
+    .to_string();
+    let response = format!(
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes()).await;
+}
 
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
 pub(crate) fn seed_raw_tip403_token_policy(
@@ -406,19 +526,6 @@ pub(crate) fn seed_raw_tip403_policy(
     Ok(())
 }
 
-/// Compute the TIP-20 token address for a given sender and salt.
-///
-/// Mirrors `compute_tip20_address` in the factory precompile.
-pub(crate) fn compute_tip20_address(sender: Address, salt: B256) -> Address {
-    let hash = keccak256((sender, salt).abi_encode());
-
-    let mut address_bytes = [0u8; 20];
-    address_bytes[..12].copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
-    address_bytes[12..].copy_from_slice(&hash[..8]);
-
-    Address::from(address_bytes)
-}
-
 pub(crate) trait TestNodeHandle: Send {
     fn subscribe_to_canonical_state(
         &self,
@@ -468,6 +575,7 @@ type RpcApiFactory = dyn Fn(zone_node::rpc::PrivateRpcConfig) -> RpcApiFuture + 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
+    enabled_tokens: EnabledTokenRegistry,
     l1_state_cache: L1StateCache,
     l1_block_tracker: L1BlockTracker,
     rpc_api_factory: Arc<RpcApiFactory>,
@@ -545,6 +653,11 @@ impl ZoneTestNode {
     /// Returns a handle to the deposit queue for injecting synthetic L1 blocks.
     pub(crate) fn deposit_queue(&self) -> &DepositQueue {
         &self.deposit_queue
+    }
+
+    /// Returns the enabled-token registry used by pool admission.
+    pub(crate) fn enabled_tokens(&self) -> &EnabledTokenRegistry {
+        &self.enabled_tokens
     }
 
     /// Returns a handle to the L1 state cache for seeding precompile data.
@@ -896,13 +1009,16 @@ impl ZoneTestNode {
         // Generate a throwaway signer for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
-        Self::launch_with_genesis(
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
             chain_id,
             None,
             signer,
+            8,
+            None,
+            true,
         )
         .await
     }
@@ -943,6 +1059,11 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
+        let l1_ws_url = if is_local_dummy_l1 {
+            spawn_test_l1_rpc(1337).await?
+        } else {
+            l1_ws_url
+        };
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -990,6 +1111,7 @@ impl ZoneTestNode {
             });
 
         let deposit_queue = zone_node.deposit_queue();
+        let enabled_tokens = zone_node.enabled_tokens();
         let l1_state_cache = zone_node.l1_state_cache();
         let l1_block_tracker = zone_node.l1_block_tracker();
         if is_local_dummy_l1 {
@@ -1048,6 +1170,7 @@ impl ZoneTestNode {
 
         Ok(Self {
             deposit_queue,
+            enabled_tokens,
             http_url,
             l1_state_cache,
             l1_block_tracker,
@@ -3050,6 +3173,7 @@ pub(crate) async fn start_local_zone_with_fixture(
 
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
+        zone.enabled_tokens(),
         Address::ZERO,
         Address::ZERO,
         seed_blocks,
@@ -3064,46 +3188,6 @@ pub(crate) async fn start_local_p2p_pair(
     fn available_address() -> eyre::Result<SocketAddr> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?)
-    }
-
-    async fn spawn_test_l1_rpc() -> eyre::Result<String> {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let address = listener.local_addr()?;
-        tokio::spawn(async move {
-            loop {
-                let Ok((mut stream, _)) = listener.accept().await else {
-                    return;
-                };
-                tokio::spawn(async move {
-                    let mut request = vec![0_u8; 16 * 1024];
-                    let Ok(read) = stream.read(&mut request).await else {
-                        return;
-                    };
-                    let request = String::from_utf8_lossy(&request[..read]);
-                    let body = request.split("\r\n\r\n").nth(1).unwrap_or_default();
-                    let value: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
-                    let id = value.get("id").cloned().unwrap_or(serde_json::Value::Null);
-                    let result = match value.get("method").and_then(|method| method.as_str()) {
-                        Some("eth_chainId") => serde_json::json!("0x539"),
-                        Some("eth_blockNumber") => serde_json::json!("0x0"),
-                        _ => serde_json::Value::Null,
-                    };
-                    let response_body = serde_json::json!({
-                        "jsonrpc": "2.0",
-                        "id": id,
-                        "result": result,
-                    })
-                    .to_string();
-                    let response = format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-                        response_body.len(),
-                        response_body
-                    );
-                    let _ = stream.write_all(response.as_bytes()).await;
-                });
-            }
-        });
-        Ok(format!("http://{address}"))
     }
 
     let addresses = [
@@ -3168,7 +3252,7 @@ pub(crate) async fn start_local_p2p_pair(
     let _ = std::fs::remove_dir_all(&config_dir);
 
     let chain_id = next_unique_chain_id();
-    let l1_rpc_url = spawn_test_l1_rpc().await?;
+    let l1_rpc_url = spawn_test_l1_rpc(1337).await?;
     let genesis: Genesis = serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)?;
     let signer = l1_dev_signer();
     let leader = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
@@ -3200,6 +3284,7 @@ pub(crate) async fn start_local_p2p_pair(
     for zone in [&leader, &follower] {
         fixture.seed_l1_cache(
             zone.l1_state_cache(),
+            zone.enabled_tokens(),
             Address::ZERO,
             Address::ZERO,
             seed_blocks,
@@ -3269,94 +3354,7 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
 }
 
 pub(crate) async fn start_chain_id_rpc(chain_id: u64) -> eyre::Result<url::Url> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let local_addr = listener.local_addr()?;
-    tokio::spawn(async move {
-        loop {
-            let Ok((stream, _peer)) = listener.accept().await else {
-                break;
-            };
-            tokio::spawn(handle_chain_id_rpc_request(stream, chain_id));
-        }
-    });
-    Ok(format!("http://{local_addr}").parse()?)
-}
-
-async fn handle_chain_id_rpc_request(mut stream: tokio::net::TcpStream, chain_id: u64) {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let mut request = Vec::new();
-    let mut buf = [0u8; 1024];
-    let mut headers_end = None;
-    let mut content_length = 0usize;
-
-    loop {
-        let Ok(read) = stream.read(&mut buf).await else {
-            return;
-        };
-        if read == 0 {
-            return;
-        }
-        request.extend_from_slice(&buf[..read]);
-
-        if headers_end.is_none()
-            && let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n")
-        {
-            headers_end = Some(end + 4);
-            let headers = String::from_utf8_lossy(&request[..end]);
-            content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("content-length")
-                        .then(|| value.trim().parse().ok())
-                        .flatten()
-                })
-                .unwrap_or(0);
-        }
-
-        if let Some(end) = headers_end
-            && request.len() >= end + content_length
-        {
-            break;
-        }
-    }
-
-    let body = headers_end
-        .and_then(|end| request.get(end..end + content_length))
-        .and_then(|body| serde_json::from_slice::<serde_json::Value>(body).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    let id = body
-        .get("id")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!(1));
-    let method = body
-        .get("method")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    let body = if method == "eth_chainId" {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "result": format!("0x{chain_id:x}"),
-        })
-    } else {
-        serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": id,
-            "error": {
-                "code": -32601,
-                "message": "method not found",
-            },
-        })
-    };
-    let body = body.to_string();
-    let response = format!(
-        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = stream.write_all(response.as_bytes()).await;
+    Ok(spawn_test_l1_rpc(chain_id).await?.parse()?)
 }
 
 /// Seed an existing L1Fixture's cache into a zone node's L1 state cache.
@@ -3365,6 +3363,7 @@ async fn handle_chain_id_rpc_request(mut stream: tokio::net::TcpStream, chain_id
 pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, seed_blocks: u64) {
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
+        zone.enabled_tokens(),
         Address::ZERO,
         Address::ZERO,
         seed_blocks,
@@ -3878,7 +3877,13 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
     .await?;
     let fixture = L1Fixture::new();
 
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, sequencer_address, 20);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        zone.enabled_tokens(),
+        Address::ZERO,
+        sequencer_address,
+        20,
+    );
 
     let chain_id = zone_chain_id(&zone).await?;
 
@@ -3978,6 +3983,8 @@ pub(crate) struct L1Fixture {
     last_hash: B256,
     /// Raw L1 caches seeded by this fixture, updated with state implied by injected deposits.
     caches: Mutex<Vec<L1StateCache>>,
+    /// Enabled-token registries kept in sync with injected portal events.
+    enabled_token_registries: Mutex<Vec<EnabledTokenRegistry>>,
 }
 
 impl L1Fixture {
@@ -3994,6 +4001,7 @@ impl L1Fixture {
             next_timestamp: 1_000_000,
             last_hash: genesis_hash,
             caches: Mutex::new(Vec::new()),
+            enabled_token_registries: Mutex::new(Vec::new()),
         }
     }
 
@@ -4006,6 +4014,7 @@ impl L1Fixture {
     pub(crate) fn seed_l1_cache(
         &self,
         cache_handle: &L1StateCache,
+        enabled_tokens: &EnabledTokenRegistry,
         portal_address: Address,
         sequencer: Address,
         num_blocks: u64,
@@ -4074,6 +4083,10 @@ impl L1Fixture {
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         drop(cache);
         self.caches.lock().unwrap().push(cache_handle.clone());
+        self.enabled_token_registries
+            .lock()
+            .unwrap()
+            .push(enabled_tokens.clone());
     }
 
     /// Seed the absence of an address-level TIP-403 receive policy at the current Zone anchor.
@@ -4114,6 +4127,14 @@ impl L1Fixture {
                     ALLOW_ALL_POLICY_ID,
                 );
             }
+        }
+    }
+
+    fn apply_enabled_token_events(&self, tokens: &[EnabledToken]) {
+        for registry in self.enabled_token_registries.lock().unwrap().iter() {
+            registry
+                .write()
+                .extend(tokens.iter().map(|enabled| enabled.token));
         }
     }
 
@@ -4181,6 +4202,7 @@ impl L1Fixture {
     ) {
         let block_number = block.header.inner.number;
         self.seed_enabled_token_policy_state(block_number, &events.enabled_tokens);
+        self.apply_enabled_token_events(&events.enabled_tokens);
         for deposit in &events.deposits {
             if let L1Deposit::Regular(deposit) = deposit {
                 self.seed_no_receive_policy_at(block_number, deposit.to)
@@ -4216,6 +4238,7 @@ impl L1Fixture {
     ) {
         let header = self.next_header();
         self.seed_enabled_token_policy_state(header.inner.number, &tokens);
+        self.apply_enabled_token_events(&tokens);
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,

@@ -148,6 +148,7 @@ fn test_subscriber(
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
             genesis_tempo_block_number,
+            enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(),
             block_tracker: L1BlockTracker::default(),
             l1_fetch_concurrency: 1,
@@ -851,6 +852,28 @@ fn test_push_log_decodes_bounce_back_as_regular_deposit() {
         B256::ZERO,
         "bounce-back deposits should clear memo"
     );
+}
+
+#[test]
+fn confirmed_token_enabled_event_updates_registry() {
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
+        None,
+    );
+    let token = address!("0x20c0000000000000000000000000000000000001");
+    let events = L1PortalEvents {
+        enabled_tokens: vec![EnabledToken {
+            token,
+            name: "Path USD".to_owned(),
+            symbol: "pathUSD".to_owned(),
+            currency: "USD".to_owned(),
+        }],
+        ..Default::default()
+    };
+
+    subscriber.apply_enabled_token_events(&events);
+
+    assert!(subscriber.config.enabled_tokens.read().contains(&token));
 }
 
 #[test]

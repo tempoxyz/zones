@@ -15,48 +15,47 @@ mod zone_evm;
 
 pub use database::{L1OverlayDB, ZoneDbError};
 pub use executor::{ZoneBlockExecutor, ZoneTxResult};
-pub use zone_evm::{contract_creation::validate_transaction, ZoneEvm};
+pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
     precompiles::{
-        create_tip20_precompile, create_tip403_precompile, create_zone_fee_manager_precompile,
-        tx_context::ZoneTxContext, AesGcmDecrypt, ChaumPedersenVerify, L1State, L1StorageReader,
-        TempoState, ZoneInbox, ZonePrecompileEnv, ZoneTokenFactory, AES_GCM_DECRYPT_ADDRESS,
-        CHAUM_PEDERSEN_VERIFY_ADDRESS, TIP403_REGISTRY_ADDRESS, ZONE_FEE_MANAGER_ADDRESS,
-        ZONE_TIP20_FACTORY_ADDRESS,
+        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+        L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_FEE_MANAGER_ADDRESS,
+        ZoneInbox, ZonePrecompileEnv, create_tip20_precompile, create_tip403_precompile,
+        create_zone_fee_manager_precompile, tx_context::ZoneTxContext,
     },
 };
 use alloy_evm::{
+    Database, Evm, EvmEnv, EvmFactory,
     block::BlockExecutorFactory,
     precompiles::PrecompilesMap,
-    revm::{context::DBErrorMarker, inspector::NoOpInspector, Inspector},
-    Database, Evm, EvmEnv, EvmFactory,
+    revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
 };
 use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
+    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
     block::StateDB,
     execute::{BlockAssembler, BlockAssemblerInput},
-    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{fmt, num::NonZeroU32, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::{hardfork::TempoHardfork, TempoChainSpec};
+use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
 use tempo_evm::{
-    evm::{TempoEvm, TempoEvmFactory},
     FeeTokenResolver, TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig,
     TempoEvmError, TempoHaltReason, TempoNextBlockEnvAttributes, TempoStateAccess,
+    evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
-    account_keychain::AccountKeychain, error::Result as TempoResult, nonce::NonceManager,
-    receive_policy_guard::ReceivePolicyGuard, storage::actions::StorageActions,
-    tip20::is_tip20_prefix, PrecompileEnv, ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS,
-    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS,
-    TIP_FEE_MANAGER_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
+    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
+    TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS, account_keychain::AccountKeychain,
+    error::Result as TempoResult, nonce::NonceManager, receive_policy_guard::ReceivePolicyGuard,
+    storage::actions::StorageActions, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -121,9 +120,8 @@ where
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
             Some(AesGcmDecrypt::create(&env))
         });
-        precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
-            Some(ZoneTokenFactory::create(&env))
-        });
+        // Zones activate bridged TIP-20s directly in the Inbox and expose no token factory.
+        precompiles.apply_precompile(&TIP20_FACTORY_ADDRESS, |_| None);
         precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
         precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
         let fee_env = env.clone();
@@ -490,7 +488,7 @@ fn compose_chain_spec(zone: &ZoneChainSpec, tempo: &TempoChainSpec) -> Arc<ZoneC
 mod tests {
     use super::*;
 
-    use alloy_primitives::{address, keccak256, Bytes, B256, U256};
+    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_rlp::Encodable;
     use alloy_sol_types::SolCall;
     use reth_chainspec::{EthChainSpec, ForkCondition};
@@ -500,11 +498,11 @@ mod tests {
     };
     use tempo_chainspec::{
         hardfork::TempoHardfork,
-        spec::{TempoHardforks, DEV, MODERATO},
+        spec::{DEV, MODERATO, TempoHardforks},
     };
     use tempo_precompiles::{
-        storage::StorageKey, tip403_registry::tip403_registry_slots,
-        zone_factory::ZonePortalStorage, TIP403_REGISTRY_ADDRESS,
+        TIP403_REGISTRY_ADDRESS, storage::StorageKey, tip403_registry::tip403_registry_slots,
+        zone_factory::ZonePortalStorage,
     };
     use tempo_zone_contracts::IZoneInbox;
     use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};

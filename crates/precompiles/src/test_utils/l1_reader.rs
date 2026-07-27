@@ -7,8 +7,8 @@ use std::{
 };
 use tempo_precompiles::{
     storage::{
-        hashmap::HashMapStorageProvider, Handler, PrecompileStorageProvider, Slot, Storable,
-        StorageCtx,
+        Handler, PrecompileStorageProvider, Slot, Storable, StorageCtx,
+        hashmap::HashMapStorageProvider,
     },
     tip403_registry::{CompoundPolicyData, PolicyData, TIP403Registry},
     zone_factory::ZonePortalStorage,

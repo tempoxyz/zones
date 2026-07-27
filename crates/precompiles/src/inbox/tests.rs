@@ -1,23 +1,23 @@
 use super::*;
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{address, keccak256, Bytes};
+use alloy_primitives::{Bytes, address, keccak256};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
+    PATH_USD_ADDRESS,
     storage::{ContractStorage, Handler, StorageCtx},
     test_util::TIP20Setup,
-    tip20::{TIP20Token, ITIP20},
-    zone_factory::{zone_portal_slots, ZonePortalStorage},
-    PATH_USD_ADDRESS,
+    tip20::{ITIP20, TIP20Token},
+    zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
 use zone_primitives::constants::ZONE_OUTBOX_ADDRESS;
 
 use crate::test_utils::{
-    build_plaintext, call_precompile, compressed_x_and_parity, encrypt_plaintext, test_context,
-    test_env, test_storage_provider, EncryptedDepositFixture, MockL1Reader, TestContext,
+    EncryptedDepositFixture, MockL1Reader, TestContext, build_plaintext, call_precompile,
+    compressed_x_and_parity, encrypt_plaintext, test_context, test_env, test_storage_provider,
 };
 
 const GAS: u64 = 30_000_000;
@@ -438,6 +438,14 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
     let mut harness = Harness::new()?;
     let token = address!("0x20c00000000000000000000000000000000000aa");
     harness.set_queue_hash(B256::ZERO);
+    let anchored_policy = U256::from(7) | (U256::ONE << 64);
+    let binding_slot = TIP403Registry::new().token_transfer_policies[token].base_slot();
+    {
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            StorageCtx.sstore(TIP403_REGISTRY_ADDRESS, binding_slot, anchored_policy)
+        })?;
+    }
     let mut call = harness.advance_call(Vec::new(), Vec::new());
     call.enabledTokens.push(EnabledToken {
         token,
@@ -453,6 +461,13 @@ fn enabled_token_is_initialized_before_deposit_processing() -> eyre::Result<()> 
         let token = TIP20Token::from_address(token)?;
         assert!(token.is_initialized()?);
         assert_eq!(token.name()?, "Example Dollar");
+        assert_eq!(token.next_quote_token()?, PATH_USD_ADDRESS);
+        assert!(token.has_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?);
+        assert!(token.has_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?);
+        assert_eq!(
+            StorageCtx.sload(TIP403_REGISTRY_ADDRESS, binding_slot)?,
+            anchored_policy
+        );
         Ok(())
     })?;
     Ok(())
@@ -547,10 +562,12 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         U256::from(900)
     );
     assert!(harness.pending_withdrawals()?.is_empty());
-    assert!(harness
-        .l1
-        .storage_requests()
-        .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1)));
+    assert!(
+        harness
+            .l1
+            .storage_requests()
+            .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1))
+    );
     Ok(())
 }
 

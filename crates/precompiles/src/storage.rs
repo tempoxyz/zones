@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::tempo_state::TempoState;
 
 pub(crate) use tempo_precompiles::storage::*;
+use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {

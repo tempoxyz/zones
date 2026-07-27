@@ -19,8 +19,8 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-CHAIN-ID-UNIQUE` | Each live zone uses the chain ID derived from its zone ID, and no two live zones share a chain ID | 🟡 | Cross-zone replay protection fails; signed transactions may be valid on more than one zone |
 | `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
-| `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash` starts at zero, and the first proof transitions only to the canonical genesis block derived from `zoneId` | 🔴 | The zone may bootstrap from an attacker-chosen genesis state |
-| `TEMPO-ZONE-FIRST-TEMPO-ANCHOR` | When `TempoState.tempoBlockHash` is zero, the first imported Tempo block proves the portal's `sequencer` slot is non-zero at that block | 🔴 | The zone may anchor to Tempo state from before its portal existed |
+| `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash` starts at zero, and the first proof starts with the canonical genesis block derived from `zoneId` before transitioning through at least one non-genesis block | 🔴 | The zone may bootstrap from an attacker-chosen genesis state |
+| `TEMPO-ZONE-FIRST-TEMPO-ANCHOR` | The first proof contains at least two blocks, and its first non-genesis block imports Tempo and proves the portal's `sequencer` slot is non-zero at that block | 🔴 | The zone may settle an unanchored bootstrap state or anchor to Tempo state from before its portal existed |
 | `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
 ### Access Control and Configuration
@@ -100,7 +100,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-BATCH-DEPOSIT-TRANSITION` | Deposit transition starts from the inbox's previous processed hash/number and ends at the post-batch processed hash/number | 🔴 | Deposits can be skipped, replayed, or falsely marked processed |
 | `TEMPO-ZONE-BATCH-WITHDRAWAL-COMMITMENT` | Submitted `withdrawalQueueHash` equals `ZoneOutbox.lastBatch.withdrawalQueueHash` from the proven post-state | 🔴 | Portal can enqueue withdrawals that the zone never finalized |
 | `TEMPO-ZONE-BATCH-ANCHOR-BLOCK` | Anchor block number/hash passed to the verifier matches either the direct Tempo binding or a valid ancestry chain to a recent Tempo block; when non-zero, `recentTempoBlockNumber > tempoBlockNumber` | 🔴 | Proof can rely on a stale or forged Tempo view |
-| `TEMPO-ZONE-BATCH-SEQUENCER-BENEFICIARY` | Every proven zone block has `beneficiary == portal.sequencer` | 🟡 | A non-sequencer can produce blocks or collect block-level authority |
+| `TEMPO-ZONE-BATCH-SEQUENCER-BENEFICIARY` | Every non-genesis proven zone block has `beneficiary == portal.sequencer`; the genesis block matches the canonical header in full | 🟡 | A non-sequencer can produce blocks or collect block-level authority |
 | `TEMPO-ZONE-BATCH-FINALIZE-LAST` | Intermediate blocks do not finalize withdrawals; the final block executes `finalizeWithdrawalBatch` last | 🔴 | Withdrawals can be omitted from the committed state or finalized before later user transactions |
 | `TEMPO-ZONE-PROOF-MISSING-READS` | Any zone-state or Tempo-state read missing from the witness causes proof failure; missing reads never default silently | 🔴 | Prover can omit non-zero state and prove an invalid transition |
 

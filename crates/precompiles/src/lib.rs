@@ -19,7 +19,6 @@
 //! ## Policy/token precompiles
 //!
 //! - **Zone Inbox** ([`inbox`]) — advances Tempo state and processes the deposit queue.
-//! - **TIP-20 Factory** ([`tip20_factory`]) — zone-side TIP-20 token factory.
 //! - **TIP-403 Registry** ([`tip403_proxy`]) — upstream registry over finalized L1 state.
 //! - **Zone TIP-20** ([`ztip20`]) — upstream TIP-20 with zone call rules.
 
@@ -49,7 +48,6 @@ pub use execution::ZonePrecompileEnv;
 pub mod inbox;
 pub mod storage;
 pub mod tempo_state;
-pub mod tip20_factory;
 pub mod tip403_proxy;
 #[cfg(feature = "std")]
 pub mod tx_context;
@@ -63,7 +61,6 @@ pub use outbox::ZoneOutbox;
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
-pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
 use alloy_evm::precompiles::DynPrecompile;

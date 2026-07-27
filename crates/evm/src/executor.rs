@@ -6,21 +6,21 @@
 
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
+    Database, Evm, RecoveredTx,
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockValidationError,
         ExecutableTx, GasOutput, TxResult,
     },
     eth::{EthBlockExecutor, EthTxResult},
-    Database, Evm, RecoveredTx,
 };
 use reth_evm::block::StateDB;
-use reth_revm::{context::result::ResultAndState, Inspector};
+use reth_revm::{Inspector, context::result::ResultAndState};
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::{tx_context, L1StorageReader, ADVANCE_TEMPO_SELECTOR};
+use zone_precompiles::{ADVANCE_TEMPO_SELECTOR, L1StorageReader, tx_context};
 use zone_primitives::constants::ZONE_INBOX_ADDRESS;
 
 use crate::{L1OverlayDB, ZoneEvm};
@@ -179,17 +179,17 @@ fn validate_advance_tempo(
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_advance_tempo, ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS};
+    use super::{ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, validate_advance_tempo};
 
     use alloy_consensus::{Signed, TxLegacy};
     use alloy_primitives::{Address, Bytes, U256};
     use tempo_precompiles::{
-        storage::{hashmap::HashMapStorageProvider, ContractStorage, Handler, StorageCtx},
-        test_util::TIP20Setup,
-        tip_fee_manager::{amm::PoolKey, TipFeeManager},
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
+        storage::{ContractStorage, Handler, StorageCtx, hashmap::HashMapStorageProvider},
+        test_util::TIP20Setup,
+        tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
-    use tempo_primitives::{transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE, TempoTxEnvelope};
+    use tempo_primitives::{TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE};
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
 
     fn system_tx(to: Address, input: Bytes) -> TempoTxEnvelope {

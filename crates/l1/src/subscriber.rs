@@ -251,6 +251,8 @@ pub struct L1SubscriberConfig {
     pub portal_address: Address,
     /// Optional genesis Tempo block number used to backfill a fresh zone.
     pub genesis_tempo_block_number: Option<u64>,
+    /// Shared registry of tokens enabled for this zone.
+    pub enabled_tokens: crate::state::EnabledTokenRegistry,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// finalized block.
     pub l1_state_cache: crate::state::cache::L1StateCache,
@@ -628,6 +630,7 @@ impl L1Subscriber {
             let block_number = header.number();
             let (events, invalidated) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
+            self.apply_enabled_token_events(&events);
 
             let sealed = SealedHeader::seal_slow(header);
             self.update_l1_state_anchor(block_number, &invalidated);
@@ -756,6 +759,20 @@ impl L1Subscriber {
             self.subscriber_metrics
                 .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
+        }
+    }
+
+    /// Add tokens discovered in finalized portal events to the shared registry.
+    pub(crate) fn apply_enabled_token_events(&self, portal_events: &L1PortalEvents) {
+        if portal_events.enabled_tokens.is_empty() {
+            return;
+        }
+
+        let mut enabled_tokens = self.config.enabled_tokens.write();
+        for enabled in &portal_events.enabled_tokens {
+            if enabled_tokens.insert(enabled.token) {
+                info!(token = %enabled.token, "New token enabled");
+            }
         }
     }
 

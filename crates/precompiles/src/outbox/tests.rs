@@ -1,7 +1,7 @@
 use super::*;
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{address, keccak256, Bytes};
+use alloy_primitives::{Bytes, address, keccak256};
 use alloy_sol_types::{SolCall, SolInterface, SolValue};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
@@ -19,7 +19,7 @@ use crate::{
     create_outbox_precompile,
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
     test_utils::{
-        call_precompile, test_context, test_env, test_storage_provider, MockL1Reader, TestContext,
+        MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     },
     tx_context,
 };

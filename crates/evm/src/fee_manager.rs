@@ -1,8 +1,8 @@
 //! Adapter between Tempo's protocol fee hooks and the Zone fee manager.
 
 use alloy_evm::{
-    revm::context::{result::EVMError, Journal},
     Database,
+    revm::context::{Journal, result::EVMError},
 };
 use alloy_primitives::{Address, U256};
 use tempo_chainspec::hardfork::TempoHardfork;
@@ -121,13 +121,13 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{address, Bytes, U256};
+    use alloy_primitives::{Bytes, U256, address};
     use revm::{
         context::JournalTr,
         database::{CacheDB, EmptyDB},
         state::{AccountInfo, Bytecode},
     };
-    use zone_precompiles::{zone_fee_manager, ZONE_FEE_MANAGER_ADDRESS};
+    use zone_precompiles::{ZONE_FEE_MANAGER_ADDRESS, zone_fee_manager};
 
     #[test]
     fn resolves_explicit_token_or_zone_default() {
@@ -178,14 +178,16 @@ mod tests {
         let mut journal = Journal::new(db);
         let manager = ZoneProtocolFeeManager::new();
 
-        assert!(manager
-            .validate_fee_token(
-                &mut journal,
-                initialized_token,
-                TempoHardfork::T9,
-                StorageActions::disabled(),
-            )
-            .is_ok());
+        assert!(
+            manager
+                .validate_fee_token(
+                    &mut journal,
+                    initialized_token,
+                    TempoHardfork::T9,
+                    StorageActions::disabled(),
+                )
+                .is_ok()
+        );
         assert!(matches!(
             manager.validate_fee_token(
                 &mut journal,

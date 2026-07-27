@@ -7,8 +7,8 @@ use alloy_evm::Database;
 use alloy_primitives::{Address, B256, U256};
 use revm::{
     context::{
-        result::{AnyError, EVMError},
         DBErrorMarker,
+        result::{AnyError, EVMError},
     },
     database_interface::Database as RevmDatabase,
     primitives::{AddressMap, StorageKey, StorageValue},
@@ -16,9 +16,9 @@ use revm::{
 };
 use thiserror::Error;
 use zone_precompiles::{
+    TIP403_REGISTRY_ADDRESS,
     storage::{L1State, L1StateError, L1StorageReader},
     tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
-    TIP403_REGISTRY_ADDRESS,
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 

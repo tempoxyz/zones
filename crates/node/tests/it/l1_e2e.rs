@@ -132,15 +132,28 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
         "L1 should be producing blocks in dev mode"
     );
 
-    // Start zone node connected to real L1 — genesis is patched from the L1's
-    // current header so TempoState chain continuity works.
-    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), Address::ZERO).await?;
+    // Match the normal provision flow by anchoring immediately before the portal deployment.
+    // Startup must leave the registry empty at this anchor and let subscriber backfill process
+    // the constructor's initial TokenEnabled event.
+    let anchor_block_number = l1.provider().get_block_number().await?;
+    let portal_address = l1.deploy_zone().await?;
+    let zone = ZoneTestNode::start_from_l1_at_block(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        anchor_block_number,
+    )
+    .await?;
 
     // Wait for the zone to advance past block 0 (genesis anchor)
     let zone_tempo_number = zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
     assert!(
         zone_tempo_number > 0,
         "zone should have advanced past genesis anchor"
+    );
+    assert!(
+        zone.enabled_tokens().read().contains(&PATH_USD_ADDRESS),
+        "subscriber backfill should populate the initial enabled token"
     );
 
     // Zone should also have produced L2 blocks

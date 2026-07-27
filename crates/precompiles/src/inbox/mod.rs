@@ -140,8 +140,7 @@ impl ZoneInbox {
         // NOTE: A zero portal denotes the explicit no-L1 mode used by local development and offline
         // execution. There is no canonical queue to bind in that mode.
         if !portal.is_zero() {
-            let tempo_current_hash =
-                l1.read_portal(|portal| &portal.current_deposit_queue_hash)?;
+            let tempo_current_hash = l1.read_portal(|portal| &portal.current_deposit_queue_hash)?;
             if tempo_current_hash != current_hash {
                 return Err(ZoneInboxError::invalid_deposit_queue_hash().into());
             }
