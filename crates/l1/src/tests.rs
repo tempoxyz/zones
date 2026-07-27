@@ -1118,19 +1118,11 @@ fn finalized_queue_tracks_tip_after_consumption() {
 
     let h100 = make_test_header(100);
     let h100_hash = header_hash(&h100);
-    assert!(
-        queue
-            .enqueue(h100, L1PortalEvents::default())
-            .expect("first finalized block should enqueue")
-    );
+    queue.enqueue(h100, L1PortalEvents::default());
 
     let h101 = make_chained_header(101, h100_hash);
     let h101_hash = header_hash(&h101);
-    assert!(
-        queue
-            .enqueue(h101, L1PortalEvents::default())
-            .expect("next finalized block should enqueue")
-    );
+    queue.enqueue(h101, L1PortalEvents::default());
 
     confirm_shared(&queue);
     confirm_shared(&queue);
@@ -1141,14 +1133,20 @@ fn finalized_queue_tracks_tip_after_consumption() {
         "the subscriber high-water mark must survive consumption"
     );
 
-    assert!(
-        queue
-            .enqueue(
-                make_chained_header(102, h101_hash),
-                L1PortalEvents::default(),
-            )
-            .expect("queue should continue from its consumed tip")
+    queue.enqueue(
+        make_chained_header(102, h101_hash),
+        L1PortalEvents::default(),
     );
+}
+
+#[test]
+#[should_panic(expected = "finalized L1 queue invariant violated")]
+fn finalized_deposit_queue_panics_on_discontinuity() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h10_hash = header_hash(&h10);
+    queue.enqueue(h10, L1PortalEvents::default());
+    queue.enqueue(make_chained_header(12, h10_hash), L1PortalEvents::default());
 }
 
 #[test]

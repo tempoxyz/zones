@@ -142,8 +142,8 @@ impl DepositQueue {
     }
 
     /// Enqueue a finalized L1 block and notify waiters when it was appended.
-    pub fn enqueue(&self, header: TempoHeader, events: L1PortalEvents) -> eyre::Result<bool> {
-        self.enqueue_sealed(SealedHeader::seal_slow(header), events)
+    pub fn enqueue(&self, header: TempoHeader, events: L1PortalEvents) {
+        self.enqueue_sealed(SealedHeader::seal_slow(header), events);
     }
 
     /// Like [`enqueue`](Self::enqueue) but accepts an already-sealed header,
@@ -152,12 +152,16 @@ impl DepositQueue {
         &self,
         header: SealedHeader<TempoHeader>,
         events: L1PortalEvents,
-    ) -> eyre::Result<bool> {
-        let appended = self.inner.lock().try_enqueue(header, events)?;
+    ) -> bool {
+        let appended = self
+            .inner
+            .lock()
+            .try_enqueue(header, events)
+            .unwrap_or_else(|err| panic!("finalized L1 queue invariant violated: {err}"));
         if appended {
             self.notify.notify_one();
         }
-        Ok(appended)
+        appended
     }
 
     /// Peek at the next L1 block without removing it.
