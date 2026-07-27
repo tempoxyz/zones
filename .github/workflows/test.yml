@@ -48,6 +48,7 @@ jobs:
           shared-key: test-build
           cache-workspace-crates: true
           cache-on-failure: true
+          save-if: ${{ github.event_name == 'push' }}
       - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
         with:
           tool: nextest@0.9.124
