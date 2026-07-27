@@ -161,6 +161,11 @@ where
     }
 }
 
+/// Classify a transaction as the block's `advanceTempo`, enforcing first-and-once-only.
+///
+/// The result also authorizes the precompile (see `L1State::authorize_system_advance`), so a
+/// stateless executor reproducing this block must derive the same classification from the
+/// transaction stream rather than trusting the sender address.
 fn validate_advance_tempo(
     has_advanced_tempo: bool,
     tx: &TempoTxEnvelope,

@@ -60,7 +60,7 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
 
     /// Clears bookkeeping that is valid only for the current transaction attempt.
     pub(crate) fn reset_transaction_state(&mut self) {
-        self.l1.reset_anchor();
+        self.l1.reset_transaction_state();
     }
 }
 

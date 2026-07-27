@@ -89,7 +89,7 @@ impl<P> L1State<P> {
     }
 
     /// Clears state that is valid only for the current transaction attempt.
-    pub fn reset_anchor(&self) {
+    pub fn reset_transaction_state(&self) {
         self.anchor.set(None);
         self.system_advance_authorized.set(false);
     }
@@ -303,7 +303,7 @@ mod tests {
     fn l1_state_reset_allows_a_new_anchor() {
         let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
         read(&l1, 10).unwrap();
-        l1.reset_anchor();
+        l1.reset_transaction_state();
         l1.advance_anchor(10, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
     }

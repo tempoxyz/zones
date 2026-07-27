@@ -1,7 +1,7 @@
 use super::*;
 
 use alloy_evm::EvmInternals;
-use alloy_primitives::{Bytes, address};
+use alloy_primitives::{Bytes, address, keccak256};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
@@ -38,7 +38,6 @@ struct Harness {
     l1_state: L1State<MockL1Reader>,
     precompile: DynPrecompile,
     outbox_precompile: DynPrecompile,
-    genesis_hash: B256,
 }
 
 impl Harness {
@@ -48,7 +47,6 @@ impl Harness {
 
     fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
         let mut ctx = test_context();
-        let genesis_hash = B256::ZERO;
         {
             let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
             StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -64,7 +62,7 @@ impl Harness {
             })?;
         }
 
-        l1.set_u256(PORTAL, PORTAL_ADMIN_SLOT.into(), 1, U256::ONE);
+        l1.insert(PORTAL, PORTAL_ADMIN_SLOT.into(), 1, U256::ONE);
         l1.seed_active_sequencer(PORTAL, 1, SEQUENCER);
         let l1_state = L1State::new(l1.clone(), PORTAL);
         // Stand in for the block executor, which authorizes the block's `advanceTempo` before
@@ -79,14 +77,13 @@ impl Harness {
             l1_state,
             precompile,
             outbox_precompile,
-            genesis_hash,
         })
     }
 
     fn child_header(&self) -> TempoHeader {
         TempoHeader {
             inner: alloy_consensus::Header {
-                parent_hash: self.genesis_hash,
+                parent_hash: B256::ZERO,
                 number: 1,
                 ..Default::default()
             },
@@ -236,7 +233,7 @@ fn unauthorized_advance_reverts_even_from_the_zero_address() -> eyre::Result<()>
     let mut harness = Harness::new()?;
     // An `eth_call` can set `from` to the zero address, but it never reaches the block executor,
     // so it never gets authorized. Model that by clearing the authorization the harness seeded.
-    harness.l1_state.reset_anchor();
+    harness.l1_state.reset_transaction_state();
 
     let output = harness.call(
         Address::ZERO,

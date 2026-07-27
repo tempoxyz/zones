@@ -42,8 +42,15 @@ pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_N
 
 /// Storage slot containing the finalized Tempo block hash in Zone state.
 ///
-/// Zero means no checkpoint has been imported yet, which is distinct from a checkpoint at Tempo
-/// block zero. Readers must consult this before treating [`TEMPO_BLOCK_NUMBER_SLOT`] as a height.
+/// This slot is the single definition of the empty-checkpoint sentinel: **zero means no checkpoint
+/// has been imported yet**, which is distinct from a checkpoint at Tempo block zero. Every reader
+/// must consult it before treating [`TEMPO_BLOCK_NUMBER_SLOT`] as a height, because block number
+/// zero is a valid height and so cannot carry that meaning on its own.
+///
+/// The rule is enforced separately at each layer that resolves an anchor, since they sit on
+/// opposite sides of the `no_std` / reth-provider boundary and cannot share code: `read_anchor`
+/// here, `L1OverlayDB::anchor` in `zone-evm`, and `TempoStateExt::tempo_num_hash` callers in
+/// `zone-node`. Keep them consistent with this definition.
 pub const TEMPO_BLOCK_HASH_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_HASH;
 
 impl TempoState {
@@ -182,21 +189,32 @@ impl TempoState {
         self.tempo_block_number.read().map(Some)
     }
 
+    /// Resolve the anchor for a system-only Tempo read, or the response to return instead.
+    ///
+    /// Shared by both read entry points: the caller check and the empty-checkpoint guard are the
+    /// same for each, and only the encoding of the fetched value differs.
+    fn system_read_anchor(&mut self, sender: Address) -> Result<u64, PrecompileResult> {
+        if !Self::is_system_caller(sender) {
+            return Err(
+                self.revert_string("TempoState: only zone system contracts can read Tempo state")
+            );
+        }
+        match self.read_anchor() {
+            Ok(Some(number)) => Ok(number),
+            Ok(None) => Err(self.revert_error(TempoStateAbi::NoTempoCheckpoint {})),
+            Err(err) => Err(self.storage.error_result(err)),
+        }
+    }
+
     fn read_tempo_storage_slot<P: L1StorageReader>(
         &mut self,
         l1: &L1State<P>,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotCall,
     ) -> PrecompileResult {
-        if !Self::is_system_caller(sender) {
-            return self
-                .revert_string("TempoState: only zone system contracts can read Tempo state");
-        }
-
-        let block_number = match self.read_anchor() {
-            Ok(Some(number)) => number,
-            Ok(None) => return self.revert_error(TempoStateAbi::NoTempoCheckpoint {}),
-            Err(err) => return self.storage.error_result(err),
+        let block_number = match self.system_read_anchor(sender) {
+            Ok(number) => number,
+            Err(response) => return response,
         };
         let value = l1.read_l1_storage(call.account, call.slot, block_number)?;
         Ok(self.storage.success_output(
@@ -210,15 +228,9 @@ impl TempoState {
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotsCall,
     ) -> PrecompileResult {
-        if !Self::is_system_caller(sender) {
-            return self
-                .revert_string("TempoState: only zone system contracts can read Tempo state");
-        }
-
-        let block_number = match self.read_anchor() {
-            Ok(Some(number)) => number,
-            Ok(None) => return self.revert_error(TempoStateAbi::NoTempoCheckpoint {}),
-            Err(err) => return self.storage.error_result(err),
+        let block_number = match self.system_read_anchor(sender) {
+            Ok(number) => number,
+            Err(response) => return response,
         };
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
@@ -518,7 +530,7 @@ mod tests {
     fn first_import_accepts_any_block_after_portal_creation() -> eyre::Result<()> {
         let reader = MockL1Reader::default();
         let portal = Address::repeat_byte(0x42);
-        reader.set_u256(
+        reader.insert(
             portal,
             U256::from_be_bytes(PORTAL_ADMIN_SLOT.0),
             42,
