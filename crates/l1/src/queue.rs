@@ -104,6 +104,29 @@ impl PendingDeposits {
             .expect("front was checked immediately before pop"))
     }
 
+    /// Confirm every pending L1 block up to and including `expected`.
+    ///
+    /// Follower import calls this only after the corresponding zone block is
+    /// canonical. It is therefore idempotent and tolerates stale entries before
+    /// `expected`, but rejects a different hash at the expected height.
+    pub(crate) fn confirm_through(&mut self, expected: NumHash) -> eyre::Result<()> {
+        while let Some(front) = self.pending.front().map(|entry| entry.header.num_hash()) {
+            if front.number > expected.number {
+                break;
+            }
+            eyre::ensure!(
+                front.number < expected.number || front.hash == expected.hash,
+                "deposit queue holds L1 block {} with hash {}, but the consumed block is {}",
+                front.number,
+                front.hash,
+                expected.hash,
+            );
+            self.confirm(front)
+                .expect("front was just read and matches by construction");
+        }
+        Ok(())
+    }
+
     /// Drain all pending L1 block deposits.
     #[cfg(test)]
     pub(crate) fn drain(&mut self) -> Vec<L1BlockDeposits> {
@@ -146,6 +169,39 @@ impl DepositQueue {
         self.enqueue_sealed(SealedHeader::seal_slow(header), events);
     }
 
+    /// Enqueue an already-sealed header and report invariant violations to the
+    /// caller instead of panicking.
+    ///
+    /// Subscriber and peer-import inputs are external, so they use this path.
+    /// Returns whether the block was newly appended.
+    pub fn try_enqueue_sealed(
+        &self,
+        header: SealedHeader<TempoHeader>,
+        events: L1PortalEvents,
+    ) -> eyre::Result<bool> {
+        let mut queue = self.inner.lock();
+        if let Some(queued) = queue
+            .pending
+            .iter()
+            .find(|queued| queued.header.number() == header.number())
+        {
+            eyre::ensure!(
+                queued.header.hash() == header.hash(),
+                "conflicting finalized L1 block at height {}: existing={}, received={}",
+                header.number(),
+                queued.header.hash(),
+                header.hash()
+            );
+            return Ok(false);
+        }
+        let appended = queue.try_enqueue(header, events)?;
+        drop(queue);
+        if appended {
+            self.notify.notify_one();
+        }
+        Ok(appended)
+    }
+
     /// Like [`enqueue`](Self::enqueue) but accepts an already-sealed header,
     /// avoiding a redundant hash computation.
     pub fn enqueue_sealed(
@@ -173,6 +229,11 @@ impl DepositQueue {
     ///
     pub fn confirm(&self, expected: NumHash) -> eyre::Result<L1BlockDeposits> {
         self.inner.lock().confirm(expected)
+    }
+
+    /// Advance the queue past a canonical follower anchor.
+    pub fn confirm_through(&self, expected: NumHash) -> eyre::Result<()> {
+        self.inner.lock().confirm_through(expected)
     }
 
     /// Wait until an L1 block is available.

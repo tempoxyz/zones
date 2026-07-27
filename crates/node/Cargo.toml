@@ -72,6 +72,7 @@ alloy-sol-types.workspace = true
 # misc
 clap = { workspace = true, optional = true }
 eyre.workspace = true
+tokio-util.workspace = true
 futures.workspace = true
 k256.workspace = true
 metrics.workspace = true

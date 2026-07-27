@@ -1,5 +1,5 @@
 use super::*;
-use crate::abi::DepositType;
+use crate::{abi::DepositType, subscriber::DepositSink};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
@@ -163,13 +163,24 @@ fn test_subscriber(
             enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(),
             block_tracker: L1BlockTracker::default(),
+            retain_observations: true,
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
         },
         local_state,
-        deposit_queue: Some(DepositQueue::default()),
+        deposit_sink: DepositSink::Queue(DepositQueue::default()),
         subscriber_metrics: Default::default(),
     }
+}
+
+fn test_observer(
+    local_state: Arc<dyn LocalTempoCheckpointReader>,
+    genesis_tempo_block_number: Option<u64>,
+) -> L1Subscriber {
+    let mut subscriber = test_subscriber(local_state, genesis_tempo_block_number);
+    subscriber.config.retain_observations = false;
+    subscriber.deposit_sink = DepositSink::Observer;
+    subscriber
 }
 
 #[tokio::test]
@@ -343,10 +354,8 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
 }
 
 #[test]
-fn observer_mode_applies_state_and_records_without_a_deposit_sink() {
-    let mut subscriber =
-        test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
-    subscriber.deposit_queue = None;
+fn subscriber_applies_state_and_records_observation() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
     let header = make_test_header(10);
     let sealed = seal(header);
     let anchor = sealed.num_hash();
@@ -374,7 +383,6 @@ fn observer_mode_applies_state_and_records_without_a_deposit_sink() {
         subscriber.config.block_tracker.observed_hash(10),
         Some(anchor.hash)
     );
-    assert!(subscriber.deposit_queue.is_none());
 }
 
 fn make_test_header(number: u64) -> TempoHeader {
@@ -751,17 +759,70 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         .expect_err("finite trigger stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
 
-    let blocks = subscriber
-        .deposit_queue
-        .as_ref()
-        .expect("leader test subscriber has a deposit queue")
-        .drain();
+    let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
+        panic!("test subscriber must retain deposits");
+    };
+    let blocks = queue.drain();
     assert_eq!(
         blocks
             .iter()
             .map(|block| block.header.number())
             .collect::<Vec<_>>(),
         vec![10, 11, 12]
+    );
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn observer_advances_caches_without_retaining_deposit_blocks() {
+    let subscriber = test_observer(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let cached_address = address!("0x0000000000000000000000000000000000000ABC");
+    let cached_slot = B256::with_last_byte(1);
+    let cached_value = B256::with_last_byte(2);
+    {
+        let mut cache = subscriber.config.l1_state_cache.lock();
+        cache.invalidate_and_set_anchor(9, []);
+        cache.set(cached_address, cached_slot, 9, cached_value);
+    }
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let header_10 = make_test_header(10);
+    let header_11 = make_chained_header(11, header_hash(&header_10));
+    let header_12 = make_chained_header(12, header_hash(&header_11));
+
+    asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_10);
+    push_header_and_empty_receipts(&asserter, header_11);
+    push_header_and_empty_receipts(&asserter, header_12);
+
+    assert_eq!(
+        subscriber
+            .sync_finalized_once(&l1_provider, 10)
+            .await
+            .unwrap(),
+        13
+    );
+
+    assert_eq!(
+        subscriber
+            .config
+            .l1_state_cache
+            .lock()
+            .get(cached_address, cached_slot, 12),
+        Some(cached_value),
+        "receipt coverage must keep advancing on an observer"
+    );
+    assert_eq!(subscriber.config.block_tracker.latest().unwrap().number, 12);
+    assert_eq!(
+        subscriber.config.block_tracker.observed_hash(12),
+        None,
+        "an observer has no downstream consumer requiring retained observations"
+    );
+    assert!(
+        matches!(subscriber.deposit_sink, DepositSink::Observer),
+        "an observer must not accumulate finalized blocks in a deposit queue"
     );
     assert!(asserter.read_q().is_empty());
 }
@@ -807,14 +868,10 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
         .unwrap();
 
     assert_eq!(next, 11);
-    assert!(
-        subscriber
-            .deposit_queue
-            .as_ref()
-            .expect("leader test subscriber has a deposit queue")
-            .drain()
-            .is_empty()
-    );
+    let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
+        panic!("test subscriber must retain deposits");
+    };
+    assert!(queue.drain().is_empty());
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1137,6 +1194,86 @@ fn finalized_queue_tracks_tip_after_consumption() {
         make_chained_header(102, h101_hash),
         L1PortalEvents::default(),
     );
+}
+
+#[test]
+fn external_enqueue_reports_discontinuity_without_panicking() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h10_hash = header_hash(&h10);
+    assert!(
+        queue
+            .try_enqueue_sealed(seal(h10), L1PortalEvents::default())
+            .unwrap()
+    );
+
+    let err = queue
+        .try_enqueue_sealed(
+            seal(make_chained_header(12, h10_hash)),
+            L1PortalEvents::default(),
+        )
+        .expect_err("external input must report a gap");
+    assert!(
+        err.to_string()
+            .contains("non-contiguous finalized L1 block")
+    );
+}
+
+#[test]
+fn external_enqueue_accepts_duplicate_producers() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let h12 = make_chained_header(12, header_hash(&h11));
+    let duplicate = seal(h10);
+    assert!(
+        queue
+            .try_enqueue_sealed(duplicate.clone(), L1PortalEvents::default())
+            .unwrap()
+    );
+    for header in [h11, h12] {
+        queue
+            .try_enqueue_sealed(seal(header), L1PortalEvents::default())
+            .unwrap();
+    }
+    assert!(
+        !queue
+            .try_enqueue_sealed(duplicate, L1PortalEvents::default())
+            .unwrap()
+    );
+    assert_eq!(queue.peek().unwrap().header.number(), 10);
+}
+
+#[test]
+fn confirm_through_is_idempotent_and_drains_stale_entries() {
+    let queue = DepositQueue::new();
+    let h10 = make_test_header(10);
+    let h11 = make_chained_header(11, header_hash(&h10));
+    let h12 = make_chained_header(12, header_hash(&h11));
+    let anchor = seal(h12.clone()).num_hash();
+    for header in [h10, h11, h12] {
+        queue
+            .try_enqueue_sealed(seal(header), L1PortalEvents::default())
+            .unwrap();
+    }
+
+    queue.confirm_through(anchor).unwrap();
+    assert!(queue.peek().is_none());
+    queue.confirm_through(anchor).unwrap();
+}
+
+#[test]
+fn confirm_through_rejects_a_conflicting_anchor() {
+    let queue = DepositQueue::new();
+    queue
+        .try_enqueue_sealed(seal(make_test_header(10)), L1PortalEvents::default())
+        .unwrap();
+
+    let err = queue
+        .confirm_through(NumHash::new(10, B256::repeat_byte(0xab)))
+        .expect_err("a different hash at the same height must fail");
+    assert!(err.to_string().contains("deposit queue holds L1 block 10"));
+    assert_eq!(queue.peek().unwrap().header.number(), 10);
 }
 
 #[test]
