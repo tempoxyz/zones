@@ -44,6 +44,7 @@ import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLi
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { MockRevertingReceiver } from "../mocks/MockCallbackReceivers.sol";
 import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
 import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
@@ -126,38 +127,6 @@ contract GasConsumingReceiver is IWithdrawalReceiver {
         // Infinite loop to consume all gas
         while (true) { }
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
-    }
-
-}
-
-/// @notice Mock receiver that reverts with an oversized blob of revert data.
-/// @dev Producing the blob costs only this frame's memory expansion, charged against the gas the
-///      messenger forwarded. A caller that propagates the revert must copy the whole blob into
-///      its own frame at quadratic cost, which is the amplification this models.
-contract RevertBombReceiver is IWithdrawalReceiver {
-
-    uint256 public bombSize;
-
-    constructor(uint256 size) {
-        bombSize = size;
-    }
-
-    function onWithdrawalReceived(
-        uint32,
-        address,
-        bytes32,
-        address,
-        uint128,
-        bytes calldata
-    )
-        external
-        view
-        returns (bytes4)
-    {
-        uint256 size = bombSize;
-        assembly {
-            revert(0, size)
-        }
     }
 
 }
@@ -3100,7 +3069,7 @@ contract ZonePortalTest is BaseTest {
     /// deterministically rebuilds the same batch from the same queue, the FIFO stalled
     /// permanently — the failure mode named in TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS.
     function test_withdrawal_revertBombDoesNotStallWithdrawalQueue() public {
-        RevertBombReceiver bomb = new RevertBombReceiver(900_000);
+        MockRevertingReceiver bomb = new MockRevertingReceiver(900_000);
         vm.prank(admin);
         portal.setRole(address(bomb), Role.CallbackGateway);
 

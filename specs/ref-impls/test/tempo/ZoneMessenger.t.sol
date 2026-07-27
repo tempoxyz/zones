@@ -12,6 +12,12 @@ import {
 } from "../../src/interfaces/IZone.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import {
+    ACCEPTED_CALLBACK_WORD,
+    DIRTY_PADDED_CALLBACK_WORD,
+    MockRawReturnReceiver,
+    MockRevertingReceiver
+} from "../mocks/MockCallbackReceivers.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
@@ -80,145 +86,19 @@ contract RejectingWithdrawalReceiver is IWithdrawalReceiver {
 
 }
 
-/// @dev Reverts with `bombSize` bytes of revert data. Producing the blob only costs this
-/// frame's own memory expansion, out of the gas the messenger forwarded; the damage is that a
-/// caller which propagates the revert must `returndatacopy` the whole blob into its own frame.
-contract RevertBombReceiver is IWithdrawalReceiver {
-
-    uint256 public bombSize;
-
-    constructor(uint256 size) {
-        bombSize = size;
-    }
-
-    function onWithdrawalReceived(
-        uint32,
-        address,
-        bytes32,
-        address,
-        uint128,
-        bytes calldata
-    )
-        external
-        view
-        returns (bytes4)
-    {
-        uint256 size = bombSize;
-        assembly {
-            revert(0, size)
-        }
-    }
-
-}
-
-/// @dev Returns the expected selector followed by `bombSize` bytes of padding.
-contract ReturnBombReceiver is IWithdrawalReceiver {
-
-    uint256 public bombSize;
-
-    constructor(uint256 size) {
-        bombSize = size;
-    }
-
-    function onWithdrawalReceived(
-        uint32,
-        address,
-        bytes32,
-        address,
-        uint128,
-        bytes calldata
-    )
-        external
-        view
-        returns (bytes4)
-    {
-        uint256 size = bombSize;
-        bytes4 accepted = IWithdrawalReceiver.onWithdrawalReceived.selector;
-        assembly {
-            mstore(0, accepted)
-            return(0, size)
-        }
-    }
-
-}
-
-/// @dev Returns exactly one word whose leading selector is correct but whose low-order padding
-/// is dirty. Solidity's `bytes4` decoder must keep rejecting this.
-contract DirtyPaddingReceiver is IWithdrawalReceiver {
-
-    function onWithdrawalReceived(
-        uint32,
-        address,
-        bytes32,
-        address,
-        uint128,
-        bytes calldata
-    )
-        external
-        pure
-        returns (bytes4)
-    {
-        bytes4 accepted = IWithdrawalReceiver.onWithdrawalReceived.selector;
-        assembly {
-            mstore(0, or(accepted, not(shl(224, 0xffffffff))))
-            return(0, 32)
-        }
-    }
-
-}
-
-/// @dev Returns a well-formed selector word followed by a second, ignorable word.
-contract OverlongReceiver is IWithdrawalReceiver {
-
-    function onWithdrawalReceived(
-        uint32,
-        address,
-        bytes32,
-        address,
-        uint128,
-        bytes calldata
-    )
-        external
-        pure
-        returns (bytes4)
-    {
-        bytes4 accepted = IWithdrawalReceiver.onWithdrawalReceived.selector;
-        assembly {
-            mstore(0, accepted)
-            mstore(32, not(0))
-            return(0, 64)
-        }
-    }
-
-}
-
-/// @dev Returns fewer than 32 bytes, which cannot decode to a `bytes4`.
-contract ShortReturnReceiver is IWithdrawalReceiver {
-
-    function onWithdrawalReceived(
-        uint32,
-        address,
-        bytes32,
-        address,
-        uint128,
-        bytes calldata
-    )
-        external
-        pure
-        returns (bytes4)
-    {
-        assembly {
-            return(0, 4)
-        }
-    }
-
-}
-
 contract ZoneMessengerTest is BaseTest {
 
     uint32 internal constant ZONE_ID = 1;
     uint32 internal constant OTHER_ZONE_ID = 2;
     uint64 internal constant CALLBACK_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
+
+    /// @dev Oversized response used by the amplification bounds. Any size above ~100,000 bytes
+    ///      discriminates an unbounded copy; the pass margin is size-independent, so a large blob
+    ///      buys a louder failure signal for free.
+    uint256 internal constant BOMB_SIZE = 900_000;
+
+    /// @dev Headroom over the callee's own memory expansion, covering fixed relay overhead.
+    uint256 internal constant AMPLIFICATION_SLACK = 30_000;
 
     MockZoneFactoryForMessenger public messengerFactory;
     ZoneMessenger public messenger;
@@ -263,6 +143,49 @@ contract ZoneMessengerTest is BaseTest {
 
     function _callback() internal pure returns (bytes memory) {
         return hex"010203";
+    }
+
+    /// @dev Funds the messenger and authorizes `target`, so a following `vm.expectRevert` binds to
+    ///      the relay itself rather than to this setup.
+    function _prepareRelay(address target) internal returns (address) {
+        zoneToken.mint(address(messenger), 1);
+        _allowGateway(target);
+        return target;
+    }
+
+    /// @dev Relays a single token to an already-prepared `target` with the maximum callback gas.
+    function _relay(address target) internal {
+        vm.prank(portal);
+        messenger.relayMessage(
+            ZONE_ID, address(zoneToken), bytes32("sender"), target, 1, CALLBACK_GAS_LIMIT, ""
+        );
+    }
+
+    /// @dev Relays to `target` and reports the gas charged to the messenger's caller frame.
+    function _relayCost(address target) internal returns (uint256 burned) {
+        _prepareRelay(target);
+
+        vm.prank(portal);
+        uint256 before = gasleft();
+        try messenger.relayMessage(
+            ZONE_ID, address(zoneToken), bytes32("sender"), target, 1, CALLBACK_GAS_LIMIT, ""
+        ) { }
+            catch { }
+        burned = before - gasleft();
+    }
+
+    /// @dev The callee always pays its own memory expansion out of the forwarded `gasLimit`. What
+    ///      must not happen is the messenger paying to copy the same blob a second time, so the
+    ///      whole relay may exceed the honest baseline by at most that one expansion.
+    function _assertNotAmplified(uint256 honest, uint256 bombed) internal pure {
+        assertLt(bombed, honest + _memoryCost(BOMB_SIZE) + AMPLIFICATION_SLACK);
+    }
+
+    /// @dev Cost of expanding a fresh frame's memory to `size` bytes, per the EVM's quadratic
+    ///      formula.
+    function _memoryCost(uint256 size) internal pure returns (uint256) {
+        uint256 words = (size + 31) / 32;
+        return 3 * words + (words * words) / 512;
     }
 
     function test_zoneFactoryConstant() public view {
@@ -399,32 +322,15 @@ contract ZoneMessengerTest is BaseTest {
                         UNTRUSTED RETURN DATA BOUNDS
     //////////////////////////////////////////////////////////////*/
 
-    /// @dev Relays to `target` and reports the gas charged to the messenger's caller frame.
-    function _relayCost(address target) internal returns (uint256 burned) {
-        zoneToken.mint(address(messenger), 1);
-        _allowGateway(target);
-
-        vm.prank(portal);
-        uint256 before = gasleft();
-        try messenger.relayMessage(
-            ZONE_ID, address(zoneToken), bytes32("sender"), target, 1, CALLBACK_GAS_LIMIT, ""
-        ) { }
-            catch { }
-        burned = before - gasleft();
-    }
-
     /// A callback that reverts with megabytes must not charge the copy to the messenger's frame.
     /// Without a bounded `catch`, solc's revert-forwarder copies the blob at quadratic cost, so a
     /// single withdrawal can burn several times the `gasLimit` it declared and paid for, starving
     /// the remaining items in a `processWithdrawals` batch.
     function test_relayMessage_revertBombDoesNotAmplifyCallerGas() public {
-        uint256 honest = _relayCost(address(new RevertBombReceiver(4)));
-        uint256 bombed = _relayCost(address(new RevertBombReceiver(900_000)));
+        uint256 honest = _relayCost(address(new MockRevertingReceiver(4)));
+        uint256 bombed = _relayCost(address(new MockRevertingReceiver(BOMB_SIZE)));
 
-        // The callee still pays its own memory expansion out of the forwarded `gasLimit`; what
-        // must not happen is the messenger paying to copy the blob a second time.
-        uint256 calleeExpansion = _memoryCost(900_000);
-        assertLt(bombed, honest + calleeExpansion + 30_000);
+        _assertNotAmplified(honest, bombed);
     }
 
     /// The same bound must hold for oversized success returns. This one already held before the
@@ -432,64 +338,47 @@ contract ZoneMessengerTest is BaseTest {
     /// rather than from `returndatasize()`; it is here to keep that property from regressing if
     /// the return type ever becomes dynamic.
     function test_relayMessage_returnBombDoesNotAmplifyCallerGas() public {
-        uint256 honest = _relayCost(address(new ReturnBombReceiver(32)));
-        uint256 bombed = _relayCost(address(new ReturnBombReceiver(900_000)));
+        uint256 honest = _relayCost(address(new MockRawReturnReceiver(ACCEPTED_CALLBACK_WORD, 32)));
+        uint256 bombed =
+            _relayCost(address(new MockRawReturnReceiver(ACCEPTED_CALLBACK_WORD, BOMB_SIZE)));
 
-        uint256 calleeExpansion = _memoryCost(900_000);
-        assertLt(bombed, honest + calleeExpansion + 30_000);
+        _assertNotAmplified(honest, bombed);
     }
 
-    /// Cost of expanding a fresh frame's memory to `size` bytes, per the EVM's quadratic formula.
-    function _memoryCost(uint256 size) internal pure returns (uint256) {
-        uint256 words = (size + 31) / 32;
-        return 3 * words + (words * words) / 512;
+    /// Trailing bytes beyond the selector word are ignored, dirty or not.
+    function test_relayMessage_acceptsOverlongResponse() public {
+        _relay(_prepareRelay(address(new MockRawReturnReceiver(ACCEPTED_CALLBACK_WORD, 64))));
     }
 
-    /// Bounding the copy must not change which responses are accepted. These shapes pin the
-    /// decoder's behaviour so a later refactor cannot quietly loosen it.
+    /// Dirty low-order padding in the selector word must still be rejected.
     ///
-    /// A `catch` clause deliberately does not catch failures in decoding the callee's return
-    /// data, so a malformed response still reverts with empty data rather than
-    /// `CallbackRejected` — unchanged from before this bound was introduced. Either way the
-    /// portal's `try this.deliverWithdrawal(...)` catches the failure and bounces the withdrawal.
-    function test_relayMessage_acceptsOnlyWellFormedSelectorWord() public {
-        zoneToken.mint(address(messenger), 4);
+    /// A `catch` clause deliberately does not catch failures in decoding the callee's return data,
+    /// so a malformed response reverts with empty data rather than `CallbackRejected` — unchanged
+    /// from before this bound was introduced. Either way the portal's
+    /// `try this.deliverWithdrawal(...)` catches the failure and bounces the withdrawal.
+    function test_relayMessage_rejectsDirtyPaddedSelector() public {
+        address target =
+            _prepareRelay(address(new MockRawReturnReceiver(DIRTY_PADDED_CALLBACK_WORD, 32)));
 
-        address overlong = address(new OverlongReceiver());
-        _allowGateway(overlong);
-        vm.prank(portal);
-        messenger.relayMessage(
-            ZONE_ID, address(zoneToken), bytes32("sender"), overlong, 1, CALLBACK_GAS_LIMIT, ""
-        );
-
-        address dirty = address(new DirtyPaddingReceiver());
-        _allowGateway(dirty);
-        vm.prank(portal);
         vm.expectRevert();
-        messenger.relayMessage(
-            ZONE_ID, address(zoneToken), bytes32("sender"), dirty, 1, CALLBACK_GAS_LIMIT, ""
-        );
+        _relay(target);
+    }
 
-        address short = address(new ShortReturnReceiver());
-        _allowGateway(short);
-        vm.prank(portal);
+    /// A response shorter than one word cannot decode to a `bytes4`.
+    function test_relayMessage_rejectsShortResponse() public {
+        address target =
+            _prepareRelay(address(new MockRawReturnReceiver(ACCEPTED_CALLBACK_WORD, 4)));
+
         vm.expectRevert();
-        messenger.relayMessage(
-            ZONE_ID, address(zoneToken), bytes32("sender"), short, 1, CALLBACK_GAS_LIMIT, ""
-        );
+        _relay(target);
     }
 
     /// A reverting callback surfaces as `CallbackRejected`, never as the callee's own revert data.
     function test_relayMessage_revertingCallbackSurfacesAsCallbackRejected() public {
-        address bomb = address(new RevertBombReceiver(64));
-        zoneToken.mint(address(messenger), 1);
-        _allowGateway(bomb);
+        address target = _prepareRelay(address(new MockRevertingReceiver(64)));
 
-        vm.prank(portal);
         vm.expectRevert(ZoneMessenger.CallbackRejected.selector);
-        messenger.relayMessage(
-            ZONE_ID, address(zoneToken), bytes32("sender"), bomb, 1, CALLBACK_GAS_LIMIT, ""
-        );
+        _relay(target);
     }
 
 }
