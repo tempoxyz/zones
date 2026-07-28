@@ -612,7 +612,9 @@ where
         let role = leadership.role_of(&local_ed25519_public_key);
         // Subscribe before starting Commonware (and, importantly, before RPC launch) so a
         // follower cannot admit a transaction in a startup gap.
-        let new_transactions = (role == Role::Follower).then(|| pool.new_transactions_listener());
+        let new_transactions = role
+            .follows_leader()
+            .then(|| pool.new_transactions_listener());
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
@@ -640,7 +642,9 @@ where
                 );
                 sync_events
             }
-            Role::Follower => {
+            // An RPC-only follower replicates and forwards exactly like a quorum follower; it
+            // simply never receives a settlement proposal to sign.
+            Role::Follower | Role::RpcFollower => {
                 task_executor.spawn_critical_task(
                     "zone-p2p-transaction-forward",
                     forward_new_transactions(

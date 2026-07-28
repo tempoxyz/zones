@@ -3,6 +3,7 @@ use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
+    sync::Arc,
 };
 
 use alloy_primitives::Address as EthereumAddress;
@@ -10,18 +11,66 @@ use commonware_codec::DecodeExt as _;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Address, Ingress};
 use commonware_utils::Hostname;
-use derive_more::{Display, FromStr};
 use serde::Deserialize;
 
+/// Minimum number of nodes that must be registered for the on-chain settlement quorum.
+const MIN_QUORUM_NODES: usize = 3;
+
 /// The role assigned to a node by the manifest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Display, FromStr)]
-#[display(rename_all = "lowercase")]
-#[from_str(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     /// Builds blocks and runs the existing sequencer settlement tasks.
     Leader,
-    /// Runs without block production, follows `Leader`s blocks
+    /// Runs without block production, follows `Leader`s blocks, and signs settlement
+    /// attestations for the on-chain quorum.
     Follower,
+    /// Follows `Leader`s blocks without joining the on-chain quorum.
+    ///
+    /// A hot standby for public RPC: it imports and serves the same chain and forwards
+    /// transactions to the leader, but never signs a settlement attestation. That keeps the
+    /// leader and the quorum followers off the internet without changing the quorum.
+    RpcFollower,
+}
+
+impl Role {
+    /// Whether this role replicates the leader's chain instead of producing blocks.
+    pub const fn follows_leader(self) -> bool {
+        matches!(self, Self::Follower | Self::RpcFollower)
+    }
+
+    /// Whether this role signs settlement attestations for the on-chain quorum.
+    pub const fn in_quorum(self) -> bool {
+        matches!(self, Self::Leader | Self::Follower)
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Leader => "leader",
+            Self::Follower => "follower",
+            Self::RpcFollower => "rpc-follower",
+        }
+    }
+}
+
+impl fmt::Display for Role {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for Role {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "leader" => Ok(Self::Leader),
+            "follower" => Ok(Self::Follower),
+            "rpc-follower" => Ok(Self::RpcFollower),
+            other => Err(format!(
+                "expected `leader`, `follower`, or `rpc-follower`, got `{other}`"
+            )),
+        }
+    }
 }
 
 /// Shared bootstrap leadership record for a zone node.
@@ -60,16 +109,27 @@ pub struct LeadershipState {
     pub leader: PublicKey,
     /// First block where the leader can become active.
     pub start_block: u64,
+    /// Members that replicate the chain without joining the on-chain quorum.
+    ///
+    /// Shared rather than copied: routing consults this on every P2P command.
+    rpc_followers: Arc<BTreeSet<PublicKey>>,
 }
 
 impl LeadershipState {
-    /// Creates a leadership record.
-    pub const fn new(epoch: u64, leader: PublicKey, start_block: u64) -> Self {
+    /// Creates a leadership record whose members all belong to the quorum.
+    pub fn new(epoch: u64, leader: PublicKey, start_block: u64) -> Self {
         Self {
             epoch,
             leader,
             start_block,
+            rpc_followers: Arc::default(),
         }
+    }
+
+    /// Marks the members that replicate the chain without joining the on-chain quorum.
+    pub fn with_rpc_followers(mut self, rpc_followers: BTreeSet<PublicKey>) -> Self {
+        self.rpc_followers = Arc::new(rpc_followers);
+        self
     }
 
     /// Monotonically increasing fencing epoch.
@@ -96,6 +156,8 @@ impl LeadershipState {
     pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Role {
         if ed25519_public_key == &self.leader {
             Role::Leader
+        } else if self.rpc_followers.contains(ed25519_public_key) {
+            Role::RpcFollower
         } else {
             Role::Follower
         }
@@ -177,6 +239,7 @@ pub struct ManifestNode {
     ed25519_public_key: PublicKey,
     secp256k1_address: EthereumAddress,
     address: ManifestAddress,
+    rpc_only: bool,
 }
 
 impl ManifestNode {
@@ -199,6 +262,11 @@ impl ManifestNode {
     pub const fn address(&self) -> &ManifestAddress {
         &self.address
     }
+
+    /// Whether this node serves RPC without joining the on-chain settlement quorum.
+    pub const fn is_rpc_only(&self) -> bool {
+        self.rpc_only
+    }
 }
 
 /// A parsed and intrinsically validated zone manifest.
@@ -216,9 +284,6 @@ impl ZoneManifest {
         let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Toml)?;
         if raw.sequencer_set_version == 0 {
             return Err(ManifestError::InvalidSequencerSetVersion);
-        }
-        if raw.nodes.len() < 3 {
-            return Err(ManifestError::TooFewNodes(raw.nodes.len()));
         }
 
         let leader_ed25519_public_key =
@@ -267,11 +332,15 @@ impl ZoneManifest {
                         address: raw_node.address.clone(),
                         reason,
                     })?;
+            if raw_node.rpc_only && ed25519_public_key == leader_ed25519_public_key {
+                return Err(ManifestError::RpcOnlyLeader(raw_node.name));
+            }
             nodes.push(ManifestNode {
                 name: raw_node.name,
                 ed25519_public_key,
                 secp256k1_address,
                 address,
+                rpc_only: raw_node.rpc_only,
             });
         }
 
@@ -279,6 +348,13 @@ impl ZoneManifest {
             return Err(ManifestError::LeaderEd25519PublicKeyNotFound(
                 leader_ed25519_public_key.to_string(),
             ));
+        }
+
+        // RPC-only members are not registered with `ZonePortal`, so they cannot make up for a
+        // quorum that is too small to settle.
+        let quorum_nodes = nodes.iter().filter(|node| !node.rpc_only).count();
+        if quorum_nodes < MIN_QUORUM_NODES {
+            return Err(ManifestError::TooFewQuorumNodes(quorum_nodes));
         }
 
         Ok(Self {
@@ -356,12 +432,23 @@ impl ZoneManifest {
 
     /// Static leadership record used for the lifetime of the process.
     pub fn bootstrap_leadership(&self) -> LeadershipState {
-        LeadershipState::new(0, self.leader_ed25519_public_key.clone(), 0)
+        LeadershipState::new(0, self.leader_ed25519_public_key.clone(), 0).with_rpc_followers(
+            self.nodes
+                .iter()
+                .filter(|node| node.rpc_only)
+                .map(|node| node.ed25519_public_key.clone())
+                .collect(),
+        )
     }
 
     /// All nodes in the static peer set.
     pub fn nodes(&self) -> &[ManifestNode] {
         &self.nodes
+    }
+
+    /// Nodes registered with `ZonePortal` for the on-chain settlement quorum.
+    pub fn quorum_nodes(&self) -> impl Iterator<Item = &ManifestNode> {
+        self.nodes.iter().filter(|node| !node.rpc_only)
     }
 
     /// Returns whether an Ed25519 key belongs to the manifest's static peer set.
@@ -402,6 +489,9 @@ struct RawManifestNode {
     ed25519_public_key: String,
     secp256k1_address: String,
     address: String,
+    /// Serve RPC as a hot standby without joining the on-chain settlement quorum.
+    #[serde(default)]
+    rpc_only: bool,
 }
 
 fn parse_ed25519_public_key(field: &str, encoded: &str) -> Result<PublicKey, ManifestError> {
@@ -433,8 +523,13 @@ pub enum ManifestError {
     #[error("invalid sequencer manifest TOML")]
     Toml(#[source] toml::de::Error),
 
-    #[error("sequencer manifest must contain at least 3 nodes, found {0}")]
-    TooFewNodes(usize),
+    #[error(
+        "sequencer manifest must contain at least {MIN_QUORUM_NODES} quorum nodes (nodes without `rpc_only`), found {0}"
+    )]
+    TooFewQuorumNodes(usize),
+
+    #[error("sequencer manifest leader `{0}` cannot be `rpc_only`")]
+    RpcOnlyLeader(String),
 
     #[error("sequencer manifest node names must not be empty")]
     EmptyNodeName,
@@ -490,7 +585,7 @@ pub enum ManifestError {
 mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
-    use super::{ManifestError, Role, ZoneManifest};
+    use super::{MIN_QUORUM_NODES, ManifestError, Role, ZoneManifest};
 
     fn ed25519_public_key(seed: u64) -> String {
         let key = PrivateKey::from_seed(seed).public_key();
@@ -502,13 +597,21 @@ mod tests {
     }
 
     fn manifest(leader: u64, nodes: &[(u64, &str, &str)]) -> String {
+        let quorum = nodes
+            .iter()
+            .map(|(key, name, address)| (*key, *name, *address, false))
+            .collect::<Vec<_>>();
+        manifest_with_rpc_only(leader, &quorum)
+    }
+
+    fn manifest_with_rpc_only(leader: u64, nodes: &[(u64, &str, &str, bool)]) -> String {
         let mut value = format!(
             "zone_id = 7\nleader_ed25519_public_key = \"{}\"\n",
             ed25519_public_key(leader)
         );
-        for (key, name, address) in nodes {
+        for (key, name, address, rpc_only) in nodes {
             value.push_str(&format!(
-                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                "\n[[nodes]]\nname = \"{name}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
                 ed25519_public_key(*key),
                 secp256k1_address(*key),
             ));
@@ -565,9 +668,109 @@ mod tests {
             .split_once("\n```")
             .expect("README closes the TOML manifest example");
 
+        // The example uses placeholder keys, so only its shape can be checked.
         let manifest: super::RawManifest = toml::from_str(example).unwrap();
         assert_eq!(manifest.zone_id, 7);
-        assert_eq!(manifest.nodes.len(), 3);
+        assert_eq!(manifest.nodes.len(), 4);
+        assert_eq!(
+            manifest.nodes.iter().filter(|node| !node.rpc_only).count(),
+            MIN_QUORUM_NODES
+        );
+    }
+
+    #[test]
+    fn rpc_only_nodes_replicate_without_joining_the_quorum() {
+        let input = manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", false),
+                (2, "follower-a", "127.0.0.1:9201", false),
+                (3, "follower-b", "127.0.0.1:9202", false),
+                (4, "public-rpc", "127.0.0.1:9203", true),
+            ],
+        );
+        let manifest = ZoneManifest::parse(&input).unwrap();
+        let leader = PrivateKey::from_seed(1).public_key();
+        let follower = PrivateKey::from_seed(2).public_key();
+        let rpc_follower = PrivateKey::from_seed(4).public_key();
+        let leadership = manifest.bootstrap_leadership();
+
+        assert_eq!(leadership.role_of(&leader), Role::Leader);
+        assert_eq!(leadership.role_of(&follower), Role::Follower);
+        assert_eq!(leadership.role_of(&rpc_follower), Role::RpcFollower);
+
+        // The RPC standby replicates, but the on-chain quorum is unchanged by its presence.
+        assert!(Role::RpcFollower.follows_leader());
+        assert!(!Role::RpcFollower.in_quorum());
+        assert_eq!(manifest.nodes().len(), 4);
+        assert_eq!(manifest.quorum_nodes().count(), 3);
+        assert!(
+            manifest
+                .quorum_nodes()
+                .all(|node| node.ed25519_public_key() != &rpc_follower)
+        );
+
+        assert_eq!(
+            manifest
+                .validate_node(
+                    7,
+                    &rpc_follower,
+                    secp256k1_address(4).parse().unwrap(),
+                    Some(Role::RpcFollower),
+                )
+                .unwrap(),
+            Role::RpcFollower
+        );
+        assert!(matches!(
+            manifest.validate_node(
+                7,
+                &rpc_follower,
+                secp256k1_address(4).parse().unwrap(),
+                Some(Role::Follower),
+            ),
+            Err(ManifestError::RoleMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_topologies_that_would_shrink_the_quorum() {
+        // Four nodes, but only two of them can sign a settlement.
+        let thin_quorum = manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", false),
+                (2, "follower", "127.0.0.1:9201", false),
+                (3, "public-rpc-a", "127.0.0.1:9202", true),
+                (4, "public-rpc-b", "127.0.0.1:9203", true),
+            ],
+        );
+        assert!(matches!(
+            ZoneManifest::parse(&thin_quorum),
+            Err(ManifestError::TooFewQuorumNodes(2))
+        ));
+
+        // A leader cannot opt out of the quorum it settles for.
+        let rpc_only_leader = manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", true),
+                (2, "follower-a", "127.0.0.1:9201", false),
+                (3, "follower-b", "127.0.0.1:9202", false),
+            ],
+        );
+        assert!(matches!(
+            ZoneManifest::parse(&rpc_only_leader),
+            Err(ManifestError::RpcOnlyLeader(_))
+        ));
+    }
+
+    #[test]
+    fn role_round_trips_through_its_cli_and_manifest_spelling() {
+        for role in [Role::Leader, Role::Follower, Role::RpcFollower] {
+            assert_eq!(role.to_string().parse::<Role>().unwrap(), role);
+        }
+        assert_eq!("rpc-follower".parse::<Role>().unwrap(), Role::RpcFollower);
+        assert!("rpc_follower".parse::<Role>().is_err());
     }
 
     #[test]
@@ -581,7 +784,7 @@ mod tests {
         );
         assert!(matches!(
             ZoneManifest::parse(&too_small),
-            Err(ManifestError::TooFewNodes(2))
+            Err(ManifestError::TooFewQuorumNodes(2))
         ));
 
         let duplicate = manifest(

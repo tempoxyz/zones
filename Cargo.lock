@@ -13570,7 +13570,6 @@ dependencies = [
  "commonware-runtime",
  "commonware-utils",
  "const-hex",
- "derive_more",
  "eyre",
  "metrics",
  "serde",

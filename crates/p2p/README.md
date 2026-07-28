@@ -14,10 +14,20 @@ behavior.
 - The **leader** runs the existing block-production and L1-settlement tasks in
   addition to the P2P network.
 - A **follower** joins the P2P network and receives blocks from the leader, validating and importing the blocks and sending a signed block hash back to the leader
+- An **rpc-follower** replicates and validates exactly like a follower, but never signs a
+  settlement attestation and is not registered with `ZonePortal`. It is a hot standby for public
+  RPC: it serves reads from its own imported chain and forwards transactions to the leader, so
+  neither the leader nor a quorum follower has to be exposed to the internet. Mark one with
+  `rpc_only = true` on its manifest node.
+
+Because rpc-followers are outside the on-chain quorum, they neither raise nor lower the signature
+threshold. The manifest therefore still requires at least three *quorum* nodes, and the leader
+cannot be `rpc_only`.
 
 The manifest is authoritative. The (optional) `--sequencer.role` CLI argument is
-only an assertion checked against the manifest. There is no automatic election or promotion.
- 
+only an assertion checked against the manifest — `leader`, `follower`, or `rpc-follower`. There is
+no automatic election or promotion.
+
 
 ## Commonware network
 
@@ -37,7 +47,7 @@ or endpoint is accidentally reused.
 
 ## Manifest example
 
-The manifest is TOML and must contain at least three nodes. The following shows
+The manifest is TOML and must contain at least three quorum nodes. The following shows
 the configuration shape:
 
 ```toml
@@ -62,11 +72,21 @@ name = "follower-b"
 ed25519_public_key = "0xfb..."
 secp256k1_address = "0x3333333333333333333333333333333333333333"
 address = "follower-b.zone.internal:9200"
+
+[[nodes]]
+name = "public-rpc"
+ed25519_public_key = "0xrpc..."
+secp256k1_address = "0x4444444444444444444444444444444444444444"
+address = "public-rpc.zone.internal:9200"
+rpc_only = true
 ```
+
+`rpc_only` defaults to `false`, so existing manifests keep their current meaning.
 
 The manifest loader validates that:
 
-- there are at least three nodes;
+- there are at least three quorum nodes (nodes without `rpc_only`);
+- the leader is not `rpc_only`;
 - node names, Ed25519 public keys, and secp256k1 addresses are unique;
 - every address has a non-zero port;
 - `leader_ed25519_public_key` identifies one of the nodes;
@@ -114,8 +134,9 @@ authentication remains enforced.
 
 Every node probes for missing blocks when P2P starts and retries while its eligible peers are
 offline or a gap remains. Followers request blocks from the statically configured leader. A
-recovering leader requests blocks from the configured followers. Both roles can serve bounded
-64-block response pages from their persisted canonical chain.
+recovering leader requests blocks from any replica. An rpc-follower requests from the leader *or*
+a quorum follower, so a leader outage does not stall the node that serves public reads. Every role
+can serve bounded 64-block response pages from its persisted canonical chain.
 
 Backfilled blocks use the same RLP representation and import path as live replicated blocks. A
 node buffers out-of-order arrivals, then re-executes and canonicalizes only the next block after
@@ -126,8 +147,9 @@ canonical.
 ## Transaction forwarding
 
 Commonware carries blocks, catch-up traffic, and transactions on independent authenticated
-channels. A follower sends canonical EIP-2718 transaction bytes only to the configured leader,
-and the leader accepts transaction messages only from manifest members with the follower role.
+channels. A follower — quorum or rpc-only — sends canonical EIP-2718 transaction bytes only to the
+configured leader, and the leader accepts transaction messages only from manifest members that
+follow its chain.
 
 This permits public RPC to be exposed on followers while keeping the leader's RPC private. The
 leader decodes and validates every forwarded transaction again, and it alone selects and orders

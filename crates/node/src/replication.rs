@@ -413,7 +413,9 @@ pub(crate) async fn run_block_sync<P>(
     let role = leadership.role_of(&local_ed25519_public_key);
     match role {
         Role::Leader => run_leader_backfill_server(provider, events, commands, attestation).await,
-        Role::Follower => {
+        // An RPC-only follower imports the same chain through the same path; the P2P layer keeps
+        // settlement proposals away from it, so it never signs.
+        Role::Follower | Role::RpcFollower => {
             run_follower_block_sync(
                 provider,
                 engine,

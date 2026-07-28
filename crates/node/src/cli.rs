@@ -199,8 +199,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 },
             });
         }
-        if manifest_role == Some(Role::Follower) {
-            info!(target: "reth::cli", "Starting in follower mode");
+        if let Some(role) = manifest_role.filter(|role| role.follows_leader()) {
+            info!(target: "reth::cli", %role, "Starting without block production");
         }
         if let Some(config) = p2p_config {
             node = node.with_p2p(config);
@@ -336,6 +336,8 @@ pub struct ZoneArgs {
     pub p2p_bypass_ip_check: bool,
 
     /// (Optional) Checked against the role derived from the manifest.
+    ///
+    /// One of `leader`, `follower`, or `rpc-follower`.
     #[arg(
         long = "sequencer.role",
         env = "SEQUENCER_ROLE",
@@ -452,8 +454,7 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
 
 fn sequencer_enabled(cli_flag: bool, manifest_role: Option<Role>) -> bool {
     match manifest_role {
-        Some(Role::Leader) => true,
-        Some(Role::Follower) => false,
+        Some(role) => role == Role::Leader,
         None => cli_flag,
     }
 }
@@ -738,8 +739,32 @@ mod tests {
     fn manifest_role_is_authoritative_for_sequencer_startup() {
         assert!(sequencer_enabled(false, Some(Role::Leader)));
         assert!(!sequencer_enabled(true, Some(Role::Follower)));
+        assert!(!sequencer_enabled(true, Some(Role::RpcFollower)));
         assert!(sequencer_enabled(true, None));
         assert!(!sequencer_enabled(false, None));
+    }
+
+    #[test]
+    fn sequencer_role_argument_accepts_the_rpc_follower_spelling() {
+        let parsed = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer-key",
+            "0x01",
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+            "--secp256k1.key",
+            "node-secp256k1.key",
+            "--sequencer.role",
+            "rpc-follower",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zone.sequencer_role, Some(Role::RpcFollower));
     }
 
     #[test]
