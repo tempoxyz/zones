@@ -55,6 +55,13 @@ contract ZoneMessenger is IZoneMessenger {
             revert InvalidCallbackTarget();
         }
 
+        // Unlike the callback below, this call is deliberately left raw: `token` is not attacker
+        // chosen. `enableToken` is admin-only and requires `isTIP20`, which restricts tokens to
+        // the factory's reserved prefix, so `transfer` is precompile-backed and reverts with
+        // constant-size errors. A token with arbitrary code could bubble an oversized revert blob
+        // here — but it would also burn the uncapped gas this call forwards, so bounding the copy
+        // would not save the batch. The boundary is the native-TIP-20 restriction, not this frame.
+        // Invariant: TEMPO-ZONE-WITHDRAWAL-CALLBACK-RETURNDATA-BOUND.
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();
         }
