@@ -1,0 +1,120 @@
+name: Sync Tempo ZonePortal
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: sync-tempo-zone-portal
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  sync:
+    name: Sync ZonePortal runtime to Tempo
+    if: github.repository == 'tempoxyz/zones'
+    runs-on: ubuntu-latest
+    environment: release-pr
+    permissions: {}
+    steps:
+      - name: Checkout Zones
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          path: zones
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Foundry
+        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          version: nightly
+
+      - name: Compile ZonePortal runtime
+        working-directory: zones/specs/ref-impls
+        run: |
+          forge inspect src/tempo/ZonePortal.sol:ZonePortal deployedBytecode \
+            > "$RUNNER_TEMP/zone-portal-runtime.txt"
+
+      - name: Mint Tempo pull request token
+        id: app-token
+        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
+        with:
+          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          owner: tempoxyz
+          repositories: tempo
+          permission-contents: write
+          permission-pull-requests: write
+          permission-metadata: read
+
+      - name: Checkout Tempo
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
+        with:
+          repository: tempoxyz/tempo
+          path: tempo
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      - name: Compare and update ZonePortal runtime
+        id: portal
+        run: |
+          python3 zones/scripts/sync-tempo-zone-portal.py \
+            --runtime-file "$RUNNER_TEMP/zone-portal-runtime.txt" \
+            --tempo-file tempo/crates/contracts/src/zones.rs \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Push update
+        if: steps.portal.outputs.changed == 'true'
+        working-directory: tempo
+        env:
+          BRANCH: automation/sync-zone-portal
+          ZONES_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git config user.name "tempo-release-bot[bot]"
+          git config user.email "tempo-release-bot[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add crates/contracts/src/zones.rs
+          git commit -m "chore(contracts): sync ZonePortal runtime"
+          git push --force origin "HEAD:refs/heads/$BRANCH"
+
+      - name: Open or update Tempo pull request
+        if: steps.portal.outputs.changed == 'true'
+        working-directory: tempo
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: automation/sync-zone-portal
+          ZONES_SHA: ${{ github.sha }}
+          ZONES_HASH: ${{ steps.portal.outputs.zones_hash }}
+          OLD_TEMPO_HASH: ${{ steps.portal.outputs.tempo_hash }}
+        run: |
+          set -euo pipefail
+          title="chore(contracts): sync ZonePortal runtime"
+          cat > "$RUNNER_TEMP/portal-pr-body.md" <<EOF
+          Syncs the embedded ZonePortal runtime with [tempoxyz/zones@${ZONES_SHA}](https://github.com/tempoxyz/zones/commit/${ZONES_SHA}).
+
+          Executable SHA-256: \\`${OLD_TEMPO_HASH}\` → \\`${ZONES_HASH}\`.
+          EOF
+
+          pr=$(gh pr list \
+            --repo tempoxyz/tempo \
+            --head "$BRANCH" \
+            --base main \
+            --state open \
+            --json number \
+            --jq '.[0].number // empty')
+          if [[ -n "$pr" ]]; then
+            gh pr edit "$pr" \
+              --repo tempoxyz/tempo \
+              --title "$title" \
+              --body-file "$RUNNER_TEMP/portal-pr-body.md"
+          else
+            gh pr create \
+              --repo tempoxyz/tempo \
+              --head "$BRANCH" \
+              --base main \
+              --title "$title" \
+              --body-file "$RUNNER_TEMP/portal-pr-body.md"
+          fi
