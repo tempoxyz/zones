@@ -64,6 +64,8 @@ jobs:
             --runtime "ZonePortal=$RUNNER_TEMP/ZonePortal" \
             --runtime "ZoneMessenger=$RUNNER_TEMP/ZoneMessenger" \
             --tempo-file tempo/crates/contracts/src/zones.rs \
+            --presto tempo/crates/chainspec/src/genesis/presto.json \
+            --zones-sha "$GITHUB_SHA" \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Push update
@@ -88,10 +90,15 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BASE_BRANCH: main
           BRANCH: automation/sync-zone-runtimes
-          PR_TITLE: "chore(contracts): sync Zone runtimes"
+          HARDFORK: ${{ steps.runtimes.outputs.hardfork }}
           ZONES_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          if [[ "$HARDFORK" == "true" ]]; then
+            title="[DRAFT] feat(hardfork): stage updated Zone runtimes"
+          else
+            title="chore(contracts): sync Zone runtimes"
+          fi
           printf \
             "Syncs the embedded ZonePortal and ZoneMessenger runtimes with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n" \
             "$ZONES_SHA" "$ZONES_SHA" > "$RUNNER_TEMP/runtimes-pr-body.md"
@@ -106,13 +113,19 @@ jobs:
           if [[ -n "$pr" ]]; then
             gh pr edit "$pr" \
               --repo tempoxyz/tempo \
-              --title "$PR_TITLE" \
+              --title "$title" \
               --body-file "$RUNNER_TEMP/runtimes-pr-body.md"
+            if [[ "$HARDFORK" == "true" ]]; then
+              gh pr ready "$pr" --repo tempoxyz/tempo --undo
+            fi
           else
+            draft=()
+            [[ "$HARDFORK" == "true" ]] && draft=(--draft)
             gh pr create \
               --repo tempoxyz/tempo \
               --head "$BRANCH" \
               --base "$BASE_BRANCH" \
-              --title "$PR_TITLE" \
-              --body-file "$RUNNER_TEMP/runtimes-pr-body.md"
+              --title "$title" \
+              --body-file "$RUNNER_TEMP/runtimes-pr-body.md" \
+              "${draft[@]}"
           fi
