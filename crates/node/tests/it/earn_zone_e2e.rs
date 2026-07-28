@@ -18,7 +18,7 @@ use alloy_sol_types::{SolCall, SolConstructor, SolValue};
 use eyre::WrapErr;
 use std::time::Duration;
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
-use tempo_contracts::precompiles::{ITIP20, ITIP403Registry};
+use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP403Registry};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
@@ -369,7 +369,7 @@ impl EarnZoneFixture {
         )
         .await?;
         let authority_contract = DemoTokenAuthority::new(authority, &provider);
-        let receipt = ITIP20::new(PATH_USD_ADDRESS, &provider)
+        let receipt = IRolesAuth::new(PATH_USD_ADDRESS, &provider)
             .grantRole(keccak256("ISSUER_ROLE"), authority)
             .send()
             .await?
@@ -377,7 +377,7 @@ impl EarnZoneFixture {
             .await?;
         eyre::ensure!(receipt.status(), "granting reserve issuer role failed");
         for token in [vault_asset, alternate_asset] {
-            let receipt = ITIP20::new(token, &provider)
+            let receipt = IRolesAuth::new(token, &provider)
                 .grantRole(keccak256("ISSUER_ROLE"), authority)
                 .send()
                 .await?
