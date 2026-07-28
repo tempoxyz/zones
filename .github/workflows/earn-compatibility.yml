@@ -1,0 +1,134 @@
+name: Earn compatibility
+
+on:
+  repository_dispatch:
+    types: [earn-main-updated]
+  workflow_dispatch:
+  schedule:
+    - cron: "17 * * * *"
+  pull_request:
+    paths:
+      - ".github/workflows/earn-compatibility.yml"
+      - "crates/node/tests/it/earn_zone_e2e.rs"
+
+concurrency:
+  group: earn-compatibility
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  main-compatibility:
+    name: Zones main × Earn main
+    if: github.repository == 'tempoxyz/zones'
+    runs-on: depot-ubuntu-latest-16
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout Zones
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Checkout Earn main
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: tempoxyz/earn
+          ref: main
+          path: earn
+          ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Record revisions
+        id: revisions
+        run: |
+          echo "zones=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "earn=$(git -C earn rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust
+        uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          toolchain: stable
+
+      - name: Install nextest
+        uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
+        with:
+          tool: nextest@0.9.124
+
+      - name: Install Foundry
+        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          version: nightly
+
+      - name: Build Solidity artifacts
+        id: solidity
+        run: |
+          forge build --root specs/ref-impls --no-lint
+          forge build \
+            --root earn \
+            --skip test \
+            --skip script \
+            --no-lint \
+            --out "$GITHUB_WORKSPACE/specs/ref-impls/out"
+
+      - name: Run Earn Zone integration
+        id: integration
+        run: |
+          cargo nextest run \
+            --profile ci \
+            -p zone-node \
+            --test it \
+            -E 'test(/^earn_zone_e2e::/)'
+
+      - name: Publish remediation event
+        if: >-
+          always() &&
+          (steps.solidity.outcome == 'failure' || steps.integration.outcome == 'failure') &&
+          (github.event_name == 'repository_dispatch' || github.event_name == 'schedule')
+        env:
+          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
+          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
+          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
+          ZONES_SHA: ${{ steps.revisions.outputs.zones }}
+          EARN_SHA: ${{ steps.revisions.outputs.earn }}
+        run: |
+          set -euo pipefail
+
+          install -m 0700 -d "$RUNNER_TEMP/events"
+          printf '%s' "$EVENTS_KEY" > "$RUNNER_TEMP/events/key.pem"
+          printf '%s' "$EVENTS_CERT" > "$RUNNER_TEMP/events/cert.pem"
+          payload=$(jq -cn \
+            --arg zones_sha "$ZONES_SHA" \
+            --arg earn_sha "$EARN_SHA" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            '{
+              repository: "tempoxyz/zones",
+              event: "earn_compatibility_failure",
+              data: {
+                zones_sha: $zones_sha,
+                earn_sha: $earn_sha,
+                run_url: $run_url
+              }
+            }')
+          mapfile -t events_args < <(
+            python3 - "$EVENTS_ARGS" <<'PY'
+          import shlex
+          import sys
+
+          for argument in shlex.split(sys.argv[1]):
+              print(argument)
+          PY
+          )
+          (( ${#events_args[@]} > 0 )) || {
+            echo "EVENTS_ARGS is empty" >&2
+            exit 1
+          }
+          curl --fail-with-body --silent --show-error \
+            --key "$RUNNER_TEMP/events/key.pem" \
+            --cert "$RUNNER_TEMP/events/cert.pem" \
+            "${events_args[@]}" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
