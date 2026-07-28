@@ -13,7 +13,10 @@ use crate::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
         route_events_to_generations, run_role_controller,
     },
-    rpc::{SequencerRpcContext, ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
+    rpc::{
+        SequencerRpcContext, ZoneRpc, ZoneRpcApi, public_zone_rpc_module, rpc_connection_config,
+        start_private_rpc,
+    },
 };
 use alloy_primitives::Address;
 use alloy_provider::Provider as _;
@@ -629,7 +632,17 @@ where
         let pool = ctx.node.pool().clone();
         let engine_handle = ctx.beacon_engine_handle.clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
-        let handle = self.inner.launch_add_ons(ctx).await?;
+        let public_rpc_slot = sequencer_rpc_slot.clone();
+        let portal_address = self.portal_address;
+        let handle = self
+            .inner
+            .launch_add_ons_with(ctx, move |container| {
+                container
+                    .modules
+                    .merge_http(public_zone_rpc_module(portal_address, public_rpc_slot)?)?;
+                Ok(())
+            })
+            .await?;
 
         Self::launch_private_rpc(
             self.private_rpc_config,

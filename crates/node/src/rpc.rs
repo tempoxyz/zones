@@ -23,6 +23,7 @@ use alloy_rpc_types_eth::{
 use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use futures::StreamExt;
+use jsonrpsee::{RpcModule, types::ErrorObjectOwned};
 use reth_provider::CanonStateSubscriptions;
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
@@ -63,9 +64,9 @@ use zone_rpc::{
 
 use crate::{replication::PeerTipRegistry, role::SharedRoleStatus};
 
-/// Multi-sequencer handles for the operator RPC methods.
+/// Multi-sequencer handles for the sequencer RPC methods.
 ///
-/// The private RPC launches before the role controller, so the node installs this context
+/// The RPC servers launch before the role controller, so the node installs this context
 /// through an [`std::sync::OnceLock`] indirection once the leadership machinery exists.
 #[derive(Debug)]
 pub struct SequencerRpcContext {
@@ -86,7 +87,7 @@ pub struct SequencerRpcContext {
 }
 
 impl SequencerRpcContext {
-    /// Create the operator RPC context for a multi-sequencer node.
+    /// Create the RPC context for a multi-sequencer node.
     pub(crate) fn new(
         schedule: LeadershipSchedule,
         status: SharedRoleStatus,
@@ -106,6 +107,28 @@ impl SequencerRpcContext {
             relayer,
         }
     }
+}
+
+/// Build the unauthenticated Zone extension installed on the node's public HTTP RPC.
+pub(crate) fn public_zone_rpc_module(
+    portal_address: Address,
+    sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
+) -> Result<RpcModule<()>, jsonrpsee::core::RegisterMethodError> {
+    let mut module = RpcModule::new(());
+    module.register_async_method("zone_setLeader", move |params, _, _| {
+        let sequencer = sequencer.clone();
+        async move {
+            let (target,) = params.parse::<(Address,)>()?;
+            set_leader(portal_address, sequencer.as_ref(), target)
+                .await
+                .map_err(public_rpc_error)
+        }
+    })?;
+    Ok(module)
+}
+
+fn public_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(error.code as i32, error.message, error.data)
 }
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
@@ -1016,101 +1039,87 @@ where
             })
         })
     }
+}
 
-    fn zone_set_leader(&self, target: Address, auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move {
-            let Some(context) = self.sequencer.get() else {
-                return Err(JsonRpcError::invalid_params(
-                    "zone_setLeader requires multi-sequencer mode",
-                ));
-            };
-            if self.config.zone_portal.is_zero() {
-                return Err(JsonRpcError::invalid_params(
-                    "zone_setLeader requires a nonzero portal",
-                ));
-            }
-
-            // Only the portal admin may move leadership through this endpoint. The portal
-            // additionally requires the relaying transaction to come from an active
-            // sequencer (this node's individual key).
-            let portal = ZonePortal::new(self.config.zone_portal, &context.relayer);
-            let admin = portal
-                .admin()
-                .block(BlockId::finalized())
-                .call()
-                .await
-                .map_err(internal)?;
-            if auth.caller != admin {
-                return Err(JsonRpcError {
-                    code: -32005,
-                    message: "caller is not the portal admin".to_owned(),
-                    data: None,
-                });
-            }
-
-            // The target must be a manifest member and a registered portal sequencer.
-            if context.manifest.node_by_secp256k1_address(target).is_none() {
-                return Err(JsonRpcError::invalid_params(
-                    "target is not a manifest member",
-                ));
-            }
-            let is_sequencer = portal
-                .isSequencer(target)
-                .block(BlockId::finalized())
-                .call()
-                .await
-                .map_err(internal)?;
-            if !is_sequencer {
-                return Err(JsonRpcError::invalid_params(
-                    "target is not a registered portal sequencer",
-                ));
-            }
-
-            // Read the finalized epoch for the compare-and-set guard. A duplicate fanout to
-            // the already-active leader is answered without a transaction; races remain safe
-            // because same-target calls no-op on chain and the epoch guard rejects delayed
-            // stale calls.
-            let leader_call = portal.leader().block(BlockId::finalized());
-            let epoch_call = portal.leaderEpoch().block(BlockId::finalized());
-            let (leader, expected_epoch) =
-                tokio::try_join!(leader_call.call(), epoch_call.call()).map_err(internal)?;
-            if leader == target {
-                return to_raw(&SetLeaderResponse {
-                    status: "alreadyActive".to_owned(),
-                    tx_hash: None,
-                    relayer: context.local_secp256k1_address,
-                    requested_leader: target,
-                });
-            }
-
-            // Relay with the individual key on the reserved admin-operations nonce lane and
-            // return immediately: the node's role changes only when its finalized L1
-            // subscriber observes the resulting transition (I6).
-            let pending = portal
-                .setLeader(target, expected_epoch)
-                .nonce_key(zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY)
-                .send()
-                .await
-                .map_err(internal)?;
-            let tx_hash = *pending.tx_hash();
-            metrics::counter!("zone_set_leader_submissions_total", "result" => "submitted")
-                .increment(1);
-            tracing::info!(
-                target: "zone::rpc",
-                %target,
-                %tx_hash,
-                caller = %auth.caller,
-                expected_epoch,
-                "Relayed setLeader to the ZonePortal"
-            );
-            to_raw(&SetLeaderResponse {
-                status: "submitted".to_owned(),
-                tx_hash: Some(tx_hash),
-                relayer: context.local_secp256k1_address,
-                requested_leader: target,
-            })
-        })
+async fn set_leader(
+    portal_address: Address,
+    sequencer: &std::sync::OnceLock<SequencerRpcContext>,
+    target: Address,
+) -> Result<SetLeaderResponse, JsonRpcError> {
+    let Some(context) = sequencer.get() else {
+        return Err(JsonRpcError::invalid_params(
+            "zone_setLeader requires multi-sequencer mode",
+        ));
+    };
+    if portal_address.is_zero() {
+        return Err(JsonRpcError::invalid_params(
+            "zone_setLeader requires a nonzero portal",
+        ));
     }
+
+    // The public endpoint is intentionally unauthenticated. The transaction itself is still
+    // signed by this node's individual sequencer key, and the portal enforces relayer authority.
+    let portal = ZonePortal::new(portal_address, &context.relayer);
+
+    // The target must be a manifest member and a registered portal sequencer.
+    if context.manifest.node_by_secp256k1_address(target).is_none() {
+        return Err(JsonRpcError::invalid_params(
+            "target is not a manifest member",
+        ));
+    }
+    let is_sequencer = portal
+        .isSequencer(target)
+        .block(BlockId::finalized())
+        .call()
+        .await
+        .map_err(internal)?;
+    if !is_sequencer {
+        return Err(JsonRpcError::invalid_params(
+            "target is not a registered portal sequencer",
+        ));
+    }
+
+    // Read the finalized epoch for the compare-and-set guard. A duplicate fanout to
+    // the already-active leader is answered without a transaction; races remain safe
+    // because same-target calls no-op on chain and the epoch guard rejects delayed
+    // stale calls.
+    let leader_call = portal.leader().block(BlockId::finalized());
+    let epoch_call = portal.leaderEpoch().block(BlockId::finalized());
+    let (leader, expected_epoch) =
+        tokio::try_join!(leader_call.call(), epoch_call.call()).map_err(internal)?;
+    if leader == target {
+        return Ok(SetLeaderResponse {
+            status: "alreadyActive".to_owned(),
+            tx_hash: None,
+            relayer: context.local_secp256k1_address,
+            requested_leader: target,
+        });
+    }
+
+    // Relay with the individual key on the reserved admin-operations nonce lane and
+    // return immediately: the node's role changes only when its finalized L1
+    // subscriber observes the resulting transition (I6).
+    let pending = portal
+        .setLeader(target, expected_epoch)
+        .nonce_key(zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY)
+        .send()
+        .await
+        .map_err(internal)?;
+    let tx_hash = *pending.tx_hash();
+    metrics::counter!("zone_set_leader_submissions_total", "result" => "submitted").increment(1);
+    tracing::info!(
+        target: "zone::rpc",
+        %target,
+        %tx_hash,
+        expected_epoch,
+        "Relayed setLeader to the ZonePortal"
+    );
+    Ok(SetLeaderResponse {
+        status: "submitted".to_owned(),
+        tx_hash: Some(tx_hash),
+        relayer: context.local_secp256k1_address,
+        requested_leader: target,
+    })
 }
 
 /// Clear RPC header fields that reveal private execution state from the header
@@ -1189,6 +1198,30 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn public_rpc_module_exposes_set_leader_without_auth() {
+        let module = public_zone_rpc_module(
+            Address::repeat_byte(0x11),
+            Arc::new(std::sync::OnceLock::new()),
+        )
+        .expect("public zone RPC module should register");
+
+        assert_eq!(
+            module.method_names().collect::<Vec<_>>(),
+            ["zone_setLeader"]
+        );
+
+        let error = module
+            .call::<_, SetLeaderResponse>("zone_setLeader", [Address::repeat_byte(0x22)])
+            .await
+            .expect_err("an uninitialized sequencer context should reject the call");
+        assert!(
+            error
+                .to_string()
+                .contains("zone_setLeader requires multi-sequencer mode")
+        );
+    }
 
     #[test]
     fn redact_fee_history_preserves_shape_and_public_values() {

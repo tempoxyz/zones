@@ -187,13 +187,6 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `zone_getSequencerInfo()` — returns this node's local view of the multi-sequencer
     /// topology, finalized leadership, progress, and promotion readiness.
     fn zone_get_sequencer_info(&self, auth: AuthContext) -> BoxFut<'_>;
-
-    /// `zone_setLeader(target)` — relays a leadership transfer to the ZonePortal on L1.
-    ///
-    /// Requires the authenticated caller to be the portal admin. Returns immediately with
-    /// the L1 transaction hash; the node's role never changes optimistically — only its
-    /// normal finalized L1 subscriber observing the resulting transition changes roles.
-    fn zone_set_leader(&self, target: Address, auth: AuthContext) -> BoxFut<'_>;
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -359,17 +352,6 @@ pub async fn dispatch(
             "zone_getSequencerInfo",
             api.zone_get_sequencer_info(auth.clone()).await,
         ),
-        "zone_setLeader" => {
-            let (target,) = match parse_params::<(Address,)>(raw, &id, "expected [leaderAddress]") {
-                Ok(v) => v,
-                Err(resp) => return resp,
-            };
-            api_result(
-                id,
-                "zone_setLeader",
-                api.zone_set_leader(target, auth.clone()).await,
-            )
-        }
         _ => {
             // Method is whitelisted but not yet implemented via direct API
             JsonRpcResponse::error(
@@ -820,15 +802,6 @@ mod tests {
         stub!(uninstall_filter, _id: FilterId, _auth: AuthContext);
         stub!(zone_get_sequencer_info, _auth: AuthContext);
 
-        fn zone_set_leader(&self, target: Address, _auth: AuthContext) -> BoxFut<'_> {
-            Box::pin(async move {
-                to_raw(&json!({
-                    "status": "submitted",
-                    "requestedLeader": format!("{target:#x}"),
-                }))
-            })
-        }
-
         fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
             Box::pin(async move {
                 to_raw(&json!({
@@ -880,16 +853,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn zone_leadership_methods_are_classified_and_dispatched() {
+    async fn private_rpc_excludes_set_leader() {
         use crate::types::{MethodTier, classify_method};
 
-        // The operator surface deliberately lives outside the wildcard-rejected admin_*
-        // namespace; the mutation is admin-authorized inside the handler instead.
         assert_eq!(
             classify_method("zone_getSequencerInfo"),
             Some(MethodTier::Public)
         );
-        assert_eq!(classify_method("zone_setLeader"), Some(MethodTier::Public));
+        assert_eq!(classify_method("zone_setLeader"), None);
         assert_eq!(
             classify_method("admin_setLeader"),
             Some(MethodTier::Restricted)
@@ -900,26 +871,8 @@ mod tests {
         let rejected = dispatch(&request("admin_setLeader", json!([])), &auth(), &api).await;
         assert_eq!(rejected.error.unwrap().code, -32005);
 
-        // zone_setLeader parses [address] params and routes to the API.
-        let target = Address::repeat_byte(0x22);
-        let resp = dispatch(
-            &request("zone_setLeader", json!([format!("{target:#x}")])),
-            &auth(),
-            &api,
-        )
-        .await;
-        assert!(resp.error.is_none(), "{:?}", resp.error);
-        let body: serde_json::Value =
-            serde_json::from_str(resp.result.as_ref().unwrap().get()).unwrap();
-        assert_eq!(body["status"], "submitted");
-        assert_eq!(
-            body["requestedLeader"].as_str().unwrap(),
-            format!("{target:#x}")
-        );
-
-        // Malformed params are rejected with -32602.
-        let malformed = dispatch(&request("zone_setLeader", json!([42])), &auth(), &api).await;
-        assert_eq!(malformed.error.unwrap().code, -32602);
+        let excluded = dispatch(&request("zone_setLeader", json!([])), &auth(), &api).await;
+        assert_eq!(excluded.error.unwrap().code, -32601);
     }
 
     #[tokio::test]

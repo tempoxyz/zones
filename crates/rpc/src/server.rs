@@ -398,7 +398,6 @@ mod tests {
         stub!(zone_get_zone_info, _c: crate::auth::AuthContext);
         stub!(zone_get_encryption_key, _c: crate::auth::AuthContext);
         stub!(zone_get_sequencer_info, _c: crate::auth::AuthContext);
-        stub!(zone_set_leader, _a: Address, _c: crate::auth::AuthContext);
     }
 
     fn test_config() -> PrivateRpcConfig {

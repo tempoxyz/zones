@@ -353,9 +353,6 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "zone_getAuthorizationTokenInfo"
         | "zone_getZoneInfo"
         | "zone_getSequencerInfo"
-        // Authenticated operator mutation: the handler additionally requires the caller to
-        // be the portal admin. Deliberately outside the wildcard-rejected admin_* namespace.
-        | "zone_setLeader"
         | "zone_getEncryptionKey" => Some(MethodTier::Public),
 
         // Fetch-then-check: public but redacted based on caller identity

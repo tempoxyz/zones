@@ -13501,6 +13501,7 @@ dependencies = [
  "const-hex",
  "eyre",
  "futures",
+ "jsonrpsee",
  "k256",
  "metrics",
  "p256",

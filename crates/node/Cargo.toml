@@ -74,6 +74,7 @@ clap = { workspace = true, optional = true }
 eyre.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
+jsonrpsee.workspace = true
 k256.workspace = true
 metrics.workspace = true
 serde_json.workspace = true
