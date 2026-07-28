@@ -50,6 +50,9 @@ const MAX_RETRIES: u32 = 3;
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// Backoff before rebuilding the monitor after a start or run failure.
+const RESTART_BACKOFF: Duration = Duration::from_secs(5);
+
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
@@ -815,12 +818,13 @@ pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
                 Ok(monitor) => monitor,
                 Err(e) => {
                     error!(error = %e, "Zone monitor failed to start, retrying in 5s");
-                    tokio::select! {
-                        () = shutdown.cancelled() => {
-                            info!("Zone monitor stopped before start");
-                            return;
-                        }
-                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    if shutdown
+                        .run_until_cancelled(tokio::time::sleep(RESTART_BACKOFF))
+                        .await
+                        .is_none()
+                    {
+                        info!("Zone monitor stopped before start");
+                        return;
                     }
                     continue;
                 }
@@ -836,12 +840,13 @@ pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
                         error = %e,
                         "Zone monitor failed; rebuilding from the portal anchor in 5s"
                     );
-                    tokio::select! {
-                        () = shutdown.cancelled() => {
-                            info!("Zone monitor stopped");
-                            return;
-                        }
-                        () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                    if shutdown
+                        .run_until_cancelled(tokio::time::sleep(RESTART_BACKOFF))
+                        .await
+                        .is_none()
+                    {
+                        info!("Zone monitor stopped");
+                        return;
                     }
                 }
             }

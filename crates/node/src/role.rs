@@ -222,20 +222,39 @@ enum DesiredRole {
 }
 
 impl DesiredRole {
-    const fn kind(self) -> GenerationKind {
+    /// Stable name for status, metric labels, and logs.
+    const fn name(self) -> &'static str {
         match self {
-            Self::Leader { .. } => GenerationKind::Leader,
-            Self::Follower { .. } => GenerationKind::Follower,
-            Self::Fenced => GenerationKind::Fenced,
+            Self::Leader { .. } => "leader",
+            Self::Follower { .. } => "follower",
+            Self::Fenced => "fenced",
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenerationKind {
-    Leader,
-    Follower,
-    Fenced,
+    /// Value for the `zone_leadership_role` gauge.
+    const fn gauge(self) -> f64 {
+        match self {
+            Self::Leader { .. } => 2.0,
+            Self::Follower { .. } => 1.0,
+            Self::Fenced => 0.0,
+        }
+    }
+
+    /// Epoch of the governing record, when one governs.
+    const fn epoch(self) -> Option<u64> {
+        match self {
+            Self::Leader { epoch, .. } | Self::Follower { epoch } => Some(epoch),
+            Self::Fenced => None,
+        }
+    }
+
+    /// Whether two roles are the same variant, ignoring the epoch.
+    ///
+    /// Generations are switched per variant, not per epoch: an epoch bump that leaves this
+    /// node in the same role must not tear down and rebuild its task graph.
+    fn same_variant(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 }
 
 /// Outcome of one generation task, tagged for supervision decisions.
@@ -296,7 +315,7 @@ async fn supervise_sequencer_tasks(
 
 struct RunningGeneration {
     id: u64,
-    kind: GenerationKind,
+    role: DesiredRole,
     token: CancellationToken,
     tasks: JoinSet<TaskEnd>,
 }
@@ -328,11 +347,14 @@ impl RunningGeneration {
                 }
             }
         }
-        info!(target: "zone::role", generation = self.id, kind = ?self.kind, "Role generation stopped");
+        info!(target: "zone::role", generation = self.id, role = self.role.name(), "Role generation stopped");
     }
 }
 
 /// Derive the desired role for the next anchor from local canonical state and the schedule.
+///
+/// `DesiredRole::Leader` carries the next anchor it was derived from, so the promotion
+/// barrier never re-reads the checkpoint under a second, possibly divergent, error policy.
 fn desired_role<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -488,10 +510,11 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
         // Only forced recovery has an additional promotion barrier. Normal transitions are
         // complete when the local next anchor is assigned to this node.
-        let mut ready_for_promotion = true;
         let mut promotion_reasons = Vec::new();
         if let DesiredRole::Leader { epoch, next_anchor } = desired
-            && current.as_ref().map(|generation| generation.kind) != Some(GenerationKind::Leader)
+            && !current
+                .as_ref()
+                .is_some_and(|generation| generation.role.same_variant(desired))
         {
             match promotion_readiness(
                 &context.provider,
@@ -503,7 +526,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     info!(target: "zone::role", epoch, next_anchor, "Promotion barrier satisfied");
                 }
                 Readiness::Conflicted(detail) => {
-                    ready_for_promotion = false;
                     error!(
                         target: "zone::role",
                         epoch,
@@ -515,8 +537,10 @@ pub(crate) async fn run_role_controller<P, Pool>(
                 }
             }
         }
-        let switch = current.as_ref().map(|generation| generation.kind) != Some(desired.kind());
-        if switch {
+        if !current
+            .as_ref()
+            .is_some_and(|generation| generation.role.same_variant(desired))
+        {
             if let Some(generation) = current.take() {
                 generation.stop(&sinks).await;
             }
@@ -531,69 +555,49 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     // complete desired generation after the decision backoff.
                     sinks.clear();
                     retry_decision = true;
-                    ready_for_promotion = false;
                     promotion_reasons = vec![format!(
-                        "failed to start {:?} generation: {err:#}",
-                        desired.kind()
+                        "failed to start {} generation: {err:#}",
+                        desired.name()
                     )];
                     error!(
                         target: "zone::role",
                         generation = generation_id,
-                        kind = ?desired.kind(),
+                        role = desired.name(),
                         %err,
                         "Role generation failed to start; fencing before retry"
                     );
                 }
             }
 
-            let active_kind = current
+            let active_role = current
                 .as_ref()
-                .map(|generation| generation.kind)
-                .unwrap_or(GenerationKind::Fenced);
+                .map(|generation| generation.role)
+                .unwrap_or(DesiredRole::Fenced);
             metrics::counter!(
                 "zone_leadership_transitions_total",
-                "to" => match active_kind {
-                    GenerationKind::Leader => "leader",
-                    GenerationKind::Follower => "follower",
-                    GenerationKind::Fenced => "fenced",
-                },
+                "to" => active_role.name(),
             )
             .increment(1);
-            metrics::gauge!("zone_leadership_role").set(match active_kind {
-                GenerationKind::Leader => 2.0,
-                GenerationKind::Follower => 1.0,
-                GenerationKind::Fenced => 0.0,
-            });
-            if active_kind == desired.kind()
-                && let Some(epoch) = match desired {
-                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
-                        Some(epoch)
-                    }
-                    DesiredRole::Fenced => None,
-                }
+            metrics::gauge!("zone_leadership_role").set(active_role.gauge());
+            if active_role.same_variant(desired)
+                && let Some(epoch) = desired.epoch()
             {
                 metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
             }
         }
 
-        let active_kind = current
+        let active_role = current
             .as_ref()
-            .map(|generation| generation.kind)
-            .unwrap_or(GenerationKind::Fenced);
+            .map(|generation| generation.role)
+            .unwrap_or(DesiredRole::Fenced);
+        // Readiness is exactly "nothing is blocking promotion", so it is derived rather than
+        // tracked alongside the reasons it would have to stay consistent with.
+        let ready_for_promotion = promotion_reasons.is_empty();
         {
             let mut status = context.status.lock().expect("poisoned");
-            status.role = match active_kind {
-                GenerationKind::Leader => "leader",
-                GenerationKind::Follower => "follower",
-                GenerationKind::Fenced => "fenced",
-            };
-            status.epoch = if active_kind == desired.kind() {
-                match desired {
-                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
-                        Some(epoch)
-                    }
-                    DesiredRole::Fenced => None,
-                }
+            status.role = active_role.name();
+            status.epoch = if active_role.same_variant(desired) {
+                desired.epoch()
             } else {
                 None
             };
@@ -606,7 +610,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
         } else {
             0.0
         });
-
         // A fenced generation has no tasks; an empty JoinSet's join_next() is immediately
         // ready with None, so polling it would spin this loop hot. Stay pending instead and
         // wake only on an explicit change or a retry for a failed/pending decision.
@@ -872,7 +875,7 @@ where
 
     Ok(RunningGeneration {
         id,
-        kind: desired.kind(),
+        role: desired,
         token,
         tasks,
     })

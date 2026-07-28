@@ -370,6 +370,9 @@ contract ZonePortal is IZonePortal {
         _setLeader(newLeader);
     }
 
+    /// @dev Single write path for a leadership transition: assign, bump the fencing epoch,
+    ///      stamp the activation block, emit. `crates/l1` decodes `LeaderUpdated` to drive
+    ///      node roles, so every transition must go through here to stay consistent.
     function _setLeader(address newLeader) private {
         address previous = leader;
         leader = newLeader;

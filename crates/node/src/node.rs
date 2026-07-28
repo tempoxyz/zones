@@ -177,7 +177,7 @@ pub struct ZoneSequencerAddOnsConfig {
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
     pub l1_transaction_signer: Option<PrivateKeySigner>,
-    /// Zone ID for chain ID validation.
+    /// Zone ID used by sequencer encryption.
     pub zone_id: u32,
     /// Fallback interval for reconciling the canonical Zone head.
     pub zone_poll_interval: Duration,
@@ -194,7 +194,7 @@ pub struct ZoneSequencerAddOnsConfig {
 pub struct ZonePrivateRpcConfig {
     /// Port for RPC traffic.
     pub private_rpc_port: u16,
-    /// Zone ID for chain ID validation and private RPC auth.
+    /// Zone ID used by private RPC authentication.
     pub zone_id: u32,
     /// Max duration for private RPC auth.
     pub max_auth_token_validity: Duration,
@@ -757,7 +757,6 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
-                    chain_id,
                     attestation.store.clone(),
                 )?),
                 None => None,
@@ -806,7 +805,6 @@ where
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
-                chain_id,
                 None,
             )
             .await?;
@@ -889,18 +887,21 @@ async fn seed_leadership_schedule(
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    let leader = portal.leader().block(block_id).call().await?;
+    // All three describe the same transition at the same block and have no data dependency
+    // on each other, so they go out as one batch rather than three serial round trips on the
+    // startup path.
+    let leader_call = portal.leader().block(block_id);
+    let epoch_call = portal.leaderEpoch().block(block_id);
+    let activation_call = portal.leaderActivationTempoBlock().block(block_id);
+    let (leader, epoch, activation) = tokio::try_join!(
+        leader_call.call(),
+        epoch_call.call(),
+        activation_call.call(),
+    )?;
     eyre::ensure!(
         !leader.is_zero(),
         "portal {portal_address} has no leader at finalized L1 snapshot block {snapshot_anchor}"
     );
-
-    let epoch = portal.leaderEpoch().block(block_id).call().await?;
-    let activation = portal
-        .leaderActivationTempoBlock()
-        .block(block_id)
-        .call()
-        .await?;
     let node = manifest.node_by_secp256k1_address(leader).ok_or_else(|| {
         eyre::eyre!(
             "finalized portal leader {leader} (epoch {epoch}) does not map to any manifest \
@@ -999,20 +1000,8 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        chain_id: u64,
         attestation_store: Option<AttestationStore>,
     ) -> eyre::Result<LeaderSequencerDeps> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
@@ -1146,18 +1135,6 @@ where
         portal_address: Address,
         chain_id: u64,
     ) -> eyre::Result<()> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
-
         let eth_handlers = handle.eth_handlers().clone();
         let zone_rpc_url = handle
             .rpc_server_handles
@@ -1193,21 +1170,8 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         sequencer_addr: Address,
-        chain_id: u64,
         attestation_store: Option<AttestationStore>,
     ) -> eyre::Result<()> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
-
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,

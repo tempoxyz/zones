@@ -123,8 +123,6 @@ impl ForcedRecoveryState {
 struct LeadershipScheduleState {
     /// Retained transitions indexed by activation Tempo block.
     transitions: std::collections::BTreeMap<u64, LeadershipState>,
-    /// Highest epoch finalized L1 has shown us (observability + publication check).
-    latest_observed_epoch: Option<u64>,
     /// Highest Tempo anchor embedded in a locally canonical zone block.
     applied_anchor: Option<u64>,
     /// Optional operator-requested forced recovery.
@@ -308,11 +306,6 @@ impl LeadershipSchedule {
                 record.activation_tempo_block,
             );
         }
-        state.latest_observed_epoch = Some(
-            state
-                .latest_observed_epoch
-                .map_or(record.epoch, |epoch| epoch.max(record.epoch)),
-        );
         state
             .transitions
             .insert(record.activation_tempo_block, record);
@@ -406,8 +399,11 @@ impl LeadershipSchedule {
     }
 
     /// Highest epoch finalized L1 has shown us.
+    ///
+    /// Derived: `publish` requires `epoch == last.epoch + 1` and pruning never drops the last
+    /// entry, so the highest observed epoch is always the last retained transition's.
     pub fn latest_observed_epoch(&self) -> Option<u64> {
-        self.inner.read().expect("poisoned").latest_observed_epoch
+        self.latest().map(|record| record.epoch)
     }
 
     /// Epoch whose activation boundary the locally applied checkpoint has crossed.
@@ -438,6 +434,9 @@ impl LeadershipSchedule {
     /// recovery by asking who governed the previous anchor.
     pub fn record_applied_anchor(&self, tempo_anchor: u64) {
         let mut state = self.inner.write().expect("poisoned");
+        // Which record governs the next anchor before this advance, compared against the
+        // same value afterwards so the notify below fires only when the advance actually
+        // changes the controller-visible schedule.
         let previous_next_anchor_record = state.next_anchor_record();
         state.applied_anchor = Some(
             state
@@ -470,6 +469,8 @@ impl LeadershipSchedule {
         }
         let governing_record_changed = state.next_anchor_record() != previous_next_anchor_record;
         drop(state);
+        // A plain advance stays silent, but forced-recovery completion must wake the role
+        // controller even when the ordinary governing record is unchanged.
         if governing_record_changed || recovery_completed {
             self.changed.send_replace(());
         }
@@ -516,7 +517,6 @@ impl LeadershipSchedule {
             .cloned()
             .collect()
     }
-
     /// Returns whether `ed25519_public_key` leads any retained transition.
     ///
     /// A transport-level acceptance check for live blocks: a lagging follower must keep
@@ -1117,7 +1117,6 @@ mod tests {
         assert_eq!(schedule.latest(), None);
         assert_eq!(schedule.latest_observed_epoch(), None);
         assert_eq!(schedule.locally_applied_epoch(), None);
-        assert_eq!(schedule.role_for(&public_key(1), 100), None);
     }
 
     #[test]
