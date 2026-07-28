@@ -14,13 +14,17 @@ workspace = true
 # tempo
 tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
+tempo-primitives.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 
 # reth
+reth-chain-state.workspace = true
 reth-metrics.workspace = true
+reth-storage-api.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
@@ -44,6 +48,6 @@ tracing.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+reth-provider = { workspace = true, features = ["test-utils"] }
 serde_json.workspace = true
-tempo-primitives.workspace = true
 tokio-tungstenite.workspace = true

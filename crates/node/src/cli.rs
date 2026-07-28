@@ -189,8 +189,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 sequencer_signer,
                 l1_transaction_signer,
                 zone_id: args.zone_id,
-                zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-                batch_interval_blocks: args.zone_batch_interval_blocks,
                 batch_anchor_config: BatchAnchorConfig::default(),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
                 withdrawal_batch_limits: WithdrawalBatchLimits {
@@ -343,14 +341,6 @@ pub struct ZoneArgs {
         requires = "sequencer_manifest"
     )]
     pub sequencer_role: Option<Role>,
-
-    /// How often (in seconds) the zone monitor polls for new L2 blocks.
-    #[arg(
-        long = "zone.poll-interval-secs",
-        env = "ZONE_POLL_INTERVAL_SECS",
-        default_value_t = 1
-    )]
-    pub zone_poll_interval_secs: u64,
 
     /// Number of zone blocks between withdrawal batch boundaries.
     ///

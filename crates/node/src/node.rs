@@ -60,9 +60,7 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -157,10 +155,6 @@ pub struct ZoneSequencerAddOnsConfig {
     pub l1_transaction_signer: Option<PrivateKeySigner>,
     /// Zone ID for chain ID validation.
     pub zone_id: u32,
-    /// How often the zone monitor polls for new L2 blocks.
-    pub zone_poll_interval: Duration,
-    /// Number of zone blocks between withdrawal batch boundaries / L1 submissions.
-    pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
@@ -555,6 +549,7 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let zone_provider = ctx.node.provider().clone();
         let handle = self.inner.launch_add_ons(ctx).await?;
 
         Self::launch_private_rpc(
@@ -573,6 +568,7 @@ where
             Self::launch_sequencer_tasks(
                 config,
                 &handle,
+                zone_provider,
                 &task_executor,
                 self.l1_config.l1_rpc_url,
                 self.l1_config.portal_address,
@@ -866,6 +862,7 @@ where
     async fn launch_sequencer_tasks(
         config: ZoneSequencerAddOnsConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
+        zone_provider: N::Provider,
         task_executor: &reth_tasks::TaskExecutor,
         l1_rpc_url: String,
         portal_address: Address,
@@ -886,12 +883,6 @@ where
             }
         }
 
-        let zone_rpc_url = handle
-            .rpc_server_handles
-            .rpc
-            .http_url()
-            .expect("HTTP RPC server must be enabled for sequencer mode");
-
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -901,17 +892,14 @@ where
             withdrawal_batch_limits: config.withdrawal_batch_limits,
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
-            tempo_state_address: TEMPO_STATE_ADDRESS,
-            zone_rpc_url,
-            zone_poll_interval: config.zone_poll_interval,
-            batch_interval_blocks: config.batch_interval_blocks,
             batch_anchor_config: config.batch_anchor_config,
             attestation_store,
         };
         let l1_transaction_signer = config
             .l1_transaction_signer
             .unwrap_or(config.sequencer_signer);
-        let seq_handle = spawn_zone_sequencer(sequencer_config, l1_transaction_signer).await;
+        let seq_handle =
+            spawn_zone_sequencer(sequencer_config, l1_transaction_signer, zone_provider).await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
         // Critical task — node shuts down if either exits.

@@ -13699,6 +13699,7 @@ name = "zone-sequencer"
 version = "0.1.0"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
@@ -13715,7 +13716,10 @@ dependencies = [
  "metrics",
  "parking_lot",
  "proptest",
+ "reth-chain-state",
  "reth-metrics",
+ "reth-provider",
+ "reth-storage-api",
  "schnellru",
  "serde_json",
  "tempo-alloy",
