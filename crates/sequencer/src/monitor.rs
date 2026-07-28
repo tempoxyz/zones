@@ -50,9 +50,6 @@ const MAX_RETRIES: u32 = 3;
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 
-/// Fallback reconciliation interval for lagged notifications and retryable provider failures.
-const FALLBACK_RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
-
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
@@ -60,6 +57,8 @@ pub struct ZoneMonitorConfig {
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
     pub inbox_address: Address,
+    /// Fallback interval for reconciling the canonical head when no notification arrives.
+    pub poll_interval: Duration,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
@@ -73,6 +72,10 @@ pub struct ZoneMonitorConfig {
 ///
 /// Local state only advances after a successful L1 submission. On repeated
 /// failures the monitor resyncs from the portal's on-chain `blockHash()`.
+///
+/// Canonical consistency is strict: a non-zero portal anchor must resolve to a canonical local
+/// block, and a reorg terminates the current monitor instance so it can be rebuilt from the portal
+/// anchor. This deliberately fails closed instead of silently replaying from genesis.
 pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     config: ZoneMonitorConfig,
     /// Metrics for zone observation and L1 batch submission.
@@ -217,7 +220,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
         // Subscribe before reading the head so a block imported during startup cannot be missed.
         let mut canonical = self.provider.canonical_state_stream();
-        let mut fallback = tokio::time::interval(FALLBACK_RECONCILE_INTERVAL);
+        let mut fallback = tokio::time::interval(self.config.poll_interval);
 
         loop {
             self.process_available_blocks().await;
@@ -696,6 +699,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
     }
 
+    /// Resolve the portal anchor against the local canonical chain.
+    ///
+    /// A missing non-zero anchor is a consistency error. Treating it as genesis could make the
+    /// sequencer construct a transition from state that the portal has already superseded.
     fn resolve_zone_block_number(provider: &P, zone_block_hash: B256) -> Result<u64> {
         if zone_block_hash.is_zero() {
             return Ok(0);
@@ -758,8 +765,8 @@ pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     repair_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut monitor = loop {
-            match ZoneMonitor::new(
+        loop {
+            let mut monitor = match ZoneMonitor::new(
                 config.clone(),
                 zone_provider.clone(),
                 l1_provider.clone(),
@@ -770,17 +777,19 @@ pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
             )
             .await
             {
-                Ok(monitor) => break monitor,
+                Ok(monitor) => monitor,
                 Err(e) => {
                     error!(error = %e, "Zone monitor failed to start, retrying in 5s");
                     tokio::time::sleep(Duration::from_secs(5)).await;
+                    continue;
                 }
-            }
-        };
+            };
 
-        loop {
             if let Err(e) = monitor.run().await {
-                error!(error = %e, "Zone monitor failed, restarting in 5s");
+                error!(
+                    error = %e,
+                    "Zone monitor failed; rebuilding from the portal anchor in 5s"
+                );
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
@@ -886,6 +895,7 @@ mod tests {
         let config = ZoneMonitorConfig {
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
+            poll_interval: Duration::from_secs(1),
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
             attestation_store: None,
@@ -915,6 +925,7 @@ mod tests {
         let config = ZoneMonitorConfig {
             outbox_address: Address::repeat_byte(0x22),
             inbox_address: Address::repeat_byte(0x33),
+            poll_interval: Duration::from_secs(1),
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
             attestation_store: None,

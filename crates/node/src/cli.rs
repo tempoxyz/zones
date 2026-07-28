@@ -189,6 +189,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 sequencer_signer,
                 l1_transaction_signer,
                 zone_id: args.zone_id,
+                zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_anchor_config: BatchAnchorConfig::default(),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
                 withdrawal_batch_limits: WithdrawalBatchLimits {
@@ -342,11 +343,18 @@ pub struct ZoneArgs {
     )]
     pub sequencer_role: Option<Role>,
 
+    /// How often (in seconds) the zone monitor reconciles with the canonical head if no
+    /// canonical-state notification triggers it first.
+    #[arg(
+        long = "zone.poll-interval-secs",
+        env = "ZONE_POLL_INTERVAL_SECS",
+        default_value_t = 1
+    )]
+    pub zone_poll_interval_secs: u64,
+
     /// Number of zone blocks between withdrawal batch boundaries.
     ///
-    /// Also used by the sequencer monitor to decide when enough chain progress has
-    /// occurred to look for empty finalized batches to submit to L1. Default 120 is
-    /// ~1 minute at Tempo's expected 500 ms block time.
+    /// Default 120 is ~1 minute at Tempo's expected 500 ms block time.
     #[arg(
         long = "zone.batch-interval-blocks",
         env = "ZONE_BATCH_INTERVAL_BLOCKS",
@@ -668,6 +676,28 @@ mod tests {
         .unwrap();
         assert!(parsed.zone.enable_sequencer);
         assert!(parsed.zone.sequencer_manifest.is_none());
+    }
+
+    #[test]
+    fn zone_poll_interval_keeps_one_second_default_and_accepts_override() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer-key",
+            "0x01",
+        ];
+
+        let default = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert_eq!(default.zone.zone_poll_interval_secs, 1);
+
+        let overridden = ZoneArgsParser::try_parse_from(
+            common.into_iter().chain(["--zone.poll-interval-secs", "3"]),
+        )
+        .unwrap();
+        assert_eq!(overridden.zone.zone_poll_interval_secs, 3);
     }
 
     #[test]

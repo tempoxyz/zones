@@ -155,6 +155,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub l1_transaction_signer: Option<PrivateKeySigner>,
     /// Zone ID for chain ID validation.
     pub zone_id: u32,
+    /// Fallback interval for reconciling the canonical Zone head.
+    pub zone_poll_interval: Duration,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
@@ -888,6 +890,7 @@ where
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
+            zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
             withdrawal_batch_limits: config.withdrawal_batch_limits,
             outbox_address: ZONE_OUTBOX_ADDRESS,

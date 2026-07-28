@@ -616,6 +616,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `--sequencer-key-file` | (optional) | File or FIFO containing the sequencer private key; avoids exposing it in process arguments |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
+| `--zone.poll-interval-secs` | 1 | Fallback interval for reconciling the canonical Zone head when no native notification arrives |
 | `--withdrawal-poll-interval-secs` | 5 | How often (seconds) the withdrawal processor polls the L1 queue |
 | `--withdrawal-max-batch-gas` | 10000000 | Maximum planned gas for one `processWithdrawals` transaction (up to 20000000); an oversized FIFO head is still sent alone |
 | `--withdrawal-max-in-flight-batches` | 8 | Maximum ordered withdrawal transactions kept concurrently in flight |

@@ -89,6 +89,10 @@ pub struct ZoneSequencerConfig {
     pub l1_rpc_url: String,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
+    /// Fallback interval for reconciling the canonical Zone head.
+    ///
+    /// Canonical-state notifications normally trigger reconciliation immediately.
+    pub zone_poll_interval: Duration,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
@@ -155,6 +159,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     let monitor_config = ZoneMonitorConfig {
         outbox_address: config.outbox_address,
         inbox_address: config.inbox_address,
+        poll_interval: config.zone_poll_interval,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
         attestation_store: config.attestation_store,

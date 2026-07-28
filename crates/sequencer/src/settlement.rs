@@ -1571,21 +1571,6 @@ fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
     Ok(finalized_batches)
 }
 
-/// Lazily split an inclusive block range into bounded query windows.
-#[cfg(test)]
-pub(crate) fn log_query_ranges(from: u64, to: u64) -> impl Iterator<Item = (u64, u64)> {
-    std::iter::successors(Some(from), move |&start| {
-        let end = start.saturating_add(LOG_QUERY_BLOCK_CHUNK - 1).min(to);
-        if end >= to { None } else { end.checked_add(1) }
-    })
-    .map(move |start| {
-        (
-            start,
-            start.saturating_add(LOG_QUERY_BLOCK_CHUNK - 1).min(to),
-        )
-    })
-}
-
 fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
     hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1).max(floor)
 }
@@ -2169,23 +2154,6 @@ mod tests {
         let withdrawals = vec![w0, w1, w2];
         let hash = abi::Withdrawal::queue_hash(&withdrawals[2..]);
         assert_eq!(find_processed_offset(&withdrawals, hash), Some(2));
-    }
-
-    #[test]
-    fn log_query_ranges_chunk_large_ranges() {
-        let end = 100 + (LOG_QUERY_BLOCK_CHUNK * 2) + 234;
-        let ranges: Vec<_> = log_query_ranges(100, end).collect();
-
-        assert_eq!(ranges.len(), 3);
-        assert_eq!(ranges[0], (100, 100 + LOG_QUERY_BLOCK_CHUNK - 1));
-        assert_eq!(
-            ranges[1],
-            (
-                100 + LOG_QUERY_BLOCK_CHUNK,
-                100 + (LOG_QUERY_BLOCK_CHUNK * 2) - 1
-            )
-        );
-        assert_eq!(ranges[2], (100 + (LOG_QUERY_BLOCK_CHUNK * 2), end));
     }
 
     #[test]
