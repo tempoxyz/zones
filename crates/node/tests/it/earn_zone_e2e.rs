@@ -733,16 +733,6 @@ impl EarnZoneFixture {
         })
     }
 
-    async fn assert_router_empty(&self) -> eyre::Result<()> {
-        for token in [self.vault_asset, self.alternate_asset, self.earn_share] {
-            eyre::ensure!(
-                self.l1.balance_of(token, self.router).await? == U256::ZERO,
-                "SingleZoneEarnRouter retained token {token}"
-            );
-        }
-        Ok(())
-    }
-
     async fn assert_private_return(
         &self,
         token: Address,
