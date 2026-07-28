@@ -1454,7 +1454,7 @@ fn map_encrypted_payload(payload: EncryptedDepositPayload) -> EarnEncryptedDepos
 fn legacy_delivery(portal: Address, refund_recipient: Address) -> LegacyEarnZoneDelivery {
     LegacyEarnZoneDelivery {
         portal,
-        keyIndex: 0,
+        keyIndex: U256::ZERO,
         encrypted: EarnEncryptedDepositPayload {
             ephemeralPubkeyX: B256::ZERO,
             ephemeralPubkeyYParity: 0,
