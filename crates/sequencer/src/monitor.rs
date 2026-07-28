@@ -67,6 +67,29 @@ pub struct ZoneMonitorConfig {
     pub attestation_store: Option<AttestationStore>,
 }
 
+/// Withdrawal state shared between the zone monitor and withdrawal processor.
+#[derive(Clone)]
+pub struct ZoneMonitorSharedState {
+    withdrawal_store: SharedWithdrawalStore,
+    withdrawal_notify: Arc<Notify>,
+    repair_notify: Arc<Notify>,
+}
+
+impl ZoneMonitorSharedState {
+    /// Create the shared withdrawal state used by the zone monitor.
+    pub fn new(
+        withdrawal_store: SharedWithdrawalStore,
+        withdrawal_notify: Arc<Notify>,
+        repair_notify: Arc<Notify>,
+    ) -> Self {
+        Self {
+            withdrawal_store,
+            withdrawal_notify,
+            repair_notify,
+        }
+    }
+}
+
 /// Monitors the Zone L2 chain for new finalized batch boundaries and submits
 /// them to the ZonePortal on L1.
 ///
@@ -763,11 +786,15 @@ pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
     signer: PrivateKeySigner,
-    withdrawal_store: SharedWithdrawalStore,
-    withdrawal_notify: Arc<Notify>,
-    repair_notify: Arc<Notify>,
+    shared_state: ZoneMonitorSharedState,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    let ZoneMonitorSharedState {
+        withdrawal_store,
+        withdrawal_notify,
+        repair_notify,
+    } = shared_state;
+
     tokio::spawn(async move {
         loop {
             if shutdown.is_cancelled() {

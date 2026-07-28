@@ -30,7 +30,7 @@ pub mod withdrawals;
 
 pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
-pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
+pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
@@ -177,14 +177,17 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         withdrawal_repair_notify.clone(),
         shutdown.clone(),
     );
+    let monitor_shared_state = ZoneMonitorSharedState::new(
+        withdrawal_store,
+        withdrawal_notify,
+        withdrawal_repair_notify,
+    );
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
         zone_provider,
         l1_provider,
         signer,
-        withdrawal_store,
-        withdrawal_notify,
-        withdrawal_repair_notify,
+        monitor_shared_state,
         shutdown,
     );
 
