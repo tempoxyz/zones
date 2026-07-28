@@ -47,8 +47,8 @@ use crate::{
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
 };
 
-/// How often the controller re-derives the desired role when nothing else wakes it.
-const ROLE_RECHECK_INTERVAL: Duration = Duration::from_millis(500);
+/// Backoff after a transient role or promotion-readiness derivation failure.
+const ROLE_DECISION_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// How long a stopping generation may take before its remaining tasks are aborted.
 const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 /// Backoff after a generation task fails unexpectedly.
@@ -211,6 +211,8 @@ pub(crate) async fn route_events_to_generations(
 enum DesiredRole {
     Leader {
         epoch: u64,
+        /// The next anchor, read while deriving this role decision.
+        next_anchor: u64,
     },
     Follower {
         epoch: u64,
@@ -288,28 +290,22 @@ fn desired_role<P>(
     schedule: &LeadershipSchedule,
     local: &P2pPeerId,
     can_lead: bool,
-) -> DesiredRole
+) -> eyre::Result<DesiredRole>
 where
     P: StateProviderFactory,
 {
-    let checkpoint = match provider
+    let checkpoint = provider
         .latest()
         .map_err(eyre::Report::from)
-        .and_then(|state| state.tempo_block_number().map_err(eyre::Report::from))
-    {
-        Ok(checkpoint) => checkpoint,
-        Err(err) => {
-            error!(target: "zone::role", %err, "Failed reading the local Tempo checkpoint; fencing");
-            return DesiredRole::Fenced;
-        }
-    };
+        .and_then(|state| state.tempo_block_number().map_err(eyre::Report::from))?;
     let next_anchor = checkpoint.saturating_add(1);
-    match schedule.leader_for(next_anchor) {
+    Ok(match schedule.leader_for(next_anchor) {
         None => DesiredRole::Fenced,
         Some(record) if &record.leader == local => {
             if can_lead {
                 DesiredRole::Leader {
                     epoch: record.epoch,
+                    next_anchor,
                 }
             } else {
                 error!(
@@ -324,7 +320,7 @@ where
         Some(record) => DesiredRole::Follower {
             epoch: record.epoch,
         },
-    }
+    })
 }
 
 /// Promotion-readiness verdict from hash-carrying peer tip evidence.
@@ -434,10 +430,10 @@ where
 /// `sinks` must be the same [`EventSinks`] handed to [`route_events_to_generations`] — the
 /// router is long-lived while generations come and go.
 ///
-/// Subscribes to the schedule notifier plus generation task completion, re-derives the
-/// desired role by the next-anchor rule, and switches role generations. Observation alone
-/// never switches roles — the trigger is consumption progress reaching the boundary, which
-/// this loop tracks by re-reading the local Tempo checkpoint.
+/// Subscribes to schedule and peer-tip notifications plus generation task completion,
+/// re-derives the desired role by the next-anchor rule, and switches role generations.
+/// Observation alone never switches roles — the trigger is consumption progress reaching
+/// the boundary, which this loop tracks by re-reading the local Tempo checkpoint.
 pub(crate) async fn run_role_controller<P, Pool>(
     context: RoleControllerContext<P, Pool>,
     sinks: EventSinks,
@@ -456,8 +452,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
 {
     let mut schedule_changes = context.schedule.subscribe();
-    let mut recheck = tokio::time::interval(ROLE_RECHECK_INTERVAL);
-    recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut peer_tip_changes = context.peer_tips.subscribe();
 
     let mut generation_id: u64 = 0;
     let mut current: Option<RunningGeneration> = None;
@@ -465,30 +460,29 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
     loop {
         let can_lead = context.sequencer.is_some();
-        let mut desired = desired_role(
+        let mut retry_decision = false;
+        let mut desired = match desired_role(
             &context.provider,
             &context.schedule,
             &context.local_ed25519_public_key,
             can_lead,
-        );
+        ) {
+            Ok(desired) => desired,
+            Err(err) => {
+                error!(target: "zone::role", %err, "Failed reading the local Tempo checkpoint; fencing");
+                retry_decision = true;
+                DesiredRole::Fenced
+            }
+        };
 
         // Promotion barrier: switching the head writer to this node requires hash-carrying
         // tip evidence. Until the barrier is satisfied the node keeps importing as a
         // follower and actively probes peers for evidence.
         let mut ready_for_promotion = true;
         let mut promotion_reasons = Vec::new();
-        if let DesiredRole::Leader { epoch } = desired
+        if let DesiredRole::Leader { epoch, next_anchor } = desired
             && current.as_ref().map(|generation| generation.kind) != Some(GenerationKind::Leader)
         {
-            let next_anchor = match context
-                .provider
-                .latest()
-                .map_err(eyre::Report::from)
-                .and_then(|state| state.tempo_block_number().map_err(eyre::Report::from))
-            {
-                Ok(checkpoint) => checkpoint.saturating_add(1),
-                Err(_) => 0,
-            };
             match promotion_readiness(
                 &context.provider,
                 &context.schedule,
@@ -501,6 +495,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     info!(target: "zone::role", epoch, next_anchor, "Promotion barrier satisfied");
                 }
                 Readiness::NotReady(reasons) => {
+                    retry_decision = true;
                     ready_for_promotion = false;
                     debug!(target: "zone::role", epoch, next_anchor, ?reasons, "Promotion pending readiness");
                     promotion_reasons = reasons;
@@ -533,7 +528,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
                 GenerationKind::Fenced => "fenced",
             };
             status.epoch = match desired {
-                DesiredRole::Leader { epoch } | DesiredRole::Follower { epoch } => Some(epoch),
+                DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => Some(epoch),
                 DesiredRole::Fenced => None,
             };
             status.generation = generation_id;
@@ -567,7 +562,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
                 GenerationKind::Fenced => 0.0,
             });
             if let Some(epoch) = match desired {
-                DesiredRole::Leader { epoch } | DesiredRole::Follower { epoch } => Some(epoch),
+                DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => Some(epoch),
                 DesiredRole::Fenced => None,
             } {
                 metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
@@ -577,7 +572,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
         // A fenced generation has no tasks; an empty JoinSet's join_next() is immediately
         // ready with None, so polling it would spin this loop hot. Stay pending instead and
-        // wake only on schedule changes or the recheck tick.
+        // wake only on an explicit change or a retry for a failed/pending decision.
         let task_end = async {
             match current.as_mut() {
                 Some(generation) if !generation.tasks.is_empty() => {
@@ -591,6 +586,12 @@ pub(crate) async fn run_role_controller<P, Pool>(
             changed = schedule_changes.changed() => {
                 if changed.is_err() {
                     error!(target: "zone::role", "Leadership schedule notifier closed");
+                    return;
+                }
+            }
+            changed = peer_tip_changes.changed() => {
+                if changed.is_err() {
+                    error!(target: "zone::role", "Peer tip notifier closed");
                     return;
                 }
             }
@@ -638,7 +639,13 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     None => {}
                 }
             }
-            _ = recheck.tick() => {}
+            _ = async {
+                if retry_decision {
+                    tokio::time::sleep(ROLE_DECISION_RETRY_BACKOFF).await;
+                } else {
+                    std::future::pending().await
+                }
+            } => {}
         }
     }
 }
@@ -725,7 +732,7 @@ where
             });
             info!(target: "zone::role", generation = id, epoch, "Follower generation started");
         }
-        DesiredRole::Leader { epoch } => {
+        DesiredRole::Leader { epoch, .. } => {
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             sinks.install(sync_tx, Some(transactions_tx));

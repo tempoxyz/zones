@@ -332,9 +332,20 @@ pub(crate) struct PendingPeerBlock {
 ///
 /// Fed by backfill completions on the follower sync loop, consumed by the role controller's
 /// promotion gate and the status RPC.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct PeerTipRegistry {
     inner: std::sync::Arc<std::sync::Mutex<HashMap<P2pPeerId, (PeerTip, std::time::Instant)>>>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+impl Default for PeerTipRegistry {
+    fn default() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(());
+        Self {
+            inner: Default::default(),
+            changed,
+        }
+    }
 }
 
 impl PeerTipRegistry {
@@ -343,6 +354,7 @@ impl PeerTipRegistry {
             .lock()
             .expect("poisoned")
             .insert(peer, (tip, std::time::Instant::now()));
+        self.changed.send_replace(());
     }
 
     pub(crate) fn snapshot(&self) -> Vec<(P2pPeerId, PeerTip, std::time::Instant)> {
@@ -352,6 +364,10 @@ impl PeerTipRegistry {
             .iter()
             .map(|(peer, (tip, at))| (peer.clone(), *tip, *at))
             .collect()
+    }
+
+    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
     }
 }
 
@@ -1543,6 +1559,35 @@ mod tests {
                 start: LOCAL_HEAD + 1,
             })
         );
+    }
+
+    #[test]
+    fn peer_tip_registry_announces_fresh_evidence() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+        use zone_p2p::PeerTip;
+
+        let registry = super::PeerTipRegistry::default();
+        let mut changes = registry.subscribe();
+        assert!(!changes.has_changed().unwrap());
+
+        let peer = PrivateKey::from_seed(1).public_key();
+        let tip = PeerTip {
+            zone_height: 7,
+            zone_hash: B256::repeat_byte(0x07),
+            tempo_block_number: 11,
+            tempo_block_hash: B256::repeat_byte(0x11),
+        };
+        registry.record(peer.clone(), tip);
+        assert!(changes.has_changed().unwrap());
+        changes.borrow_and_update();
+
+        // Re-advertising the same tip refreshes its evidence timestamp and must wake waiters.
+        registry.record(peer.clone(), tip);
+        assert!(changes.has_changed().unwrap());
+        let snapshot = registry.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, peer);
+        assert_eq!(snapshot[0].1, tip);
     }
 
     fn pending_block(payload: u64) -> super::PendingPeerBlock {

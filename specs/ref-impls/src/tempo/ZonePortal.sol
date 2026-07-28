@@ -218,10 +218,7 @@ contract ZonePortal is IZonePortal {
         // The first sequencer bootstraps leadership so a fresh zone has a producer without a
         // separate setLeader call. The creation block is replayed by every zone node because
         // zone genesis anchors before createZone.
-        leader = initialSequencers[0];
-        leaderEpoch = 1;
-        leaderActivationTempoBlock = uint64(block.number);
-        emit LeaderUpdated(address(0), initialSequencers[0], 1, uint64(block.number));
+        _setLeader(initialSequencers[0]);
 
         for (uint256 i; i < _zoneGateways.length; ++i) {
             _setRole(_zoneGateways[i], Role.CallbackGateway);
@@ -289,19 +286,14 @@ contract ZonePortal is IZonePortal {
             revert InvalidSequencerSet();
         }
 
-        bool retainsLeader = leader == address(0);
         for (uint256 i = 0; i < length; ++i) {
             address signer = newSequencers[i];
             if (signer == address(0)) revert InvalidSequencerSet();
-            if (signer == leader) retainsLeader = true;
 
             for (uint256 j = 0; j < i; ++j) {
                 if (newSequencers[j] == signer) revert InvalidSequencerSet();
             }
         }
-        // Rotating out the active leader would strand block production: transfer leadership
-        // first (add the replacement, setLeader, then remove the old member).
-        if (!retainsLeader) revert ActiveLeaderRemoved();
 
         bool membersUnchanged = length == _sequencers.length;
         if (membersUnchanged) {
@@ -325,6 +317,9 @@ contract ZonePortal is IZonePortal {
             _sequencers.push(signer);
             isSequencer[signer] = true;
         }
+        // Rotating out the active leader would strand block production: transfer leadership
+        // first (add the replacement, setLeader, then remove the old member).
+        if (leader != address(0) && !isSequencer[leader]) revert ActiveLeaderRemoved();
 
         sequencerThreshold = newThreshold;
         uint64 nonce = sequencerSetVersion;
@@ -358,11 +353,16 @@ contract ZonePortal is IZonePortal {
             revert LeaderAlreadyUpdatedThisBlock();
         }
 
+        _setLeader(newLeader);
+    }
+
+    function _setLeader(address newLeader) private {
         address previous = leader;
         leader = newLeader;
         leaderEpoch += 1;
-        leaderActivationTempoBlock = uint64(block.number);
-        emit LeaderUpdated(previous, newLeader, leaderEpoch, uint64(block.number));
+        uint64 activationTempoBlock = uint64(block.number);
+        leaderActivationTempoBlock = activationTempoBlock;
+        emit LeaderUpdated(previous, newLeader, leaderEpoch, activationTempoBlock);
     }
 
     /// @notice Set zone gas rate. Only callable by admin.

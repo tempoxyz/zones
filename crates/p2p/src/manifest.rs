@@ -83,6 +83,18 @@ struct LeadershipScheduleState {
     applied_anchor: Option<u64>,
 }
 
+impl LeadershipScheduleState {
+    fn next_anchor_record(&self) -> Option<&LeadershipState> {
+        let next_anchor = self
+            .applied_anchor
+            .map_or(u64::MAX, |applied| applied.saturating_add(1));
+        self.transitions
+            .range(..=next_anchor)
+            .next_back()
+            .map(|(_, record)| record)
+    }
+}
+
 /// Activation-indexed schedule of finalized leadership transitions.
 ///
 /// Every observed leadership transition is kept
@@ -234,15 +246,11 @@ impl LeadershipSchedule {
     /// outgoing leader — not the most recently observed one — still produces. Routing only,
     /// never a production permit.
     pub fn next_anchor_record(&self) -> Option<LeadershipState> {
-        let state = self.inner.read().expect("poisoned");
-        let next_anchor = state
-            .applied_anchor
-            .map_or(u64::MAX, |applied| applied.saturating_add(1));
-        state
-            .transitions
-            .range(..=next_anchor)
-            .next_back()
-            .map(|(_, record)| record.clone())
+        self.inner
+            .read()
+            .expect("poisoned")
+            .next_anchor_record()
+            .cloned()
     }
 
     /// Highest epoch finalized L1 has shown us.
@@ -278,6 +286,7 @@ impl LeadershipSchedule {
     /// recovery by asking who governed the previous anchor.
     pub fn record_applied_anchor(&self, tempo_anchor: u64) {
         let mut state = self.inner.write().expect("poisoned");
+        let previous_next_anchor_record = state.next_anchor_record().cloned();
         state.applied_anchor = Some(
             state
                 .applied_anchor
@@ -299,8 +308,12 @@ impl LeadershipSchedule {
                 .transitions
                 .retain(|&activation, _| activation >= keep_from);
         }
+        let governing_record_changed =
+            state.next_anchor_record() != previous_next_anchor_record.as_ref();
         drop(state);
-        self.changed.send_replace(());
+        if governing_record_changed {
+            self.changed.send_replace(());
+        }
     }
 
     /// Subscribe to schedule-change notifications. The watch is a wakeup, not the schedule:
@@ -878,14 +891,39 @@ mod tests {
     }
 
     #[test]
-    fn schedule_watch_announces_changes() {
+    fn schedule_watch_announces_effective_changes() {
         let schedule = LeadershipSchedule::uninitialized();
-        let watcher = schedule.subscribe();
+        let mut watcher = schedule.subscribe();
         assert!(!watcher.has_changed().unwrap());
         schedule
             .publish(LeadershipState::new(1, public_key(1), 0))
             .unwrap();
         assert!(watcher.has_changed().unwrap());
+        watcher.borrow_and_update();
+
+        // Seed the applied cursor while only epoch 1 is known.
+        schedule.record_applied_anchor(98);
+        assert!(!watcher.has_changed().unwrap());
+
+        schedule
+            .publish(LeadershipState::new(2, public_key(2), 100))
+            .unwrap();
+        assert!(watcher.has_changed().unwrap());
+        watcher.borrow_and_update();
+
+        // Advancing within one leadership record (or backwards) is silent.
+        schedule.record_applied_anchor(98);
+        assert!(!watcher.has_changed().unwrap());
+        schedule.record_applied_anchor(50);
+        assert!(!watcher.has_changed().unwrap());
+
+        // Applying anchor 99 moves the next anchor to epoch 2's activation boundary.
+        schedule.record_applied_anchor(99);
+        assert!(watcher.has_changed().unwrap());
+        watcher.borrow_and_update();
+
+        schedule.record_applied_anchor(150);
+        assert!(!watcher.has_changed().unwrap());
     }
 
     fn ed25519_public_key(seed: u64) -> String {
