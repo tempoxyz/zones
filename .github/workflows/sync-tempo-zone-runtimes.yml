@@ -1,4 +1,4 @@
-name: Sync Tempo ZonePortal
+name: Sync Tempo Zone runtimes
 
 on:
   push:
@@ -6,14 +6,14 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: sync-tempo-zone-portal
+  group: sync-tempo-zone-runtimes
   cancel-in-progress: true
 
 permissions: {}
 
 jobs:
   sync:
-    name: Sync ZonePortal runtime to Tempo
+    name: Sync Zone runtimes to Tempo
     if: github.repository == 'tempoxyz/zones'
     runs-on: ubuntu-latest
     environment: release-pr
@@ -31,11 +31,11 @@ jobs:
         with:
           version: nightly
 
-      - name: Compile ZonePortal runtime
+      - name: Compile Zone runtimes
         working-directory: zones/specs/ref-impls
         run: |
-          forge inspect src/tempo/ZonePortal.sol:ZonePortal deployedBytecode \
-            > "$RUNNER_TEMP/zone-portal-runtime.txt"
+          forge inspect ZonePortal deployedBytecode > "$RUNNER_TEMP/ZonePortal"
+          forge inspect ZoneMessenger deployedBytecode > "$RUNNER_TEMP/ZoneMessenger"
 
       - name: Mint Tempo pull request token
         id: app-token
@@ -57,19 +57,20 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: true
 
-      - name: Compare and update ZonePortal runtime
-        id: portal
+      - name: Compare and update Zone runtimes
+        id: runtimes
         run: |
-          python3 zones/scripts/sync-tempo-zone-portal.py \
-            --runtime-file "$RUNNER_TEMP/zone-portal-runtime.txt" \
+          python3 zones/scripts/sync-tempo-zone-runtimes.py \
+            --runtime "ZonePortal=$RUNNER_TEMP/ZonePortal" \
+            --runtime "ZoneMessenger=$RUNNER_TEMP/ZoneMessenger" \
             --tempo-file tempo/crates/contracts/src/zones.rs \
             --github-output "$GITHUB_OUTPUT"
 
       - name: Push update
-        if: steps.portal.outputs.changed == 'true'
+        if: steps.runtimes.outputs.changed == 'true'
         working-directory: tempo
         env:
-          BRANCH: automation/sync-zone-portal
+          BRANCH: automation/sync-zone-runtimes
           ZONES_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -77,26 +78,23 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -B "$BRANCH"
           git add crates/contracts/src/zones.rs
-          git commit -m "chore(contracts): sync ZonePortal runtime"
+          git commit -m "chore(contracts): sync Zone runtimes"
           git push --force origin "HEAD:refs/heads/$BRANCH"
 
       - name: Open or update Tempo pull request
-        if: steps.portal.outputs.changed == 'true'
+        if: steps.runtimes.outputs.changed == 'true'
         working-directory: tempo
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BASE_BRANCH: main
-          BRANCH: automation/sync-zone-portal
-          PR_TITLE: "chore(contracts): sync ZonePortal runtime"
+          BRANCH: automation/sync-zone-runtimes
+          PR_TITLE: "chore(contracts): sync Zone runtimes"
           ZONES_SHA: ${{ github.sha }}
-          ZONES_HASH: ${{ steps.portal.outputs.zones_hash }}
-          OLD_TEMPO_HASH: ${{ steps.portal.outputs.tempo_hash }}
         run: |
           set -euo pipefail
           printf \
-            "Syncs the embedded ZonePortal runtime with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n\nExecutable SHA-256: \`%s\` → \`%s\`.\n" \
-            "$ZONES_SHA" "$ZONES_SHA" "$OLD_TEMPO_HASH" "$ZONES_HASH" \
-            > "$RUNNER_TEMP/portal-pr-body.md"
+            "Syncs the embedded ZonePortal and ZoneMessenger runtimes with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n" \
+            "$ZONES_SHA" "$ZONES_SHA" > "$RUNNER_TEMP/runtimes-pr-body.md"
 
           pr=$(gh pr list \
             --repo tempoxyz/tempo \
@@ -109,12 +107,12 @@ jobs:
             gh pr edit "$pr" \
               --repo tempoxyz/tempo \
               --title "$PR_TITLE" \
-              --body-file "$RUNNER_TEMP/portal-pr-body.md"
+              --body-file "$RUNNER_TEMP/runtimes-pr-body.md"
           else
             gh pr create \
               --repo tempoxyz/tempo \
               --head "$BRANCH" \
               --base "$BASE_BRANCH" \
               --title "$PR_TITLE" \
-              --body-file "$RUNNER_TEMP/portal-pr-body.md"
+              --body-file "$RUNNER_TEMP/runtimes-pr-body.md"
           fi
