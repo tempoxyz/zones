@@ -37,6 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     AttestationStore, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX, ZonePortal},
+    prover::ShadowProver,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog, ZoneBlockSnapshot,
         fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
@@ -132,6 +133,8 @@ pub struct ZoneMonitor<P: ZoneSequencerProvider> {
     prev_zone_block_hash: B256,
     /// Most recent canonical zone block observed from the node.
     latest_observed_zone_block: u64,
+    /// Detached, observational SPF worker.
+    shadow_prover: Option<ShadowProver>,
 }
 
 impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
@@ -156,6 +159,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             withdrawal_store,
             withdrawal_notify,
             repair_notify,
+            None,
         )
         .await
     }
@@ -168,6 +172,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
         repair_notify: Arc<Notify>,
+        shadow_prover: Option<ShadowProver>,
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let mut batch_submitter = BatchSubmitter::with_optional_signer_and_anchor_config(
@@ -222,6 +227,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             prev_processed_deposit_number,
             prev_zone_block_hash,
             latest_observed_zone_block: last_submitted_zone_block,
+            shadow_prover,
         };
 
         // Restore pending withdrawal data from zone L2 events so the
@@ -460,6 +466,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             withdrawal_batch_index: finalized_batch.finalized_index,
         };
 
+        if let Some(prover) = &self.shadow_prover {
+            prover.try_enqueue(from, to, batch_data.clone());
+        }
         self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals)
             .await
     }
@@ -792,26 +801,46 @@ pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     shared_state: ZoneMonitorSharedState,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> tokio::task::JoinHandle<()> {
+    spawn_zone_monitor_with_prover(
+        config,
+        zone_provider,
+        l1_provider,
+        signer,
+        shared_state,
+        None,
+        shutdown,
+    )
+}
+
+pub(crate) fn spawn_zone_monitor_with_prover<P: ZoneSequencerProvider>(
+    config: ZoneMonitorConfig,
+    zone_provider: P,
+    l1_provider: DynProvider<TempoNetwork>,
+    signer: PrivateKeySigner,
+    shared_state: ZoneMonitorSharedState,
+    shadow_prover: Option<ShadowProver>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> tokio::task::JoinHandle<()> {
     let ZoneMonitorSharedState {
         withdrawal_store,
         withdrawal_notify,
         repair_notify,
     } = shared_state;
-
     tokio::spawn(async move {
         loop {
             if shutdown.is_cancelled() {
                 info!("Zone monitor stopped before start");
                 return;
             }
-            let mut monitor = match ZoneMonitor::new(
+            let mut monitor = match ZoneMonitor::new_with_provider(
                 config.clone(),
                 zone_provider.clone(),
                 l1_provider.clone(),
-                signer.clone(),
+                Some(signer.clone()),
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
                 repair_notify.clone(),
+                shadow_prover.clone(),
             )
             .await
             {
@@ -973,6 +1002,7 @@ mod tests {
             prev_processed_deposit_number: 0,
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             latest_observed_zone_block: 50,
+            shadow_prover: None,
         }
     }
 
@@ -999,6 +1029,7 @@ mod tests {
             SharedWithdrawalStore::new(),
             Arc::new(Notify::new()),
             Arc::new(Notify::new()),
+            None,
         )
         .await
         {

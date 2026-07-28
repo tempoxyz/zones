@@ -86,8 +86,8 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_sequencer::{
-    AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
-    attestation::AttestationDomain, spawn_zone_sequencer,
+    AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
+    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer_with_prover,
 };
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
@@ -175,6 +175,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
+    /// Run the SPF over finalized candidates in detached, observational mode.
+    pub enable_prover: bool,
 }
 
 /// Configuration for the Zone redacted RPC server extension.
@@ -678,6 +680,14 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let prover_config = self
+            .sequencer_config
+            .as_ref()
+            .filter(|config| config.enable_prover)
+            .map(|config| ShadowProverConfig {
+                zone_id: config.zone_id,
+                evm_config: ctx.node.evm_config().clone(),
+            });
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -748,6 +758,7 @@ where
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
                     attestation.store.clone(),
+                    prover_config.clone(),
                 )?),
                 None => None,
             };
@@ -799,6 +810,7 @@ where
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
                 None,
+                prover_config,
             )
             .await?;
         }
@@ -1066,6 +1078,7 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
+        prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1082,6 +1095,7 @@ where
         Ok(LeaderSequencerDeps {
             config,
             sequencer_config,
+            prover_config,
         })
     }
 
@@ -1271,6 +1285,7 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
+        prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<()> {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
@@ -1288,11 +1303,11 @@ where
         let l1_transaction_signer = config
             .l1_transaction_signer
             .unwrap_or(config.sequencer_signer);
-        // Legacy single-sequencer mode: the tasks run for the process lifetime.
-        let seq_handle = spawn_zone_sequencer(
+        let seq_handle = spawn_zone_sequencer_with_prover(
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
+            prover_config,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;

@@ -167,6 +167,10 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         } else {
             None
         };
+        eyre::ensure!(
+            !args.enable_prover || should_sequence_blocks,
+            "--sequencer.enable-prover requires a promotable sequencer node"
+        );
         let additional_decryption_keys =
             load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
 
@@ -212,6 +216,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                     max_batch_gas: args.withdrawal_max_batch_gas,
                     max_in_flight_batches: args.withdrawal_max_in_flight_batches,
                 },
+                enable_prover: args.enable_prover,
             });
         }
         if let Some(config) = p2p_config {
@@ -494,6 +499,10 @@ pub struct ZoneArgs {
         conflicts_with = "sequencer_manifest"
     )]
     pub enable_sequencer: bool,
+
+    /// Validate finalized batch candidates with the SPF without changing settlement.
+    #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
+    pub enable_prover: bool,
 }
 
 impl ZoneArgs {
