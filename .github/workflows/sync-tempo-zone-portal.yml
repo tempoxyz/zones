@@ -94,7 +94,7 @@ jobs:
         run: |
           set -euo pipefail
           printf \
-            'Syncs the embedded ZonePortal runtime with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n\nExecutable SHA-256: `%s` → `%s`.\n' \
+            "Syncs the embedded ZonePortal runtime with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n\nExecutable SHA-256: \`%s\` → \`%s\`.\n" \
             "$ZONES_SHA" "$ZONES_SHA" "$OLD_TEMPO_HASH" "$ZONES_HASH" \
             > "$RUNNER_TEMP/portal-pr-body.md"
 
