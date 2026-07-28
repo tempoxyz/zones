@@ -3,7 +3,14 @@ name: Sync Tempo ZonePortal
 on:
   push:
     branches: [main]
+  pull_request: # Temporary: exercise the workflow from #871.
   workflow_dispatch:
+
+# Temporary test target. Restore this to an automation branch before merging.
+env:
+  TEMPO_BASE_BRANCH: main
+  TEMPO_SYNC_BRANCH: agent/zones-sync-test
+  TEMPO_PR_TITLE: "[DONOTMERGE] ci: zones test"
 
 concurrency:
   group: sync-tempo-zone-portal
@@ -53,6 +60,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
         with:
           repository: tempoxyz/tempo
+          ref: ${{ env.TEMPO_SYNC_BRANCH }}
           path: tempo
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: true
@@ -69,7 +77,7 @@ jobs:
         if: steps.portal.outputs.changed == 'true'
         working-directory: tempo
         env:
-          BRANCH: automation/sync-zone-portal
+          BRANCH: ${{ env.TEMPO_SYNC_BRANCH }}
           ZONES_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -85,13 +93,14 @@ jobs:
         working-directory: tempo
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BRANCH: automation/sync-zone-portal
+          BASE_BRANCH: ${{ env.TEMPO_BASE_BRANCH }}
+          BRANCH: ${{ env.TEMPO_SYNC_BRANCH }}
+          PR_TITLE: ${{ env.TEMPO_PR_TITLE }}
           ZONES_SHA: ${{ github.sha }}
           ZONES_HASH: ${{ steps.portal.outputs.zones_hash }}
           OLD_TEMPO_HASH: ${{ steps.portal.outputs.tempo_hash }}
         run: |
           set -euo pipefail
-          title="chore(contracts): sync ZonePortal runtime"
           cat > "$RUNNER_TEMP/portal-pr-body.md" <<EOF
           Syncs the embedded ZonePortal runtime with [tempoxyz/zones@${ZONES_SHA}](https://github.com/tempoxyz/zones/commit/${ZONES_SHA}).
 
@@ -101,20 +110,20 @@ jobs:
           pr=$(gh pr list \
             --repo tempoxyz/tempo \
             --head "$BRANCH" \
-            --base main \
+            --base "$BASE_BRANCH" \
             --state open \
             --json number \
             --jq '.[0].number // empty')
           if [[ -n "$pr" ]]; then
             gh pr edit "$pr" \
               --repo tempoxyz/tempo \
-              --title "$title" \
+              --title "$PR_TITLE" \
               --body-file "$RUNNER_TEMP/portal-pr-body.md"
           else
             gh pr create \
               --repo tempoxyz/tempo \
               --head "$BRANCH" \
-              --base main \
-              --title "$title" \
+              --base "$BASE_BRANCH" \
+              --title "$PR_TITLE" \
               --body-file "$RUNNER_TEMP/portal-pr-body.md"
           fi
