@@ -3,14 +3,7 @@ name: Sync Tempo ZonePortal
 on:
   push:
     branches: [main]
-  pull_request: # Temporary: exercise the workflow from #871.
   workflow_dispatch:
-
-# Temporary test target. Restore this to an automation branch before merging.
-env:
-  TEMPO_BASE_BRANCH: main
-  TEMPO_SYNC_BRANCH: agent/zones-sync-test
-  TEMPO_PR_TITLE: "[DONOTMERGE] ci: zones test"
 
 concurrency:
   group: sync-tempo-zone-portal
@@ -60,7 +53,6 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
         with:
           repository: tempoxyz/tempo
-          ref: ${{ env.TEMPO_SYNC_BRANCH }}
           path: tempo
           token: ${{ steps.app-token.outputs.token }}
           persist-credentials: true
@@ -77,7 +69,7 @@ jobs:
         if: steps.portal.outputs.changed == 'true'
         working-directory: tempo
         env:
-          BRANCH: ${{ env.TEMPO_SYNC_BRANCH }}
+          BRANCH: automation/sync-zone-portal
           ZONES_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
@@ -93,19 +85,18 @@ jobs:
         working-directory: tempo
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BASE_BRANCH: ${{ env.TEMPO_BASE_BRANCH }}
-          BRANCH: ${{ env.TEMPO_SYNC_BRANCH }}
-          PR_TITLE: ${{ env.TEMPO_PR_TITLE }}
+          BASE_BRANCH: main
+          BRANCH: automation/sync-zone-portal
+          PR_TITLE: "chore(contracts): sync ZonePortal runtime"
           ZONES_SHA: ${{ github.sha }}
           ZONES_HASH: ${{ steps.portal.outputs.zones_hash }}
           OLD_TEMPO_HASH: ${{ steps.portal.outputs.tempo_hash }}
         run: |
           set -euo pipefail
-          cat > "$RUNNER_TEMP/portal-pr-body.md" <<EOF
-          Syncs the embedded ZonePortal runtime with [tempoxyz/zones@${ZONES_SHA}](https://github.com/tempoxyz/zones/commit/${ZONES_SHA}).
-
-          Executable SHA-256: \\`${OLD_TEMPO_HASH}\` → \\`${ZONES_HASH}\`.
-          EOF
+          printf \
+            'Syncs the embedded ZonePortal runtime with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n\nExecutable SHA-256: `%s` → `%s`.\n' \
+            "$ZONES_SHA" "$ZONES_SHA" "$OLD_TEMPO_HASH" "$ZONES_HASH" \
+            > "$RUNNER_TEMP/portal-pr-body.md"
 
           pr=$(gh pr list \
             --repo tempoxyz/tempo \
