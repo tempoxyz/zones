@@ -84,6 +84,7 @@ jobs:
           git push --force origin "HEAD:refs/heads/$BRANCH"
 
       - name: Open or update Tempo pull request
+        id: pull-request
         if: steps.runtimes.outputs.changed == 'true'
         working-directory: tempo
         env:
@@ -118,14 +119,24 @@ jobs:
             if [[ "$HARDFORK" == "true" ]]; then
               gh pr ready "$pr" --repo tempoxyz/tempo --undo
             fi
+            url=$(gh pr view "$pr" --repo tempoxyz/tempo --json url --jq .url)
           else
             draft=()
             [[ "$HARDFORK" == "true" ]] && draft=(--draft)
-            gh pr create \
+            url=$(gh pr create \
               --repo tempoxyz/tempo \
               --head "$BRANCH" \
               --base "$BASE_BRANCH" \
               --title "$title" \
               --body-file "$RUNNER_TEMP/runtimes-pr-body.md" \
-              "${draft[@]}"
+              "${draft[@]}")
           fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+
+      - name: Require Tempo alignment
+        if: steps.runtimes.outputs.changed == 'true'
+        env:
+          PR_URL: ${{ steps.pull-request.outputs.url }}
+        run: |
+          echo "::error title=Tempo Zone runtimes are stale::Merge $PR_URL to align Tempo with Zones."
+          exit 1
