@@ -117,6 +117,20 @@ offline or a gap remains. Followers request blocks from the statically configure
 recovering leader requests blocks from the configured followers. Both roles can serve bounded
 64-block response pages from their persisted canonical chain.
 
+### Leader startup recovery
+
+A leader is the sole writer of its own canonical head once block production starts, so a leader
+that crashed — or came back with an empty disk — has to catch up *before* that happens. On
+startup a leader therefore runs one recovery phase in which it behaves like a follower: it asks
+its peers for the blocks it is missing and imports them through the same validating path. Block
+production, block broadcast, and settlement proposals all start afterwards, from the recovered
+head.
+
+Recovery ends as soon as the leader's head matches every tip its peers advertised. A leader that
+hears nothing cannot tell an unreachable peer set apart from a brand new zone, so it starts
+producing after a bounded grace period and logs that it did so. Once any peer *has* answered, its
+tip is authoritative: the leader keeps retrying rather than forking the zone from a stale head.
+
 Backfilled blocks use the same RLP representation and import path as live replicated blocks. A
 node buffers out-of-order arrivals, then re-executes and canonicalizes only the next block after
 its local head. Parent linkage, execution results, block hash, and forkchoice validation therefore
