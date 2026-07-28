@@ -986,8 +986,7 @@ contract ZonePortal is IZonePortal {
 
         bytes32 depositQueueHashBefore = currentDepositQueueHash;
 
-        // Gas safety here relies on the messenger bounding its own revert data; see
-        // TEMPO-ZONE-WITHDRAWAL-CALLBACK-RETURNDATA-BOUND before widening its error surface.
+        // We copy whatever the messenger reverts with, so keep its errors small.
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
 

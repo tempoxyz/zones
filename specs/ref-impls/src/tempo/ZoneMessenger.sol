@@ -55,21 +55,13 @@ contract ZoneMessenger is IZoneMessenger {
             revert InvalidCallbackTarget();
         }
 
-        // Unlike the callback below, this call is deliberately left raw: `token` is not attacker
-        // chosen. `enableToken` is admin-only and requires `isTIP20`, which restricts tokens to
-        // the factory's reserved prefix, so `transfer` is precompile-backed and reverts with
-        // constant-size errors. A token with arbitrary code could bubble an oversized revert blob
-        // here — but it would also burn the uncapped gas this call forwards, so bounding the copy
-        // would not save the batch. The boundary is the native-TIP-20 restriction, not this frame.
-        // Invariant: TEMPO-ZONE-WITHDRAWAL-CALLBACK-RETURNDATA-BOUND.
+        // Raw call is fine: `enableToken` only accepts native TIP-20s, which revert small.
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();
         }
 
-        // A callback target is untrusted, so never copy its revert data. Propagating it charges
-        // quadratic memory gas here and again in the portal's delivery frame, letting one
-        // withdrawal burn many times its `gasLimit`. The parameterless `catch` discards it.
-        // Invariant: TEMPO-ZONE-WITHDRAWAL-CALLBACK-RETURNDATA-BOUND.
+        // The target is untrusted, so the empty `catch` drops its revert data. Copying it would
+        // cost quadratic memory gas here and again in the portal, well past `gasLimit`.
         try IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
             zoneId, msg.sender, senderTag, token, amount, data
         ) returns (
