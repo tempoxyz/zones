@@ -30,7 +30,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
 use zone_p2p::{LeadershipSchedule, P2pCommand, P2pEvent, P2pPeerId};
 use zone_payload::ZonePayloadTypes;
-use zone_sequencer::{ZoneSequencerConfig, spawn_zone_sequencer};
+use zone_sequencer::{ZoneSequencerConfig, ZoneSequencerProvider, spawn_zone_sequencer};
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
 mod zone_transaction_pool_alias {
@@ -448,6 +448,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
         + StateProviderFactory
         + ReceiptProvider
         + PersistedBlockSubscriptions
+        + ZoneSequencerProvider
         + Clone
         + Send
         + Sync
@@ -655,6 +656,7 @@ where
         + StateProviderFactory
         + ReceiptProvider
         + PersistedBlockSubscriptions
+        + ZoneSequencerProvider
         + Clone
         + Send
         + Sync
@@ -811,10 +813,16 @@ where
                 .l1_transaction_signer
                 .clone()
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
+            let zone_provider = context.provider.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
-                let handle =
-                    spawn_zone_sequencer(sequencer_config, signer, sequencer_token.clone()).await;
+                let handle = spawn_zone_sequencer(
+                    sequencer_config,
+                    signer,
+                    zone_provider,
+                    sequencer_token.clone(),
+                )
+                .await;
                 // Abort-on-drop: if this wrapper is aborted by the generation stop timeout,
                 // dropping the handles must abort the sequencer tasks rather than detach
                 // them, or a stuck iteration could submit L1 work past its demotion.

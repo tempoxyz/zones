@@ -9,7 +9,10 @@ use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
+use reth_chain_state::CanonStateSubscriptions;
+use reth_storage_api::BlockReader;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tokio::sync::Notify;
 
 pub mod abi {
@@ -37,6 +40,39 @@ pub use withdrawals::{
 
 use crate::rpc::rpc_connection_config;
 
+/// Native Zone node provider capabilities required by sequencer components.
+///
+/// This is a zero-method convenience trait over Reth's storage and canonical-state
+/// interfaces. Keeping the bounds here lets sequencer components use native Tempo
+/// blocks and receipts without depending on an RPC representation.
+pub trait ZoneSequencerProvider:
+    BlockReader<
+        Block = Block,
+        Header = TempoHeader,
+        Transaction = TempoTxEnvelope,
+        Receipt = TempoReceipt,
+    > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<T> ZoneSequencerProvider for T where
+    T: BlockReader<
+            Block = Block,
+            Header = TempoHeader,
+            Transaction = TempoTxEnvelope,
+            Receipt = TempoReceipt,
+        > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+        + Clone
+        + Send
+        + Sync
+        + 'static
+{
+}
+
 /// Conservative Tempo L1 fee cap for sequencer transactions.
 ///
 /// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
@@ -53,6 +89,10 @@ pub struct ZoneSequencerConfig {
     pub l1_rpc_url: String,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
+    /// Fallback interval for reconciling the canonical Zone head.
+    ///
+    /// Canonical-state notifications normally trigger reconciliation immediately.
+    pub zone_poll_interval: Duration,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
     /// Gas and concurrency limits for withdrawal processing transactions.
@@ -61,14 +101,6 @@ pub struct ZoneSequencerConfig {
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
     pub inbox_address: Address,
-    /// TempoState predeploy address on Zone L2.
-    pub tempo_state_address: Address,
-    /// Zone L2 RPC URL.
-    pub zone_rpc_url: String,
-    /// How often the zone monitor polls for new L2 blocks.
-    pub zone_poll_interval: Duration,
-    /// Number of zone blocks between empty withdrawal batch boundaries / L1 submissions.
-    pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
     /// Shared P2P attestation store used for quorum batch submission.
@@ -86,9 +118,10 @@ pub struct ZoneSequencerHandle {
 /// Spawn all zone sequencer background tasks.
 ///
 /// This is the top-level POC entrypoint that starts:
-/// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
-///   shared store, builds [`crate::BatchData`], and submits each batch synchronously to the
-///   ZonePortal on Tempo L1. Local state only advances on successful submission.
+/// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
+///   events into the shared store, builds [`crate::BatchData`], and submits each batch
+///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
+///   submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for each pending withdrawal.
 ///
@@ -97,9 +130,10 @@ pub struct ZoneSequencerHandle {
 ///
 /// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
 /// in-flight L1 transaction resolves before teardown.
-pub async fn spawn_zone_sequencer(
+pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
+    zone_provider: P,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
     let sequencer_address = signer.address();
@@ -129,11 +163,7 @@ pub async fn spawn_zone_sequencer(
     let monitor_config = ZoneMonitorConfig {
         outbox_address: config.outbox_address,
         inbox_address: config.inbox_address,
-        tempo_state_address: config.tempo_state_address,
-        zone_rpc_url: config.zone_rpc_url,
-        retry_connection_interval: config.retry_connection_interval,
         poll_interval: config.zone_poll_interval,
-        batch_interval_blocks: config.batch_interval_blocks,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
         attestation_store: config.attestation_store,
@@ -149,6 +179,7 @@ pub async fn spawn_zone_sequencer(
     );
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
+        zone_provider,
         l1_provider,
         signer,
         withdrawal_store,

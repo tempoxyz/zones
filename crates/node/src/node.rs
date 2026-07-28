@@ -65,9 +65,7 @@ use tempo_transaction_pool::{
     transaction::{TempoPoolTransactionError, TempoPooledTransaction},
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal};
 use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
@@ -165,10 +163,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub l1_transaction_signer: Option<PrivateKeySigner>,
     /// Zone ID for chain ID validation.
     pub zone_id: u32,
-    /// How often the zone monitor polls for new L2 blocks.
+    /// Fallback interval for reconciling the canonical Zone head.
     pub zone_poll_interval: Duration,
-    /// Number of zone blocks between withdrawal batch boundaries / L1 submissions.
-    pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
@@ -629,6 +625,7 @@ where
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
         let provider = ctx.node.provider().clone();
+        let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
         let engine_handle = ctx.beacon_engine_handle.clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
@@ -666,7 +663,6 @@ where
             let sequencer = match self.sequencer_config.take() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
                     config,
-                    &handle,
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
@@ -713,6 +709,7 @@ where
             Self::launch_sequencer_tasks(
                 config,
                 &handle,
+                zone_provider,
                 &task_executor,
                 self.l1_config.l1_rpc_url,
                 self.l1_config.portal_address,
@@ -908,7 +905,6 @@ where
     /// Build the leader-generation sequencer dependencies (activated only while leader).
     fn build_leader_sequencer_deps(
         config: ZoneSequencerAddOnsConfig,
-        handle: &<Self as NodeAddOns<N>>::Handle,
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
@@ -926,23 +922,15 @@ where
                 );
             }
         }
-        let zone_rpc_url = handle
-            .rpc_server_handles
-            .rpc
-            .http_url()
-            .expect("HTTP RPC server must be enabled for sequencer mode");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
+            zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
             withdrawal_batch_limits: config.withdrawal_batch_limits,
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
-            tempo_state_address: TEMPO_STATE_ADDRESS,
-            zone_rpc_url,
-            zone_poll_interval: config.zone_poll_interval,
-            batch_interval_blocks: config.batch_interval_blocks,
             batch_anchor_config: config.batch_anchor_config,
             attestation_store,
         };
@@ -1115,6 +1103,7 @@ where
     async fn launch_sequencer_tasks(
         config: ZoneSequencerAddOnsConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
+        zone_provider: N::Provider,
         task_executor: &reth_tasks::TaskExecutor,
         l1_rpc_url: String,
         portal_address: Address,
@@ -1135,25 +1124,16 @@ where
             }
         }
 
-        let zone_rpc_url = handle
-            .rpc_server_handles
-            .rpc
-            .http_url()
-            .expect("HTTP RPC server must be enabled for sequencer mode");
-
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
             retry_connection_interval,
+            zone_poll_interval: config.zone_poll_interval,
             withdrawal_poll_interval: config.withdrawal_poll_interval,
             withdrawal_batch_limits: config.withdrawal_batch_limits,
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
-            tempo_state_address: TEMPO_STATE_ADDRESS,
-            zone_rpc_url,
-            zone_poll_interval: config.zone_poll_interval,
-            batch_interval_blocks: config.batch_interval_blocks,
             batch_anchor_config: config.batch_anchor_config,
             attestation_store,
         };
@@ -1164,6 +1144,7 @@ where
         let seq_handle = spawn_zone_sequencer(
             sequencer_config,
             l1_transaction_signer,
+            zone_provider,
             tokio_util::sync::CancellationToken::new(),
         )
         .await;

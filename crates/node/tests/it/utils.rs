@@ -533,6 +533,12 @@ pub(crate) trait TestNodeHandle: Send {
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives>;
 
     fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture;
+
+    fn spawn_sequencer(
+        &self,
+        config: zone_sequencer::ZoneSequencerConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>>;
 }
 
 impl<Node, AddOns> TestNodeHandle for NodeHandle<Node, AddOns>
@@ -551,6 +557,23 @@ where
 
     fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture {
         &mut self.node_exit_future
+    }
+
+    fn spawn_sequencer(
+        &self,
+        config: zone_sequencer::ZoneSequencerConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>> {
+        let provider = self.node.provider().clone();
+        Box::pin(async move {
+            zone_sequencer::spawn_zone_sequencer(
+                config,
+                signer,
+                provider,
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .await
+        })
     }
 }
 
@@ -594,6 +617,14 @@ impl ZoneTestNode {
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
+    }
+
+    async fn spawn_sequencer(
+        &self,
+        config: zone_sequencer::ZoneSequencerConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> zone_sequencer::ZoneSequencerHandle {
+        self.node_handle.spawn_sequencer(config, signer).await
     }
 
     /// Stops the `ZoneEngine` at a block boundary and waits until block production has
@@ -1161,7 +1192,6 @@ impl ZoneTestNode {
                     l1_transaction_signer: None,
                     zone_id: 0,
                     zone_poll_interval: Duration::from_secs(1),
-                    batch_interval_blocks: withdrawal_batch_interval_blocks,
                     batch_anchor_config: Default::default(),
                     withdrawal_poll_interval: Duration::from_secs(5),
                     withdrawal_batch_limits: Default::default(),
@@ -3237,30 +3267,22 @@ pub(crate) async fn spawn_sequencer_with_config(
     batch_anchor_config: zone_sequencer::BatchAnchorConfig,
     withdrawal_batch_limits: zone_sequencer::WithdrawalBatchLimits,
 ) -> zone_sequencer::ZoneSequencerHandle {
-    use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+    use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),
+        zone_poll_interval: Duration::from_secs(1),
         withdrawal_poll_interval: Duration::from_millis(500),
         withdrawal_batch_limits,
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
-        tempo_state_address: TEMPO_STATE_ADDRESS,
-        zone_rpc_url: zone.http_url().to_string(),
-        zone_poll_interval: Duration::from_millis(500),
-        batch_interval_blocks: 1,
         batch_anchor_config,
         attestation_store: None,
     };
 
-    zone_sequencer::spawn_zone_sequencer(
-        config,
-        sequencer_signer,
-        tokio_util::sync::CancellationToken::new(),
-    )
-    .await
+    zone.spawn_sequencer(config, sequencer_signer).await
 }
 
 /// Start a local zone node with an L1Fixture already seeded for `seed_blocks` blocks.
