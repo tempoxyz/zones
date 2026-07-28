@@ -33,9 +33,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
-          # Keep the E2E contract ABI and artifacts deterministic. Update this SHA together with
-          # crates/node/tests/it/earn_zone_e2e.rs when adopting a new Earn contract interface.
-          ref: c75f2a55177b7314c687c02994dacc12c48b12e1
+          ref: main
           path: earn
           ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
           persist-credentials: false
