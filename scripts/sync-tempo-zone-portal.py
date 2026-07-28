@@ -3,18 +3,15 @@
 
 import argparse
 import hashlib
-import re
 from pathlib import Path
 
-PORTAL = re.compile(
-    r"(pub const ZONE_PORTAL_RUNTIME: Bytes = bytes!\(\n)"
-    r"((?:\s*\"[0-9a-fA-Fx]+\"\n)+)(\);)"
-)
+PORTAL_START = "pub const ZONE_PORTAL_RUNTIME: Bytes = bytes!(\n"
+PORTAL_END = ");"
 
 
-def runtime(text: str) -> bytes:
-    encoded = "".join(re.findall(r'"([0-9a-fA-Fx]+)"', text)).removeprefix("0x")
-    return bytes.fromhex(encoded)
+def runtime(body: str) -> bytes:
+    encoded = "".join(line.strip().strip('"') for line in body.splitlines())
+    return bytes.fromhex(encoded.removeprefix("0x"))
 
 
 def executable(code: bytes) -> bytes:
@@ -34,12 +31,16 @@ args = parser.parse_args()
 
 compiled = bytes.fromhex(args.runtime_file.read_text().strip().removeprefix("0x"))
 tempo_source = args.tempo_file.read_text()
-match = PORTAL.search(tempo_source)
-if not match:
+start = tempo_source.find(PORTAL_START)
+if start == -1:
     raise SystemExit("ZONE_PORTAL_RUNTIME not found in Tempo")
+body_start = start + len(PORTAL_START)
+end = tempo_source.find(PORTAL_END, body_start)
+if end == -1:
+    raise SystemExit("ZONE_PORTAL_RUNTIME is missing its closing delimiter")
 
 zones_executable = executable(compiled)
-tempo_executable = executable(runtime(match.group(2)))
+tempo_executable = executable(runtime(tempo_source[body_start:end]))
 changed = zones_executable != tempo_executable
 zones_hash = sha256(zones_executable)
 tempo_hash = sha256(tempo_executable)
@@ -51,8 +52,8 @@ if changed:
     encoded = compiled.hex()
     chunks = [encoded[i : i + 160] for i in range(0, len(encoded), 160)]
     body = "".join(f'    "{"0x" if i == 0 else ""}{chunk}"\n' for i, chunk in enumerate(chunks))
-    replacement = match.group(1) + body + match.group(3)
-    args.tempo_file.write_text(tempo_source[: match.start()] + replacement + tempo_source[match.end() :])
+    replacement = PORTAL_START + body + PORTAL_END
+    args.tempo_file.write_text(tempo_source[:start] + replacement + tempo_source[end + len(PORTAL_END) :])
 
 with args.github_output.open("a") as output:
     output.write(f"changed={str(changed).lower()}\n")
