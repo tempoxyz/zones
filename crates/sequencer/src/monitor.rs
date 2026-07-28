@@ -333,7 +333,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// pending withdrawals from chain state.
     async fn repair_missing_withdrawal_slot(&mut self) {
         warn!("Withdrawal processor reported a missing portal head slot");
-        self.resync_from_portal().await;
+        if let Err(error) = self.resync_from_portal().await {
+            error!(%error, "Failed to resync after missing portal head slot");
+        }
     }
 
     /// Process finalized batch boundaries in `[from, to]`.
@@ -377,14 +379,12 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             );
             let before_submit = self.last_submitted_zone_block;
             self.process_finalized_batch(range_start, boundary).await?;
-            if self.last_submitted_zone_block <= before_submit {
-                warn!(
-                    before_submit,
-                    boundary = boundary_block,
-                    current_last_submitted = self.last_submitted_zone_block,
-                    "Batch submission did not advance local state; stopping boundary walk"
-                );
-                break;
+            if self.last_submitted_zone_block < boundary_block {
+                return Err(eyre::eyre!(
+                    "zone batch boundary {boundary_block} remains unsubmitted after reconciliation \
+                     (previous anchor {before_submit}, current anchor {})",
+                    self.last_submitted_zone_block
+                ));
             }
         }
 
@@ -494,7 +494,13 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
                     portal_hash = %portal_hash,
                     "prev_block_hash mismatch with portal, resyncing"
                 );
-                self.resync_from_portal().await;
+                let portal_anchor = self.resync_from_portal().await?;
+                if portal_anchor < last_zone_block {
+                    return Err(eyre::eyre!(
+                        "portal resynced to zone block {portal_anchor}, before pending batch \
+                         boundary {last_zone_block}"
+                    ));
+                }
                 return Ok(());
             }
 
@@ -598,7 +604,9 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
 
         // All retries exhausted — resync from portal.
-        self.resync_from_portal().await;
+        self.resync_from_portal()
+            .await
+            .wrap_err("failed to resync after exhausting batch submission retries")?;
 
         Err(eyre::eyre!(
             "batch submission failed after {MAX_RETRIES} retries for zone block {last_zone_block}"
@@ -610,7 +618,10 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
     /// Called after exhausting retries or when a preflight hash mismatch is
     /// detected, so subsequent batches start from the portal's actual accepted
     /// zone block rather than stale local values.
-    async fn resync_from_portal(&mut self) {
+    ///
+    /// Returns the portal-confirmed canonical Zone block number. Callers must verify that this
+    /// anchor covers any batch boundary they were attempting to submit.
+    async fn resync_from_portal(&mut self) -> Result<u64> {
         self.metrics.resync_from_portal_total.increment(1);
         let old_hash = self.prev_zone_block_hash;
         let old_last_submitted = self.last_submitted_zone_block;
@@ -622,81 +633,66 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let store = self.withdrawal_store.lock();
             store.summary()
         };
-        match self.batch_submitter.read_portal_block_hash().await {
-            Ok(portal_hash) => {
-                let last_submitted_zone_block =
-                    match Self::resolve_zone_block_number(&self.provider, portal_hash) {
-                        Ok(number) => number,
-                        Err(error) => {
-                            error!(%error, "Failed to resolve portal-confirmed zone block");
-                            return;
-                        }
-                    };
-                let previous_snapshot = match Self::snapshot_at_or_genesis(
-                    &self.provider,
-                    self.config.inbox_address,
-                    last_submitted_zone_block,
-                ) {
-                    Ok(snapshot) => snapshot,
-                    Err(error) => {
-                        error!(
-                            %error,
-                            last_submitted_zone_block,
-                            "Failed to read portal-confirmed zone commitments"
-                        );
-                        return;
-                    }
-                };
-                let deposit_hash = previous_snapshot.processed_deposit_hash;
-                let deposit_number = previous_snapshot.processed_deposit_number;
+        let portal_hash = self
+            .batch_submitter
+            .read_portal_block_hash()
+            .await
+            .wrap_err("failed to read portal state during resync")?;
+        let last_submitted_zone_block =
+            Self::resolve_zone_block_number(&self.provider, portal_hash)
+                .wrap_err("failed to resolve portal-confirmed zone block")?;
+        let previous_snapshot = Self::snapshot_at_or_genesis(
+            &self.provider,
+            self.config.inbox_address,
+            last_submitted_zone_block,
+        )
+        .wrap_err("failed to read portal-confirmed zone commitments")?;
+        let deposit_hash = previous_snapshot.processed_deposit_hash;
+        let deposit_number = previous_snapshot.processed_deposit_number;
 
-                warn!(
-                    old_prev_block_hash = %old_hash,
-                    new_block_hash = %portal_hash,
-                    old_last_submitted_zone_block = old_last_submitted,
-                    new_last_submitted_zone_block = last_submitted_zone_block,
-                    store_batches_before_resync,
-                    store_first_slot_before_resync,
-                    store_last_slot_before_resync,
-                    %deposit_hash,
-                    deposit_number,
-                    "Resynced from portal and zone state"
-                );
-                self.prev_zone_block_hash = portal_hash;
-                self.last_submitted_zone_block = last_submitted_zone_block;
-                self.latest_observed_zone_block = last_submitted_zone_block;
-                self.prev_processed_deposit_hash = deposit_hash;
-                self.prev_processed_deposit_number = deposit_number;
-                self.metrics
-                    .latest_zone_block_submitted_to_l1
-                    .set(last_submitted_zone_block as f64);
-                self.update_submission_lag();
-                if let Some(store) = &self.config.attestation_store {
-                    store.remove_submitted(last_submitted_zone_block);
-                }
-                if let Err(e) = self.restore_pending_withdrawals_from_chain().await {
-                    let (stale_store_batches, stale_store_first_slot, stale_store_last_slot) = {
-                        let mut store = self.withdrawal_store.lock();
-                        let summary = store.summary();
-                        store.replace_batches(Default::default());
-                        summary
-                    };
-                    error!(
-                        error = %e,
-                        stale_store_batches,
-                        stale_store_first_slot,
-                        stale_store_last_slot,
-                        "Failed to restore pending withdrawals during portal resync; cleared local withdrawal store"
-                    );
-                }
-            }
-            Err(e) => {
-                error!(
-                    error = %e,
-                    "Failed to read portal state during resync"
-                );
-            }
+        warn!(
+            old_prev_block_hash = %old_hash,
+            new_block_hash = %portal_hash,
+            old_last_submitted_zone_block = old_last_submitted,
+            new_last_submitted_zone_block = last_submitted_zone_block,
+            store_batches_before_resync,
+            store_first_slot_before_resync,
+            store_last_slot_before_resync,
+            %deposit_hash,
+            deposit_number,
+            "Resynced from portal and zone state"
+        );
+        self.prev_zone_block_hash = portal_hash;
+        self.last_submitted_zone_block = last_submitted_zone_block;
+        // Rewind boundary discovery to the portal-confirmed anchor. The caller may only advance
+        // this cursor again after every discovered boundary is confirmed submitted.
+        self.latest_observed_zone_block = last_submitted_zone_block;
+        self.prev_processed_deposit_hash = deposit_hash;
+        self.prev_processed_deposit_number = deposit_number;
+        self.metrics
+            .latest_zone_block_submitted_to_l1
+            .set(last_submitted_zone_block as f64);
+        self.update_submission_lag();
+        if let Some(store) = &self.config.attestation_store {
+            store.remove_submitted(last_submitted_zone_block);
         }
+        if let Err(e) = self.restore_pending_withdrawals_from_chain().await {
+            let (stale_store_batches, stale_store_first_slot, stale_store_last_slot) = {
+                let mut store = self.withdrawal_store.lock();
+                let summary = store.summary();
+                store.replace_batches(Default::default());
+                summary
+            };
+            error!(
+                error = %e,
+                stale_store_batches,
+                stale_store_first_slot,
+                stale_store_last_slot,
+                "Failed to restore pending withdrawals during portal resync; cleared local withdrawal store"
+            );
+        }
+
+        Ok(last_submitted_zone_block)
     }
 
     /// Resolve the portal anchor against the local canonical chain.
@@ -971,8 +967,9 @@ mod tests {
 
         let mut monitor = test_monitor(l1.clone(), zone);
 
-        monitor.resync_from_portal().await;
+        let anchor = monitor.resync_from_portal().await.unwrap();
 
+        assert_eq!(anchor, confirmed_zone_block);
         assert_eq!(monitor.prev_zone_block_hash, portal_hash);
         assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
         assert_eq!(monitor.prev_processed_deposit_hash, confirmed_deposit_hash);
@@ -1045,8 +1042,9 @@ mod tests {
             },
         );
 
-        monitor.resync_from_portal().await;
+        let anchor = monitor.resync_from_portal().await.unwrap();
 
+        assert_eq!(anchor, confirmed_zone_block);
         let store = monitor.withdrawal_store.lock();
         assert_eq!(store.batch_count(), 0);
         assert_eq!(monitor.prev_zone_block_hash, portal_hash);
@@ -1096,6 +1094,89 @@ mod tests {
             monitor.prev_processed_deposit_hash,
             batch_data.next_processed_deposit_hash
         );
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn preflight_hash_mismatch_rejects_anchor_before_pending_boundary() {
+        let l1 = Asserter::new();
+        let portal_hash = B256::from(U256::from(7).to_be_bytes::<32>());
+        let confirmed_zone_block = 15;
+        let pending_boundary = 20;
+        let confirmed_deposit_hash = B256::repeat_byte(0x33);
+        let zone = mock_zone_provider(portal_hash, confirmed_zone_block, confirmed_deposit_hash);
+
+        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(7),
+            abi_encode_u64(7),
+        ]));
+
+        let mut monitor = test_monitor(l1.clone(), zone);
+        let batch_data = BatchData {
+            zone_height: pending_boundary,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0x99),
+            next_block_hash: B256::repeat_byte(0x55),
+            prev_processed_deposit_hash: B256::repeat_byte(0x77),
+            next_processed_deposit_hash: B256::repeat_byte(0x66),
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 8,
+        };
+
+        let error = monitor
+            .submit_batch_with_retry(&batch_data, pending_boundary, Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("before pending batch boundary 20")
+        );
+        assert_eq!(monitor.last_submitted_zone_block, confirmed_zone_block);
+        assert_eq!(monitor.latest_observed_zone_block, confirmed_zone_block);
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn preflight_hash_mismatch_propagates_failed_resync() {
+        let l1 = Asserter::new();
+        let portal_hash = B256::repeat_byte(0x77);
+        let zone = TestZoneProvider::new();
+
+        l1.push_success(&abi_encode_b256(portal_hash));
+        l1.push_failure_msg("resync unavailable");
+
+        let mut monitor = test_monitor(l1.clone(), zone);
+        let batch_data = BatchData {
+            zone_height: 20,
+            tempo_block_number: 123,
+            prev_block_hash: B256::repeat_byte(0x99),
+            next_block_hash: B256::repeat_byte(0x55),
+            prev_processed_deposit_hash: B256::repeat_byte(0x77),
+            next_processed_deposit_hash: B256::repeat_byte(0x66),
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
+            withdrawal_queue_hash: B256::ZERO,
+            withdrawal_batch_index: 8,
+        };
+
+        let error = monitor
+            .submit_batch_with_retry(&batch_data, 20, Vec::new())
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to read portal state during resync")
+        );
+        assert_eq!(monitor.last_submitted_zone_block, 10);
+        assert_eq!(monitor.latest_observed_zone_block, 50);
         assert!(l1.read_q().is_empty());
     }
 }
