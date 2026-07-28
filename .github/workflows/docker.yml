@@ -155,7 +155,19 @@ jobs:
                 digest: $digest
               }
             }')
-          read -r -a events_args <<<"$EVENTS_ARGS"
+          command -v python3 >/dev/null || {
+            echo "python3 is required to parse EVENTS_ARGS" >&2
+            exit 1
+          }
+          mapfile -t events_args < <(
+            python3 - "$EVENTS_ARGS" <<'PY'
+          import shlex
+          import sys
+
+          for argument in shlex.split(sys.argv[1]):
+              print(argument)
+          PY
+          )
           (( ${#events_args[@]} > 0 )) || {
             echo "EVENTS_ARGS is empty" >&2
             exit 1
