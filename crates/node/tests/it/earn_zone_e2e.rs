@@ -58,20 +58,28 @@ alloy_sol_types::sol! {
 
     struct FixedFeeRecipient {
         address account;
-        uint16 rateBps;
+        uint96 rate;
     }
 
     struct ExcessReturnFee {
         bool enabled;
         address account;
-        uint16 annualTargetRateBps;
-        uint16 excessFeeRateBps;
+        uint96 annualTargetRate;
+        uint96 excessFeeRate;
     }
 
     struct FeeConfig {
         uint8 fixedFeeCount;
         FixedFeeRecipient[4] fixedFees;
         ExcessReturnFee excess;
+    }
+
+    struct EarnFeesInit {
+        address administrator;
+        address guardian;
+        uint96 fixedFeeCap;
+        uint96 excessFeeCap;
+        FeeConfig initialConfig;
     }
 
     struct EarnEncryptedDepositPayload {
@@ -111,7 +119,7 @@ alloy_sol_types::sol! {
         address engine;
         address owner;
         EarnVaultControls controls;
-        FeeConfig fees;
+        EarnFeesInit fees;
     }
 
     #[sol(rpc)]
@@ -322,17 +330,23 @@ impl EarnZoneFixture {
         )
         .await?;
 
-        let fees = FeeConfig {
-            fixedFeeCount: 0,
-            fixedFees: std::array::from_fn(|_| FixedFeeRecipient {
-                account: Address::ZERO,
-                rateBps: Default::default(),
-            }),
-            excess: ExcessReturnFee {
-                enabled: false,
-                account: Address::ZERO,
-                annualTargetRateBps: Default::default(),
-                excessFeeRateBps: Default::default(),
+        let fees = EarnFeesInit {
+            administrator: Address::ZERO,
+            guardian: Address::ZERO,
+            fixedFeeCap: Default::default(),
+            excessFeeCap: Default::default(),
+            initialConfig: FeeConfig {
+                fixedFeeCount: 0,
+                fixedFees: std::array::from_fn(|_| FixedFeeRecipient {
+                    account: Address::ZERO,
+                    rate: Default::default(),
+                }),
+                excess: ExcessReturnFee {
+                    enabled: false,
+                    account: Address::ZERO,
+                    annualTargetRate: Default::default(),
+                    excessFeeRate: Default::default(),
+                },
             },
         };
         let params = EarnDeployParams {
