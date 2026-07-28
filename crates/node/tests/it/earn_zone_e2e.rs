@@ -368,6 +368,7 @@ impl EarnZoneFixture {
             .abi_encode(),
         )
         .await?;
+        let provider = l1.dev_provider();
         let authority_contract = DemoTokenAuthority::new(authority, &provider);
         let receipt = IRolesAuth::new(PATH_USD_ADDRESS, &provider)
             .grantRole(keccak256("ISSUER_ROLE"), authority)
@@ -414,6 +415,8 @@ impl EarnZoneFixture {
             .abi_encode(),
         )
         .await?;
+        let provider = l1.dev_provider();
+        let authority_contract = DemoTokenAuthority::new(authority, &provider);
         let unwrap_role = authority_contract.UNWRAPPER_ROLE().call().await?;
         let receipt = authority_contract
             .grantRole(unwrap_role, router)
