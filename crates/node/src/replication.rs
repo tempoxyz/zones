@@ -1,6 +1,7 @@
 //! Node-side leader block replication and follower import.
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::NumHash;
 use alloy_primitives::B256;
 use alloy_provider::DynProvider;
 use alloy_rlp::Decodable as _;
@@ -909,49 +910,30 @@ where
     validate_l1_checkpoint_transition(&l1_header, local.number, local.hash, block_number)?;
     let anchor = l1_header.num_hash();
 
-    // Anchor-aware fence for live blocks: the  sender must
+    // Anchor-aware fence for live blocks: the sender must
     // be the scheduled leader of the block's anchor. This stops an honest stale
     // leader's broadcast from splitting followers.
     // Backfilled blocks carry no producer claim and are judged by parent/anchor/execution/conflict
     // validation only.
-    if let Some(sender) = &peer_block.live_sender {
-        match schedule.leader_for(anchor.number) {
-            Some(record) if &record.leader == sender => {}
-            Some(record) => eyre::bail!(
-                "live block {block_number} for anchor {} was broadcast by {sender}, but the \
-                 schedule assigns that anchor to {} (epoch {})",
-                anchor.number,
-                record.leader,
-                record.epoch,
-            ),
-            None => eyre::bail!(
-                "live block {block_number} embeds anchor {} which no retained leadership \
-                 record governs",
-                anchor.number,
-            ),
-        }
-    }
-    let observed = loop {
-        match tokio::time::timeout(
-            Duration::from_secs(30),
-            l1_block_tracker.wait_for_portal_events(anchor),
-        )
-        .await
-        {
-            Ok(observed) => {
-                let observed = observed?;
-                portal_inputs.validate(&observed)?;
-                break observed;
-            }
-            Err(_) => warn!(
-                target: "zone::p2p",
-                block_number,
-                l1_block = anchor.number,
-                l1_hash = ?anchor.hash,
-                "Peer block import is waiting for local L1 observation of its anchor"
-            ),
-        }
-    };
+    //
+    // Check once before waiting to reject an already-known invalid sender without blocking the
+    // import loop. `wait_for_validated_peer_anchor` checks again after observing the anchor:
+    // the anchor itself may finalize a leadership transition that changes its assigned producer.
+    validate_live_block_sender(
+        schedule,
+        peer_block.live_sender.as_ref(),
+        anchor.number,
+        block_number,
+    )?;
+    let observed = wait_for_validated_peer_anchor(
+        l1_block_tracker,
+        schedule,
+        &portal_inputs,
+        peer_block.live_sender.as_ref(),
+        anchor,
+        block_number,
+    )
+    .await?;
 
     // The subscriber normally enqueues immediately after recording this observation. Enqueueing
     // here as well closes that small scheduling window and makes follower import self-contained;
@@ -989,6 +971,67 @@ where
 
     info!(target: "zone::p2p", block_number, ?hash, "Imported canonical leader block");
     Ok(())
+}
+
+fn validate_live_block_sender(
+    schedule: &LeadershipSchedule,
+    live_sender: Option<&P2pPeerId>,
+    anchor_number: u64,
+    block_number: u64,
+) -> eyre::Result<()> {
+    let Some(sender) = live_sender else {
+        return Ok(());
+    };
+    match schedule.leader_for(anchor_number) {
+        Some(record) if &record.leader == sender => Ok(()),
+        Some(record) => eyre::bail!(
+            "live block {block_number} for anchor {anchor_number} was broadcast by {sender}, but \
+             the schedule assigns that anchor to {} (epoch {})",
+            record.leader,
+            record.epoch,
+        ),
+        None => eyre::bail!(
+            "live block {block_number} embeds anchor {anchor_number} which no retained leadership \
+             record governs",
+        ),
+    }
+}
+
+async fn wait_for_validated_peer_anchor(
+    l1_block_tracker: &L1BlockTracker,
+    schedule: &LeadershipSchedule,
+    portal_inputs: &AdvanceTempoPortalInputs,
+    live_sender: Option<&P2pPeerId>,
+    anchor: NumHash,
+    block_number: u64,
+) -> eyre::Result<L1PortalEvents> {
+    let observed = loop {
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            l1_block_tracker.wait_for_portal_events(anchor),
+        )
+        .await
+        {
+            Ok(observed) => {
+                let observed = observed?;
+                portal_inputs.validate(&observed)?;
+                break observed;
+            }
+            Err(_) => warn!(
+                target: "zone::p2p",
+                block_number,
+                l1_block = anchor.number,
+                l1_hash = ?anchor.hash,
+                "Peer block import is waiting for local L1 observation of its anchor"
+            ),
+        }
+    };
+
+    // The L1 subscriber publishes any transition finalized by this anchor before recording the
+    // anchor in the tracker. Re-read the schedule now so the pre-wait decision cannot authorize a
+    // sender that this anchor demoted.
+    validate_live_block_sender(schedule, live_sender, anchor.number, block_number)?;
+    Ok(observed)
 }
 
 struct AdvanceTempoPortalInputs {
@@ -1084,14 +1127,17 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use alloy_eips::NumHash;
     use futures::{StreamExt as _, stream};
 
     use super::{
-        BackfillProgress, EncodedPersistedBlock, MAX_PENDING_BLOCKS, PersistedBlockSource,
-        PersistedTip, broadcast_persisted_blocks, buffer_pending_block,
+        AdvanceTempoPortalInputs, BackfillProgress, EncodedPersistedBlock, MAX_PENDING_BLOCKS,
+        PersistedBlockSource, PersistedTip, broadcast_persisted_blocks, buffer_pending_block,
+        validate_live_block_sender, wait_for_validated_peer_anchor,
     };
     use alloy_primitives::B256;
-    use zone_p2p::P2pCommand;
+    use zone_l1::{L1BlockTracker, L1PortalEvents};
+    use zone_p2p::{LeadershipSchedule, LeadershipState, P2pCommand};
 
     #[derive(Clone)]
     struct StartupRaceSource {
@@ -1367,6 +1413,63 @@ mod tests {
             super::validate_l1_checkpoint_transition(&header, 10, B256::repeat_byte(0x99), 7)
                 .unwrap_err();
         assert!(wrong_parent.to_string().contains("does not extend"));
+    }
+
+    #[tokio::test]
+    async fn revalidates_live_sender_after_anchor_observation() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+        const ANCHOR_NUMBER: u64 = 10;
+        const ZONE_BLOCK_NUMBER: u64 = 7;
+
+        let outgoing = PrivateKey::from_seed(1).public_key();
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, outgoing.clone(), 0));
+        let tracker = L1BlockTracker::default();
+        let anchor = NumHash::new(ANCHOR_NUMBER, B256::repeat_byte(0x10));
+
+        // The sender is valid under the pre-observation schedule.
+        validate_live_block_sender(&schedule, Some(&outgoing), ANCHOR_NUMBER, ZONE_BLOCK_NUMBER)
+            .unwrap();
+
+        let waiter = {
+            let schedule = schedule.clone();
+            let tracker = tracker.clone();
+            let outgoing = outgoing.clone();
+            tokio::spawn(async move {
+                let portal_inputs = AdvanceTempoPortalInputs {
+                    deposits: vec![],
+                    enabled_tokens: vec![],
+                };
+                wait_for_validated_peer_anchor(
+                    &tracker,
+                    &schedule,
+                    &portal_inputs,
+                    Some(&outgoing),
+                    anchor,
+                    ZONE_BLOCK_NUMBER,
+                )
+                .await
+            })
+        };
+
+        // Match subscriber ordering: publish the transition finalized by H before H becomes
+        // observable to follower import.
+        schedule
+            .publish(LeadershipState::new(2, incoming.clone(), ANCHOR_NUMBER))
+            .unwrap();
+        tracker
+            .record_with_portal_events(anchor, L1PortalEvents::default())
+            .unwrap();
+
+        let error = waiter
+            .await
+            .expect("anchor waiter must not panic")
+            .expect_err("the post-observation sender check must reject the outgoing leader");
+        let message = error.to_string();
+        assert!(message.contains(&outgoing.to_string()));
+        assert!(message.contains(&incoming.to_string()));
+        assert!(message.contains("schedule assigns that anchor"));
     }
 
     #[tokio::test]

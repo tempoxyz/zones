@@ -151,7 +151,9 @@ impl EventSinks {
 /// suppress the requesting peer until its response timeout and stall a leadership handoff.
 /// Every other event is forwarded to the active generation's substream, and events arriving
 /// between generations are dropped because the successor re-derives its state from the
-/// provider and schedule.
+/// provider and schedule. Generation delivery is deliberately non-blocking: when a generation
+/// falls behind, dropping recoverable events is preferable to blocking process-lifetime backfill
+/// serving behind generation-local backpressure.
 pub(crate) async fn route_events_to_generations(
     mut events: mpsc::Receiver<P2pEvent>,
     sinks: EventSinks,
@@ -180,12 +182,25 @@ pub(crate) async fn route_events_to_generations(
             debug!(target: "zone::role", "Dropping P2P event with no active generation consumer");
             continue;
         };
-        if sink.send(event).await.is_err() {
-            // The generation stopped after we snapshotted its sink; the next generation
-            // installs fresh channels and re-derives its state, so late generation-specific
-            // events must not leak into the successor.
-            metrics::counter!("zone_leadership_events_dropped_between_generations_total")
-                .increment(1);
+        match sink.try_send(event) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Live blocks and backfill responses are recovered by the follower's periodic
+                // backfill probe; transaction forwarding reconciles from the pool. Never let a
+                // slow generation block the process-lifetime backfill request path.
+                metrics::counter!("zone_leadership_events_dropped_backpressure_total").increment(1);
+                debug!(
+                    target: "zone::role",
+                    "Dropping generation event because its bounded sink is full"
+                );
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // The generation stopped after we snapshotted its sink; the next generation
+                // installs fresh channels and re-derives its state, so late generation-specific
+                // events must not leak into the successor.
+                metrics::counter!("zone_leadership_events_dropped_between_generations_total")
+                    .increment(1);
+            }
         }
     }
     error!(target: "zone::role", "P2P event channel closed");
@@ -914,5 +929,64 @@ mod tests {
             .await
             .expect("event router did not stop")
             .expect("event router task panicked");
+    }
+
+    #[tokio::test]
+    async fn backfill_request_bypasses_saturated_generation_sink() {
+        let sinks = EventSinks::default();
+        let (generation_tx, mut generation_rx) = mpsc::channel(1);
+        sinks.install(generation_tx, None);
+
+        let (network_events, event_rx) = mpsc::channel(4);
+        let (backfill_tx, mut backfill_rx) = mpsc::channel(1);
+        let router = tokio::spawn(route_events_to_generations(event_rx, sinks, backfill_tx));
+        let peer = PrivateKey::from_seed(1).public_key();
+
+        // The first event fills the generation sink. The second must be dropped instead of
+        // parking the router ahead of the process-lifetime backfill request.
+        for port in [9000, 9001] {
+            network_events
+                .send(P2pEvent::Started {
+                    ed25519_public_key: peer.clone(),
+                    listen: SocketAddr::from(([127, 0, 0, 1], port)),
+                })
+                .await
+                .unwrap();
+        }
+        network_events
+            .send(P2pEvent::BackfillRequested {
+                peer: peer.clone(),
+                request_id: 8,
+                start: 43,
+            })
+            .await
+            .unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(1), backfill_rx.recv())
+            .await
+            .expect("generation backpressure blocked the backfill request")
+            .expect("backfill serving channel closed");
+        assert_eq!(request.peer, peer);
+        assert_eq!(request.request_id, 8);
+        assert_eq!(request.start, 43);
+
+        drop(network_events);
+        tokio::time::timeout(Duration::from_secs(1), router)
+            .await
+            .expect("event router did not stop")
+            .expect("event router task panicked");
+
+        let forwarded = generation_rx
+            .recv()
+            .await
+            .expect("the first generation event should have been forwarded");
+        assert!(matches!(
+            forwarded,
+            P2pEvent::Started { listen, .. } if listen.port() == 9000
+        ));
+        assert!(
+            generation_rx.try_recv().is_err(),
+            "the event that encountered backpressure should have been dropped"
+        );
     }
 }
