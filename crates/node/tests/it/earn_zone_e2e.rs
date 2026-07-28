@@ -18,7 +18,7 @@ use alloy_sol_types::{SolCall, SolConstructor, SolValue};
 use eyre::WrapErr;
 use std::time::Duration;
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
-use tempo_contracts::precompiles::{ITIP20, ITIP403Registry};
+use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP403Registry};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
@@ -27,7 +27,6 @@ const AMOUNT: u128 = 1_000_000;
 const REWARD_AMOUNT: u128 = AMOUNT / 10;
 const PUBLIC_USER_BALANCE: u128 = 50_000_000;
 const PRIVATE_FEE_BALANCE: u128 = 10_000_000;
-const DEX_LIQUIDITY: u128 = 300_000_000;
 const TOKEN_SUPPLY: u128 = 1_000_000_000;
 // Match Earn's current callback budget.
 const CALLBACK_GAS_LIMIT: u64 = 10_000_000;
@@ -58,28 +57,20 @@ alloy_sol_types::sol! {
 
     struct FixedFeeRecipient {
         address account;
-        uint96 rate;
+        uint16 rateBps;
     }
 
     struct ExcessReturnFee {
         bool enabled;
         address account;
-        uint96 annualTargetRate;
-        uint96 excessFeeRate;
+        uint16 annualTargetRateBps;
+        uint16 excessFeeRateBps;
     }
 
     struct FeeConfig {
         uint8 fixedFeeCount;
         FixedFeeRecipient[4] fixedFees;
         ExcessReturnFee excess;
-    }
-
-    struct EarnFeesInit {
-        address administrator;
-        address guardian;
-        uint96 fixedFeeCap;
-        uint96 excessFeeCap;
-        FeeConfig initialConfig;
     }
 
     struct EarnEncryptedDepositPayload {
@@ -90,13 +81,7 @@ alloy_sol_types::sol! {
         bytes16 tag;
     }
 
-    enum EarnDestination {
-        Zone,
-        Public
-    }
-
-    struct EarnZoneDelivery {
-        address portal;
+    struct EarnZoneReturn {
         uint256 keyIndex;
         EarnEncryptedDepositPayload encrypted;
         address refundRecipient;
@@ -104,8 +89,29 @@ alloy_sol_types::sol! {
 
     struct EarnCallbackData {
         EarnFlow flow;
+        uint128 minVaultAssets;
+        uint128 minEarnShares;
+        uint128 minOutputAmount;
+        bytes32 actionId;
+        EarnZoneReturn zoneReturn;
+    }
+
+    enum LegacyEarnDestination {
+        Zone,
+        Public
+    }
+
+    struct LegacyEarnZoneDelivery {
+        address portal;
+        uint256 keyIndex;
+        EarnEncryptedDepositPayload encrypted;
+        address refundRecipient;
+    }
+
+    struct LegacyEarnCallbackData {
+        EarnFlow flow;
         address earnVault;
-        EarnDestination destination;
+        LegacyEarnDestination destination;
         address outputToken;
         uint128 minVaultAssets;
         uint128 minEarnShares;
@@ -119,12 +125,13 @@ alloy_sol_types::sol! {
         address engine;
         address owner;
         EarnVaultControls controls;
-        EarnFeesInit fees;
+        FeeConfig fees;
     }
 
     #[sol(rpc)]
     contract EarnZonePortalView {
         function messenger() external view returns (address);
+        function zoneId() external view returns (uint32);
     }
 
     #[sol(rpc)]
@@ -163,6 +170,9 @@ alloy_sol_types::sol! {
 
     #[sol(rpc)]
     contract EarnVault {
+        function deposit(uint256 assets, address receiver, uint256 minEarnShares)
+            external
+            returns (uint256 earnShares);
         function depositVenueShares(uint256 venueShares, address receiver, uint256 minEarnShares)
             external
             returns (uint256 earnShares);
@@ -173,6 +183,9 @@ alloy_sol_types::sol! {
             external
             returns (uint256 newShares);
         function previewRedeem(uint256 shares) external view returns (uint256 assets);
+        function redeem(uint256 earnShares, address receiver, uint256 minAssets)
+            external
+            returns (uint256 assets);
         function setDepositsPaused(bool paused) external;
         function convertEngineSharesToEarnShares(uint256 shares) external view returns (uint256);
         function totalEarnShares() external view returns (uint256);
@@ -181,25 +194,34 @@ alloy_sol_types::sol! {
     }
 
     #[sol(rpc)]
-    contract UniversalEarnRouter {
-        function deposit(address earnVault, uint256 assets, uint256 minEarnShares, address recipient)
-            external
-            returns (uint256 earnShares);
+    contract SingleZoneEarnRouter {
+        constructor(uint32 allowedZoneId_, address earnVault_, address privateAsset_, address tokenAuthority_);
+    }
+
+    #[sol(rpc)]
+    contract LegacyUniversalEarnRouter {
         function depositToZone(
             address earnVault,
             uint256 assets,
             uint256 minEarnShares,
-            EarnZoneDelivery delivery
+            LegacyEarnZoneDelivery delivery
         ) external returns (uint256 earnShares, bytes32 zoneDepositHash);
-        function redeem(address earnVault, uint256 earnShares, uint256 minAssets, address recipient)
-            external
-            returns (uint256 assets);
         function redeemToZone(
             address earnVault,
             uint256 earnShares,
             uint256 minAssets,
-            EarnZoneDelivery delivery
+            LegacyEarnZoneDelivery delivery
         ) external returns (uint256 assets, bytes32 zoneDepositHash);
+    }
+
+    #[sol(rpc)]
+    contract DemoTokenAuthority {
+        constructor(address reserveToken, address administrator);
+        function BRIDGE_ECOSYSTEM_CONTRACT_ROLE() external view returns (bytes32);
+        function UNWRAPPER_ROLE() external view returns (bytes32);
+        function grantRole(bytes32 role, address account) external;
+        function setTxnMintLimit(address stablecoin, uint256 limit) external;
+        function mintBridgeEcosystem(address stablecoin, address receiver, uint256 amount) external;
     }
 
     #[sol(rpc)]
@@ -330,23 +352,17 @@ impl EarnZoneFixture {
         )
         .await?;
 
-        let fees = EarnFeesInit {
-            administrator: Address::ZERO,
-            guardian: Address::ZERO,
-            fixedFeeCap: Default::default(),
-            excessFeeCap: Default::default(),
-            initialConfig: FeeConfig {
-                fixedFeeCount: 0,
-                fixedFees: std::array::from_fn(|_| FixedFeeRecipient {
-                    account: Address::ZERO,
-                    rate: Default::default(),
-                }),
-                excess: ExcessReturnFee {
-                    enabled: false,
-                    account: Address::ZERO,
-                    annualTargetRate: Default::default(),
-                    excessFeeRate: Default::default(),
-                },
+        let fees = FeeConfig {
+            fixedFeeCount: 0,
+            fixedFees: std::array::from_fn(|_| FixedFeeRecipient {
+                account: Address::ZERO,
+                rateBps: Default::default(),
+            }),
+            excess: ExcessReturnFee {
+                enabled: false,
+                account: Address::ZERO,
+                annualTargetRateBps: Default::default(),
+                excessFeeRateBps: Default::default(),
             },
         };
         let params = EarnDeployParams {
@@ -388,7 +404,93 @@ impl EarnZoneFixture {
             .await?;
         eyre::ensure!(receipt.status(), "initializing the Earn engine failed");
 
-        let router = deploy_contract(&l1, "UniversalEarnRouter", Vec::new()).await?;
+        let authority = deploy_contract(
+            &l1,
+            "DemoTokenAuthority",
+            DemoTokenAuthority::constructorCall {
+                reserveToken: PATH_USD_ADDRESS,
+                administrator: owner,
+            }
+            .abi_encode(),
+        )
+        .await?;
+        let provider = l1.dev_provider();
+        let authority_contract = DemoTokenAuthority::new(authority, &provider);
+        let receipt = IRolesAuth::new(PATH_USD_ADDRESS, &provider)
+            .grantRole(keccak256("ISSUER_ROLE"), authority)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "granting reserve issuer role failed");
+        for token in [vault_asset, alternate_asset] {
+            let receipt = IRolesAuth::new(token, &provider)
+                .grantRole(keccak256("ISSUER_ROLE"), authority)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(
+                receipt.status(),
+                "granting TokenAuthority issuer role failed"
+            );
+            let receipt = authority_contract
+                .setTxnMintLimit(token, U256::from(TOKEN_SUPPLY))
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(
+                receipt.status(),
+                "setting TokenAuthority transaction limit failed"
+            );
+        }
+        let zone_id = EarnZonePortalView::new(portal, l1.provider())
+            .zoneId()
+            .call()
+            .await?;
+        let router = deploy_contract(
+            &l1,
+            "SingleZoneEarnRouter",
+            SingleZoneEarnRouter::constructorCall {
+                allowedZoneId_: zone_id,
+                earnVault_: earn_vault,
+                privateAsset_: alternate_asset,
+                tokenAuthority_: authority,
+            }
+            .abi_encode(),
+        )
+        .await?;
+        let provider = l1.dev_provider();
+        let authority_contract = DemoTokenAuthority::new(authority, &provider);
+        let unwrap_role = authority_contract.UNWRAPPER_ROLE().call().await?;
+        let receipt = authority_contract
+            .grantRole(unwrap_role, router)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "granting router unwrap role failed");
+        let bridge_role = authority_contract
+            .BRIDGE_ECOSYSTEM_CONTRACT_ROLE()
+            .call()
+            .await?;
+        let receipt = authority_contract
+            .grantRole(bridge_role, owner)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "granting fixture funding role failed");
+        for token in [vault_asset, alternate_asset] {
+            let receipt = authority_contract
+                .mintBridgeEcosystem(token, user_address, U256::from(PUBLIC_USER_BALANCE))
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            eyre::ensure!(receipt.status(), "funding TokenAuthority fixture failed");
+        }
         let router_block = l1.set_zone_gateway_on_portal(portal, router, true).await?;
         zone.wait_for_l2_tempo_finalized(router_block, E2E_TIMEOUT)
             .await?;
@@ -431,17 +533,6 @@ impl EarnZoneFixture {
         l1.enable_token_on_portal(portal, vault_asset).await?;
         l1.enable_token_on_portal(portal, alternate_asset).await?;
         l1.enable_token_on_portal(portal, earn_share).await?;
-
-        l1.create_dex_pair(vault_asset).await?;
-        l1.create_dex_pair(alternate_asset).await?;
-        l1.place_dex_bid_order(vault_asset, DEX_LIQUIDITY, 0)
-            .await?;
-        l1.place_dex_ask_order(vault_asset, DEX_LIQUIDITY, 0)
-            .await?;
-        l1.place_dex_bid_order(alternate_asset, DEX_LIQUIDITY, 0)
-            .await?;
-        l1.place_dex_ask_order(alternate_asset, DEX_LIQUIDITY, 0)
-            .await?;
 
         let configured_at = l1.provider().get_block_number().await?;
         zone.wait_for_l2_tempo_finalized(configured_at, E2E_TIMEOUT)
@@ -620,7 +711,7 @@ impl EarnZoneFixture {
     async fn callback_data(
         &self,
         flow: EarnFlow,
-        output_token: Address,
+        _output_token: Address,
         recipient: Address,
         refund_recipient: Address,
         limits: EarnLimits,
@@ -630,37 +721,29 @@ impl EarnZoneFixture {
             .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
             .await?;
         let action_id = keccak256(encrypted.ciphertext.as_ref());
-        let destination_data = EarnZoneDelivery {
-            portal: self.portal,
+        let zone_return = EarnZoneReturn {
             keyIndex: key_index,
             encrypted: map_encrypted_payload(encrypted),
             refundRecipient: refund_recipient,
-        }
-        .abi_encode()
-        .into();
+        };
         Ok(EarnCallbackData {
             flow,
-            earnVault: self.earn_vault,
-            destination: EarnDestination::Zone,
-            outputToken: output_token,
             minVaultAssets: limits.min_vault_assets,
             minEarnShares: limits.min_earn_shares,
             minOutputAmount: limits.min_output_amount,
             actionId: action_id,
-            destinationData: destination_data,
+            zoneReturn: zone_return,
         }
         .abi_encode()
         .into())
     }
 
     async fn deposit_limits(&self, input_token: Address, amount: u128) -> eyre::Result<EarnLimits> {
-        let expected_vault_assets = if input_token == self.vault_asset {
-            amount
-        } else {
-            self.l1
-                .quote_dex_swap_exact_amount_in(input_token, self.vault_asset, amount)
-                .await?
-        };
+        eyre::ensure!(
+            input_token == self.alternate_asset,
+            "unsupported private Earn input"
+        );
+        let expected_vault_assets = amount;
         let min_vault_assets = minimum_output(expected_vault_assets);
         let expected_earn_shares = EarnVault::new(self.earn_vault, self.l1.provider())
             .convertEngineSharesToEarnShares(U256::from(min_vault_assets))
@@ -687,290 +770,16 @@ impl EarnZoneFixture {
             .await?;
         let min_vault_assets =
             minimum_output(u256_to_u128(expected_vault_assets, "Earn redeem preview")?);
-        let min_output_amount = if output_token == self.vault_asset {
-            min_vault_assets
-        } else {
-            minimum_output(
-                self.l1
-                    .quote_dex_swap_exact_amount_in(
-                        self.vault_asset,
-                        output_token,
-                        min_vault_assets,
-                    )
-                    .await?,
-            )
-        };
+        eyre::ensure!(
+            output_token == self.alternate_asset,
+            "unsupported private Earn output"
+        );
+        let min_output_amount = min_vault_assets;
         Ok(EarnLimits {
             min_vault_assets,
             min_earn_shares: 0,
             min_output_amount,
         })
-    }
-
-    fn public_callback_data(
-        &self,
-        flow: EarnFlow,
-        output_token: Address,
-        recipient: Address,
-        limits: EarnLimits,
-    ) -> Bytes {
-        EarnCallbackData {
-            flow,
-            earnVault: self.earn_vault,
-            destination: EarnDestination::Public,
-            outputToken: output_token,
-            minVaultAssets: limits.min_vault_assets,
-            minEarnShares: limits.min_earn_shares,
-            minOutputAmount: limits.min_output_amount,
-            actionId: keccak256((recipient, output_token).abi_encode()),
-            destinationData: recipient.abi_encode().into(),
-        }
-        .abi_encode()
-        .into()
-    }
-
-    async fn assert_router_empty(&self) -> eyre::Result<()> {
-        for token in [self.vault_asset, self.alternate_asset, self.earn_share] {
-            eyre::ensure!(
-                self.l1.balance_of(token, self.router).await? == U256::ZERO,
-                "UniversalEarnRouter retained token {token}"
-            );
-        }
-        Ok(())
-    }
-
-    async fn enable_public_callback_destinations(&self) -> eyre::Result<()> {
-        // Closed-access portals require every callback to append a return deposit. Earn's public
-        // matrix destinations intentionally leave the Zone system, so mirror upstream's open Zone
-        // environment for only those paths.
-        let block = self
-            .l1
-            .set_access_mode_on_portal(self.portal, false)
-            .await?;
-        self.zone
-            .wait_for_l2_tempo_finalized(block, E2E_TIMEOUT)
-            .await?;
-        Ok(())
-    }
-
-    async fn deposit_public_to_private(&self, recipient: Address) -> eyre::Result<u128> {
-        let provider = self.user.l1_provider();
-        let limits = self.deposit_limits(self.vault_asset, AMOUNT).await?;
-        let private_before = self.zone.balance_of(self.earn_share, recipient).await?;
-        let public_before = self
-            .l1
-            .balance_of(self.earn_share, self.user.address())
-            .await?;
-        let receipt = ITIP20::new(self.vault_asset, provider)
-            .approve(self.router, U256::from(AMOUNT))
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "public deposit router approval failed");
-
-        let (key_index, encrypted) = self
-            .l1
-            .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
-            .await?;
-        let delivery = EarnZoneDelivery {
-            portal: self.portal,
-            keyIndex: key_index,
-            encrypted: map_encrypted_payload(encrypted),
-            refundRecipient: self.user.address(),
-        };
-        let receipt = UniversalEarnRouter::new(self.router, provider)
-            .depositToZone(
-                self.earn_vault,
-                U256::from(AMOUNT),
-                U256::from(limits.min_earn_shares),
-                delivery,
-            )
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "public-to-private Earn deposit failed");
-
-        let private_after = self
-            .zone
-            .wait_for_balance(
-                self.earn_share,
-                recipient,
-                private_before + U256::from(1),
-                E2E_TIMEOUT,
-            )
-            .await?;
-        assert_eq!(
-            self.l1
-                .balance_of(self.earn_share, self.user.address())
-                .await?,
-            public_before,
-            "public-to-private deposit left EarnShare on the caller"
-        );
-        self.assert_router_empty().await?;
-        u256_to_u128(
-            private_after - private_before,
-            "EarnShare returned by public-to-private deposit",
-        )
-    }
-
-    async fn deposit_private_to_public(&mut self, recipient: Address) -> eyre::Result<u128> {
-        self.enable_public_callback_destinations().await?;
-        self.encrypted_entry(self.vault_asset, AMOUNT).await?;
-        let before = self.l1.balance_of(self.earn_share, recipient).await?;
-        let limits = self.deposit_limits(self.vault_asset, AMOUNT).await?;
-        let data = self.public_callback_data(EarnFlow::Deposit, self.earn_share, recipient, limits);
-        self.user
-            .withdraw_token_with(
-                self.vault_asset,
-                WithdrawalArgs {
-                    amount: AMOUNT,
-                    to: Some(self.router),
-                    memo: B256::ZERO,
-                    gas_limit: CALLBACK_GAS_LIMIT,
-                    zone_fallback_recipient: Some(self.user.address()),
-                    data,
-                    reveal_to: Bytes::new(),
-                },
-            )
-            .await?;
-        let after = self
-            .l1
-            .wait_for_balance(
-                self.earn_share,
-                recipient,
-                before + U256::from(1),
-                E2E_TIMEOUT,
-            )
-            .await?;
-        self.assert_router_empty().await?;
-        u256_to_u128(
-            after - before,
-            "EarnShare returned by private-to-public deposit",
-        )
-    }
-
-    async fn mint_public_earn(&self) -> eyre::Result<u128> {
-        let provider = self.user.l1_provider();
-        let limits = self.deposit_limits(self.vault_asset, AMOUNT).await?;
-        let receipt = ITIP20::new(self.vault_asset, provider)
-            .approve(self.router, U256::from(AMOUNT))
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "public Earn deposit approval failed");
-        let before = self
-            .l1
-            .balance_of(self.earn_share, self.user.address())
-            .await?;
-        let receipt = UniversalEarnRouter::new(self.router, provider)
-            .deposit(
-                self.earn_vault,
-                U256::from(AMOUNT),
-                U256::from(limits.min_earn_shares),
-                self.user.address(),
-            )
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "public Earn deposit failed");
-        let after = self
-            .l1
-            .balance_of(self.earn_share, self.user.address())
-            .await?;
-        self.assert_router_empty().await?;
-        u256_to_u128(after - before, "public Earn deposit")
-    }
-
-    async fn redeem_public_to_private(&self, recipient: Address) -> eyre::Result<u128> {
-        let earn_shares = self.mint_public_earn().await?;
-        let limits = self.redeem_limits(earn_shares, self.vault_asset).await?;
-        let provider = self.user.l1_provider();
-        let receipt = ITIP20::new(self.earn_share, provider)
-            .approve(self.router, U256::from(earn_shares))
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "public Earn redeem approval failed");
-
-        let private_before = self.zone.balance_of(self.vault_asset, recipient).await?;
-        let (key_index, encrypted) = self
-            .l1
-            .encrypt_deposit_for_portal(self.portal, recipient, B256::ZERO)
-            .await?;
-        let delivery = EarnZoneDelivery {
-            portal: self.portal,
-            keyIndex: key_index,
-            encrypted: map_encrypted_payload(encrypted),
-            refundRecipient: self.user.address(),
-        };
-        let receipt = UniversalEarnRouter::new(self.router, provider)
-            .redeemToZone(
-                self.earn_vault,
-                U256::from(earn_shares),
-                U256::from(limits.min_vault_assets),
-                delivery,
-            )
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "public-to-private Earn redeem failed");
-        let private_after = self
-            .zone
-            .wait_for_balance(
-                self.vault_asset,
-                recipient,
-                private_before + U256::from(1),
-                E2E_TIMEOUT,
-            )
-            .await?;
-        self.assert_router_empty().await?;
-        u256_to_u128(
-            private_after - private_before,
-            "assets returned by public-to-private redeem",
-        )
-    }
-
-    async fn redeem_private_to_public(&mut self, recipient: Address) -> eyre::Result<u128> {
-        let user = self.user.address();
-        let earn_shares = self.zone_deposit(self.vault_asset, user).await?;
-        self.enable_public_callback_destinations().await?;
-        let before = self.l1.balance_of(self.vault_asset, recipient).await?;
-        let limits = self.redeem_limits(earn_shares, self.vault_asset).await?;
-        let data = self.public_callback_data(EarnFlow::Redeem, self.vault_asset, recipient, limits);
-        self.user
-            .withdraw_token_with(
-                self.earn_share,
-                WithdrawalArgs {
-                    amount: earn_shares,
-                    to: Some(self.router),
-                    memo: B256::ZERO,
-                    gas_limit: CALLBACK_GAS_LIMIT,
-                    zone_fallback_recipient: Some(user),
-                    data,
-                    reveal_to: Bytes::new(),
-                },
-            )
-            .await?;
-        let after = self
-            .l1
-            .wait_for_balance(
-                self.vault_asset,
-                recipient,
-                before + U256::from(1),
-                E2E_TIMEOUT,
-            )
-            .await?;
-        self.assert_router_empty().await?;
-        u256_to_u128(
-            after - before,
-            "assets returned by private-to-public redeem",
-        )
     }
 
     async fn assert_private_return(
@@ -1146,6 +955,25 @@ impl EarnZoneFixture {
         recipient: Address,
         limits: EarnLimits,
     ) -> eyre::Result<()> {
+        let data = self
+            .callback_data(
+                EarnFlow::Deposit,
+                self.earn_share,
+                recipient,
+                self.user.address(),
+                limits,
+            )
+            .await?;
+        self.zone_deposit_with_data_expect_callback_bounce(input_token, recipient, data)
+            .await
+    }
+
+    async fn zone_deposit_with_data_expect_callback_bounce(
+        &mut self,
+        input_token: Address,
+        recipient: Address,
+        data: Bytes,
+    ) -> eyre::Result<()> {
         self.encrypted_entry(input_token, AMOUNT).await?;
         let private_input_before = self
             .zone
@@ -1159,15 +987,6 @@ impl EarnZoneFixture {
         let backing_before = VenueVault::new(self.venue_vault, self.l1.provider())
             .balanceOf(self.engine)
             .call()
-            .await?;
-        let data = self
-            .callback_data(
-                EarnFlow::Deposit,
-                self.earn_share,
-                recipient,
-                self.user.address(),
-                limits,
-            )
             .await?;
         let callback_gas_limit = CALLBACK_GAS_LIMIT;
         self.user
@@ -1632,6 +1451,21 @@ fn map_encrypted_payload(payload: EncryptedDepositPayload) -> EarnEncryptedDepos
     }
 }
 
+fn legacy_delivery(portal: Address, refund_recipient: Address) -> LegacyEarnZoneDelivery {
+    LegacyEarnZoneDelivery {
+        portal,
+        keyIndex: U256::ZERO,
+        encrypted: EarnEncryptedDepositPayload {
+            ephemeralPubkeyX: B256::ZERO,
+            ephemeralPubkeyYParity: 0,
+            ciphertext: Bytes::new(),
+            nonce: Default::default(),
+            tag: Default::default(),
+        },
+        refundRecipient: refund_recipient,
+    }
+}
+
 fn u256_to_u128(value: U256, description: &str) -> eyre::Result<u128> {
     value
         .try_into()
@@ -1652,10 +1486,10 @@ fn ensure_gas_headroom(gas_used: u64, gas_limit: u64, operation: &str) -> eyre::
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zone_deposit_direct() -> eyre::Result<()> {
+async fn matrix_deposit_private_private_succeeds() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
     let user = fixture.user.address();
-    let shares = fixture.zone_deposit(fixture.vault_asset, user).await?;
+    let shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     assert_eq!(shares, AMOUNT, "direct Zone deposit was not 1:1");
     Ok(())
 }
@@ -1664,18 +1498,20 @@ async fn zone_deposit_direct() -> eyre::Result<()> {
 async fn zone_deposit_third_party_recipient() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
     let recipient = fixture.l1.signer_at(3).address();
-    let shares = fixture.zone_deposit(fixture.vault_asset, recipient).await?;
+    let shares = fixture
+        .zone_deposit(fixture.alternate_asset, recipient)
+        .await?;
     assert_eq!(shares, AMOUNT, "third-party Zone deposit was not 1:1");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zone_redeem_direct() -> eyre::Result<()> {
+async fn matrix_redeem_private_private_succeeds() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
     let user = fixture.user.address();
-    let shares = fixture.zone_deposit(fixture.vault_asset, user).await?;
+    let shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     let output = fixture
-        .zone_redeem(shares, fixture.vault_asset, user)
+        .zone_redeem(shares, fixture.alternate_asset, user)
         .await?;
     assert_eq!(output, AMOUNT, "direct Zone lifecycle was not 1:1");
     Ok(())
@@ -1686,9 +1522,9 @@ async fn zone_redeem_third_party_recipient() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
     let user = fixture.user.address();
     let recipient = fixture.l1.signer_at(3).address();
-    let shares = fixture.zone_deposit(fixture.vault_asset, user).await?;
+    let shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     let output = fixture
-        .zone_redeem(shares, fixture.vault_asset, recipient)
+        .zone_redeem(shares, fixture.alternate_asset, recipient)
         .await?;
     assert_eq!(output, AMOUNT, "third-party Zone lifecycle was not 1:1");
     Ok(())
@@ -1729,13 +1565,13 @@ async fn zone_swap_slippage_bounces() -> eyre::Result<()> {
 async fn controls_pause_blocks_entry_but_preserves_exits() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
     let user = fixture.user.address();
-    let shares = fixture.zone_deposit(fixture.vault_asset, user).await?;
+    let shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     fixture.set_deposits_paused(true).await?;
     fixture
-        .zone_deposit_expect_callback_bounce(fixture.vault_asset, user, EarnLimits::default())
+        .zone_deposit_expect_callback_bounce(fixture.alternate_asset, user, EarnLimits::default())
         .await?;
     let output = fixture
-        .zone_redeem(shares, fixture.vault_asset, user)
+        .zone_redeem(shares, fixture.alternate_asset, user)
         .await?;
     assert_eq!(output, AMOUNT, "deposit pause blocked a private exit");
     fixture.set_deposits_paused(false).await?;
@@ -1749,7 +1585,7 @@ async fn zone_ineligible_private_deposit_bounces() -> eyre::Result<()> {
     fixture.allow_zone_account(outsider).await?;
     fixture.set_access_eligibility(outsider, false).await?;
     fixture
-        .zone_deposit_expect_recipient_bounce(fixture.vault_asset, outsider)
+        .zone_deposit_expect_recipient_bounce(fixture.alternate_asset, outsider)
         .await
 }
 
@@ -1760,7 +1596,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
     let outsider = fixture.l1.signer_at(3).address();
     fixture.allow_zone_account(outsider).await?;
     fixture.set_access_eligibility(outsider, false).await?;
-    let user_shares = fixture.zone_deposit(fixture.vault_asset, user).await?;
+    let user_shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     let user_before = fixture.zone.balance_of(fixture.earn_share, user).await?;
     let outsider_before = fixture
         .zone
@@ -1792,7 +1628,7 @@ async fn zone_ineligible_private_transfer_blocked() -> eyre::Result<()> {
         "rejected private transfer changed the recipient balance"
     );
     let output = fixture
-        .zone_redeem(user_shares, fixture.vault_asset, user)
+        .zone_redeem(user_shares, fixture.alternate_asset, user)
         .await?;
     assert_eq!(output, AMOUNT, "eligible holder cleanup was not 1:1");
     Ok(())
@@ -1811,7 +1647,9 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         .deposit(PRIVATE_FEE_BALANCE, E2E_TIMEOUT, &fixture.zone)
         .await?;
     fixture.set_access_eligibility(outsider, true).await?;
-    let outsider_shares = fixture.zone_deposit(fixture.vault_asset, outsider).await?;
+    let outsider_shares = fixture
+        .zone_deposit(fixture.alternate_asset, outsider)
+        .await?;
     assert!(
         outsider_shares > 0,
         "eligible private outsider received no EarnShare"
@@ -1821,7 +1659,7 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
         .zone_redeem_as(
             &mut outsider_account,
             outsider_shares,
-            fixture.vault_asset,
+            fixture.alternate_asset,
             outsider,
         )
         .await?;
@@ -1844,7 +1682,7 @@ async fn zone_removed_private_holder_can_exit() -> eyre::Result<()> {
 async fn zone_rewards_private_holder() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
     let user = fixture.user.address();
-    let shares = fixture.zone_deposit(fixture.vault_asset, user).await?;
+    let shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
     assert!(shares > 1, "private reward setup minted too few shares");
 
     let private_after_entry = fixture.zone.balance_of(fixture.earn_share, user).await?;
@@ -1928,7 +1766,7 @@ async fn zone_rewards_private_holder() -> eyre::Result<()> {
     let first_shares = shares / 2;
     let second_shares = shares - first_shares;
     let first_output = fixture
-        .zone_redeem(first_shares, fixture.vault_asset, user)
+        .zone_redeem(first_shares, fixture.alternate_asset, user)
         .await?;
     assert!(
         first_output > 0,
@@ -1942,7 +1780,7 @@ async fn zone_rewards_private_holder() -> eyre::Result<()> {
     );
 
     let second_output = fixture
-        .zone_redeem(second_shares, fixture.vault_asset, user)
+        .zone_redeem(second_shares, fixture.alternate_asset, user)
         .await?;
     assert_eq!(
         first_output + second_output,
@@ -1958,81 +1796,231 @@ async fn zone_rewards_private_holder() -> eyre::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn matrix_deposit_public_private_self() -> eyre::Result<()> {
+async fn matrix_deposit_public_public_succeeds() -> eyre::Result<()> {
     let fixture = EarnZoneFixture::start().await?;
-    let amount = fixture
-        .deposit_public_to_private(fixture.user.address())
+    let user = fixture.user.address();
+    let provider = fixture.user.l1_provider();
+    let shares_before = fixture.l1.balance_of(fixture.earn_share, user).await?;
+
+    let receipt = ITIP20::new(fixture.vault_asset, provider)
+        .approve(fixture.earn_vault, U256::from(AMOUNT))
+        .send()
+        .await?
+        .get_receipt()
         .await?;
-    assert!(amount > 0, "public deposit produced no private EarnShare");
+    eyre::ensure!(receipt.status(), "public EarnVault approval failed");
+    let receipt = EarnVault::new(fixture.earn_vault, provider)
+        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(receipt.status(), "public EarnVault deposit failed");
+    assert_eq!(
+        fixture.l1.balance_of(fixture.earn_share, user).await? - shares_before,
+        U256::from(AMOUNT),
+        "public-to-public deposit was not 1:1"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn matrix_deposit_public_private_third_party() -> eyre::Result<()> {
+async fn matrix_redeem_public_public_succeeds() -> eyre::Result<()> {
     let fixture = EarnZoneFixture::start().await?;
-    let amount = fixture
-        .deposit_public_to_private(fixture.l1.signer_at(3).address())
+    let user = fixture.user.address();
+    let provider = fixture.user.l1_provider();
+    let assets_before = fixture.l1.balance_of(fixture.vault_asset, user).await?;
+
+    ITIP20::new(fixture.vault_asset, provider)
+        .approve(fixture.earn_vault, U256::from(AMOUNT))
+        .send()
+        .await?
+        .get_receipt()
         .await?;
-    assert!(amount > 0, "public deposit produced no private EarnShare");
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn matrix_deposit_private_public_self() -> eyre::Result<()> {
-    let mut fixture = EarnZoneFixture::start().await?;
-    let amount = fixture
-        .deposit_private_to_public(fixture.user.address())
+    EarnVault::new(fixture.earn_vault, provider)
+        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .send()
+        .await?
+        .get_receipt()
         .await?;
-    assert!(amount > 0, "private deposit produced no public EarnShare");
+    let earn_shares = fixture.l1.balance_of(fixture.earn_share, user).await?;
+
+    let receipt = ITIP20::new(fixture.earn_share, provider)
+        .approve(fixture.earn_vault, earn_shares)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(receipt.status(), "public EarnShare approval failed");
+    let receipt = EarnVault::new(fixture.earn_vault, provider)
+        .redeem(earn_shares, user, U256::from(1))
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(receipt.status(), "public EarnVault redeem failed");
+    assert_eq!(
+        fixture.l1.balance_of(fixture.vault_asset, user).await?,
+        assets_before,
+        "direct public EarnVault lifecycle did not return the deposited assets"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn matrix_deposit_private_public_third_party() -> eyre::Result<()> {
-    let mut fixture = EarnZoneFixture::start().await?;
-    let recipient = fixture.l1.signer_at(3).address();
-    let amount = fixture.deposit_private_to_public(recipient).await?;
-    assert!(amount > 0, "private deposit produced no public EarnShare");
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn matrix_redeem_public_private_self() -> eyre::Result<()> {
+async fn matrix_deposit_public_private_rejects_retired_router_surface() -> eyre::Result<()> {
     let fixture = EarnZoneFixture::start().await?;
-    let amount = fixture
-        .redeem_public_to_private(fixture.user.address())
-        .await?;
-    assert!(amount > 0, "public redeem produced no private assets");
+    let user = fixture.user.address();
+    let result = LegacyUniversalEarnRouter::new(fixture.router, fixture.user.l1_provider())
+        .depositToZone(
+            fixture.earn_vault,
+            U256::from(AMOUNT),
+            U256::from(1),
+            legacy_delivery(fixture.portal, user),
+        )
+        .call()
+        .await;
+    eyre::ensure!(
+        result.is_err(),
+        "retired public-to-private deposit surface remained callable"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn matrix_redeem_public_private_third_party() -> eyre::Result<()> {
+async fn matrix_redeem_public_private_rejects_retired_router_surface() -> eyre::Result<()> {
     let fixture = EarnZoneFixture::start().await?;
-    let amount = fixture
-        .redeem_public_to_private(fixture.l1.signer_at(3).address())
-        .await?;
-    assert!(amount > 0, "public redeem produced no private assets");
+    let user = fixture.user.address();
+    let result = LegacyUniversalEarnRouter::new(fixture.router, fixture.user.l1_provider())
+        .redeemToZone(
+            fixture.earn_vault,
+            U256::from(AMOUNT),
+            U256::from(1),
+            legacy_delivery(fixture.portal, user),
+        )
+        .call()
+        .await;
+    eyre::ensure!(
+        result.is_err(),
+        "retired public-to-private redeem surface remained callable"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn matrix_redeem_private_public_self() -> eyre::Result<()> {
+async fn matrix_deposit_private_public_rejects_legacy_destination() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
-    let amount = fixture
-        .redeem_private_to_public(fixture.user.address())
+    let user = fixture.user.address();
+    let data: Bytes = LegacyEarnCallbackData {
+        flow: EarnFlow::Deposit,
+        earnVault: fixture.earn_vault,
+        destination: LegacyEarnDestination::Public,
+        outputToken: fixture.earn_share,
+        minVaultAssets: 1,
+        minEarnShares: 1,
+        minOutputAmount: 0,
+        actionId: keccak256("legacy-public-destination"),
+        destinationData: user.abi_encode().into(),
+    }
+    .abi_encode()
+    .into();
+    fixture
+        .zone_deposit_with_data_expect_callback_bounce(fixture.alternate_asset, user, data)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn matrix_redeem_private_public_rejects_legacy_destination() -> eyre::Result<()> {
+    let mut fixture = EarnZoneFixture::start().await?;
+    let user = fixture.user.address();
+    let earn_shares = fixture.zone_deposit(fixture.alternate_asset, user).await?;
+    let private_before = fixture.zone.balance_of(fixture.earn_share, user).await?;
+    let supply_before = EarnShare::new(fixture.earn_share, fixture.l1.provider())
+        .totalSupply()
+        .call()
         .await?;
-    assert!(amount > 0, "private redeem produced no public assets");
+    let data: Bytes = LegacyEarnCallbackData {
+        flow: EarnFlow::Redeem,
+        earnVault: fixture.earn_vault,
+        destination: LegacyEarnDestination::Public,
+        outputToken: fixture.alternate_asset,
+        minVaultAssets: 1,
+        minEarnShares: 0,
+        minOutputAmount: 1,
+        actionId: keccak256("legacy-public-redeem-destination"),
+        destinationData: user.abi_encode().into(),
+    }
+    .abi_encode()
+    .into();
+    fixture
+        .user
+        .withdraw_token_with(
+            fixture.earn_share,
+            WithdrawalArgs {
+                amount: earn_shares,
+                to: Some(fixture.router),
+                memo: B256::ZERO,
+                gas_limit: CALLBACK_GAS_LIMIT,
+                zone_fallback_recipient: Some(user),
+                data,
+                reveal_to: Bytes::new(),
+            },
+        )
+        .await?;
+    fixture
+        .zone
+        .wait_for_balance(fixture.earn_share, user, private_before, BOUNCE_TIMEOUT)
+        .await?;
+    fixture
+        .l1
+        .assert_withdrawal_processed_with_status(
+            fixture.portal,
+            fixture.router,
+            fixture.earn_share,
+            earn_shares,
+            false,
+        )
+        .await?;
+    assert_eq!(
+        EarnShare::new(fixture.earn_share, fixture.l1.provider())
+            .totalSupply()
+            .call()
+            .await?,
+        supply_before,
+        "rejected private-to-public redeem changed EarnShare supply"
+    );
+    assert_eq!(
+        fixture
+            .l1
+            .balance_of(fixture.earn_share, fixture.router)
+            .await?,
+        U256::ZERO,
+        "rejected private-to-public redeem left shares on the router"
+    );
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn matrix_redeem_private_public_third_party() -> eyre::Result<()> {
+async fn legacy_cross_zone_destination_callback_bounces() -> eyre::Result<()> {
     let mut fixture = EarnZoneFixture::start().await?;
-    let recipient = fixture.l1.signer_at(3).address();
-    let amount = fixture.redeem_private_to_public(recipient).await?;
-    assert!(amount > 0, "private redeem produced no public assets");
-    Ok(())
+    let user = fixture.user.address();
+    let delivery = legacy_delivery(Address::with_last_byte(0x42), user);
+    let data: Bytes = LegacyEarnCallbackData {
+        flow: EarnFlow::Deposit,
+        earnVault: fixture.earn_vault,
+        destination: LegacyEarnDestination::Zone,
+        outputToken: fixture.earn_share,
+        minVaultAssets: 1,
+        minEarnShares: 1,
+        minOutputAmount: 0,
+        actionId: keccak256("legacy-cross-zone-destination"),
+        destinationData: delivery.abi_encode().into(),
+    }
+    .abi_encode()
+    .into();
+    fixture
+        .zone_deposit_with_data_expect_callback_bounce(fixture.alternate_asset, user, data)
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2043,7 +2031,7 @@ async fn migration_existing_vault_shares_to_zone() -> eyre::Result<()> {
     let earn_shares = fixture.migrate_existing_vault_shares().await?;
     assert_eq!(earn_shares, AMOUNT, "venue-share migration was not 1:1");
     let output = fixture
-        .zone_redeem(earn_shares, fixture.vault_asset, user)
+        .zone_redeem(earn_shares, fixture.alternate_asset, user)
         .await?;
     assert_eq!(output, AMOUNT, "migrated EarnShare did not redeem 1:1");
     Ok(())
