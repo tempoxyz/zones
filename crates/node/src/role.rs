@@ -35,8 +35,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, resolve_portal_zone_anchor,
-    spawn_zone_sequencer,
+    ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
+    resolve_portal_zone_anchor, spawn_zone_sequencer, spawn_zone_sequencer_with_prover,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -110,6 +110,7 @@ pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
+    pub prover_config: Option<ShadowProverConfig>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
@@ -936,12 +937,14 @@ where
                 .clone()
                 .unwrap_or_else(|| sequencer.config.sequencer_signer.clone());
             let zone_provider = context.provider.clone();
+            let prover_config = sequencer.prover_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
-                let handle = spawn_zone_sequencer(
+                let handle = spawn_zone_sequencer_with_prover(
                     sequencer_config,
                     signer,
                     zone_provider,
+                    prover_config,
                     sequencer_token.clone(),
                 )
                 .await;

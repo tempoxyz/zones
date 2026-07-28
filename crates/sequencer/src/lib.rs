@@ -10,7 +10,7 @@ use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
 use reth_chain_state::CanonStateSubscriptions;
-use reth_storage_api::BlockReader;
+use reth_storage_api::{BlockReader, StateProviderFactory};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tokio::sync::Notify;
@@ -24,6 +24,7 @@ mod encryption_key;
 mod metrics;
 pub mod monitor;
 pub mod nonce_keys;
+mod prover;
 mod rpc;
 pub mod settlement;
 pub mod withdrawals;
@@ -31,6 +32,7 @@ pub mod withdrawals;
 pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
+pub use prover::ShadowProverConfig;
 pub use settlement::{
     BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
 };
@@ -54,6 +56,7 @@ pub trait ZoneSequencerProvider:
         Transaction = TempoTxEnvelope,
         Receipt = TempoReceipt,
     > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+    + StateProviderFactory
     + Clone
     + Send
     + Sync
@@ -68,6 +71,7 @@ impl<T> ZoneSequencerProvider for T where
             Transaction = TempoTxEnvelope,
             Receipt = TempoReceipt,
         > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+        + StateProviderFactory
         + Clone
         + Send
         + Sync
@@ -138,6 +142,20 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     zone_provider: P,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
+    spawn_zone_sequencer_with_prover(config, signer, zone_provider, None, shutdown).await
+}
+
+/// Spawn all zone sequencer background tasks with optional shadow SPF validation.
+///
+/// Shadow validation is observational: candidates are queued without delaying or changing L1
+/// settlement, and any prover failure is reported only through logs.
+pub async fn spawn_zone_sequencer_with_prover<P: ZoneSequencerProvider>(
+    config: ZoneSequencerConfig,
+    signer: PrivateKeySigner,
+    zone_provider: P,
+    prover_config: Option<ShadowProverConfig>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> ZoneSequencerHandle {
     let sequencer_address = signer.address();
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
@@ -170,6 +188,15 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         batch_anchor_config: config.batch_anchor_config,
         attestation_store: config.attestation_store,
     };
+    let shadow_prover = prover_config.map(|prover_config| {
+        prover::spawn_shadow_prover(
+            prover_config,
+            monitor_config.portal_address,
+            monitor_config.batch_anchor_config,
+            zone_provider.clone(),
+            l1_provider.clone(),
+        )
+    });
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
@@ -184,12 +211,13 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         withdrawal_notify,
         withdrawal_repair_notify,
     );
-    let monitor_handle = spawn_zone_monitor(
+    let monitor_handle = monitor::spawn_zone_monitor_with_prover(
         monitor_config,
         zone_provider,
         l1_provider,
         signer,
         monitor_shared_state,
+        shadow_prover,
         shutdown,
     );
 

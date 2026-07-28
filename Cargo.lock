@@ -13946,9 +13946,13 @@ dependencies = [
  "parking_lot",
  "proptest",
  "reth-chain-state",
+ "reth-evm",
  "reth-metrics",
+ "reth-primitives-traits",
  "reth-provider",
+ "reth-revm",
  "reth-storage-api",
+ "reth-trie-common",
  "schnellru",
  "serde_json",
  "tempo-alloy",
@@ -13959,6 +13963,9 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
+ "zone-evm",
+ "zone-l1",
+ "zone-spf",
 ]
 
 [[package]]
