@@ -96,6 +96,30 @@ alloy_sol_types::sol! {
         EarnZoneReturn zoneReturn;
     }
 
+    enum LegacyEarnDestination {
+        Zone,
+        Public
+    }
+
+    struct LegacyEarnZoneDelivery {
+        address portal;
+        uint256 keyIndex;
+        EarnEncryptedDepositPayload encrypted;
+        address refundRecipient;
+    }
+
+    struct LegacyEarnCallbackData {
+        EarnFlow flow;
+        address earnVault;
+        LegacyEarnDestination destination;
+        address outputToken;
+        uint128 minVaultAssets;
+        uint128 minEarnShares;
+        uint128 minOutputAmount;
+        bytes32 actionId;
+        bytes destinationData;
+    }
+
     struct EarnDeployParams {
         bytes32 deploymentId;
         address engine;
@@ -146,6 +170,9 @@ alloy_sol_types::sol! {
 
     #[sol(rpc)]
     contract EarnVault {
+        function deposit(uint256 assets, address receiver, uint256 minEarnShares)
+            external
+            returns (uint256 earnShares);
         function depositVenueShares(uint256 venueShares, address receiver, uint256 minEarnShares)
             external
             returns (uint256 earnShares);
@@ -156,6 +183,9 @@ alloy_sol_types::sol! {
             external
             returns (uint256 newShares);
         function previewRedeem(uint256 shares) external view returns (uint256 assets);
+        function redeem(uint256 earnShares, address receiver, uint256 minAssets)
+            external
+            returns (uint256 assets);
         function setDepositsPaused(bool paused) external;
         function convertEngineSharesToEarnShares(uint256 shares) external view returns (uint256);
         function totalEarnShares() external view returns (uint256);
@@ -909,6 +939,25 @@ impl EarnZoneFixture {
         recipient: Address,
         limits: EarnLimits,
     ) -> eyre::Result<()> {
+        let data = self
+            .callback_data(
+                EarnFlow::Deposit,
+                self.earn_share,
+                recipient,
+                self.user.address(),
+                limits,
+            )
+            .await?;
+        self.zone_deposit_with_data_expect_callback_bounce(input_token, recipient, data)
+            .await
+    }
+
+    async fn zone_deposit_with_data_expect_callback_bounce(
+        &mut self,
+        input_token: Address,
+        recipient: Address,
+        data: Bytes,
+    ) -> eyre::Result<()> {
         self.encrypted_entry(input_token, AMOUNT).await?;
         let private_input_before = self
             .zone
@@ -922,15 +971,6 @@ impl EarnZoneFixture {
         let backing_before = VenueVault::new(self.venue_vault, self.l1.provider())
             .balanceOf(self.engine)
             .call()
-            .await?;
-        let data = self
-            .callback_data(
-                EarnFlow::Deposit,
-                self.earn_share,
-                recipient,
-                self.user.address(),
-                limits,
-            )
             .await?;
         let callback_gas_limit = CALLBACK_GAS_LIMIT;
         self.user
@@ -1722,6 +1762,107 @@ async fn zone_rewards_private_holder() -> eyre::Result<()> {
         "private reward lifecycle left EarnShare behind"
     );
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn public_deposit_and_redeem_use_earn_vault_directly() -> eyre::Result<()> {
+    let fixture = EarnZoneFixture::start().await?;
+    let user = fixture.user.address();
+    let provider = fixture.user.l1_provider();
+    let assets_before = fixture.l1.balance_of(fixture.vault_asset, user).await?;
+
+    ITIP20::new(fixture.vault_asset, provider)
+        .approve(fixture.earn_vault, U256::from(AMOUNT))
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    EarnVault::new(fixture.earn_vault, provider)
+        .deposit(U256::from(AMOUNT), user, U256::from(1))
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    let earn_shares = fixture.l1.balance_of(fixture.earn_share, user).await?;
+    eyre::ensure!(
+        earn_shares > U256::ZERO,
+        "public deposit minted no EarnShare"
+    );
+
+    ITIP20::new(fixture.earn_share, provider)
+        .approve(fixture.earn_vault, earn_shares)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    EarnVault::new(fixture.earn_vault, provider)
+        .redeem(earn_shares, user, U256::from(1))
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    assert_eq!(
+        fixture.l1.balance_of(fixture.vault_asset, user).await?,
+        assets_before,
+        "direct public EarnVault lifecycle did not return the deposited assets"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_public_destination_callback_bounces() -> eyre::Result<()> {
+    let mut fixture = EarnZoneFixture::start().await?;
+    let user = fixture.user.address();
+    let data: Bytes = LegacyEarnCallbackData {
+        flow: EarnFlow::Deposit,
+        earnVault: fixture.earn_vault,
+        destination: LegacyEarnDestination::Public,
+        outputToken: fixture.earn_share,
+        minVaultAssets: 1,
+        minEarnShares: 1,
+        minOutputAmount: 0,
+        actionId: keccak256("legacy-public-destination"),
+        destinationData: user.abi_encode().into(),
+    }
+    .abi_encode()
+    .into();
+    fixture
+        .zone_deposit_with_data_expect_callback_bounce(fixture.alternate_asset, user, data)
+        .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_cross_zone_destination_callback_bounces() -> eyre::Result<()> {
+    let mut fixture = EarnZoneFixture::start().await?;
+    let user = fixture.user.address();
+    let delivery = LegacyEarnZoneDelivery {
+        portal: Address::with_last_byte(0x42),
+        keyIndex: 0,
+        encrypted: EarnEncryptedDepositPayload {
+            ephemeralPubkeyX: B256::ZERO,
+            ephemeralPubkeyYParity: 0,
+            ciphertext: Bytes::new(),
+            nonce: Default::default(),
+            tag: Default::default(),
+        },
+        refundRecipient: user,
+    };
+    let data: Bytes = LegacyEarnCallbackData {
+        flow: EarnFlow::Deposit,
+        earnVault: fixture.earn_vault,
+        destination: LegacyEarnDestination::Zone,
+        outputToken: fixture.earn_share,
+        minVaultAssets: 1,
+        minEarnShares: 1,
+        minOutputAmount: 0,
+        actionId: keccak256("legacy-cross-zone-destination"),
+        destinationData: delivery.abi_encode().into(),
+    }
+    .abi_encode()
+    .into();
+    fixture
+        .zone_deposit_with_data_expect_callback_bounce(fixture.alternate_asset, user, data)
+        .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
