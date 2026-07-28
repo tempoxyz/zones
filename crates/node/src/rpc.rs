@@ -32,6 +32,7 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::logs_utils;
+use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoCallBuilderExt as _, TempoHeaderResponse, TempoTransactionRequest},
@@ -46,6 +47,7 @@ use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
 };
+use zone_l1::TempoStateExt as _;
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{
@@ -110,17 +112,30 @@ impl SequencerRpcContext {
 }
 
 /// Build the unauthenticated Zone extension installed on the node's public HTTP RPC.
-pub(crate) fn public_zone_rpc_module(
+pub(crate) fn public_zone_rpc_module<P>(
     portal_address: Address,
     sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
-) -> Result<RpcModule<()>, jsonrpsee::core::RegisterMethodError> {
+    provider: P,
+) -> Result<RpcModule<()>, jsonrpsee::core::RegisterMethodError>
+where
+    P: BlockNumReader + StateProviderFactory + Clone + Send + Sync + 'static,
+{
     let mut module = RpcModule::new(());
+    let set_leader_sequencer = sequencer.clone();
     module.register_async_method("zone_setLeader", move |params, _, _| {
-        let sequencer = sequencer.clone();
+        let sequencer = set_leader_sequencer.clone();
         async move {
             let (target,) = params.parse::<(Address,)>()?;
             set_leader(portal_address, sequencer.as_ref(), target)
                 .await
+                .map_err(public_rpc_error)
+        }
+    })?;
+    module.register_async_method("zone_getSequencerInfo", move |_, _, _| {
+        let sequencer = sequencer.clone();
+        let provider = provider.clone();
+        async move {
+            get_sequencer_info(portal_address, sequencer.as_ref(), &provider)
                 .map_err(public_rpc_error)
         }
     })?;
@@ -129,6 +144,108 @@ pub(crate) fn public_zone_rpc_module(
 
 fn public_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(error.code as i32, error.message, error.data)
+}
+
+fn get_sequencer_info<P>(
+    portal_address: Address,
+    sequencer: &std::sync::OnceLock<SequencerRpcContext>,
+    provider: &P,
+) -> Result<SequencerInfoResponse, JsonRpcError>
+where
+    P: BlockNumReader + StateProviderFactory,
+{
+    let Some(context) = sequencer.get() else {
+        // Single-sequencer (or not yet initialized) node: report the minimal view.
+        return Ok(SequencerInfoResponse {
+            mode: "single".to_owned(),
+            portal: portal_address,
+            local: None,
+            active_leader: None,
+            peers: Vec::new(),
+            progress: None,
+            readiness: None,
+        });
+    };
+
+    let status = context.status.lock().expect("poisoned").clone();
+    let latest = context.schedule.latest();
+    let active_leader = latest.as_ref().map(|record| {
+        let node = context.manifest.node_by_ed25519_public_key(&record.leader);
+        ActiveLeaderInfo {
+            name: node.map(|node| node.name().to_owned()),
+            sequencer_address: node
+                .map(|node| node.secp256k1_address())
+                .unwrap_or_default(),
+            p2p_public_key: record.leader.to_string(),
+            epoch: U64::from(record.epoch),
+            activation_tempo_block: U64::from(record.activation_tempo_block),
+        }
+    });
+
+    let tips: HashMap<_, _> = context
+        .peer_tips
+        .snapshot()
+        .into_iter()
+        .map(|(peer, tip, _)| (peer, tip))
+        .collect();
+    let peers = context
+        .manifest
+        .nodes()
+        .iter()
+        .map(|node| SequencerPeerInfo {
+            name: node.name().to_owned(),
+            sequencer_address: node.secp256k1_address(),
+            is_local: node.ed25519_public_key() == &context.local_ed25519_public_key,
+            tip: tips.get(node.ed25519_public_key()).map(|tip| PeerTipInfo {
+                zone_height: U64::from(tip.zone_height),
+                zone_hash: tip.zone_hash,
+                tempo_block_number: U64::from(tip.tempo_block_number),
+                tempo_block_hash: tip.tempo_block_hash,
+            }),
+        })
+        .collect();
+
+    let zone_height = provider.best_block_number().map_err(internal)?;
+    let tempo_block_number = provider
+        .latest()
+        .map_err(internal)?
+        .tempo_block_number()
+        .map_err(internal)?;
+
+    let local_node = context
+        .manifest
+        .node_by_ed25519_public_key(&context.local_ed25519_public_key);
+    Ok(SequencerInfoResponse {
+        mode: "multi".to_owned(),
+        portal: portal_address,
+        local: Some(LocalSequencerInfo {
+            name: local_node
+                .map(|node| node.name().to_owned())
+                .unwrap_or_default(),
+            sequencer_address: context.local_secp256k1_address,
+            p2p_public_key: context.local_ed25519_public_key.to_string(),
+            role: status.role.to_owned(),
+        }),
+        active_leader,
+        peers,
+        progress: Some(SequencerProgress {
+            zone_height: U64::from(zone_height),
+            tempo_block_number: U64::from(tempo_block_number),
+            latest_observed_leadership_epoch: context
+                .schedule
+                .latest_observed_epoch()
+                .map(U64::from),
+            locally_applied_leadership_epoch: context
+                .schedule
+                .locally_applied_epoch()
+                .map(U64::from),
+            pending_transitions: U64::from(context.schedule.pending_transitions() as u64),
+        }),
+        readiness: Some(SequencerReadiness {
+            ready_for_promotion: status.ready_for_promotion,
+            reasons: status.promotion_reasons,
+        }),
+    })
 }
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
@@ -221,8 +338,6 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     /// Maps filter IDs to the authenticated account that created them.
     /// The reth filter registry remains the source of truth for filter liveness.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
-    /// Multi-sequencer operator handles, installed once the role controller exists.
-    sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
 }
 
 impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
@@ -230,15 +345,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     pub async fn new(
         eth: EthHandlers<Api>,
         config: zone_rpc::PrivateRpcConfig,
-    ) -> eyre::Result<Self> {
-        Self::with_sequencer_context(eth, config, Arc::new(std::sync::OnceLock::new())).await
-    }
-
-    /// Wrap reth's [`EthHandlers`] with a multi-sequencer operator context slot.
-    pub async fn with_sequencer_context(
-        eth: EthHandlers<Api>,
-        config: zone_rpc::PrivateRpcConfig,
-        sequencer: Arc<std::sync::OnceLock<SequencerRpcContext>>,
     ) -> eyre::Result<Self> {
         let l1_rpc_url = config.l1_rpc_url.clone();
         let zone_rpc_url = config.zone_rpc_url.clone();
@@ -267,7 +373,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
-            sequencer,
         };
         rpc.spawn_filter_owner_pruner();
         Ok(rpc)
@@ -937,108 +1042,6 @@ where
             to_raw(&key)
         })
     }
-
-    fn zone_get_sequencer_info(&self, _auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move {
-            let Some(context) = self.sequencer.get() else {
-                // Single-sequencer (or not yet initialized) node: report the minimal view.
-                return to_raw(&SequencerInfoResponse {
-                    mode: "single".to_owned(),
-                    portal: self.config.zone_portal,
-                    local: None,
-                    active_leader: None,
-                    peers: Vec::new(),
-                    progress: None,
-                    readiness: None,
-                });
-            };
-
-            let status = context.status.lock().expect("poisoned").clone();
-            let latest = context.schedule.latest();
-            let active_leader = latest.as_ref().map(|record| {
-                let node = context.manifest.node_by_ed25519_public_key(&record.leader);
-                ActiveLeaderInfo {
-                    name: node.map(|node| node.name().to_owned()),
-                    sequencer_address: node
-                        .map(|node| node.secp256k1_address())
-                        .unwrap_or_default(),
-                    p2p_public_key: record.leader.to_string(),
-                    epoch: U64::from(record.epoch),
-                    activation_tempo_block: U64::from(record.activation_tempo_block),
-                }
-            });
-
-            let tips: HashMap<_, _> = context
-                .peer_tips
-                .snapshot()
-                .into_iter()
-                .map(|(peer, tip, _)| (peer, tip))
-                .collect();
-            let peers = context
-                .manifest
-                .nodes()
-                .iter()
-                .map(|node| SequencerPeerInfo {
-                    name: node.name().to_owned(),
-                    sequencer_address: node.secp256k1_address(),
-                    is_local: node.ed25519_public_key() == &context.local_ed25519_public_key,
-                    tip: tips.get(node.ed25519_public_key()).map(|tip| PeerTipInfo {
-                        zone_height: U64::from(tip.zone_height),
-                        zone_hash: tip.zone_hash,
-                        tempo_block_number: U64::from(tip.tempo_block_number),
-                        tempo_block_hash: tip.tempo_block_hash,
-                    }),
-                })
-                .collect();
-
-            let zone_height = self
-                .zone_provider
-                .get_block_number()
-                .await
-                .map_err(internal)?;
-            let tempo_block_number = self
-                .tempo_state
-                .tempoBlockNumber()
-                .call()
-                .await
-                .map_err(internal)?;
-
-            let local_node = context
-                .manifest
-                .node_by_ed25519_public_key(&context.local_ed25519_public_key);
-            to_raw(&SequencerInfoResponse {
-                mode: "multi".to_owned(),
-                portal: self.config.zone_portal,
-                local: Some(LocalSequencerInfo {
-                    name: local_node
-                        .map(|node| node.name().to_owned())
-                        .unwrap_or_default(),
-                    sequencer_address: context.local_secp256k1_address,
-                    p2p_public_key: context.local_ed25519_public_key.to_string(),
-                    role: status.role.to_owned(),
-                }),
-                active_leader,
-                peers,
-                progress: Some(SequencerProgress {
-                    zone_height: U64::from(zone_height),
-                    tempo_block_number: U64::from(tempo_block_number),
-                    latest_observed_leadership_epoch: context
-                        .schedule
-                        .latest_observed_epoch()
-                        .map(U64::from),
-                    locally_applied_leadership_epoch: context
-                        .schedule
-                        .locally_applied_epoch()
-                        .map(U64::from),
-                    pending_transitions: U64::from(context.schedule.pending_transitions() as u64),
-                }),
-                readiness: Some(SequencerReadiness {
-                    ready_for_promotion: status.ready_for_promotion,
-                    reasons: status.promotion_reasons.clone(),
-                }),
-            })
-        })
-    }
 }
 
 async fn set_leader(
@@ -1200,17 +1203,28 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn public_rpc_module_exposes_set_leader_without_auth() {
+    async fn public_rpc_module_exposes_sequencer_methods_without_auth() {
         let module = public_zone_rpc_module(
             Address::repeat_byte(0x11),
             Arc::new(std::sync::OnceLock::new()),
+            Arc::new(reth_provider::test_utils::MockEthProvider::default()),
         )
         .expect("public zone RPC module should register");
 
-        assert_eq!(
-            module.method_names().collect::<Vec<_>>(),
-            ["zone_setLeader"]
-        );
+        let methods = module.method_names().collect::<HashSet<_>>();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.contains("zone_getSequencerInfo"));
+        assert!(methods.contains("zone_setLeader"));
+
+        let info = module
+            .call::<_, SequencerInfoResponse>(
+                "zone_getSequencerInfo",
+                jsonrpsee::core::EmptyServerParams::new(),
+            )
+            .await
+            .expect("single-sequencer info should be available without authentication");
+        assert_eq!(info.mode, "single");
+        assert_eq!(info.portal, Address::repeat_byte(0x11));
 
         let error = module
             .call::<_, SetLeaderResponse>("zone_setLeader", [Address::repeat_byte(0x22)])

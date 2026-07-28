@@ -142,7 +142,6 @@ impl ZoneRpcApi for MockZoneRpcApi {
     stub!(get_filter_changes, _a: alloy_rpc_types_eth::FilterId, _c: zone_rpc::auth::AuthContext);
     stub!(new_block_filter, _c: zone_rpc::auth::AuthContext);
     stub!(uninstall_filter, _a: alloy_rpc_types_eth::FilterId, _c: zone_rpc::auth::AuthContext);
-    stub!(zone_get_sequencer_info, _c: zone_rpc::auth::AuthContext);
 
     fn ws_subscribe_new_heads(
         &self,

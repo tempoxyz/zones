@@ -633,13 +633,16 @@ where
         let engine_handle = ctx.beacon_engine_handle.clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
         let public_rpc_slot = sequencer_rpc_slot.clone();
+        let public_rpc_provider = provider.clone();
         let portal_address = self.portal_address;
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
-                container
-                    .modules
-                    .merge_http(public_zone_rpc_module(portal_address, public_rpc_slot)?)?;
+                container.modules.merge_http(public_zone_rpc_module(
+                    portal_address,
+                    public_rpc_slot,
+                    public_rpc_provider,
+                )?)?;
                 Ok(())
             })
             .await?;
@@ -651,7 +654,6 @@ where
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
             chain_id,
-            sequencer_rpc_slot,
         )
         .await?;
 
@@ -1067,7 +1069,6 @@ where
         retry_connection_interval: Duration,
         portal_address: Address,
         chain_id: u64,
-        sequencer_rpc_slot: Arc<std::sync::OnceLock<SequencerRpcContext>>,
     ) -> eyre::Result<()> {
         if config.zone_id != 0 {
             let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
@@ -1097,14 +1098,8 @@ where
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
         };
-        let api: Arc<dyn ZoneRpcApi> = Arc::new(
-            ZoneRpc::with_sequencer_context(
-                eth_handlers,
-                private_rpc_config.clone(),
-                sequencer_rpc_slot,
-            )
-            .await?,
-        );
+        let api: Arc<dyn ZoneRpcApi> =
+            Arc::new(ZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
         let local_addr = start_private_rpc(private_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 

@@ -183,10 +183,6 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `zone_getEncryptionKey()` — returns the active encryption key at the
     /// current Tempo L1 head.
     fn zone_get_encryption_key(&self, auth: AuthContext) -> BoxFut<'_>;
-
-    /// `zone_getSequencerInfo()` — returns this node's local view of the multi-sequencer
-    /// topology, finalized leadership, progress, and promotion readiness.
-    fn zone_get_sequencer_info(&self, auth: AuthContext) -> BoxFut<'_>;
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -346,11 +342,6 @@ pub async fn dispatch(
             id,
             "zone_getEncryptionKey",
             api.zone_get_encryption_key(auth.clone()).await,
-        ),
-        "zone_getSequencerInfo" => api_result(
-            id,
-            "zone_getSequencerInfo",
-            api.zone_get_sequencer_info(auth.clone()).await,
         ),
         _ => {
             // Method is whitelisted but not yet implemented via direct API
@@ -800,8 +791,6 @@ mod tests {
         stub!(get_filter_changes, _id: FilterId, _auth: AuthContext);
         stub!(new_block_filter, _auth: AuthContext);
         stub!(uninstall_filter, _id: FilterId, _auth: AuthContext);
-        stub!(zone_get_sequencer_info, _auth: AuthContext);
-
         fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
             Box::pin(async move {
                 to_raw(&json!({
@@ -853,13 +842,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_rpc_excludes_set_leader() {
+    async fn private_rpc_excludes_public_sequencer_methods() {
         use crate::types::{MethodTier, classify_method};
 
-        assert_eq!(
-            classify_method("zone_getSequencerInfo"),
-            Some(MethodTier::Public)
-        );
+        assert_eq!(classify_method("zone_getSequencerInfo"), None);
         assert_eq!(classify_method("zone_setLeader"), None);
         assert_eq!(
             classify_method("admin_setLeader"),
@@ -872,6 +858,9 @@ mod tests {
         assert_eq!(rejected.error.unwrap().code, -32005);
 
         let excluded = dispatch(&request("zone_setLeader", json!([])), &auth(), &api).await;
+        assert_eq!(excluded.error.unwrap().code, -32601);
+
+        let excluded = dispatch(&request("zone_getSequencerInfo", json!([])), &auth(), &api).await;
         assert_eq!(excluded.error.unwrap().code, -32601);
     }
 
