@@ -1267,13 +1267,6 @@ contract ZoneInboxTest is Test {
         vm.prank(bob);
         assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
 
-        vm.expectRevert(ZoneInbox.UnauthorizedRefundReader.selector);
-        vm.prank(alice);
-        inbox.refunds(address(zoneToken), bob);
-
-        vm.prank(sequencer);
-        assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
-
         zoneToken.setMinter(address(inbox), true);
         tempoState.setMockAccountAllowed(mockPortal, bob, false);
         vm.prank(bob);
@@ -1379,10 +1372,11 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
-        vm.startPrank(sequencer);
-        uint256 parkedRefunds = inbox.refunds(address(zoneToken), bob)
-            + inbox.refunds(address(zoneToken), encryptedRecipient);
-        vm.stopPrank();
+        vm.prank(bob);
+        uint128 bobRefunds = inbox.refunds(address(zoneToken), bob);
+        vm.prank(encryptedRecipient);
+        uint128 encryptedRecipientRefunds = inbox.refunds(address(zoneToken), encryptedRecipient);
+        uint256 parkedRefunds = uint256(bobRefunds) + encryptedRecipientRefunds;
         assertEq(zoneToken.totalSupply() + parkedRefunds, netCredited);
     }
 
