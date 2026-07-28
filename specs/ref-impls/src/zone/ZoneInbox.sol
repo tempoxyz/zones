@@ -54,9 +54,7 @@ contract ZoneInbox is IZoneInbox {
     uint64 public processedDepositNumber;
 
     /// @notice Refunds parked after a withdrawal-bounce-back mint reverts on the zone.
-    mapping(address token => mapping(address owner => uint128 amount)) internal _refunds;
-
-    error UnauthorizedRefundReader();
+    mapping(address token => mapping(address owner => uint128 amount)) private _refunds;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -424,15 +422,6 @@ contract ZoneInbox is IZoneInbox {
             _refunds[d.token][zoneFallbackRecipient] += d.amount;
             emit WithdrawalBounceBackPending(zoneFallbackRecipient, d.token, d.amount);
         }
-    }
-
-    /// @notice Return a parked refund for an owner.
-    /// @dev Restrict access at execution time so forwarding contracts cannot bypass privacy.
-    function refunds(address token, address owner) external view returns (uint128) {
-        if (msg.sender != owner && !config.isSequencer(msg.sender)) {
-            revert UnauthorizedRefundReader();
-        }
-        return _refunds[token][owner];
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
