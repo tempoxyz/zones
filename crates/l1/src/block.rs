@@ -7,10 +7,6 @@ pub struct L1BlockDeposits {
     pub header: SealedHeader<TempoHeader>,
     /// Portal events extracted from this block.
     pub events: L1PortalEvents,
-    /// Deposit queue hash chain value before this block's deposits.
-    pub queue_hash_before: B256,
-    /// Deposit queue hash chain value after this block's deposits.
-    pub queue_hash_after: B256,
 }
 
 impl L1BlockDeposits {

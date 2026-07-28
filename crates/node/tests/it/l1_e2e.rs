@@ -168,6 +168,11 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
         B256::ZERO,
         "tempoBlockHash should be set from real L1 headers"
     );
+    assert_eq!(
+        zone.l1_block_tracker().observed_hash(zone_tempo_number),
+        None,
+        "the leader must prune L1 observations after consuming them"
+    );
 
     Ok(())
 }

@@ -1,16 +1,22 @@
 //! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
 //! and the native `TempoState` precompile.
 
-use alloc::{rc::Rc, string::String};
+use alloc::{
+    rc::Rc,
+    string::{String, ToString},
+};
 use core::{cell::Cell, fmt};
 
-use alloy_primitives::{Address, B256, keccak256};
-use alloy_sol_types::SolValue;
+use alloy_primitives::{Address, B256, U256};
 use revm::{context::result::AnyError, precompile::PrecompileError};
+use tempo_precompiles::{
+    error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
+};
 use thiserror::Error;
 
+use crate::tempo_state::TempoState;
+
 pub(crate) use tempo_precompiles::storage::*;
-use zone_primitives::constants::PORTAL_IS_SEQUENCER_SLOT;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
@@ -50,7 +56,7 @@ pub struct L1State<P> {
     anchor: Rc<Cell<Option<u64>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,
-    /// Zone portal whose L1 state defines the active sequencer set.
+    /// ZonePortal read through the L1 provider by explicit storage operations.
     portal_address: Address,
 }
 
@@ -74,8 +80,8 @@ impl<P> L1State<P> {
         self.anchor.get()
     }
 
-    /// Returns the ZonePortal configured for this execution-local L1 state.
-    pub(crate) const fn portal(&self) -> Address {
+    /// Returns the configured ZonePortal address.
+    pub const fn portal(&self) -> Address {
         self.portal_address
     }
 
@@ -118,14 +124,25 @@ impl<P: L1StorageReader> L1State<P> {
         self.provider.read_l1_storage(account, slot, block_number)
     }
 
-    /// Return whether `account` belongs to the active sequencer set at `block_number`.
-    pub fn is_active_sequencer(
+    /// Reads and decodes a typed slot from an L1 account at the active anchor.
+    pub fn read_l1<T: Storable>(&self, slot: &Slot<T>) -> tempo_precompiles::Result<T> {
+        let storage = L1Storage {
+            l1: self,
+            account: slot.address(),
+        };
+        T::load(&storage, slot.slot(), slot.ctx())
+    }
+
+    /// Selects and reads a typed slot from the configured ZonePortal at the active anchor.
+    ///
+    /// The callback only exposes the portal for selecting a handler; the selected value is always
+    /// resolved through [`Self::read_l1`] rather than the local EVM journal.
+    pub fn read_portal<T: Storable>(
         &self,
-        account: Address,
-        block_number: u64,
-    ) -> Result<bool, L1StateError> {
-        let slot = keccak256((account, PORTAL_IS_SEQUENCER_SLOT).abi_encode());
-        Ok(self.read_l1_storage(self.portal_address, slot, block_number)? != B256::ZERO)
+        select_slot: impl for<'a> FnOnce(&'a ZonePortal) -> &'a Slot<T>,
+    ) -> tempo_precompiles::Result<T> {
+        let portal = ZonePortal::new(self.portal_address);
+        self.read_l1(select_slot(&portal))
     }
 }
 
@@ -186,6 +203,37 @@ impl From<L1StateError> for PrecompileError {
     }
 }
 
+/// Read-only [`StorageOps`] adapter for one L1 account.
+///
+/// This lets typed precompile storage handlers decode L1 slots without inserting the fetched
+/// values into the EVM journal. Reads use the transaction's selected anchor, falling back to the
+/// checkpoint stored in [`TempoState`] on the first read; writes are always rejected.
+struct L1Storage<'a, P> {
+    /// Execution-local provider and anchor coordination shared by all L1 reads.
+    l1: &'a L1State<P>,
+    /// L1 account whose storage slots are exposed through [`StorageOps`].
+    account: Address,
+}
+
+impl<P: L1StorageReader> StorageOps for L1Storage<'_, P> {
+    fn load(&self, slot: U256) -> tempo_precompiles::Result<U256> {
+        let anchor = match self.l1.get_anchor() {
+            Some(anchor) => anchor,
+            None => TempoState::new().tempo_block_number.read()?,
+        };
+        self.l1
+            .read_l1_storage(self.account, slot.into(), anchor)
+            .map(Into::into)
+            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))
+    }
+
+    fn store(&mut self, _slot: U256, _value: U256) -> tempo_precompiles::Result<()> {
+        Err(TempoPrecompileError::Fatal(
+            "L1 storage is read-only".into(),
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -239,22 +287,5 @@ mod tests {
         l1.reset_anchor();
         l1.advance_anchor(10, 11).unwrap();
         assert_eq!(l1.get_anchor(), Some(11));
-    }
-
-    #[test]
-    fn sequencer_membership_uses_requested_anchor() {
-        let portal = Address::repeat_byte(0x11);
-        let current = Address::repeat_byte(0x22);
-        let next = Address::repeat_byte(0x33);
-        let reader = MockL1Reader::default();
-        reader.seed_active_sequencer(portal, 7, current);
-        reader.seed_active_sequencer(portal, 8, next);
-        let l1 = L1State::new(reader, portal);
-
-        assert!(l1.is_active_sequencer(current, 7).unwrap());
-        assert!(!l1.is_active_sequencer(next, 7).unwrap());
-        l1.reset_anchor();
-        assert!(l1.is_active_sequencer(next, 8).unwrap());
-        assert!(!l1.is_active_sequencer(current, 8).unwrap());
     }
 }

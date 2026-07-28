@@ -64,6 +64,7 @@ use tempo_zone_contracts::{
     ZonePortal::{self, Role as PortalRole},
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
@@ -188,15 +189,10 @@ alloy_sol_types::sol! {
     }
 }
 
-/// Deterministic salt for the zone test token.
-pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-]);
-
 /// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
 ///
 /// Requires `forge build` to have been run in `specs/ref-impls`.
-fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+pub(crate) fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
@@ -531,25 +527,18 @@ pub(crate) fn seed_raw_tip403_policy(
     Ok(())
 }
 
-/// Compute the TIP-20 token address for a given sender and salt.
-///
-/// Mirrors `compute_tip20_address` in the factory precompile.
-pub(crate) fn compute_tip20_address(sender: Address, salt: B256) -> Address {
-    let hash = keccak256((sender, salt).abi_encode());
-
-    let mut address_bytes = [0u8; 20];
-    address_bytes[..12].copy_from_slice(&tempo_primitives::transaction::TIP20_PAYMENT_PREFIX);
-    address_bytes[12..].copy_from_slice(&hash[..8]);
-
-    Address::from(address_bytes)
-}
-
 pub(crate) trait TestNodeHandle: Send {
     fn subscribe_to_canonical_state(
         &self,
     ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives>;
 
     fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture;
+
+    fn spawn_sequencer(
+        &self,
+        config: zone_sequencer::ZoneSequencerConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>>;
 }
 
 impl<Node, AddOns> TestNodeHandle for NodeHandle<Node, AddOns>
@@ -568,6 +557,17 @@ where
 
     fn node_exit_future_mut(&mut self) -> &mut NodeExitFuture {
         &mut self.node_exit_future
+    }
+
+    fn spawn_sequencer(
+        &self,
+        config: zone_sequencer::ZoneSequencerConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> Pin<Box<dyn Future<Output = zone_sequencer::ZoneSequencerHandle> + Send + '_>> {
+        let provider = self.node.provider().clone();
+        Box::pin(
+            async move { zone_sequencer::spawn_zone_sequencer(config, signer, provider).await },
+        )
     }
 }
 
@@ -598,6 +598,10 @@ pub(crate) struct ZoneTestNode {
     l1_block_tracker: L1BlockTracker,
     rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
+    /// Cancels the `ZoneEngine`, when this node runs one.
+    ///
+    /// Exercises the graceful-stop path reserved for the future leadership supervisor.
+    engine_stop: Option<CancellationToken>,
     _tasks: Runtime,
 }
 
@@ -605,6 +609,40 @@ impl ZoneTestNode {
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
+    }
+
+    async fn spawn_sequencer(
+        &self,
+        config: zone_sequencer::ZoneSequencerConfig,
+        signer: alloy_signer_local::PrivateKeySigner,
+    ) -> zone_sequencer::ZoneSequencerHandle {
+        self.node_handle.spawn_sequencer(config, signer).await
+    }
+
+    /// Stops the `ZoneEngine` at a block boundary and waits until block production has
+    /// actually ceased.
+    ///
+    /// Returns the head the engine stopped at.
+    pub(crate) async fn stop_engine(&self) -> eyre::Result<u64> {
+        let stop = self
+            .engine_stop
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("this test node does not run a ZoneEngine"))?;
+        stop.cancel();
+
+        // The engine finishes the block in flight before returning, so poll until the head
+        // holds still rather than assuming it stops instantly.
+        let provider = self.provider();
+        let mut previous = provider.get_block_number().await?;
+        for _ in 0..50 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let current = provider.get_block_number().await?;
+            if current == previous {
+                return Ok(current);
+            }
+            previous = current;
+        }
+        eyre::bail!("ZoneEngine kept producing blocks after cancellation")
     }
 
     /// Returns an HTTP provider connected to this zone node.
@@ -742,6 +780,16 @@ impl ZoneTestNode {
             }
         })
         .await
+    }
+
+    /// Reads `tempoBlockNumber` from the L2 `TempoState` predeploy right now.
+    pub(crate) async fn tempo_block_number(&self) -> eyre::Result<u64> {
+        use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState};
+
+        Ok(TempoState::new(TEMPO_STATE_ADDRESS, self.provider())
+            .tempoBlockNumber()
+            .call()
+            .await?)
     }
 
     /// Wait for `tempoBlockNumber` on this zone to reach at least `target`.
@@ -1107,6 +1155,11 @@ impl ZoneTestNode {
         if let Some(p2p_config) = p2p_config {
             zone_node = zone_node.with_p2p(p2p_config);
         }
+        if spawn_engine {
+            // The harness drives its own ZoneEngine against the shared queue below, so the
+            // node must keep enqueueing deposits even without a sequencer or P2P config.
+            zone_node = zone_node.with_external_deposit_consumer();
+        }
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
         // The ZoneEngine is the sole block producer; it advances the chain when L1
@@ -1143,16 +1196,20 @@ impl ZoneTestNode {
             .launch_with_debug_capabilities()
             .await?;
 
+        let mut engine_stop = None;
         if spawn_engine {
             let provider = node_handle.node.provider();
             let last_header = provider
                 .sealed_header(provider.best_block_number()?)?
                 .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+            let stop = CancellationToken::new();
+            engine_stop = Some(stop.clone());
             let engine = zone_node::ZoneEngine::new(
                 provider.chain_spec(),
                 node_handle.node.add_ons_handle.beacon_engine_handle.clone(),
                 node_handle.node.payload_builder_handle.clone(),
                 deposit_queue.clone(),
+                l1_block_tracker.clone(),
                 last_header,
                 sequencer_signer.address(),
                 SecretKey::from(sequencer_signer.credential()),
@@ -1161,7 +1218,7 @@ impl ZoneTestNode {
             node_handle
                 .node
                 .task_executor
-                .spawn_critical_task("zone-engine", engine.run());
+                .spawn_critical_task("zone-engine", engine.run_until(stop));
         }
 
         let http_url: url::Url = node_handle
@@ -1194,6 +1251,7 @@ impl ZoneTestNode {
             l1_block_tracker,
             rpc_api_factory,
             node_handle: Box::new(node_handle),
+            engine_stop,
             _tasks: tasks,
         })
     }
@@ -3161,25 +3219,22 @@ pub(crate) async fn spawn_sequencer_with_config(
     batch_anchor_config: zone_sequencer::BatchAnchorConfig,
     withdrawal_batch_limits: zone_sequencer::WithdrawalBatchLimits,
 ) -> zone_sequencer::ZoneSequencerHandle {
-    use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+    use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone_sequencer::ZoneSequencerConfig {
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
         retry_connection_interval: Duration::from_millis(100),
+        zone_poll_interval: Duration::from_secs(1),
         withdrawal_poll_interval: Duration::from_millis(500),
         withdrawal_batch_limits,
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
-        tempo_state_address: TEMPO_STATE_ADDRESS,
-        zone_rpc_url: zone.http_url().to_string(),
-        zone_poll_interval: Duration::from_millis(500),
-        batch_interval_blocks: 1,
         batch_anchor_config,
         attestation_store: None,
     };
 
-    zone_sequencer::spawn_zone_sequencer(config, sequencer_signer).await
+    zone.spawn_sequencer(config, sequencer_signer).await
 }
 
 /// Start a local zone node with an L1Fixture already seeded for `seed_blocks` blocks.

@@ -69,7 +69,7 @@ transaction atomically:
 
 - Advances `tempoBlockNumber` and `tempoBlockHash` in the `TempoState`
   predeploy, anchoring the zone to L1.
-- Enables newly bridged TIP-20 tokens via the `ZoneTokenFactory` precompile.
+- Activates newly bridged TIP-20 tokens directly in the `ZoneInbox` precompile.
 - Processes deposits from the L1 queue — minting zone-side tokens to recipients.
 - Validates the deposit hash chain against the L1 portal's queue hash.
 
@@ -89,9 +89,9 @@ precompiles before minting.
 TIP-20 tokens are enabled on the zone at runtime (not at genesis). When a new
 token is bridged via the L1 portal's `enableToken()`, the `L1Subscriber` picks
 up the `TokenEnabled` event and includes it in the next zone block's system
-transaction. The `ZoneInbox` contract calls the `ZoneTokenFactory` precompile,
-which initializes the token's storage and grants `ISSUER_ROLE` to the inbox
-(for minting on deposits) and outbox (for burning on withdrawals).
+transaction. The `ZoneInbox` precompile initializes the token's storage directly
+and grants `ISSUER_ROLE` to the inbox (for minting on deposits) and outbox (for
+burning on withdrawals).
 
 ## Batch Submission
 
@@ -256,7 +256,6 @@ just set-transfer-policy $TOKEN <M>
 |---------|-----------|---------|
 | `0x1C00…0100` | `ChaumPedersenVerify` | Verify DLOG equality proofs for ECDH |
 | `0x1C00…0101` | `AesGcmDecrypt` | AES-256-GCM authenticated decryption |
-| `0x20FC…0000` | `ZoneTokenFactory` | Initialize TIP-20 tokens on the zone |
 | `0x403C…0000` | `TIP403Registry` | Upstream read-only execution over exact-block raw L1 policy state |
 
 ## EVM Configuration
@@ -264,9 +263,8 @@ just set-transfer-policy $TOKEN <M>
 `ZoneEvmConfig` wraps `TempoEvmConfig` — the zone runs the same EVM as Tempo
 L1 with these differences:
 
-- The **TIP20Factory** precompile is replaced by `ZoneTokenFactory`, which only
-  supports `enableToken` (no `createToken`) since zone tokens are always bridged
-  from L1.
+- The **TIP20Factory** precompile is disabled. Zone tokens are always bridged
+  from L1 and activated directly by `ZoneInbox`.
 - The **TIP403Registry** uses upstream Tempo execution through a read-only
   storage overlay anchored at the finalized L1 block recorded in `TempoState`.
   Policy mutations revert because registry state is owned by L1.

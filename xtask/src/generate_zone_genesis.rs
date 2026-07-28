@@ -28,11 +28,13 @@ use tempo_contracts::{
 };
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_precompiles::{
-    PATH_USD_ADDRESS,
+    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
+    receive_policy_guard::ReceivePolicyGuard,
     stablecoin_dex::StablecoinDEX,
     storage::{StorageActions, StorageCtx},
+    storage_credits::StorageCredits,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
@@ -41,7 +43,6 @@ use tempo_primitives::TempoHeader;
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
 use zone_precompiles::{
     TempoState as NativeTempoState, ZoneFeeManager, ZoneOutbox as NativeZoneOutbox,
-    ZoneTokenFactory,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -140,12 +141,13 @@ impl GenerateZoneGenesis {
         deploy_permit2(&mut evm)?;
 
         initialize_tip403_registry(&mut evm)?;
-        initialize_tip20_factory(&mut evm)?;
         create_path_usd_token(&mut evm, self.admin)?;
         initialize_fee_manager(&mut evm, self.default_fee_token)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
         initialize_account_keychain(&mut evm)?;
+        initialize_receive_policy_guard(&mut evm)?;
+        initialize_storage_credits(&mut evm)?;
 
         let mut nonce = 0u64;
 
@@ -200,7 +202,7 @@ impl GenerateZoneGenesis {
             .cache
             .accounts
             .iter()
-            .filter(|(addr, _)| **addr != DEPLOYER)
+            .filter(|(addr, _)| **addr != DEPLOYER && **addr != TIP20_FACTORY_ADDRESS)
             .filter(|(addr, _)| {
                 self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
             })
@@ -490,21 +492,6 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
     Ok(())
 }
 
-/// Initialize the ZoneTokenFactory precompile (required before creating any TIP20 tokens).
-fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(
-        &mut ctx.journaled_state,
-        &ctx.block,
-        &ctx.cfg,
-        &ctx.tx,
-        StorageActions::disabled(),
-        || ZoneTokenFactory::new().initialize(),
-    )?;
-    println!("Initialized ZoneTokenFactory");
-    Ok(())
-}
-
 /// Create pathUSD as the default fee token at its reserved TIP20 address.
 ///
 /// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
@@ -618,5 +605,39 @@ fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Re
         || AccountKeychain::new().initialize(),
     )?;
     println!("Initialized AccountKeychain");
+    Ok(())
+}
+
+/// Initialize the ReceivePolicyGuard precompile account.
+fn initialize_receive_policy_guard(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || ReceivePolicyGuard::new().initialize(),
+    )?;
+    println!("Initialized ReceivePolicyGuard");
+    Ok(())
+}
+
+/// Initialize the StorageCredits precompile account.
+///
+/// TIP-1060 bookkeeping writes this account from the EVM handler, even when no transaction calls
+/// the precompile directly. Keeping the account non-empty prevents EIP-161 from dropping the
+/// sequential transition while the sparse-trie state hook still observes its storage updates.
+fn initialize_storage_credits(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || StorageCredits::new().initialize(),
+    )?;
+    println!("Initialized StorageCredits");
     Ok(())
 }

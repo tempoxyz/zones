@@ -33,7 +33,7 @@ use std::{
 
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, U256};
-use alloy_provider::DynProvider;
+use alloy_provider::{DynProvider, Provider};
 use futures::{StreamExt, stream::FuturesUnordered};
 use parking_lot::Mutex;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt};
@@ -383,9 +383,13 @@ impl WithdrawalProcessor {
     async fn process_queue(&mut self) -> eyre::Result<()> {
         // loop through all the slots
         loop {
-            let head_call = self.portal.withdrawalQueueHead();
-            let tail_call = self.portal.withdrawalQueueTail();
-            let (head, tail): (U256, U256) = tokio::try_join!(head_call.call(), tail_call.call())?;
+            let (head, tail): (U256, U256) = self
+                .provider
+                .multicall()
+                .add(self.portal.withdrawalQueueHead())
+                .add(self.portal.withdrawalQueueTail())
+                .aggregate()
+                .await?;
 
             let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
             let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
@@ -848,6 +852,10 @@ mod tests {
         Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
     }
 
+    fn abi_encode_multicall(values: Vec<Bytes>) -> Bytes {
+        (U256::ZERO, values).abi_encode_params().into()
+    }
+
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
             token: address!("0x0000000000000000000000000000000000001000"),
@@ -1139,8 +1147,10 @@ mod tests {
     #[tokio::test]
     async fn process_queue_requests_monitor_resync_when_head_slot_missing() {
         let l1 = Asserter::new();
-        l1.push_success(&abi_encode_u64(51));
-        l1.push_success(&abi_encode_u64(71));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(51),
+            abi_encode_u64(71),
+        ]));
 
         let repair_notify = Arc::new(Notify::new());
         let mut processor = test_processor(
@@ -1161,8 +1171,10 @@ mod tests {
     async fn process_queue_requests_repair_when_store_data_mismatches_slot_hash() {
         let l1 = Asserter::new();
         // head = 5, tail = 6, slot hash that matches no suffix of the stored batch.
-        l1.push_success(&abi_encode_u64(5));
-        l1.push_success(&abi_encode_u64(6));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(5),
+            abi_encode_u64(6),
+        ]));
         l1.push_success(&abi_encode_u64(0));
         l1.push_success(&abi_encode_b256(B256::repeat_byte(0xde)));
 
@@ -1191,8 +1203,10 @@ mod tests {
         let l1 = Asserter::new();
         // head = 5, tail = 6, slot already contains EMPTY_SENTINEL (head advanced
         // between our head read and the slot read).
-        l1.push_success(&abi_encode_u64(5));
-        l1.push_success(&abi_encode_u64(6));
+        l1.push_success(&abi_encode_multicall(vec![
+            abi_encode_u64(5),
+            abi_encode_u64(6),
+        ]));
         l1.push_success(&abi_encode_u64(0));
         l1.push_success(&abi_encode_b256(EMPTY_SENTINEL));
 

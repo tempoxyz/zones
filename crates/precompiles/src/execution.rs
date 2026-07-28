@@ -21,9 +21,7 @@ use core::cell::RefCell;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolError;
-use revm::precompile::{
-    PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
-};
+use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
@@ -68,10 +66,8 @@ pub(crate) enum CallCheck {
 
 /// State-read failures raised while applying pre-execution rules.
 pub(crate) enum CallRuleError {
-    /// Error from Zone-local precompile storage, preserving halt/fatal behavior.
+    /// Error from Zone-local or L1-mirrored precompile storage.
     Tempo(TempoPrecompileError),
-    /// Fatal external-state error that must abort EVM execution.
-    Fatal(PrecompileError),
 }
 
 /// Selector and caller dependent precompile call rules evaluated after storage setup.
@@ -141,7 +137,6 @@ pub(crate) fn create_precompile(
             CallCheck::Error(CallRuleError::Tempo(error)) => {
                 StorageCtx::default().error_result(error)
             }
-            CallCheck::Error(CallRuleError::Fatal(error)) => Err(error),
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
