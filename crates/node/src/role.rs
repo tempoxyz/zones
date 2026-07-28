@@ -24,7 +24,7 @@ use reth_storage_api::{BlockNumReader, BlockReader, ReceiptProvider, StateProvid
 use reth_transaction_pool::TransactionPool;
 use tempo_primitives::{Block, TempoHeader};
 use tokio::{sync::mpsc, task::JoinSet};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
@@ -40,8 +40,8 @@ mod zone_transaction_pool_alias {
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     replication::{
-        AttestationContext, PeerTipRegistry, broadcast_persisted_blocks, run_follower_block_sync,
-        run_leader_backfill_server,
+        AttestationContext, BackfillRequest, PeerTipRegistry, broadcast_persisted_blocks,
+        collect_follower_settlement_signatures, run_follower_block_sync,
     },
     settlement_attestation::collect_leader_settlements,
     tx_forwarding::{forward_new_transactions, insert_forwarded_transactions},
@@ -122,37 +122,59 @@ struct GenerationSinks {
 
 impl EventSinks {
     fn install(&self, sync: mpsc::Sender<P2pEvent>, transactions: Option<mpsc::Sender<P2pEvent>>) {
-        *self.inner.lock().expect("poisoned") = GenerationSinks {
-            sync: Some(sync),
-            transactions,
-        };
+        let mut sinks = self.inner.lock().expect("poisoned");
+        sinks.sync = Some(sync);
+        sinks.transactions = transactions;
     }
 
     fn clear(&self) {
-        *self.inner.lock().expect("poisoned") = GenerationSinks::default();
+        let mut sinks = self.inner.lock().expect("poisoned");
+        sinks.sync = None;
+        sinks.transactions = None;
+    }
+
+    fn sink_for(&self, event: &P2pEvent) -> Option<mpsc::Sender<P2pEvent>> {
+        let sinks = self.inner.lock().expect("poisoned");
+        if matches!(event, P2pEvent::TransactionReceived { .. }) {
+            sinks.transactions.clone()
+        } else {
+            sinks.sync.clone()
+        }
     }
 }
 
 /// Long-lived P2P event demultiplexer.
 ///
-/// Owns the single event receiver for the process lifetime and forwards each event to the
-/// active generation's substream. Events arriving between generations are dropped — every
-/// generation re-derives its state from the provider and the schedule on start, so a dropped
-/// wakeup is recovered by the follower's backfill probes or the leader's queue heartbeat.
+/// Owns the single event receiver for the process lifetime. Backfill requests are
+/// generation-independent — every role serves the same canonical provider — so they go to
+/// the process-lifetime backfill server, never to a role generation; dropping one would
+/// suppress the requesting peer until its response timeout and stall a leadership handoff.
+/// Every other event is forwarded to the active generation's substream, and events arriving
+/// between generations are dropped because the successor re-derives its state from the
+/// provider and schedule.
 pub(crate) async fn route_events_to_generations(
     mut events: mpsc::Receiver<P2pEvent>,
     sinks: EventSinks,
+    backfill: mpsc::Sender<BackfillRequest>,
 ) {
     while let Some(event) = events.recv().await {
-        let sink = {
-            let sinks = sinks.inner.lock().expect("poisoned");
-            if matches!(event, P2pEvent::TransactionReceived { .. }) {
-                sinks.transactions.clone()
-            } else {
-                sinks.sync.clone()
+        if let P2pEvent::BackfillRequested {
+            peer,
+            request_id,
+            start,
+        } = event
+        {
+            if let Err(err) = backfill.try_send(BackfillRequest {
+                peer,
+                request_id,
+                start,
+            }) {
+                metrics::counter!("zone_leadership_backfill_requests_dropped_total").increment(1);
+                warn!(target: "zone::role", %err, start, "Dropped a block backfill request because the serving queue is unavailable");
             }
-        };
-        let Some(sink) = sink else {
+            continue;
+        }
+        let Some(sink) = sinks.sink_for(&event) else {
             metrics::counter!("zone_leadership_events_dropped_between_generations_total")
                 .increment(1);
             debug!(target: "zone::role", "Dropping P2P event with no active generation consumer");
@@ -160,8 +182,8 @@ pub(crate) async fn route_events_to_generations(
         };
         if sink.send(event).await.is_err() {
             // The generation stopped after we snapshotted its sink; the next generation
-            // installs fresh channels, so this event is dropped by design (late events must
-            // never reach a newer generation).
+            // installs fresh channels and re-derives its state, so late generation-specific
+            // events must not leak into the successor.
             metrics::counter!("zone_leadership_events_dropped_between_generations_total")
                 .increment(1);
         }
@@ -537,10 +559,15 @@ pub(crate) async fn run_role_controller<P, Pool>(
             current = Some(start_generation(&context, &sinks, desired, generation_id).await);
         }
 
+        // A fenced generation has no tasks; an empty JoinSet's join_next() is immediately
+        // ready with None, so polling it would spin this loop hot. Stay pending instead and
+        // wake only on schedule changes or the recheck tick.
         let task_end = async {
             match current.as_mut() {
-                Some(generation) => generation.tasks.join_next().await,
-                None => std::future::pending().await,
+                Some(generation) if !generation.tasks.is_empty() => {
+                    generation.tasks.join_next().await
+                }
+                _ => std::future::pending().await,
             }
         };
         tokio::select! {
@@ -591,6 +618,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
                         }
                         tokio::time::sleep(GENERATION_RESTART_BACKOFF).await;
                     }
+                    // Unreachable: join_next() is only polled while the set is non-empty.
                     None => {}
                 }
             }
@@ -723,12 +751,11 @@ where
 
             let server_token = token.clone();
             let provider = context.provider.clone();
-            let commands = context.commands.clone();
             let attestation = context.attestation.clone();
             tasks.spawn(async move {
-                run_leader_backfill_server(provider, sync_rx, commands, attestation, server_token)
+                collect_follower_settlement_signatures(provider, sync_rx, attestation, server_token)
                     .await;
-                TaskEnd::Ended("leader-backfill-server")
+                TaskEnd::Ended("leader-settlement-signatures")
             });
 
             let pool = context.pool.clone();
@@ -768,8 +795,13 @@ where
             tasks.spawn(async move {
                 let handle =
                     spawn_zone_sequencer(sequencer_config, signer, sequencer_token.clone()).await;
-                let (withdrawal, monitor) =
-                    tokio::join!(handle.withdrawal_handle, handle.monitor_handle);
+                // Abort-on-drop: if this wrapper is aborted by the generation stop timeout,
+                // dropping the handles must abort the sequencer tasks rather than detach
+                // them, or a stuck iteration could submit L1 work past its demotion.
+                let (withdrawal, monitor) = tokio::join!(
+                    AbortOnDropHandle::new(handle.withdrawal_handle),
+                    AbortOnDropHandle::new(handle.monitor_handle)
+                );
                 if let Err(err) = withdrawal {
                     warn!(target: "zone::role", %err, "Withdrawal processor task failed");
                 }
@@ -819,4 +851,63 @@ where
         context.schedule.clone(),
         context.local_ed25519_public_key.clone(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, time::Duration};
+
+    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use tokio::sync::mpsc;
+    use zone_p2p::P2pEvent;
+
+    use super::{EventSinks, route_events_to_generations};
+
+    /// Reproduces the startup ordering from the native stress test: the P2P router is live
+    /// and receives a peer's backfill request before the role controller installs its first
+    /// generation sink. The request must reach the process-lifetime backfill server anyway —
+    /// losing it leaves the requester blocked behind the P2P backfill response timeout.
+    #[tokio::test]
+    async fn backfill_request_bypasses_generation_sinks() {
+        let sinks = EventSinks::default();
+        let (network_events, event_rx) = mpsc::channel(1);
+        let (backfill_tx, mut backfill_rx) = mpsc::channel(1);
+        let router = tokio::spawn(route_events_to_generations(
+            event_rx,
+            sinks.clone(),
+            backfill_tx,
+        ));
+        let peer = PrivateKey::from_seed(1).public_key();
+
+        network_events
+            .send(P2pEvent::BackfillRequested {
+                peer: peer.clone(),
+                request_id: 7,
+                start: 42,
+            })
+            .await
+            .unwrap();
+        // A generation-specific event with no installed sink is dropped, not deferred.
+        network_events
+            .send(P2pEvent::Started {
+                ed25519_public_key: peer.clone(),
+                listen: SocketAddr::from(([127, 0, 0, 1], 9000)),
+            })
+            .await
+            .unwrap();
+
+        let request = tokio::time::timeout(Duration::from_secs(1), backfill_rx.recv())
+            .await
+            .expect("backfill request never reached the serving channel")
+            .expect("backfill serving channel closed");
+        assert_eq!(request.peer, peer);
+        assert_eq!(request.request_id, 7);
+        assert_eq!(request.start, 42);
+
+        drop(network_events);
+        tokio::time::timeout(Duration::from_secs(1), router)
+            .await
+            .expect("event router did not stop")
+            .expect("event router task panicked");
+    }
 }

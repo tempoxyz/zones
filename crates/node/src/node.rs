@@ -5,7 +5,10 @@
 
 use crate::{
     ZoneEngine,
-    replication::{AttestationContext, PeerTipRegistry},
+    replication::{
+        AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, BackfillRequest, PeerTipRegistry,
+        serve_backfill_requests,
+    },
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
         route_events_to_generations, run_role_controller,
@@ -573,7 +576,12 @@ where
             let manifest = config.manifest().clone();
             let local_secp256k1_address = config.secp256k1_address();
             let individual_signer = config.block_attestation_signer();
-            let (sinks, commands) = Self::launch_p2p_network(config, network_id, &task_executor)?;
+            // Created before the network starts so requests arriving ahead of the serving
+            // task (spawned once the provider exists) buffer instead of dropping.
+            let (backfill_requests_tx, backfill_requests_rx) =
+                tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
+            let (sinks, commands) =
+                Self::launch_p2p_network(config, network_id, &task_executor, backfill_requests_tx)?;
 
             // Operator RPC handles: every node holds a wallet-backed L1 provider signing
             // with its individual key so any member can relay setLeader.
@@ -610,6 +618,7 @@ where
                 local_ed25519_public_key,
                 role_status,
                 peer_tips,
+                backfill_requests_rx,
             ));
         } else if let Some(ref config) = self.sequencer_config {
             // Legacy single-sequencer mode keeps the static engine.
@@ -644,8 +653,16 @@ where
             local_ed25519_public_key,
             role_status,
             peer_tips,
+            backfill_requests_rx,
         )) = p2p_runtime
         {
+            // Backfill serving is role-neutral: every role serves the same canonical
+            // provider, so the server outlives role generations and a leadership handoff
+            // can never drop an accepted request.
+            task_executor.spawn_critical_task(
+                "zone-backfill-server",
+                serve_backfill_requests(provider.clone(), commands.clone(), backfill_requests_rx),
+            );
             let sequencer = match self.sequencer_config.take() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
                     config,
@@ -835,6 +852,7 @@ where
         config: P2pConfig,
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
+        backfill_requests: tokio::sync::mpsc::Sender<BackfillRequest>,
     ) -> eyre::Result<(EventSinks, tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>)> {
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
@@ -848,7 +866,7 @@ where
         let sinks = EventSinks::default();
         task_executor.spawn_critical_task(
             "zone-p2p-event-router",
-            route_events_to_generations(events, sinks.clone()),
+            route_events_to_generations(events, sinks.clone(), backfill_requests),
         );
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",

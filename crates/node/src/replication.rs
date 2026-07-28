@@ -254,20 +254,16 @@ const BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 const BLOCK_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_PENDING_BLOCKS: usize = 128;
 const BACKFILL_PAGE_SIZE: u64 = 64;
-const BACKFILL_SERVE_QUEUE_CAPACITY: usize = 8;
+/// Bounds queued requests at the process-lifetime backfill server. Requesters keep at most
+/// one request outstanding per peer, so manifest size bounds the live queue depth; the
+/// headroom absorbs requests arriving before the server task starts.
+pub(crate) const BACKFILL_SERVE_QUEUE_CAPACITY: usize = 128;
 
-struct BackfillRequest {
-    peer: zone_p2p::P2pPeerId,
-    request_id: u64,
-    start: u64,
-}
-
-struct BackfillServerTask(tokio::task::JoinHandle<()>);
-
-impl Drop for BackfillServerTask {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
+/// One peer's queued block backfill request.
+pub(crate) struct BackfillRequest {
+    pub(crate) peer: zone_p2p::P2pPeerId,
+    pub(crate) request_id: u64,
+    pub(crate) start: u64,
 }
 
 /// Keep track of the backfill exactly. We'll buffer any live blocks received
@@ -445,7 +441,14 @@ where
     Ok(())
 }
 
-async fn serve_backfill_requests<P>(
+/// Serve block backfill requests for the process lifetime.
+///
+/// Backfill serving is role-neutral: leaders, followers, and fenced nodes all serve the
+/// same canonical provider. Running one server outside the role generations means a
+/// generation switch can never drop or abandon an accepted request, which would suppress
+/// the requesting peer until its response timeout and stall a leadership handoff.
+/// Exits when the request channel closes.
+pub(crate) async fn serve_backfill_requests<P>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
     mut requests: mpsc::Receiver<BackfillRequest>,
@@ -483,15 +486,16 @@ async fn serve_backfill_requests<P>(
     }
 }
 
-/// Leaders serve follower backfill requests and collect settlement
-/// signatures, without ever requesting or importing peer blocks.
+/// Collect and verify follower settlement signatures on the leader, without ever
+/// requesting or importing peer blocks.
 ///
-/// While this  runs, [`ZoneEngine`](crate::ZoneEngine) is the sole chain-head
-/// writer. The loop exits when `stop` fires.
-pub(crate) async fn run_leader_backfill_server<P>(
+/// While this runs, [`ZoneEngine`](crate::ZoneEngine) is the sole chain-head
+/// writer. Backfill requests are served by the process-lifetime
+/// [`serve_backfill_requests`] task, never by role generations. The loop exits
+/// when `stop` fires.
+pub(crate) async fn collect_follower_settlement_signatures<P>(
     provider: P,
     mut events: mpsc::Receiver<P2pEvent>,
-    commands: mpsc::Sender<P2pCommand>,
     attestation: AttestationContext,
     stop: CancellationToken,
 ) where
@@ -505,18 +509,11 @@ pub(crate) async fn run_leader_backfill_server<P>(
         + Sync
         + 'static,
 {
-    let (backfill_requests, backfill_request_rx) = mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
-    let mut backfill_server = BackfillServerTask(tokio::spawn(serve_backfill_requests(
-        provider.clone(),
-        commands,
-        backfill_request_rx,
-    )));
-
     loop {
         tokio::select! {
             biased;
             () = stop.cancelled() => {
-                debug!(target: "zone::p2p", "Leader backfill server stopped");
+                debug!(target: "zone::p2p", "Leader settlement signature collection stopped");
                 return;
             }
             event = events.recv() => {
@@ -526,10 +523,8 @@ pub(crate) async fn run_leader_backfill_server<P>(
                 };
                 match event {
                     P2pEvent::Started { .. } => {}
-                    P2pEvent::BackfillRequested { peer, request_id, start } => {
-                        if let Err(err) = backfill_requests.try_send(BackfillRequest { peer, request_id, start }) {
-                            tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
-                        }
+                    P2pEvent::BackfillRequested { .. } => {
+                        debug!(target: "zone::p2p", "Ignoring backfill request on the leader settlement loop; the process-lifetime server handles it");
                     }
                     P2pEvent::SettlementSignatureReceived { follower, signature } => {
                         let result = async {
@@ -571,18 +566,11 @@ pub(crate) async fn run_leader_backfill_server<P>(
                     }
                 }
             }
-            result = &mut backfill_server.0 => {
-                match result {
-                    Ok(()) => tracing::error!(target: "zone::p2p", "Block backfill server stopped unexpectedly"),
-                    Err(err) => tracing::error!(target: "zone::p2p", %err, "Block backfill server task failed"),
-                }
-                return;
-            }
         }
     }
 }
 
-/// Serve catch-up requests and import live/backfilled blocks in canonical order on a follower.
+/// Import live/backfilled blocks in canonical order on a follower.
 ///
 /// Live blocks are only imported from the leader when the sender equals
 /// `schedule.leader_for(the block's embedded anchor)`. We do this because if there are accidentally
@@ -617,14 +605,6 @@ pub(crate) async fn run_follower_block_sync<P>(
     // This is capped to `MAX_PENDING_BLOCKS`.
     let mut pending = BTreeMap::<u64, PendingPeerBlock>::new();
     let mut backfill = BackfillProgress::new();
-    let (backfill_requests, backfill_request_rx) = mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
-
-    // Serve backfill requests in a separate task to avoid competing the live blocks
-    let mut backfill_server = BackfillServerTask(tokio::spawn(serve_backfill_requests(
-        provider.clone(),
-        commands.clone(),
-        backfill_request_rx,
-    )));
 
     // Always probe on startup to see if we're behind
     let mut retry = tokio::time::interval(BACKFILL_RETRY_INTERVAL);
@@ -685,10 +665,8 @@ pub(crate) async fn run_follower_block_sync<P>(
                             Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
                         }
                     }
-                    P2pEvent::BackfillRequested { peer, request_id, start } => {
-                        if let Err(err) = backfill_requests.try_send(BackfillRequest { peer, request_id, start }) {
-                            tracing::warn!(target: "zone::p2p", %err, start, queue_capacity = BACKFILL_SERVE_QUEUE_CAPACITY, "Dropped block backfill request because the serving queue is unavailable");
-                        }
+                    P2pEvent::BackfillRequested { .. } => {
+                        debug!(target: "zone::p2p", "Ignoring backfill request on follower block sync; the process-lifetime server handles it");
                     }
                     P2pEvent::BlockReceived { .. }
                     | P2pEvent::BackfillBlockReceived { .. } => {
@@ -819,13 +797,6 @@ pub(crate) async fn run_follower_block_sync<P>(
                     debug!(target: "zone::p2p", "P2P command channel closed");
                     return;
                 }
-            }
-            result = &mut backfill_server.0 => {
-                match result {
-                    Ok(()) => tracing::error!(target: "zone::p2p", "Block backfill server stopped unexpectedly"),
-                    Err(err) => tracing::error!(target: "zone::p2p", %err, "Block backfill server task failed"),
-                }
-                return;
             }
         }
     }
