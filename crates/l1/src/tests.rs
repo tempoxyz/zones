@@ -149,17 +149,13 @@ impl LocalTempoCheckpointReader for SequenceLocalTempoCheckpointReader {
     }
 }
 
-fn test_subscriber(
-    local_state: Arc<dyn LocalTempoCheckpointReader>,
-    genesis_tempo_block_number: Option<u64>,
-) -> L1Subscriber {
+fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscriber {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
 
     L1Subscriber {
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
             portal_address,
-            genesis_tempo_block_number,
             enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(),
             block_tracker: L1BlockTracker::default(),
@@ -173,11 +169,8 @@ fn test_subscriber(
     }
 }
 
-fn test_observer(
-    local_state: Arc<dyn LocalTempoCheckpointReader>,
-    genesis_tempo_block_number: Option<u64>,
-) -> L1Subscriber {
-    let mut subscriber = test_subscriber(local_state, genesis_tempo_block_number);
+fn test_observer(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscriber {
+    let mut subscriber = test_subscriber(local_state);
     subscriber.config.retain_observations = false;
     subscriber.deposit_sink = DepositSink::Observer;
     subscriber
@@ -355,7 +348,7 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
 
 #[test]
 fn subscriber_applies_state_and_records_observation() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let header = make_test_header(10);
     let sealed = seal(header);
     let anchor = sealed.num_hash();
@@ -642,10 +635,7 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 
 #[test]
 fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
-        Some(0),
-    );
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
     let stable_account = address!("0x0000000000000000000000000000000000000ABC");
@@ -698,40 +688,30 @@ fn deposit_hash_chain(previous_hash: B256, deposits: &[L1Deposit]) -> B256 {
     })
 }
 
-#[tokio::test]
-async fn test_resolve_start_block_reads_live_local_state_each_time() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([
-            10, 11,
-        ]))),
-        None,
-    );
-    assert_eq!(subscriber.resolve_start_block().await.unwrap(), Some(11));
-    assert_eq!(subscriber.resolve_start_block().await.unwrap(), Some(12));
+#[test]
+fn test_resolve_start_block_reads_live_local_state_each_time() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new(
+        VecDeque::from([10, 11]),
+    )));
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 12);
 }
 
-#[tokio::test]
-async fn test_resolve_start_block_falls_back_to_genesis_override_when_local_state_is_zero() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
-        Some(42),
+#[test]
+fn test_resolve_start_block_rejects_unanchored_genesis() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    assert!(
+        subscriber
+            .resolve_start_block()
+            .unwrap_err()
+            .to_string()
+            .contains("zone genesis is not anchored to an L1 block")
     );
-    assert_eq!(subscriber.resolve_start_block().await.unwrap(), Some(43));
-}
-
-#[tokio::test]
-async fn test_resolve_start_block_skips_backfill_without_checkpoint() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
-        None,
-    );
-
-    assert_eq!(subscriber.resolve_start_block().await.unwrap(), None);
 }
 
 #[tokio::test]
 async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -775,7 +755,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
 
 #[tokio::test]
 async fn observer_advances_caches_without_retaining_deposit_blocks() {
-    let subscriber = test_observer(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let subscriber = test_observer(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let cached_address = address!("0x0000000000000000000000000000000000000ABC");
     let cached_slot = B256::with_last_byte(1);
     let cached_value = B256::with_last_byte(2);
@@ -829,10 +809,7 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
 
 #[tokio::test]
 async fn test_head_triggers_falls_back_to_http_block_filter() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new([10])),
-        None,
-    );
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
     let asserter = Asserter::new();
     let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .connect_mocked_client(asserter.clone())
@@ -853,10 +830,7 @@ async fn test_head_triggers_falls_back_to_http_block_filter() {
 
 #[tokio::test]
 async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new([10])),
-        None,
-    );
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
@@ -925,10 +899,7 @@ fn test_push_log_decodes_bounce_back_as_regular_deposit() {
 
 #[test]
 fn confirmed_token_enabled_event_updates_registry() {
-    let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
-        None,
-    );
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
     let token = address!("0x20c0000000000000000000000000000000000001");
     let events = L1PortalEvents {
         enabled_tokens: vec![EnabledToken {
