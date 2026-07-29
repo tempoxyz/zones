@@ -574,6 +574,37 @@ impl L1Subscriber {
         Ok(next)
     }
 
+    /// Resolve the latest L1 anchor already admitted by local state or this subscriber.
+    fn latest_ingested_anchor(&self) -> eyre::Result<NumHash> {
+        let mut latest = self.local_state.latest_tempo_checkpoint()?;
+        eyre::ensure!(
+            latest.hash != B256::ZERO,
+            "zone genesis is not anchored to an L1 block"
+        );
+
+        for candidate in [
+            self.deposit_sink.last_enqueued(),
+            self.config.block_tracker.latest(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if candidate.number > latest.number {
+                latest = candidate;
+            } else if candidate.number == latest.number {
+                eyre::ensure!(
+                    candidate.hash == latest.hash,
+                    "conflicting ingested L1 anchors at height {}: {} and {}",
+                    latest.number,
+                    latest.hash,
+                    candidate.hash
+                );
+            }
+        }
+
+        Ok(latest)
+    }
+
     /// Return the block number referenced by the L1 `finalized` tag.
     async fn finalized_block_number(
         &self,
@@ -662,6 +693,18 @@ impl L1Subscriber {
     ) -> eyre::Result<()> {
         use futures::stream;
 
+        let mut parent = self.latest_ingested_anchor()?;
+        let expected_from = parent
+            .number
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("finalized L1 block number overflow"))?;
+        eyre::ensure!(
+            from == expected_from,
+            "finalized L1 backfill must continue after block {} at {}, received start {from}",
+            parent.number,
+            parent.hash
+        );
+
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.config.block_tracker.clone();
@@ -720,6 +763,21 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
+            let expected_block_number = parent
+                .number
+                .checked_add(1)
+                .ok_or_else(|| eyre::eyre!("finalized L1 block number overflow"))?;
+            eyre::ensure!(
+                block_number == expected_block_number,
+                "non-contiguous finalized L1 header: expected height {expected_block_number}, received {block_number}"
+            );
+            eyre::ensure!(
+                header.parent_hash() == parent.hash,
+                "finalized L1 parent mismatch at height {block_number}: expected {}, received {}",
+                parent.hash,
+                header.parent_hash()
+            );
+
             // Decoding fails closed: a decode failure of a recognized portal log aborts this
             // block before anything is enqueued or any cache advances. Ingestion halts here (fenced)
             // instead of continuing under a partial event view.
@@ -774,6 +832,7 @@ impl L1Subscriber {
             if !self.config.retain_observations {
                 self.config.block_tracker.prune_through(anchor.number);
             }
+            parent = anchor;
             processed += 1;
 
             if processed.is_multiple_of(100) {
