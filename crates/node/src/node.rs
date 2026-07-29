@@ -555,6 +555,16 @@ where
                 .as_ref()
                 .map(|config| config.batch_anchor_config)
                 .unwrap_or_default();
+            // The manifest decides who this node collects settlement signatures from; the portal
+            // decides whose signatures count and how many are needed. Reconcile them before any
+            // role task starts, so a disagreement fails at startup instead of stalling
+            // settlement at the next batch boundary.
+            crate::settlement_attestation::validate_registered_sequencer_set(
+                config.manifest(),
+                self.portal_address,
+                &l1_provider,
+            )
+            .await?;
             // Every node holds an attestation store so it can be promoted anytime.
             let attestation = AttestationContext::new(
                 attestation_domain,

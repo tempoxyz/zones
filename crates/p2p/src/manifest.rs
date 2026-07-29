@@ -5,7 +5,7 @@ use std::{
     path::Path,
 };
 
-use alloy_primitives::Address as EthereumAddress;
+use alloy_primitives::{Address as EthereumAddress, B256};
 use commonware_codec::DecodeExt as _;
 use commonware_cryptography::ed25519::PublicKey;
 use commonware_p2p::{Address, Ingress};
@@ -748,6 +748,46 @@ impl ZoneManifest {
         self.nodes.iter().filter(|node| !node.rpc_only)
     }
 
+    /// Digest of the settlement-relevant membership, bound into the P2P network namespace.
+    ///
+    /// Covers each member's Ed25519 identity, its quorum standing, and the individual address
+    /// its signatures must recover to — everything a peer must agree on for two nodes to derive
+    /// the same roles from their own manifest copies. Peer addresses and the zone/portal identity
+    /// are excluded: the latter are already namespaced separately, and relocating a node must
+    /// stay a rolling operation.
+    ///
+    /// Iteration is over a sorted set, so the digest does not depend on entry order in the file.
+    pub fn membership_digest(&self) -> B256 {
+        let mut members = self
+            .nodes
+            .iter()
+            .map(|node| {
+                (
+                    node.ed25519_public_key.as_ref().to_vec(),
+                    node.rpc_only,
+                    node.secp256k1_address,
+                )
+            })
+            .collect::<Vec<_>>();
+        members.sort();
+
+        let mut preimage = Vec::with_capacity(members.len() * 64);
+        for (ed25519_public_key, rpc_only, secp256k1_address) in members {
+            preimage.extend_from_slice(&ed25519_public_key);
+            preimage.push(u8::from(rpc_only));
+            // Distinguish "no address" from any real address rather than substituting zero,
+            // which is a valid (if useless) 20-byte value.
+            match secp256k1_address {
+                Some(address) => {
+                    preimage.push(1);
+                    preimage.extend_from_slice(address.as_slice());
+                }
+                None => preimage.push(0),
+            }
+        }
+        alloy_primitives::keccak256(&preimage)
+    }
+
     /// Ed25519 keys of the members that replicate without joining the on-chain quorum.
     pub fn rpc_follower_keys(&self) -> BTreeSet<PublicKey> {
         self.nodes
@@ -1360,6 +1400,67 @@ mod tests {
             ZoneManifest::parse(&standby_with_address),
             Err(ManifestError::RpcOnlySecp256k1Address(node)) if node == "public-rpc"
         ));
+    }
+
+    #[test]
+    fn membership_digest_tracks_quorum_standing_but_not_addresses_or_order() {
+        let nodes = [
+            (1, "leader", "127.0.0.1:9200", false),
+            (2, "follower-a", "127.0.0.1:9201", false),
+            (3, "follower-b", "127.0.0.1:9202", false),
+            (4, "public-rpc", "127.0.0.1:9203", true),
+        ];
+        let baseline = ZoneManifest::parse(&manifest_with_rpc_only(1, &nodes))
+            .unwrap()
+            .membership_digest();
+
+        // Entry order in the file is not part of the identity.
+        let mut reordered = nodes;
+        reordered.swap(0, 3);
+        assert_eq!(
+            ZoneManifest::parse(&manifest_with_rpc_only(1, &reordered))
+                .unwrap()
+                .membership_digest(),
+            baseline
+        );
+
+        // Relocating a node must stay a rolling operation, so its address is excluded.
+        let moved = [
+            (1, "leader", "127.0.0.1:9200", false),
+            (2, "follower-a", "follower-a.zone.local:9300", false),
+            (3, "follower-b", "127.0.0.1:9202", false),
+            (4, "public-rpc", "127.0.0.1:9203", true),
+        ];
+        assert_eq!(
+            ZoneManifest::parse(&manifest_with_rpc_only(1, &moved))
+                .unwrap()
+                .membership_digest(),
+            baseline
+        );
+
+        // Moving a member in or out of the quorum is a different network.
+        let promoted = [
+            (1, "leader", "127.0.0.1:9200", false),
+            (2, "follower-a", "127.0.0.1:9201", false),
+            (3, "follower-b", "127.0.0.1:9202", false),
+            (4, "public-rpc", "127.0.0.1:9203", false),
+        ];
+        assert_ne!(
+            ZoneManifest::parse(&manifest_with_rpc_only(1, &promoted))
+                .unwrap()
+                .membership_digest(),
+            baseline
+        );
+
+        // ...and so is changing the address a member's signatures must recover to.
+        let rekeyed = manifest_with_rpc_only(1, &nodes).replace(
+            &format!("secp256k1_address = \"{}\"", secp256k1_address(3)),
+            &format!("secp256k1_address = \"{}\"", secp256k1_address(9)),
+        );
+        assert_ne!(
+            ZoneManifest::parse(&rekeyed).unwrap().membership_digest(),
+            baseline
+        );
     }
 
     #[test]

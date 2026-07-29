@@ -51,9 +51,17 @@ also give each node an individual secp256k1 key whose Ethereum address is
 registered with `ZonePortal`. 
 
 The authenticated-network namespace includes the P2P wire-protocol version,
-Tempo L1 chain ID, ZonePortal address, and zone ID. This prevents nodes from
-different local, test, or production environments from connecting when a key
-or endpoint is accidentally reused.
+Tempo L1 chain ID, ZonePortal address, zone ID, and a digest of the manifest's
+settlement membership. The first four prevent nodes from different local, test, or production
+environments from connecting when a key or endpoint is accidentally reused.
+
+The membership digest covers each member's Ed25519 identity, whether it is `rpc_only`, and the
+individual address its signatures must recover to. Roles are derived locally from each node's own
+manifest copy, so peers holding different copies would disagree about who settles — one collecting
+signatures from a member the other treats as a non-signing standby. Binding the digest into the
+handshake makes that disagreement a failure to authenticate rather than two views of the quorum.
+Changing membership therefore requires restarting every node together. Peer *addresses* are
+excluded from the digest, so relocating a node stays a rolling operation.
 
 ## Manifest example
 
@@ -107,6 +115,19 @@ The manifest loader validates that:
 - `leader_ed25519_public_key` identifies one of the nodes;
 - the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
+
+At startup, before any role task runs, the node also reconciles the manifest against `ZonePortal`
+at the finalized head and refuses to start unless:
+
+- `sequencer_set_version` matches the portal's;
+- every quorum node's `secp256k1_address` is a registered portal sequencer;
+- the portal's registered sequencer count *equals* the manifest quorum count — a registered
+  address the manifest does not list holds a share of the threshold nobody signs for, which is
+  exactly what a demoted standby leaves behind if its key is not deregistered; and
+- `sequencerThreshold()` is nonzero and reachable by the manifest quorum.
+
+A mismatch is a configuration error that would otherwise surface as stalled settlement at the next
+batch boundary, so it fails at startup instead.
 
 ## Generate a Commonware identity
 
