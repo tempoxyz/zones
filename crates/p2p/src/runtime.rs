@@ -135,6 +135,16 @@ impl BackfillJob {
         })
     }
 
+    /// Whether `peer` has left a request unanswered past the response timeout.
+    ///
+    /// Distinguishes "being served" from "not answering", so catch-up can stay pointed at one
+    /// authoritative source while it responds and widen only once it stops.
+    fn is_unresponsive(&self, peer: &PublicKey, now: Instant) -> bool {
+        self.outstanding
+            .get(peer)
+            .is_some_and(|request| now.duration_since(request.sent_at) >= BACKFILL_RESPONSE_TIMEOUT)
+    }
+
     fn complete(&mut self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
         if !self.accepts(peer, request_id, now) {
             return false;
@@ -635,6 +645,26 @@ async fn run_commands(
                 .cloned()
                 .collect::<Vec<_>>();
             let now = Instant::now();
+            // Prefer the single peer whose blocks the import path can bind to a producer: the
+            // scheduled leader of the next anchor. Backfilled blocks carry no producer claim, so
+            // a page from any other member is judged by parent/anchor/execution validation alone
+            // — enough to reject garbage, but not enough to distinguish the leader's chain from a
+            // valid alternative one built by a compromised quorum follower. Fanning out only
+            // once the leader stops answering confines that exposure to a leader outage instead
+            // of leaving it open on every request.
+            let (backfill_peers, leader_only) = {
+                let job = backfill_job.lock().await;
+                let leader = leadership.next_anchor_record().map(|record| record.leader);
+                match leader {
+                    Some(leader)
+                        if backfill_peers.contains(&leader)
+                            && !job.is_unresponsive(&leader, now) =>
+                    {
+                        (vec![leader], true)
+                    }
+                    _ => (backfill_peers, false),
+                }
+            };
             let request = {
                 backfill_job
                     .lock()
@@ -642,7 +672,7 @@ async fn run_commands(
                     .begin_request(&backfill_peers, now)
             };
             let Some((request_id, request_peers)) = request else {
-                debug!(target: "zone::p2p", start, configured = backfill_peers.len(), "Skipping block backfill request because all eligible peers already have outstanding responses");
+                debug!(target: "zone::p2p", start, configured = backfill_peers.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
                 continue;
             };
             let mut request_frame = Vec::with_capacity(16);
@@ -660,7 +690,10 @@ async fn run_commands(
                 }
             };
             backfill_job.lock().await.finish_send(request_id, &sent);
-            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), configured = backfill_peers.len(), "Sent block backfill request");
+            if !leader_only {
+                metrics::counter!("zone_p2p_backfill_requests_without_leader_total").increment(1);
+            }
+            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), configured = backfill_peers.len(), leader_only, "Sent block backfill request");
             continue;
         }
 
@@ -1046,6 +1079,31 @@ mod tests {
 
     fn secp256k1_identity(seed: u64) -> Secp256k1Identity {
         Secp256k1Identity::from_hex(&format!("0x{seed:064x}")).unwrap()
+    }
+
+    #[test]
+    fn leader_counts_as_unresponsive_only_after_the_response_timeout() {
+        // Drives the leader-only-until-it-stops-answering choice in the backfill request arm:
+        // a served request must not widen the source set, an abandoned one must.
+        let leader = ed25519_identity(1).ed25519_public_key();
+        let now = Instant::now();
+        let mut lifecycle = BackfillJob::default();
+
+        // Nothing outstanding: the leader is the sole source.
+        assert!(!lifecycle.is_unresponsive(&leader, now));
+
+        let (request_id, peers) = lifecycle
+            .begin_request(std::slice::from_ref(&leader), now)
+            .unwrap();
+        lifecycle.finish_send(request_id, &peers);
+        // Still within the window, so it is being served, not stalling.
+        assert!(!lifecycle.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
+        // Past the window the node must be free to ask the rest of the quorum.
+        assert!(lifecycle.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
+
+        // A completed page clears the state, returning to leader-only.
+        assert!(lifecycle.complete(&leader, request_id, now));
+        assert!(!lifecycle.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
     }
 
     #[test]
