@@ -116,18 +116,14 @@ The manifest loader validates that:
 - the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
 
-At startup, before any role task runs, the node also reconciles the manifest against `ZonePortal`
-at the finalized head and refuses to start unless:
+At startup the node also checks the manifest against `ZonePortal` at the finalized head, and
+refuses to start unless every quorum node's `secp256k1_address` is a registered portal sequencer
+and `sequencerThreshold()` is nonzero and reachable by the manifest quorum. Both would otherwise
+surface as stalled settlement at the next batch boundary.
 
-- `sequencer_set_version` matches the portal's;
-- every quorum node's `secp256k1_address` is a registered portal sequencer;
-- the portal's registered sequencer count *equals* the manifest quorum count — a registered
-  address the manifest does not list holds a share of the threshold nobody signs for, which is
-  exactly what a demoted standby leaves behind if its key is not deregistered; and
-- `sequencerThreshold()` is nonzero and reachable by the manifest quorum.
-
-A mismatch is a configuration error that would otherwise surface as stalled settlement at the next
-batch boundary, so it fails at startup instead.
+Registered sequencers the manifest does not list only warn — a demoted standby whose key was never
+deregistered holds a share of the threshold nobody signs for, but failing on it would make every
+membership change a window in which no node can start.
 
 ## Rolling out a manifest change
 
@@ -142,15 +138,8 @@ that decide a role: a misspelled `rpc_only` leaves an entry that declares no `se
 looking like a quorum node, which fails to load, and a misspelled `secp256k1_address` fails the
 same way. Check startup logs for `Ignoring sequencer manifest keys` after any manifest edit.
 
-Two kinds of change are **not** rolling, because they alter the P2P network namespace or the
-settlement quorum, and every node must be restarted together:
-
-- adding, removing, or re-keying a member, or flipping `rpc_only` — the membership digest is bound
-  into the handshake, so mixed manifests fail to authenticate rather than disagreeing silently;
-- registering or deregistering a sequencer with `ZonePortal`, which must be applied together with
-  the matching manifest edit or the startup reconciliation refuses to start.
-
-Changing a peer's `address` is rolling: addresses are excluded from the membership digest.
+Apply a `ZonePortal` registration before the manifest edit that adds the node, and the manifest
+edit before deregistering: a quorum node the portal does not know refuses to start.
 
 ## Generate a Commonware identity
 

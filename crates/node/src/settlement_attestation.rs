@@ -23,17 +23,14 @@ use zone_p2p::P2pCommand;
 use crate::replication::AttestationContext;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
-/// Reconcile the manifest's settlement quorum against `ZonePortal` before any role task starts.
+/// Check the manifest's settlement quorum against `ZonePortal` before any role task starts.
 ///
-/// The manifest decides who this node asks for signatures and whose signatures it counts, but
-/// the registered signer set and the required threshold live on L1. Without this check the two
-/// can disagree silently: an address the manifest does not know stays registered and holds a
-/// share of the threshold, a demoted standby's old key remains a signer the zone never collects
-/// from, or the threshold exceeds the number of nodes that can actually sign — each of which
-/// stalls settlement at the next batch boundary rather than at startup.
+/// A quorum node the portal has not registered can never settle, and an unreachable threshold
+/// stalls settlement — both otherwise surface as a mysterious stall at the next batch boundary.
+/// Read at the finalized head, like every other portal read.
 ///
-/// Read at the finalized head, matching every other portal read, so a registration that has not
-/// yet finalized is not mistaken for a mismatch.
+/// Extra registered signers only warn: deregistering is a cleanup task, and failing on it would
+/// make every membership change a window in which no node can start.
 pub(crate) async fn validate_registered_sequencer_set(
     manifest: &zone_p2p::ZoneManifest,
     portal_address: alloy_primitives::Address,
@@ -42,69 +39,41 @@ pub(crate) async fn validate_registered_sequencer_set(
     use alloy_eips::BlockId;
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    let set_version_call = portal.sequencerSetVersion().block(BlockId::finalized());
+    let quorum: Vec<_> = manifest.quorum_nodes().collect();
     let threshold_call = portal.sequencerThreshold().block(BlockId::finalized());
     let count_call = portal.sequencerCount().block(BlockId::finalized());
-    let (set_version, threshold, registered_count) = tokio::try_join!(
-        set_version_call.call(),
-        threshold_call.call(),
-        count_call.call(),
-    )
-    .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
-
-    eyre::ensure!(
-        set_version == manifest.sequencer_set_version(),
-        "portal signer-set version {set_version} does not match manifest sequencer_set_version {}",
-        manifest.sequencer_set_version()
-    );
-
-    // Every quorum node must be a registered signer, or the leader would wait for a signature
-    // the portal will not accept.
-    let quorum: Vec<_> = manifest.quorum_nodes().collect();
-    let memberships = futures::future::try_join_all(quorum.iter().map(|node| {
+    let registered = futures::future::try_join_all(quorum.iter().map(|node| {
         let address = node
             .secp256k1_address()
             .expect("the manifest requires an address on every quorum node");
-        let portal = &portal;
-        async move {
-            portal
-                .isSequencer(address)
-                .block(BlockId::finalized())
-                .call()
-                .await
-                .map(|registered| (node.name().to_owned(), address, registered))
-        }
-    }))
-    .await
-    .wrap_err("failed checking manifest quorum membership against ZonePortal")?;
-    for (name, address, registered) in memberships {
+        let call = portal.isSequencer(address).block(BlockId::finalized());
+        async move { call.call().await.map(|ok| (node.name(), address, ok)) }
+    }));
+    let (threshold, registered_count, registered) =
+        tokio::try_join!(threshold_call.call(), count_call.call(), registered)
+            .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+
+    for (name, address, is_registered) in registered {
         eyre::ensure!(
-            registered,
+            is_registered,
             "manifest quorum node `{name}` ({address}) is not a registered ZonePortal sequencer"
         );
     }
-
-    // Equality, not containment: a registered address the manifest does not list holds a share
-    // of the threshold that no node in this zone will ever sign for. That is exactly the state
-    // a demoted standby leaves behind if its key is not deregistered.
-    let quorum_count = U256::from(quorum.len());
     eyre::ensure!(
-        registered_count == quorum_count,
-        "ZonePortal has {registered_count} registered sequencers but the manifest lists {quorum_count} quorum nodes; \
-         an unlisted registered signer holds a share of the threshold that this zone never signs for"
+        threshold > 0 && U256::from(threshold) <= U256::from(quorum.len()),
+        "ZonePortal settlement threshold {threshold} is not reachable by the manifest's {} quorum nodes",
+        quorum.len()
     );
-    eyre::ensure!(
-        U256::from(threshold) <= quorum_count && threshold > 0,
-        "ZonePortal settlement threshold {threshold} is not reachable by the manifest's {quorum_count} quorum nodes"
-    );
+    if registered_count > U256::from(quorum.len()) {
+        tracing::warn!(
+            target: "zone::p2p",
+            %registered_count,
+            manifest_quorum = quorum.len(),
+            "ZonePortal has registered sequencers the manifest does not list; they hold a share of the threshold this zone never signs for"
+        );
+    }
 
-    info!(
-        target: "zone::p2p",
-        set_version,
-        threshold,
-        quorum_nodes = quorum.len(),
-        "Reconciled the manifest settlement quorum with ZonePortal"
-    );
+    info!(target: "zone::p2p", threshold, quorum_nodes = quorum.len(), "Checked the manifest quorum against ZonePortal");
     Ok(())
 }
 

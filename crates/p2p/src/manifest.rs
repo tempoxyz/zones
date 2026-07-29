@@ -750,15 +750,12 @@ impl ZoneManifest {
         self.nodes.iter().filter(|node| !node.rpc_only)
     }
 
-    /// Digest of the settlement-relevant membership, bound into the P2P network namespace.
+    /// Digest of the settlement-relevant membership, logged at startup.
     ///
-    /// Covers each member's Ed25519 identity, its quorum standing, and the individual address
-    /// its signatures must recover to — everything a peer must agree on for two nodes to derive
-    /// the same roles from their own manifest copies. Peer addresses and the zone/portal identity
-    /// are excluded: the latter are already namespaced separately, and relocating a node must
-    /// stay a rolling operation.
-    ///
-    /// Iteration is over a sorted set, so the digest does not depend on entry order in the file.
+    /// Covers each member's Ed25519 identity, quorum standing, and the address its signatures must
+    /// recover to — everything two nodes must agree on to derive the same roles. Compare it across
+    /// nodes to diagnose a manifest mismatch. Addresses are excluded so relocating a node does not
+    /// change it. Sorted, so file order does not matter.
     pub fn membership_digest(&self) -> B256 {
         let mut members = self
             .nodes
@@ -777,8 +774,7 @@ impl ZoneManifest {
         for (ed25519_public_key, rpc_only, secp256k1_address) in members {
             preimage.extend_from_slice(&ed25519_public_key);
             preimage.push(u8::from(rpc_only));
-            // Distinguish "no address" from any real address rather than substituting zero,
-            // which is a valid (if useless) 20-byte value.
+            // Distinguish "no address" from a real one rather than substituting zero.
             match secp256k1_address {
                 Some(address) => {
                     preimage.push(1);
@@ -1435,7 +1431,7 @@ mod tests {
     }
 
     #[test]
-    fn membership_digest_tracks_quorum_standing_but_not_addresses_or_order() {
+    fn membership_digest_tracks_quorum_standing_not_addresses_or_order() {
         let nodes = [
             (1, "leader", "127.0.0.1:9200", false),
             (2, "follower-a", "127.0.0.1:9201", false),
@@ -1446,7 +1442,7 @@ mod tests {
             .unwrap()
             .membership_digest();
 
-        // Entry order in the file is not part of the identity.
+        // File order is not part of the identity.
         let mut reordered = nodes;
         reordered.swap(0, 3);
         assert_eq!(
@@ -1456,7 +1452,7 @@ mod tests {
             baseline
         );
 
-        // Relocating a node must stay a rolling operation, so its address is excluded.
+        // Addresses are excluded.
         let moved = [
             (1, "leader", "127.0.0.1:9200", false),
             (2, "follower-a", "follower-a.zone.local:9300", false),
@@ -1470,7 +1466,7 @@ mod tests {
             baseline
         );
 
-        // Moving a member in or out of the quorum is a different network.
+        // Quorum standing changes it.
         let promoted = [
             (1, "leader", "127.0.0.1:9200", false),
             (2, "follower-a", "127.0.0.1:9201", false),
@@ -1484,7 +1480,7 @@ mod tests {
             baseline
         );
 
-        // ...and so is changing the address a member's signatures must recover to.
+        // So does the address a member's signatures must recover to.
         let rekeyed = manifest_with_rpc_only(1, &nodes).replace(
             &format!("secp256k1_address = \"{}\"", secp256k1_address(3)),
             &format!("secp256k1_address = \"{}\"", secp256k1_address(9)),

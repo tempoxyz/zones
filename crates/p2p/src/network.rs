@@ -1,6 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use alloy_primitives::{Address as EthereumAddress, B256};
+use alloy_primitives::Address as EthereumAddress;
 use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
 use commonware_p2p::{Address, authenticated::lookup};
 use commonware_runtime::{Metrics as _, Quota};
@@ -96,7 +96,11 @@ pub(crate) fn instantiate(
     bypass_ip_check: bool,
     network_id: P2pNetworkId,
 ) -> eyre::Result<(Network, Oracle, Map<PublicKey, Address>)> {
-    let namespace = namespace(manifest.zone_id(), network_id, manifest.membership_digest());
+    let namespace = namespace(manifest.zone_id(), network_id);
+    // Logged, not bound into the namespace: a mismatch between nodes stalls settlement loudly at
+    // the next batch boundary, and making it a handshake failure would turn every membership edit
+    // into a coordinated fleet restart. Compare this across nodes to diagnose one.
+    tracing::info!(target: "zone::p2p", membership_digest = %manifest.membership_digest(), "Zone P2P membership");
     let config = setup_commonware_config(ed25519_private_key, &namespace, listen, bypass_ip_check);
 
     let peers = manifest
@@ -114,26 +118,18 @@ pub(crate) fn instantiate(
     Ok((network, oracle, peers))
 }
 
-fn namespace(zone_id: u32, network_id: P2pNetworkId, membership_digest: B256) -> Vec<u8> {
-    // Include the protocol version and immutable L1 deployment identity so keys or endpoints
-    // accidentally reused across local, test, and production environments cannot authenticate
-    // into one another's P2P network.
-    //
-    // The membership digest binds the settlement-relevant manifest contents into the handshake.
-    // Roles are enforced locally from each node's own manifest copy, so peers holding different
-    // copies would classify the same node differently — one collecting signatures from a member
-    // the other treats as a non-signing standby. Disagreement now fails to authenticate instead
-    // of producing two views of the quorum. Editing membership therefore requires restarting
-    // every node; peer *addresses* are excluded so relocating a node stays a rolling operation.
+fn namespace(zone_id: u32, network_id: P2pNetworkId) -> Vec<u8> {
+    // The protocol version and immutable L1 deployment identity keep keys or endpoints
+    // accidentally reused across local, test, and production environments from authenticating
+    // into one another's network.
     let mut namespace = Vec::with_capacity(
-        NETWORK_NAMESPACE_PREFIX.len() + 1 + 8 + EthereumAddress::len_bytes() + 4 + 32,
+        NETWORK_NAMESPACE_PREFIX.len() + 1 + 8 + EthereumAddress::len_bytes() + 4,
     );
     namespace.extend_from_slice(NETWORK_NAMESPACE_PREFIX);
     namespace.push(WIRE_PROTOCOL_VERSION);
     namespace.extend_from_slice(&network_id.l1_chain_id.to_be_bytes());
     namespace.extend_from_slice(network_id.portal_address.as_slice());
     namespace.extend_from_slice(&zone_id.to_be_bytes());
-    namespace.extend_from_slice(membership_digest.as_slice());
     namespace
 }
 
@@ -160,32 +156,25 @@ pub(crate) fn settlement_quota() -> Quota {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{B256, address};
+    use alloy_primitives::address;
 
     use super::{NETWORK_NAMESPACE_PREFIX, P2pNetworkId, WIRE_PROTOCOL_VERSION, namespace};
 
     #[test]
-    fn namespace_separates_l1_environments_portals_and_memberships() {
+    fn namespace_separates_l1_environments_and_portals() {
         let portal_a = address!("1111111111111111111111111111111111111111");
         let portal_b = address!("2222222222222222222222222222222222222222");
-        let membership = B256::with_last_byte(1);
-        let other_membership = B256::with_last_byte(2);
 
         assert_ne!(
-            namespace(7, P2pNetworkId::new(1, portal_a), membership),
-            namespace(7, P2pNetworkId::new(2, portal_a), membership),
+            namespace(7, P2pNetworkId::new(1, portal_a)),
+            namespace(7, P2pNetworkId::new(2, portal_a)),
         );
         assert_ne!(
-            namespace(7, P2pNetworkId::new(1, portal_a), membership),
-            namespace(7, P2pNetworkId::new(1, portal_b), membership),
-        );
-        // Peers that disagree about who settles cannot authenticate into one network.
-        assert_ne!(
-            namespace(7, P2pNetworkId::new(1, portal_a), membership),
-            namespace(7, P2pNetworkId::new(1, portal_a), other_membership),
+            namespace(7, P2pNetworkId::new(1, portal_a)),
+            namespace(7, P2pNetworkId::new(1, portal_b)),
         );
 
-        let namespace = namespace(7, P2pNetworkId::new(1, portal_a), membership);
+        let namespace = namespace(7, P2pNetworkId::new(1, portal_a));
         assert_eq!(
             namespace[NETWORK_NAMESPACE_PREFIX.len()],
             WIRE_PROTOCOL_VERSION
