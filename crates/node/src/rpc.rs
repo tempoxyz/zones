@@ -118,7 +118,7 @@ pub(crate) trait ZoneApi {
 
     /// Returns the encryption key active at the current Tempo L1 head.
     #[method(name = "getEncryptionKey")]
-    async fn get_encryption_key(&self) -> RpcResult<Box<serde_json::value::RawValue>>;
+    async fn get_encryption_key(&self) -> RpcResult<ZonePortal::encryptionKeyAtBlockReturn>;
 }
 
 /// Public Zone API backed directly by the node and Tempo L1 providers.
@@ -173,7 +173,7 @@ where
         .map_err(public_rpc_error)
     }
 
-    async fn get_encryption_key(&self) -> RpcResult<Box<serde_json::value::RawValue>> {
+    async fn get_encryption_key(&self) -> RpcResult<ZonePortal::encryptionKeyAtBlockReturn> {
         encryption_key(self.portal_address, &self.l1_provider)
             .await
             .map_err(public_rpc_error)
@@ -291,19 +291,18 @@ async fn zone_info(
     })
 }
 
+/// Reads the encryption key active at the current Tempo L1 head.
 async fn encryption_key(
     portal_address: Address,
     l1_provider: &DynProvider<TempoNetwork>,
-) -> Result<Box<serde_json::value::RawValue>, JsonRpcError> {
+) -> Result<ZonePortal::encryptionKeyAtBlockReturn, JsonRpcError> {
     let block_number = l1_provider.get_block_number().await.map_err(internal)?;
-    let key = ZonePortal::new(portal_address, l1_provider)
+    ZonePortal::new(portal_address, l1_provider)
         .encryptionKeyAtBlock(block_number)
         .block(BlockId::number(block_number))
         .call()
         .await
-        .map_err(internal)?;
-
-    to_raw(&key)
+        .map_err(internal)
 }
 
 fn get_sequencer_info<P>(
@@ -1131,7 +1130,10 @@ where
     }
 
     fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(encryption_key(self.config.zone_portal, &self.l1_provider))
+        Box::pin(async move {
+            let key = encryption_key(self.config.zone_portal, &self.l1_provider).await?;
+            to_raw(&key)
+        })
     }
 }
 
