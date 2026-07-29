@@ -1160,8 +1160,18 @@ async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Resu
         "recipient should be blacklisted on L1"
     );
 
+    let encryption_key = k256::SecretKey::from(seq_b_signer.credential());
+    l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())
+        .await?;
+
     let zone_a = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_a).await?;
-    let zone_b = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_b).await?;
+    let zone_b = ZoneTestNode::start_from_l1_with_decryption_keys(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_b,
+        vec![encryption_key],
+    )
+    .await?;
 
     zone_a.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
     zone_b.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
@@ -1169,10 +1179,6 @@ async fn test_cross_zone_encrypted_router_tempo_refund_recipient() -> eyre::Resu
     zone_b.assert_access_enforced(false).await?;
     zone_a.assert_gateway_open(true).await?;
     zone_b.assert_gateway_open(true).await?;
-
-    let encryption_key = k256::SecretKey::from(seq_b_signer.credential());
-    l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())
-        .await?;
 
     let mut alice = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
     let deposit_amount: u128 = 2_000_000;
@@ -1455,17 +1461,13 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    use sha2::{Digest, Sha256};
-
     let mut fixture = setup_same_zone_swap_fixture().await?;
     let expected_beta = fixture
         .l1
         .quote_dex_swap_exact_amount_in(fixture.alpha, fixture.beta, fixture.swap_amount)
         .await?;
 
-    let enc_key_bytes: [u8; 32] =
-        Sha256::digest(b"swap-and-deposit-router-encrypted-tempo-refund").into();
-    let encryption_key = k256::SecretKey::from_slice(&enc_key_bytes).expect("valid key");
+    let encryption_key = k256::SecretKey::from(fixture.l1.dev_signer().credential());
 
     fixture
         .l1
