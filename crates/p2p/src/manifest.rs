@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
@@ -545,6 +545,7 @@ impl ZoneManifest {
     /// Parses and validates a TOML manifest.
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
         let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Toml)?;
+        warn_unknown_keys("manifest", &raw.unknown);
         if raw.sequencer_set_version == 0 {
             return Err(ManifestError::InvalidSequencerSetVersion);
         }
@@ -560,6 +561,7 @@ impl ZoneManifest {
             if raw_node.name.trim().is_empty() {
                 return Err(ManifestError::EmptyNodeName);
             }
+            warn_unknown_keys(&format!("nodes.{}", raw_node.name), &raw_node.unknown);
             if !names.insert(raw_node.name.clone()) {
                 return Err(ManifestError::DuplicateNodeName(raw_node.name));
             }
@@ -829,13 +831,15 @@ impl ZoneManifest {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawManifest {
     zone_id: u32,
     #[serde(default = "default_sequencer_set_version")]
     sequencer_set_version: u64,
     leader_ed25519_public_key: String,
     nodes: Vec<RawManifestNode>,
+    /// Keys this binary does not know. See [`warn_unknown_keys`].
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
 }
 
 const fn default_sequencer_set_version() -> u64 {
@@ -843,7 +847,6 @@ const fn default_sequencer_set_version() -> u64 {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct RawManifestNode {
     name: String,
     ed25519_public_key: String,
@@ -854,6 +857,35 @@ struct RawManifestNode {
     /// Serve RPC as a hot standby without joining the on-chain settlement quorum.
     #[serde(default)]
     rpc_only: bool,
+    /// Keys this binary does not know. See [`warn_unknown_keys`].
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
+}
+
+/// Log unknown manifest keys instead of failing on them.
+///
+/// The manifest is shared across the fleet, so rejecting unknown keys makes every added field a
+/// coordination hazard: in a rolling deployment where the manifest is updated before every binary
+/// is replaced, the next restart of a node running the old binary aborts during parsing and takes
+/// block production or settlement availability with it. Warning keeps a manifest that names a
+/// newer field readable by an older binary, so the manifest and the binaries can be rolled
+/// independently.
+///
+/// A warning is enough here because a mistyped key cannot quietly change this node's role: a
+/// misspelled `rpc_only` leaves an entry that declares no `secp256k1_address` looking like a
+/// quorum node, which [`ManifestError::MissingSecp256k1Address`] rejects, and a misspelled
+/// `secp256k1_address` fails the same way.
+fn warn_unknown_keys(context: &str, unknown: &BTreeMap<String, toml::Value>) {
+    if unknown.is_empty() {
+        return;
+    }
+    let keys = unknown.keys().cloned().collect::<Vec<_>>().join(", ");
+    tracing::warn!(
+        target: "zone::p2p",
+        %context,
+        %keys,
+        "Ignoring sequencer manifest keys this binary does not recognize; check for a typo, or for a manifest written for a newer binary"
+    );
 }
 
 fn parse_ed25519_public_key(field: &str, encoded: &str) -> Result<PublicKey, ManifestError> {
@@ -1461,6 +1493,40 @@ mod tests {
             ZoneManifest::parse(&rekeyed).unwrap().membership_digest(),
             baseline
         );
+    }
+
+    #[test]
+    fn unknown_keys_are_tolerated_but_cannot_silently_change_a_role() {
+        let quorum = [
+            (1, "leader", "127.0.0.1:9200", false),
+            (2, "follower-a", "127.0.0.1:9201", false),
+            (3, "follower-b", "127.0.0.1:9202", false),
+        ];
+
+        // A manifest written for a newer binary must stay readable by this one, so the manifest
+        // and the binaries can be rolled independently.
+        let mut from_the_future = manifest_with_rpc_only(1, &quorum);
+        from_the_future.push_str("some_future_node_field = \"value\"\n");
+        from_the_future.insert_str(0, "some_future_top_level_field = 42\n");
+        let manifest = ZoneManifest::parse(&from_the_future).unwrap();
+        assert_eq!(manifest.quorum_nodes().count(), MIN_QUORUM_NODES);
+
+        // A misspelled `rpc_only` leaves an entry with no `secp256k1_address` looking like a
+        // quorum node, so tolerating unknown keys cannot quietly enrol a standby in the quorum.
+        let typo = manifest_with_rpc_only(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200", false),
+                (2, "follower-a", "127.0.0.1:9201", false),
+                (3, "follower-b", "127.0.0.1:9202", false),
+                (4, "public-rpc", "127.0.0.1:9203", true),
+            ],
+        )
+        .replace("rpc_only = true", "rpc-only = true");
+        assert!(matches!(
+            ZoneManifest::parse(&typo),
+            Err(ManifestError::MissingSecp256k1Address(node)) if node == "public-rpc"
+        ));
     }
 
     #[test]

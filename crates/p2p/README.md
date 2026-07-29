@@ -129,6 +129,29 @@ at the finalized head and refuses to start unless:
 A mismatch is a configuration error that would otherwise surface as stalled settlement at the next
 batch boundary, so it fails at startup instead.
 
+## Rolling out a manifest change
+
+The manifest is shared across the fleet, so a change to it and a change to the binaries are two
+separate rollouts. **Deploy binaries first, then the manifest.** A node restarting on an older
+binary must be able to read the newer manifest, or the restart aborts during parsing and takes
+block production or settlement availability with it.
+
+Unknown keys are therefore ignored with a warning rather than rejected, so an older binary
+tolerates a manifest naming fields it does not know. This does not weaken validation of the fields
+that decide a role: a misspelled `rpc_only` leaves an entry that declares no `secp256k1_address`
+looking like a quorum node, which fails to load, and a misspelled `secp256k1_address` fails the
+same way. Check startup logs for `Ignoring sequencer manifest keys` after any manifest edit.
+
+Two kinds of change are **not** rolling, because they alter the P2P network namespace or the
+settlement quorum, and every node must be restarted together:
+
+- adding, removing, or re-keying a member, or flipping `rpc_only` — the membership digest is bound
+  into the handshake, so mixed manifests fail to authenticate rather than disagreeing silently;
+- registering or deregistering a sequencer with `ZonePortal`, which must be applied together with
+  the matching manifest edit or the startup reconciliation refuses to start.
+
+Changing a peer's `address` is rolling: addresses are excluded from the membership digest.
+
 ## Generate a Commonware identity
 
 Generate a unique Ed25519 key for each node with `xtask`:
