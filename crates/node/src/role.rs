@@ -514,8 +514,8 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
     loop {
         // An rpc-only member is not registered with `ZonePortal`, so it can never be named
-        // leader by a finalized transition. Fencing it explicitly means a corrupt or
-        // mis-provisioned record cannot start a producer whose blocks nobody could settle.
+        // leader by a finalized transition. Fencing it explicitly means a corrupt or wrongly
+        // provisioned record cannot start a producer whose blocks nobody could settle.
         let can_lead = context.sequencer.is_some()
             && context
                 .schedule
