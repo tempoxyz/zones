@@ -351,7 +351,28 @@ pub(crate) async fn collect_leader_settlements<P>(
                 let number = pending_boundary.expect("guarded by is_some");
                 match propose_settlement(&provider, number, &commands, &context).await {
                     Ok(true) => {}
-                    Ok(false) => pending_boundary = None,
+                    Ok(false) => {
+                        // The retained candidate only failed before we could determine whether it
+                        // was a boundary. Once a retry classifies it as an ordinary block, resume
+                        // the startup scan after it instead of stranding the rest of the range
+                        // behind last_scanned.
+                        let head = match provider.last_block_number() {
+                            Ok(head) => head,
+                            Err(err) => {
+                                debug!(target: "zone::p2p", %err, "Failed reading head while resuming settlement recovery");
+                                continue;
+                            }
+                        };
+                        pending_boundary = propose_persisted_settlement_range(
+                            &provider,
+                            &commands,
+                            &context,
+                            number.saturating_add(1),
+                            head,
+                        )
+                        .await;
+                        last_scanned = head;
+                    }
                     Err(err) => {
                         debug!(target: "zone::p2p", %err, height = number, "Settlement proposal retry is not currently valid");
 
@@ -505,6 +526,34 @@ mod tests {
         let pending = scan_settlement_range(pending.unwrap(), 4, propose).await;
         assert_eq!(pending, Some(2));
         assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2]);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_resumes_after_erroring_non_boundary() -> eyre::Result<()> {
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let failed_once = failed_once.clone();
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
+                    eyre::bail!("transient proposal failure");
+                }
+                Ok(number == 4)
+            }
+        };
+
+        let pending = scan_settlement_range(1, 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
+
+        let number = pending.unwrap();
+        assert!(!propose(number).await?);
+        let pending = scan_settlement_range(number.saturating_add(1), 4, propose).await;
+        assert_eq!(pending, Some(4));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2, 3, 4]);
+        Ok(())
     }
 
     #[tokio::test]
