@@ -410,9 +410,9 @@ async fn handle_test_l1_rpc_request(
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
-/// Helper to check TIP-403 authorization through a TIP-20 operation.
+/// Helper to check TIP-403 authorization via TIP-20 operations.
 ///
-/// Direct zone calls to the TIP-403 registry are forbidden, so tests use an internal consumer.
+/// Direct zone calls to TIP-403 registry are forbidden, so tests trigger checks using a TIP20 call.
 pub(crate) struct Check403Registry {
     pub(crate) provider: DynProvider,
     pub(crate) token: Address,
@@ -420,34 +420,13 @@ pub(crate) struct Check403Registry {
 
 impl Check403Registry {
     pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
-        let token = ITIP20::new(self.token, &self.provider);
+        let (token, zero) = (ITIP20::new(self.token, &self.provider), U256::ZERO);
         match role {
-            AuthRole::Transfer => token
-                .transfer(from, U256::ZERO)
-                .from(from)
-                .call()
-                .await
-                .map(|_| ()),
-            AuthRole::Sender => token
-                .transfer(to, U256::ZERO)
-                .from(from)
-                .call()
-                .await
-                .map(|_| ()),
-            AuthRole::Recipient => token
-                .transfer(from, U256::ZERO)
-                .from(to)
-                .call()
-                .await
-                .map(|_| ()),
-            AuthRole::MintRecipient => token
-                .mint(from, U256::ZERO)
-                .from(to)
-                .call()
-                .await
-                .map(|_| ()),
+            AuthRole::Transfer => token.transfer(from, zero).from(from).call().await.is_ok(),
+            AuthRole::Sender => token.transfer(to, zero).from(from).call().await.is_ok(),
+            AuthRole::Recipient => token.transfer(from, zero).from(to).call().await.is_ok(),
+            AuthRole::MintRecipient => token.mint(from, zero).to(to).call().await.is_ok(),
         }
-        .is_ok()
     }
 }
 
