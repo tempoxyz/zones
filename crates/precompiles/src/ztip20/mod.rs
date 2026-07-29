@@ -510,7 +510,7 @@ mod tests {
             }
             .abi_encode()
             .into(),
-            100_000,
+            500_000,
             false,
         )?;
         assert!(inbox_mint.is_success());
