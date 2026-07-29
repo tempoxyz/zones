@@ -39,6 +39,22 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
 
     let mut cluster = start_local_p2p_cluster(10).await?;
 
+    for method in ["eth_call", "eth_estimateGas"] {
+        let response = reqwest::Client::new()
+            .post(cluster.nodes[0].http_url().clone())
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": method,
+                "params": [],
+            }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+        assert_eq!(response["error"]["code"], -32601, "{method}: {response}");
+    }
+
     // Commonware deliberately drops messages for offline peers. Wait for
     // peer dial/handshake (loopback dials every 500ms) before producing the
     // first block. The bootstrap leader also needs tip evidence from both
