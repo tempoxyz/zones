@@ -1,45 +1,30 @@
 //! Zone rules for the L1-backed Tempo TIP-403 registry.
 //!
-//! Calls at the canonical registry address execute the upstream
-//! [`tempo_precompiles::tip403_registry::TIP403Registry`] implementation over finalized L1
-//! storage. The zone keeps mutating selectors read-only and otherwise follows upstream dispatch,
-//! gas, delegate-call, and receive-policy behavior.
+//! Other precompiles use the upstream
+//! [`tempo_precompiles::tip403_registry::TIP403Registry`] implementation directly over finalized
+//! L1 storage. Calls through the canonical EVM address are rejected as external calls.
 
 use crate::execution::{CallCheck, CallRules};
 use alloy_primitives::Address;
-use alloy_sol_types::{SolCall, SolError};
-use tempo_contracts::precompiles::ITIP403Registry;
-
-const TIP403_MUTATING_SELECTORS: &[[u8; 4]] = &[
-    ITIP403Registry::createPolicyCall::SELECTOR,
-    ITIP403Registry::createPolicyWithAccountsCall::SELECTOR,
-    ITIP403Registry::setPolicyAdminCall::SELECTOR,
-    ITIP403Registry::modifyPolicyWhitelistCall::SELECTOR,
-    ITIP403Registry::modifyPolicyBlacklistCall::SELECTOR,
-    ITIP403Registry::createCompoundPolicyCall::SELECTOR,
-    ITIP403Registry::setReceivePolicyCall::SELECTOR,
-    ITIP403Registry::migrateTransferPolicyIdsCall::SELECTOR,
-];
+use alloy_sol_types::SolError;
 
 alloy_sol_types::sol! {
-    /// Returned when a mutating call is attempted on the zone's read-only, L1-backed registry.
+    /// Returned when the zone registry is called through its external EVM interface.
     #[derive(Debug, PartialEq, Eq)]
-    error ReadOnlyRegistry();
+    error OnlyPrecompiles();
 }
 
-/// Rules that keep the zone registry read-only before upstream execution.
+/// Rejects all EVM calls to the registry.
+///
+/// Other precompiles use the TIP-403 implementation directly rather than issuing an EVM call, so
+/// every call reaching this adapter is external. External access is disabled because registry
+/// reads may require fetching finalized L1 state; exposing them through RPC simulation endpoints
+/// could let untrusted callers force repeated L1 reads and consume sequencer resources.
 pub(crate) struct Tip403Rules;
 
 impl CallRules for Tip403Rules {
-    fn admit(&self, data: &[u8], _caller: Address) -> CallCheck {
-        if TIP403_MUTATING_SELECTORS
-            .iter()
-            .any(|selector| data.starts_with(selector))
-        {
-            return CallCheck::Revert(ReadOnlyRegistry {}.abi_encode().into());
-        }
-
-        CallCheck::Continue
+    fn admit(&self, _data: &[u8], _caller: Address) -> CallCheck {
+        CallCheck::Revert(OnlyPrecompiles {}.abi_encode().into())
     }
 }
 
@@ -49,9 +34,10 @@ mod tests {
 
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{Bytes, U256, address};
+    use alloy_sol_types::SolCall;
     use revm::precompile::{PrecompileError, PrecompileOutput};
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
+    use tempo_contracts::precompiles::{ITIP403Registry, TIP403_REGISTRY_ADDRESS};
     use tempo_precompiles::{DelegateCallNotAllowed, storage::PrecompileStorageProvider};
 
     use crate::{
@@ -62,8 +48,6 @@ mod tests {
 
     const ANCHOR: u64 = 77;
     const CALLER: Address = address!("0x0000000000000000000000000000000000000aaa");
-    const ALICE: Address = address!("0x00000000000000000000000000000000000000a1");
-    const BOB: Address = address!("0x00000000000000000000000000000000000000b2");
 
     struct RegistryHarness {
         ctx: TestContext,
@@ -113,57 +97,28 @@ mod tests {
     }
 
     #[test]
-    fn mutating_selectors_are_rejected_by_admission() {
-        let rules = Tip403Rules;
-        for selector in TIP403_MUTATING_SELECTORS {
+    fn all_evm_callers_are_rejected_by_admission() {
+        for caller in [CALLER, Address::repeat_byte(0x20)] {
             assert!(matches!(
-                rules.admit(selector, CALLER),
-                CallCheck::Revert(data) if data == ReadOnlyRegistry {}.abi_encode()
+                Tip403Rules.admit(
+                    &ITIP403Registry::policyIdCounterCall {}.abi_encode(),
+                    caller,
+                ),
+                CallCheck::Revert(data) if data == OnlyPrecompiles {}.abi_encode()
             ));
         }
     }
 
     #[test]
-    fn transfer_policy_migration_is_rejected_by_admission() {
-        let call = ITIP403Registry::migrateTransferPolicyIdsCall {
-            tokens: vec![Address::repeat_byte(0x20)],
-        }
-        .abi_encode();
-
-        assert!(matches!(
-            Tip403Rules.admit(&call, CALLER),
-            CallCheck::Revert(data) if data == ReadOnlyRegistry {}.abi_encode()
-        ));
-    }
-
-    #[test]
-    fn receive_policy_reads_use_upstream_dispatch() -> eyre::Result<()> {
+    fn external_calls_revert_with_only_precompiles() -> eyre::Result<()> {
         let mut harness = RegistryHarness::new();
-        let receive = harness.call(
-            &ITIP403Registry::receivePolicyCall { account: CALLER }.abi_encode(),
+        let output = harness.call(
+            &ITIP403Registry::policyIdCounterCall {}.abi_encode(),
             u64::MAX,
         )?;
-        assert!(receive.is_success());
-        let receive = ITIP403Registry::receivePolicyCall::abi_decode_returns(&receive.bytes)?;
-        assert!(!receive.hasReceivePolicy);
 
-        let validation = harness.call(
-            &ITIP403Registry::validateReceivePolicyCall {
-                token: Address::repeat_byte(0x20),
-                sender: ALICE,
-                receiver: BOB,
-            }
-            .abi_encode(),
-            u64::MAX,
-        )?;
-        assert!(validation.is_success());
-        let validation =
-            ITIP403Registry::validateReceivePolicyCall::abi_decode_returns(&validation.bytes)?;
-        assert!(validation.authorized);
-        assert_eq!(
-            validation.blockedReason,
-            ITIP403Registry::BlockedReason::NONE
-        );
+        assert!(output.is_revert());
+        assert_eq!(output.bytes, Bytes::from(OnlyPrecompiles {}.abi_encode()));
         Ok(())
     }
 
