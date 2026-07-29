@@ -413,8 +413,6 @@ mod command {
                 &self.l1_rpc_url,
                 "--l1.portal-address",
                 &provisioned.portal.to_string(),
-                "--l1.genesis-block-number",
-                &provisioned.anchor_block_number.to_string(),
                 "--zone.id",
                 &provisioned.zone_id.to_string(),
                 "--http",

@@ -1,10 +1,15 @@
 # Tempo Zone P2P
 
-This crate provides the static networking and role bootstrap for a
-multi-sequencer Tempo Zone. A manifest defines the
-single leader(block producer) and the followers. Each node loads its own Commonware 
-Ed25519 identity, validates that it appears in the manifest, and derives whether it should start as the
-leader or a follower.
+This crate provides the static networking and the leadership schedule for a
+multi-sequencer Tempo Zone. A manifest defines the static peer topology (names, addresses,
+Ed25519 identities, individual secp256k1 addresses). Each node loads its own Commonware
+Ed25519 identity and validates that it appears in the manifest.
+
+Which member *leads* (produces blocks) is not decided by the manifest: it is derived
+exclusively from finalized Tempo L1 state — the `ZonePortal`'s `leader`, `leaderEpoch`, and
+`leaderActivationTempoBlock` fields and its `LeaderUpdated` event. Every observed transition
+is retained in an activation-indexed `LeadershipSchedule`; production and import authority
+for a given Tempo anchor is answered by `leader_for(anchor)` over that retained timeline.
 
 If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
 behavior.
@@ -15,8 +20,12 @@ behavior.
   addition to the P2P network.
 - A **follower** joins the P2P network and receives blocks from the leader, validating and importing the blocks and sending a signed block hash back to the leader
 
-The manifest is authoritative. The (optional) `--sequencer.role` CLI argument is
-only an assertion checked against the manifest. There is no automatic election or promotion.
+Roles are dynamic: a node promotes or demotes at finalized leadership activation
+boundaries, driven by the node's role controller. The manifest's
+`leader_ed25519_public_key` is only a legacy bootstrap used until the portal reports a
+nonzero leader; the (optional) `--sequencer.role` CLI argument is only an assertion checked
+against that bootstrap. There is no automatic election: leadership changes only through an
+operator-triggered `setLeader` transaction finalized on L1.
  
 
 ## Commonware network
@@ -126,8 +135,10 @@ canonical.
 ## Transaction forwarding
 
 Commonware carries blocks, catch-up traffic, and transactions on independent authenticated
-channels. A follower sends canonical EIP-2718 transaction bytes only to the configured leader,
-and the leader accepts transaction messages only from manifest members with the follower role.
+channels. A follower sends canonical EIP-2718 transaction bytes only to the leader of the next
+Tempo anchor it will consume — during a scheduled handoff that remains the outgoing leader
+until the activation boundary — and a node accepts transaction messages only from manifest
+members while it holds leadership somewhere in the retained transition schedule.
 
 This permits public RPC to be exposed on followers while keeping the leader's RPC private. The
 leader decodes and validates every forwarded transaction again, and it alone selects and orders

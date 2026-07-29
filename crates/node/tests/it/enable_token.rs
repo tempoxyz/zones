@@ -94,6 +94,7 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     let events = L1PortalEvents {
         deposits: vec![L1Deposit::Regular(deposit)],
         enabled_tokens: vec![enabled],
+        leader_transitions: vec![],
     };
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
@@ -137,6 +138,7 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
         zone.deposit_queue(),
         L1PortalEvents {
             deposits: vec![L1Deposit::Regular(deposit)],
+            leader_transitions: vec![],
             enabled_tokens: vec![EnabledToken {
                 token: token_address,
                 name: "PoolPolicyUSD".to_string(),

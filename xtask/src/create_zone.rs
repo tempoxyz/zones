@@ -131,6 +131,17 @@ impl CreateZone {
                 self.threshold
             ));
         }
+        if self.sequencers.len() > 1 && self.threshold < 2 {
+            // With threshold 1 a leader can settle blocks no follower holds, so an
+            // empty-disk leader recovery cannot reconstruct the settled chain from
+            // follower replicas. Threshold >= 2 guarantees every settled batch carries
+            // at least one follower signature.
+            println!(
+                "WARNING: multi-sequencer zone with settlement threshold 1: settled blocks \
+                 may not be recoverable from followers after leader disk loss; use a \
+                 threshold of at least 2"
+            );
+        }
 
         let key_str = self
             .private_key
@@ -216,6 +227,9 @@ impl CreateZone {
         // non-zero version. Create the zone with a 1-of-1 leader set, then
         // install the full set via `setSequencerSet`, which bumps the version
         // to 1. Single-sequencer zones keep the legacy 1-of-1 set at version 0.
+        // The portal also bootstraps the first sequencer as the initial
+        // block-production leader (leaderEpoch 1); later transfers go through
+        // setLeader.
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 initialToken: self.initial_token,

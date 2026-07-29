@@ -69,7 +69,8 @@ pub(crate) mod rpc {
 use crate::abi::{
     EncryptedDeposit as AbiEncryptedDeposit, EncryptedDepositPayload as AbiEncryptedDepositPayload,
     ZonePortal::{
-        DepositMade, EncryptedDepositMade, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, EncryptedDepositMade, LeaderUpdated, TokenEnabled, WithdrawalBounceBack,
+        ZonePortalEvents,
     },
 };
 
@@ -84,12 +85,13 @@ mod tests;
 
 pub use block::{L1BlockDeposits, PreparedL1Block};
 pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
-pub use event::{EnabledToken, L1PortalEvents};
+pub use event::{EnabledToken, L1PortalEvents, LeaderTransition};
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
 pub use state::L1StateCache;
 pub use subscriber::{
-    L1BlockTracker, L1Subscriber, L1SubscriberConfig, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
+    L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeadershipSink,
+    MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
 };
 
 #[cfg(test)]

@@ -30,7 +30,7 @@ pub mod withdrawals;
 
 pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
-pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
+pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
@@ -127,10 +127,14 @@ pub struct ZoneSequencerHandle {
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
+///
+/// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
+/// in-flight L1 transaction resolves before teardown.
 pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
     let sequencer_address = signer.address();
     // Build a single shared L1 provider with the sequencer wallet.
@@ -171,15 +175,20 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
         withdrawal_store.clone(),
         withdrawal_notify.clone(),
         withdrawal_repair_notify.clone(),
+        shutdown.clone(),
+    );
+    let monitor_shared_state = ZoneMonitorSharedState::new(
+        withdrawal_store,
+        withdrawal_notify,
+        withdrawal_repair_notify,
     );
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
         zone_provider,
         l1_provider,
         signer,
-        withdrawal_store,
-        withdrawal_notify,
-        withdrawal_repair_notify,
+        monitor_shared_state,
+        shutdown,
     );
 
     ZoneSequencerHandle {

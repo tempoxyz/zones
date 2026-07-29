@@ -197,6 +197,17 @@ contract ZoneConfigTest is BaseTest {
 
     /// @notice Verifies membership follows active-set replacement through the mapping slot.
     function test_storageSlotRegression_readsUpdatedSequencerSet() public {
+        // Rotate leadership first: the portal rejects a set that drops the active leader.
+        address[] memory joint = new address[](2);
+        joint[0] = alice;
+        joint[1] = sequencer;
+        vm.prank(admin);
+        portal.setSequencerSet(joint, 1);
+        uint64 epoch = portal.leaderEpoch();
+        vm.roll(block.number + 1);
+        vm.prank(sequencer);
+        portal.setLeader(alice, epoch);
+
         address[] memory updated = new address[](1);
         updated[0] = alice;
         vm.prank(admin);

@@ -243,6 +243,17 @@ fn portal_event_cache_invalidation_address(topic0: Option<&B256>) -> Option<Addr
     (topic0 == Some(&TokenEnabled::SIGNATURE_HASH)).then_some(TIP403_REGISTRY_ADDRESS)
 }
 
+/// Sink for leadership transitions decoded from verified finalized receipts.
+///
+/// Implemented by the node over its `LeadershipSchedule`. The subscriber applies every
+/// transition **before** enqueueing the block that recorded it — enqueueing notifies the
+/// engine internally, so append-after-enqueue could race a producer waking on that notify.
+/// An error fences ingestion of the whole L1 block.
+pub trait LeadershipSink: Send + Sync + std::fmt::Debug {
+    /// Apply one decoded leadership transition.
+    fn apply_leader_transition(&self, transition: &crate::LeaderTransition) -> eyre::Result<()>;
+}
+
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
@@ -250,8 +261,6 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
-    /// Optional genesis Tempo block number used to backfill a fresh zone.
-    pub genesis_tempo_block_number: Option<u64>,
     /// Shared registry of tokens enabled for this zone.
     pub enabled_tokens: crate::state::EnabledTokenRegistry,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
@@ -266,10 +275,13 @@ pub struct L1SubscriberConfig {
     pub l1_fetch_concurrency: usize,
     /// Interval between L1 connection attempts.
     pub retry_connection_interval: std::time::Duration,
+    /// Optional sink that receives leadership transitions before the block that
+    /// recorded them is enqueued.
+    pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
-    fn latest_tempo_block_number(&self) -> eyre::Result<u64>;
+    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash>;
 }
 
 /// Optional sink for finalized deposit-bearing L1 blocks.
@@ -310,9 +322,9 @@ impl<P> LocalTempoCheckpointReader for ProviderLocalTempoCheckpointReader<P>
 where
     P: StateProviderFactory + Clone + Send + Sync + 'static,
 {
-    fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
+    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
         let state = self.provider.latest()?;
-        Ok(state.tempo_block_number()?)
+        Ok(state.tempo_num_hash()?)
     }
 }
 
@@ -327,12 +339,58 @@ pub struct L1Subscriber {
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
 
+/// A deterministic failure while applying an already receipt-verified finalized block.
+///
+/// Reconnecting cannot change these inputs, so retrying would loop forever on the same block.
+#[derive(Debug)]
+struct FencedIngestionError {
+    block_number: u64,
+    stage: &'static str,
+    source: eyre::Report,
+}
+
+impl FencedIngestionError {
+    const fn new(block_number: u64, stage: &'static str, source: eyre::Report) -> Self {
+        Self {
+            block_number,
+            stage,
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for FencedIngestionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "L1 ingestion fenced at block {} during {}: {}",
+            self.block_number, self.stage, self.source
+        )
+    }
+}
+
+impl std::error::Error for FencedIngestionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn fenced_ingestion_error(error: &eyre::Report) -> Option<&FencedIngestionError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FencedIngestionError>())
+}
+
+#[cfg(test)]
+pub(crate) fn is_fenced_ingestion_error(error: &eyre::Report) -> bool {
+    fenced_ingestion_error(error).is_some()
+}
+
 impl L1Subscriber {
     /// Create and spawn the L1 subscriber as a critical background task.
     ///
-    /// The subscriber runs in a retry loop — if the connection drops or
-    /// [`Self::run`] returns an error, it reconnects after the configured retry
-    /// interval.
+    /// Transient failures reconnect after the configured retry interval. Deterministic failures
+    /// while applying a receipt-verified finalized block fail the critical task instead.
     pub fn spawn<P>(
         config: L1SubscriberConfig,
         local_state_provider: P,
@@ -388,6 +446,17 @@ impl L1Subscriber {
             Box::pin(async move {
                 loop {
                     if let Err(e) = subscriber.run().await {
+                        if let Some(fenced) = fenced_ingestion_error(&e) {
+                            error!(
+                                block_number = fenced.block_number,
+                                stage = fenced.stage,
+                                error = %e,
+                                "Fatal L1 ingestion fence; refusing to retry an immutable finalized block"
+                            );
+                            // This is a critical task: panicking notifies the task manager and
+                            // shuts the node down instead of leaving it alive with frozen L1 state.
+                            panic!("{fenced}");
+                        }
                         let retry_interval = subscriber.config.retry_connection_interval;
                         subscriber.subscriber_metrics.reconnects.increment(1);
                         error!(
@@ -464,38 +533,23 @@ impl L1Subscriber {
 
     /// Determine the starting block number for backfill.
     ///
-    /// Uses the zone's local `tempoBlockNumber` as the primary starting point —
-    /// this is the authoritative source for where the zone left off. Falls back
-    /// to the CLI genesis override when the zone hasn't processed any blocks
-    /// yet. Without either checkpoint, live subscription starts at the L1 tip.
-    pub(crate) async fn resolve_start_block(&self) -> eyre::Result<Option<u64>> {
-        // The zone's local state is the authoritative source for where to
-        // resume. This avoids the bug where the portal's
-        // lastSyncedTempoBlockNumber runs ahead of local zone state.
-        let local_tempo_block_number = self.local_state.latest_tempo_block_number()?;
-        if local_tempo_block_number > 0 {
-            info!(local_tempo_block_number, "Resuming from local zone state");
-            return Ok(Some(local_tempo_block_number + 1));
-        }
-
-        if let Some(genesis) = self.config.genesis_tempo_block_number {
-            info!(genesis, "Using CLI genesis block number override");
-            return Ok(Some(genesis + 1));
-        }
-
-        warn!(
-            "No local Tempo checkpoint or genesis block override — skipping backfill. \
-             Set --l1.genesis-block-number to backfill from the correct block."
+    /// The zone's persisted Tempo checkpoint is the authoritative source for
+    /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
+    /// block-zero genesis from the unanchored template.
+    pub(crate) fn resolve_start_block(&self) -> eyre::Result<u64> {
+        let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
+        eyre::ensure!(
+            local_checkpoint.hash != B256::ZERO,
+            "zone genesis is not anchored to an L1 block"
         );
-        Ok(None)
+        let local_tempo_block_number = local_checkpoint.number;
+        info!(local_tempo_block_number, "Resuming from local zone state");
+        Ok(local_tempo_block_number + 1)
     }
 
     /// Resolve the first L1 block that has not already been ingested.
-    pub(crate) async fn next_block_to_sync(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<u64> {
-        let resolved = self.resolve_start_block().await?;
+    pub(crate) fn next_block_to_sync(&self) -> eyre::Result<u64> {
+        let resolved = self.resolve_start_block()?;
         let queued = self
             .deposit_sink
             .last_enqueued()
@@ -506,29 +560,18 @@ impl L1Subscriber {
             .latest()
             .map(|last| last.number.saturating_add(1));
 
-        let next = resolved.into_iter().chain(queued).chain(observed).max();
-        match next {
-            Some(next) => {
-                // Only the persisted zone checkpoint proves consumption.
-                // Queue and observation cursors are fetch high-water marks.
-                if let Some(resolved) = resolved {
-                    self.config
-                        .block_tracker
-                        .initialize_consumed_through(resolved.saturating_sub(1));
-                }
-                Ok(next)
-            }
-            None => {
-                let next = self
-                    .finalized_block_number(l1_provider)
-                    .await?
-                    .saturating_add(1);
-                self.config
-                    .block_tracker
-                    .initialize_consumed_through(next.saturating_sub(1));
-                Ok(next)
-            }
-        }
+        let next = [Some(resolved), queued, observed]
+            .into_iter()
+            .flatten()
+            .max()
+            .expect("resolved checkpoint is always present");
+
+        // Only the persisted zone checkpoint proves consumption.
+        // Queue and observation cursors are fetch high-water marks.
+        self.config
+            .block_tracker
+            .initialize_consumed_through(resolved.saturating_sub(1));
+        Ok(next)
     }
 
     /// Return the block number referenced by the L1 `finalized` tag.
@@ -590,7 +633,7 @@ impl L1Subscriber {
         S: Stream<Item = eyre::Result<()>> + Send,
     {
         let mut triggers = Box::pin(triggers);
-        let mut next_block = self.next_block_to_sync(l1_provider).await?;
+        let mut next_block = self.next_block_to_sync()?;
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued as another trigger.
@@ -677,19 +720,46 @@ impl L1Subscriber {
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
-            let (events, invalidated) = self.extract_events(block_number, &receipts);
+            // Decoding fails closed: a decode failure of a recognized portal log aborts this
+            // block before anything is enqueued or any cache advances. Ingestion halts here (fenced)
+            // instead of continuing under a partial event view.
+            let (events, invalidated) =
+                self.extract_events(block_number, &receipts)
+                    .map_err(|err| {
+                        self.subscriber_metrics.decode_fence_failures.increment(1);
+                        FencedIngestionError::new(block_number, "portal event decoding", err)
+                    })?;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             let sealed = SealedHeader::seal_slow(header);
             let anchor = sealed.num_hash();
+            // Publish the leadership transition _before_ the activation block becomes
+            // consumable.
+            if let Some(sink) = &self.config.leadership_sink {
+                let transition = events.final_leader_transition().map_err(|err| {
+                    FencedIngestionError::new(block_number, "leadership event validation", err)
+                })?;
+                if let Some(transition) = transition {
+                    sink.apply_leader_transition(transition)
+                        .wrap_err_with(|| {
+                            format!(
+                                "cannot apply the leadership transition from block {block_number}"
+                            )
+                        })
+                        .map_err(|err| {
+                            FencedIngestionError::new(
+                                block_number,
+                                "leadership transition application",
+                                err,
+                            )
+                        })?;
+                }
+            }
             let appended = self
                 .deposit_sink
                 .enqueue(sealed, events.clone())
                 .wrap_err_with(|| {
-                    format!(
-                        "unexpected discontinuity while enqueueing finalized L1 block \
-                         {block_number}"
-                    )
+                    format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
             self.config
                 .block_tracker
@@ -737,7 +807,8 @@ impl L1Subscriber {
     /// `newHeads` or HTTP block-filter updates are used as wakeups; each
     /// notification ingests the missing finalized range in order.
     ///
-    /// Callers should retry on error (see [`Self::spawn`]).
+    /// [`Self::spawn`] retries transient errors and treats deterministic finalized-block
+    /// ingestion failures as fatal.
     pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
         let triggers = self.head_triggers(&provider).await?;
@@ -749,11 +820,14 @@ impl L1Subscriber {
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.
-    fn extract_events(
+    ///
+    /// A decode failure of a portal log is an error for the whole block. A silently dropped
+    /// event would diverge this node from its peers.
+    pub(crate) fn extract_events(
         &self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
-    ) -> L1ProcessedEvents {
+    ) -> eyre::Result<L1ProcessedEvents> {
         let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut invalidated = HashSet::new();
@@ -769,9 +843,11 @@ impl L1Subscriber {
                     {
                         invalidated.insert(address);
                     }
-                    if let Err(e) = portal_events.push_log(log, block_number) {
-                        warn!(block_number, %e, "Failed to decode portal event from receipt");
-                    }
+                    portal_events
+                        .push_log(log, block_number)
+                        .wrap_err_with(|| {
+                            format!("failed to decode a portal event in L1 block {block_number}")
+                        })?;
                 } else if let Some(address) = cache_invalidation_address(address, log.topic0()) {
                     invalidated.extend([address, log.address()]);
                 }
@@ -783,7 +859,7 @@ impl L1Subscriber {
             invalidated.extend([event.token, TIP403_REGISTRY_ADDRESS]);
         }
         self.record_portal_event_metrics(&portal_events);
-        (portal_events, invalidated)
+        Ok((portal_events, invalidated))
     }
 
     fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
@@ -818,6 +894,11 @@ impl L1Subscriber {
             self.subscriber_metrics
                 .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
+        }
+        if !portal_events.leader_transitions.is_empty() {
+            self.subscriber_metrics
+                .leader_updated_events
+                .increment(portal_events.leader_transitions.len() as u64);
         }
     }
 

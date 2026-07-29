@@ -24,51 +24,27 @@ pub enum Role {
     Follower,
 }
 
-/// Shared bootstrap leadership record for a zone node.
+/// One finalized leadership transition.
 ///
-/// Leadership remains immutable for the lifetime of the process. A future handoff implementation
-/// will replace this read-only handle with an activation-boundary-aware schedule and expose
-/// mutation only together with complete role-specific worker switching.
-#[derive(Debug, Clone)]
-pub struct Leadership(std::sync::Arc<LeadershipState>);
-
-impl Leadership {
-    /// Creates an immutable handle seeded from the validated manifest.
-    pub(crate) fn new(initial: LeadershipState) -> Self {
-        Self(std::sync::Arc::new(initial))
-    }
-
-    /// Returns the record in force right now.
-    pub fn current(&self) -> LeadershipState {
-        (*self.0).clone()
-    }
-
-    /// Returns the role of `ed25519_public_key` under the current record.
-    pub fn role_of(&self, ed25519_public_key: &PublicKey) -> Role {
-        self.0.role_of(ed25519_public_key)
-    }
-}
-
-/// The leadership record bootstrapped by a zone node.
-///
-/// Epoch zero is derived from the manifest. Later epochs are reserved for the handoff protocol.
+/// A record authorizes `leader` for every Tempo anchor with
+/// `anchor >= activation_tempo_block`, until a later transition's activation boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LeadershipState {
     /// Monotonically increasing fencing epoch.
     pub epoch: u64,
     /// Ed25519 identity of the selected leader.
     pub leader: PublicKey,
-    /// First block where the leader can become active.
-    pub start_block: u64,
+    /// Tempo (L1) block number at which this leader's authorization begins.
+    pub activation_tempo_block: u64,
 }
 
 impl LeadershipState {
     /// Creates a leadership record.
-    pub const fn new(epoch: u64, leader: PublicKey, start_block: u64) -> Self {
+    pub const fn new(epoch: u64, leader: PublicKey, activation_tempo_block: u64) -> Self {
         Self {
             epoch,
             leader,
-            start_block,
+            activation_tempo_block,
         }
     }
 
@@ -77,19 +53,14 @@ impl LeadershipState {
         self.epoch
     }
 
-    /// First block governed by this record.
-    pub const fn start_block(&self) -> u64 {
-        self.start_block
+    /// First Tempo anchor governed by this record.
+    pub const fn activation_tempo_block(&self) -> u64 {
+        self.activation_tempo_block
     }
 
     /// Leader selected by this record.
     pub const fn leader(&self) -> &PublicKey {
         &self.leader
-    }
-
-    /// Returns the leader for `block_number` when this record governs it.
-    pub fn leader_for(&self, block_number: u64) -> Option<&PublicKey> {
-        (block_number >= self.start_block).then_some(&self.leader)
     }
 
     /// Returns the role of `ed25519_public_key` under this record.
@@ -99,6 +70,276 @@ impl LeadershipState {
         } else {
             Role::Follower
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct LeadershipScheduleState {
+    /// Retained transitions indexed by activation Tempo block.
+    transitions: std::collections::BTreeMap<u64, LeadershipState>,
+    /// Highest epoch finalized L1 has shown us (observability + publication check).
+    latest_observed_epoch: Option<u64>,
+    /// Highest Tempo anchor embedded in a locally canonical zone block.
+    applied_anchor: Option<u64>,
+}
+
+impl LeadershipScheduleState {
+    fn next_anchor_record(&self) -> Option<&LeadershipState> {
+        let next_anchor = self
+            .applied_anchor
+            .map_or(u64::MAX, |applied| applied.saturating_add(1));
+        self.transitions
+            .range(..=next_anchor)
+            .next_back()
+            .map(|(_, record)| record)
+    }
+}
+
+/// Activation-indexed schedule of finalized leadership transitions.
+///
+/// Every observed leadership transition is kept
+/// until the applied Tempo checkpoint passes activation boundary. A watch notifier announces
+/// changes, but consumers re-read and index by anchor.
+///
+/// An empty schedule represents the "uninitialized" state: no portal leader has been
+/// observed at the local Tempo checkpoint and block production must stay off.
+#[derive(Debug, Clone)]
+pub struct LeadershipSchedule {
+    inner: std::sync::Arc<std::sync::RwLock<LeadershipScheduleState>>,
+    changed: tokio::sync::watch::Sender<()>,
+}
+
+impl Default for LeadershipSchedule {
+    fn default() -> Self {
+        Self::uninitialized()
+    }
+}
+
+impl LeadershipSchedule {
+    /// Creates an empty (fenced, uninitialized) schedule.
+    pub fn uninitialized() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(());
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(LeadershipScheduleState::default())),
+            changed,
+        }
+    }
+
+    /// Creates a schedule seeded with one record.
+    pub fn seeded(initial: LeadershipState) -> Self {
+        let schedule = Self::uninitialized();
+        schedule
+            .publish(initial)
+            .expect("seeding an empty schedule cannot conflict");
+        schedule
+    }
+
+    /// Returns whether any leadership record has been observed.
+    pub fn is_initialized(&self) -> bool {
+        !self.inner.read().expect("poisoned").transitions.is_empty()
+    }
+
+    /// Publish a transition observed from verified finalized receipts (or a startup snapshot).
+    ///
+    /// Publication is checked: an identical re-observation (subscriber replay) is an `Ok`
+    /// no-op, while a conflicting record at an observed activation, a non-monotonic epoch, or
+    /// a non-monotonic activation is an error that must fence ingestion in the caller.
+    /// Returns whether a new transition was appended.
+    pub fn publish(&self, record: LeadershipState) -> eyre::Result<bool> {
+        let mut state = self.inner.write().expect("poisoned");
+        // The first observed record is the earliest known authority and governs from anchor
+        // zero: a fresh zone's genesis anchors precede the portal creation block, and no
+        // other producer can exist before the first transition.
+        let record = if state.transitions.is_empty() {
+            LeadershipState {
+                activation_tempo_block: 0,
+                ..record
+            }
+        } else {
+            record
+        };
+        if let Some(existing) = state.transitions.get(&record.activation_tempo_block) {
+            eyre::ensure!(
+                *existing == record,
+                "conflicting leadership transition at activation {}: existing epoch {} leader \
+                 {}, new epoch {} leader {}",
+                record.activation_tempo_block,
+                existing.epoch,
+                existing.leader,
+                record.epoch,
+                record.leader,
+            );
+            return Ok(false);
+        }
+        if let Some((&last_activation, last)) = state.transitions.last_key_value() {
+            if record.epoch == last.epoch {
+                // A re-observation of the clamped initial record at its true activation is
+                // the same authority; anything else with a duplicate epoch is corrupt.
+                if record.leader == last.leader
+                    && last_activation == 0
+                    && state.transitions.len() == 1
+                {
+                    return Ok(false);
+                }
+                eyre::bail!(
+                    "duplicate leadership epoch {} at a different activation: retained {}, new {}",
+                    record.epoch,
+                    last_activation,
+                    record.activation_tempo_block,
+                );
+            }
+            eyre::ensure!(
+                record.epoch == last.epoch + 1,
+                "non-contiguous leadership epoch: retained {}, new {}",
+                last.epoch,
+                record.epoch,
+            );
+            eyre::ensure!(
+                record.activation_tempo_block > last_activation,
+                "leadership activation moved backwards: retained {}, new {}",
+                last_activation,
+                record.activation_tempo_block,
+            );
+        }
+        state.latest_observed_epoch = Some(
+            state
+                .latest_observed_epoch
+                .map_or(record.epoch, |epoch| epoch.max(record.epoch)),
+        );
+        state
+            .transitions
+            .insert(record.activation_tempo_block, record);
+        drop(state);
+        self.changed.send_replace(());
+        Ok(true)
+    }
+
+    /// Returns the record governing `tempo_anchor`: the greatest activation `<= tempo_anchor`
+    /// over every retained transition. `None` while uninitialized or for anchors before the
+    /// first retained activation — both fence production and import for that anchor.
+    pub fn leader_for(&self, tempo_anchor: u64) -> Option<LeadershipState> {
+        self.inner
+            .read()
+            .expect("poisoned")
+            .transitions
+            .range(..=tempo_anchor)
+            .next_back()
+            .map(|(_, record)| record.clone())
+    }
+
+    /// Returns the most recently observed record (status only, never a production permit).
+    pub fn latest(&self) -> Option<LeadershipState> {
+        self.inner
+            .read()
+            .expect("poisoned")
+            .transitions
+            .last_key_value()
+            .map(|(_, record)| record.clone())
+    }
+
+    /// Returns the record governing the next anchor this node will consume
+    /// (`applied_anchor + 1`), falling back to the most recent record while no applied
+    /// anchor has been recorded yet.
+    ///
+    /// This is the outbound routing authority for anchor-bound traffic such as transaction
+    /// forwarding: between observing a transition and reaching its activation boundary, the
+    /// outgoing leader — not the most recently observed one — still produces. Routing only,
+    /// never a production permit.
+    pub fn next_anchor_record(&self) -> Option<LeadershipState> {
+        self.inner
+            .read()
+            .expect("poisoned")
+            .next_anchor_record()
+            .cloned()
+    }
+
+    /// Highest epoch finalized L1 has shown us.
+    pub fn latest_observed_epoch(&self) -> Option<u64> {
+        self.inner.read().expect("poisoned").latest_observed_epoch
+    }
+
+    /// Epoch whose activation boundary the locally applied checkpoint has crossed.
+    ///
+    /// Observability only — promotion keys off `leader_for(next anchor)`, never this value.
+    pub fn locally_applied_epoch(&self) -> Option<u64> {
+        let state = self.inner.read().expect("poisoned");
+        let applied = state.applied_anchor?;
+        state
+            .transitions
+            .range(..=applied)
+            .next_back()
+            .map(|(_, record)| record.epoch)
+    }
+
+    /// Number of observed transitions whose activation the applied checkpoint has not crossed.
+    pub fn pending_transitions(&self) -> usize {
+        let state = self.inner.read().expect("poisoned");
+        let applied = state.applied_anchor.unwrap_or(0);
+        state.transitions.range(applied + 1..).count()
+    }
+
+    /// Record that the zone block embedding `tempo_anchor` is locally canonical, pruning
+    /// entries whose boundary the checkpoint has passed.
+    ///
+    /// The entry governing the next anchor is always retained, along with its immediate
+    /// predecessor: the promotion barrier distinguishes a planned handoff from same-identity
+    /// recovery by asking who governed the previous anchor.
+    pub fn record_applied_anchor(&self, tempo_anchor: u64) {
+        let mut state = self.inner.write().expect("poisoned");
+        let previous_next_anchor_record = state.next_anchor_record().cloned();
+        state.applied_anchor = Some(
+            state
+                .applied_anchor
+                .map_or(tempo_anchor, |applied| applied.max(tempo_anchor)),
+        );
+        let applied = state.applied_anchor.expect("just set");
+        // The entry governing the next anchor is the greatest activation <= applied + 1.
+        if let Some((&active, _)) = state
+            .transitions
+            .range(..=applied.saturating_add(1))
+            .next_back()
+        {
+            let keep_from = state
+                .transitions
+                .range(..active)
+                .next_back()
+                .map_or(active, |(&predecessor, _)| predecessor);
+            state
+                .transitions
+                .retain(|&activation, _| activation >= keep_from);
+        }
+        let governing_record_changed =
+            state.next_anchor_record() != previous_next_anchor_record.as_ref();
+        drop(state);
+        if governing_record_changed {
+            self.changed.send_replace(());
+        }
+    }
+
+    /// Subscribe to schedule-change notifications. The watch is a wakeup, not the schedule:
+    /// consumers re-read via [`Self::leader_for`].
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changed.subscribe()
+    }
+
+    /// Returns the role of `ed25519_public_key` for `tempo_anchor`, when governed.
+    pub fn role_for(&self, ed25519_public_key: &PublicKey, tempo_anchor: u64) -> Option<Role> {
+        self.leader_for(tempo_anchor)
+            .map(|record| record.role_of(ed25519_public_key))
+    }
+
+    /// Returns whether `ed25519_public_key` leads any retained transition.
+    ///
+    /// A transport-level acceptance check for live blocks: a lagging follower must keep
+    /// accepting the rightful producer of in-between anchors after a later transition is
+    /// observed. The exact per-anchor fence lives in the import path.
+    pub fn is_scheduled_leader(&self, ed25519_public_key: &PublicKey) -> bool {
+        self.inner
+            .read()
+            .expect("poisoned")
+            .transitions
+            .values()
+            .any(|record| &record.leader == ed25519_public_key)
     }
 }
 
@@ -349,12 +590,12 @@ impl ZoneManifest {
         self.sequencer_set_version
     }
 
-    /// Ed25519 Commonware public key of the statically assigned leader.
+    /// Ed25519 Commonware public key of the configured initial leader.
     pub const fn leader_ed25519_public_key(&self) -> &PublicKey {
         &self.leader_ed25519_public_key
     }
 
-    /// Static leadership record used for the lifetime of the process.
+    /// Manifest-derived initial leadership record (epoch 0, active from genesis).
     pub fn bootstrap_leadership(&self) -> LeadershipState {
         LeadershipState::new(0, self.leader_ed25519_public_key.clone(), 0)
     }
@@ -370,10 +611,24 @@ impl ZoneManifest {
             .is_some()
     }
 
-    fn node_by_ed25519_public_key(&self, ed25519_public_key: &PublicKey) -> Option<&ManifestNode> {
+    /// Returns the manifest node registered with an Ed25519 public key.
+    pub fn node_by_ed25519_public_key(
+        &self,
+        ed25519_public_key: &PublicKey,
+    ) -> Option<&ManifestNode> {
         self.nodes
             .iter()
             .find(|node| node.ed25519_public_key() == ed25519_public_key)
+    }
+
+    /// Returns the manifest node registered with an individual secp256k1 address.
+    pub fn node_by_secp256k1_address(
+        &self,
+        secp256k1_address: EthereumAddress,
+    ) -> Option<&ManifestNode> {
+        self.nodes
+            .iter()
+            .find(|node| node.secp256k1_address() == secp256k1_address)
     }
 
     pub(crate) fn has_dns_addresses(&self) -> bool {
@@ -490,7 +745,186 @@ pub enum ManifestError {
 mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
-    use super::{ManifestError, Role, ZoneManifest};
+    use super::{LeadershipSchedule, LeadershipState, ManifestError, Role, ZoneManifest};
+
+    fn public_key(seed: u64) -> commonware_cryptography::ed25519::PublicKey {
+        PrivateKey::from_seed(seed).public_key()
+    }
+
+    #[test]
+    fn uninitialized_schedule_stays_fenced() {
+        let schedule = LeadershipSchedule::uninitialized();
+        assert!(!schedule.is_initialized());
+        assert_eq!(schedule.leader_for(0), None);
+        assert_eq!(schedule.leader_for(u64::MAX), None);
+        assert_eq!(schedule.latest(), None);
+        assert_eq!(schedule.latest_observed_epoch(), None);
+        assert_eq!(schedule.locally_applied_epoch(), None);
+        assert_eq!(schedule.role_for(&public_key(1), 100), None);
+    }
+
+    #[test]
+    fn schedule_retains_skipped_intermediate_transitions() {
+        // A -> B at anchor 100 and B -> C at anchor 200 both observed while the engine is
+        // still before 100. leader_for over the retained timeline must name B for the
+        // in-between anchors, and A below the first boundary it retains.
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, public_key(1), 0));
+        assert!(
+            schedule
+                .publish(LeadershipState::new(2, public_key(2), 100))
+                .unwrap()
+        );
+        assert!(
+            schedule
+                .publish(LeadershipState::new(3, public_key(3), 200))
+                .unwrap()
+        );
+
+        assert_eq!(schedule.leader_for(99).unwrap().leader, public_key(1));
+        assert_eq!(schedule.leader_for(100).unwrap().leader, public_key(2));
+        assert_eq!(schedule.leader_for(199).unwrap().leader, public_key(2));
+        assert_eq!(schedule.leader_for(200).unwrap().leader, public_key(3));
+        assert_eq!(schedule.leader_for(u64::MAX).unwrap().leader, public_key(3));
+        assert_eq!(schedule.latest_observed_epoch(), Some(3));
+        assert_eq!(schedule.pending_transitions(), 2);
+    }
+
+    #[test]
+    fn publish_is_idempotent_and_rejects_conflicts() {
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, public_key(1), 0));
+        let transition = LeadershipState::new(2, public_key(2), 100);
+        assert!(schedule.publish(transition.clone()).unwrap());
+        // Subscriber replay of the same finalized block re-observes the same event.
+        assert!(!schedule.publish(transition).unwrap());
+
+        // A different leader at an observed activation is corrupt.
+        assert!(
+            schedule
+                .publish(LeadershipState::new(2, public_key(3), 100))
+                .is_err()
+        );
+        // Skipped epochs cannot be published: replay is contiguous.
+        assert!(
+            schedule
+                .publish(LeadershipState::new(4, public_key(3), 200))
+                .is_err()
+        );
+        // Activation boundaries are strictly increasing.
+        assert!(
+            schedule
+                .publish(LeadershipState::new(3, public_key(3), 50))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn prunes_only_past_the_applied_boundary() {
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, public_key(1), 0));
+        schedule
+            .publish(LeadershipState::new(2, public_key(2), 100))
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(3, public_key(3), 200))
+            .unwrap();
+
+        // Applying anchors below the first boundary keeps every transition queryable.
+        schedule.record_applied_anchor(98);
+        assert_eq!(schedule.leader_for(99).unwrap().leader, public_key(1));
+        assert_eq!(schedule.locally_applied_epoch(), Some(1));
+
+        // Applying 99 makes the next anchor 100. Epoch 1 has served its last anchor, but it
+        // is retained as the active entry's predecessor for the promotion-mode decision.
+        schedule.record_applied_anchor(99);
+        assert_eq!(schedule.leader_for(99).unwrap().leader, public_key(1));
+        assert_eq!(schedule.leader_for(100).unwrap().leader, public_key(2));
+        assert_eq!(schedule.leader_for(199).unwrap().leader, public_key(2));
+
+        // The applied cursor never moves backwards.
+        schedule.record_applied_anchor(50);
+        assert_eq!(schedule.leader_for(100).unwrap().leader, public_key(2));
+
+        schedule.record_applied_anchor(250);
+        // Epoch 3 is active for anchor 251; epoch 2 is its retained predecessor; epoch 1 is
+        // finally pruned.
+        assert_eq!(schedule.leader_for(99), None);
+        assert_eq!(schedule.leader_for(199).unwrap().leader, public_key(2));
+        assert_eq!(schedule.leader_for(251).unwrap().leader, public_key(3));
+        assert_eq!(schedule.locally_applied_epoch(), Some(3));
+        assert_eq!(schedule.pending_transitions(), 0);
+        // The active entry is always retained.
+        assert!(schedule.latest().is_some());
+    }
+
+    #[test]
+    fn first_record_governs_from_genesis() {
+        // The creation transition activates at the portal creation block, but the zone's
+        // first blocks embed earlier anchors (zone genesis anchors before createZone). The
+        // earliest known authority governs them.
+        let schedule = LeadershipSchedule::uninitialized();
+        assert!(
+            schedule
+                .publish(LeadershipState::new(1, public_key(1), 500))
+                .unwrap()
+        );
+        assert_eq!(schedule.leader_for(1).unwrap().leader, public_key(1));
+        assert_eq!(schedule.leader_for(499).unwrap().leader, public_key(1));
+
+        // Re-observing the same initial record at its true activation is idempotent.
+        assert!(
+            !schedule
+                .publish(LeadershipState::new(1, public_key(1), 500))
+                .unwrap()
+        );
+        // A different leader with the same epoch is still corrupt.
+        assert!(
+            schedule
+                .publish(LeadershipState::new(1, public_key(2), 500))
+                .is_err()
+        );
+
+        // Later transitions activate exactly at their boundary.
+        schedule
+            .publish(LeadershipState::new(2, public_key(2), 700))
+            .unwrap();
+        assert_eq!(schedule.leader_for(699).unwrap().leader, public_key(1));
+        assert_eq!(schedule.leader_for(700).unwrap().leader, public_key(2));
+    }
+
+    #[test]
+    fn schedule_watch_announces_effective_changes() {
+        let schedule = LeadershipSchedule::uninitialized();
+        let mut watcher = schedule.subscribe();
+        assert!(!watcher.has_changed().unwrap());
+        schedule
+            .publish(LeadershipState::new(1, public_key(1), 0))
+            .unwrap();
+        assert!(watcher.has_changed().unwrap());
+        watcher.borrow_and_update();
+
+        // Seed the applied cursor while only epoch 1 is known.
+        schedule.record_applied_anchor(98);
+        assert!(!watcher.has_changed().unwrap());
+
+        schedule
+            .publish(LeadershipState::new(2, public_key(2), 100))
+            .unwrap();
+        assert!(watcher.has_changed().unwrap());
+        watcher.borrow_and_update();
+
+        // Advancing within one leadership record (or backwards) is silent.
+        schedule.record_applied_anchor(98);
+        assert!(!watcher.has_changed().unwrap());
+        schedule.record_applied_anchor(50);
+        assert!(!watcher.has_changed().unwrap());
+
+        // Applying anchor 99 moves the next anchor to epoch 2's activation boundary.
+        schedule.record_applied_anchor(99);
+        assert!(watcher.has_changed().unwrap());
+        watcher.borrow_and_update();
+
+        schedule.record_applied_anchor(150);
+        assert!(!watcher.has_changed().unwrap());
+    }
 
     fn ed25519_public_key(seed: u64) -> String {
         let key = PrivateKey::from_seed(seed).public_key();
@@ -532,11 +966,19 @@ mod tests {
         let leadership = manifest.bootstrap_leadership();
 
         assert_eq!(leadership.epoch(), 0);
-        assert_eq!(leadership.start_block(), 0);
-        assert_eq!(leadership.leader_for(0), Some(&leader));
-        assert_eq!(leadership.leader_for(u64::MAX), Some(&leader));
+        assert_eq!(leadership.activation_tempo_block(), 0);
         assert_eq!(leadership.role_of(&leader), Role::Leader);
         assert_eq!(leadership.role_of(&follower), Role::Follower);
+
+        let schedule = super::LeadershipSchedule::seeded(leadership);
+        assert_eq!(
+            schedule.leader_for(0).map(|record| record.leader),
+            Some(leader.clone())
+        );
+        assert_eq!(
+            schedule.leader_for(u64::MAX).map(|record| record.leader),
+            Some(leader.clone())
+        );
         assert_eq!(
             manifest
                 .validate_node(7, &leader, secp256k1_address(1).parse().unwrap(), None)

@@ -791,7 +791,6 @@ mod tests {
         stub!(get_filter_changes, _id: FilterId, _auth: AuthContext);
         stub!(new_block_filter, _auth: AuthContext);
         stub!(uninstall_filter, _id: FilterId, _auth: AuthContext);
-
         fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
             Box::pin(async move {
                 to_raw(&json!({
@@ -840,6 +839,29 @@ mod tests {
             "id": 1
         }))
         .expect("request should deserialize")
+    }
+
+    #[tokio::test]
+    async fn private_rpc_excludes_public_sequencer_methods() {
+        use crate::types::{MethodTier, classify_method};
+
+        assert_eq!(classify_method("zone_getSequencerInfo"), None);
+        assert_eq!(classify_method("zone_setLeader"), None);
+        assert_eq!(
+            classify_method("admin_setLeader"),
+            Some(MethodTier::Restricted)
+        );
+
+        let api = MockZoneRpcApi::default();
+        // admin_* stays rejected before dispatch.
+        let rejected = dispatch(&request("admin_setLeader", json!([])), &auth(), &api).await;
+        assert_eq!(rejected.error.unwrap().code, -32005);
+
+        let excluded = dispatch(&request("zone_setLeader", json!([])), &auth(), &api).await;
+        assert_eq!(excluded.error.unwrap().code, -32601);
+
+        let excluded = dispatch(&request("zone_getSequencerInfo", json!([])), &auth(), &api).await;
+        assert_eq!(excluded.error.unwrap().code, -32601);
     }
 
     #[tokio::test]

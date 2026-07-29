@@ -159,6 +159,15 @@ crate::sol! {
         event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
         event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
 
+        /// Emitted when block-production leadership transitions to a new sequencer.
+        /// Zone nodes derive leadership exclusively from finalized observations of this event.
+        event LeaderUpdated(
+            address indexed previousLeader,
+            address indexed newLeader,
+            uint64 indexed epoch,
+            uint64 activationTempoBlock
+        );
+
         // -- Errors --
 
         error NotSequencer();
@@ -171,6 +180,10 @@ crate::sol! {
         error TokenNotEnabled();
         error InvalidCallbackTarget();
         error AccountNotAllowed(address account);
+        error InvalidLeader();
+        error ActiveLeaderRemoved();
+        error LeaderAlreadyUpdatedThisBlock();
+        error StaleLeadershipEpoch(uint64 expected, uint64 actual);
 
         // -- View functions --
 
@@ -193,7 +206,10 @@ crate::sol! {
         function isSequencer(address account) external view returns (bool);
         function sequencerCount() external view returns (uint256);
         function sequencerAt(uint256 index) external view returns (address);
-        function sequencerPubkey() external view returns (bytes32);
+        function leader() external view returns (address);
+        function leaderEpoch() external view returns (uint64);
+        function leaderActivationTempoBlock() external view returns (uint64);
+        function setLeader(address newLeader, uint64 expectedEpoch) external;
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
         function currentDepositQueueHash() external view returns (bytes32);
@@ -367,6 +383,10 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
             Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
             Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
+            Self::InvalidLeader(_) => f.write_str("InvalidLeader"),
+            Self::ActiveLeaderRemoved(_) => f.write_str("ActiveLeaderRemoved"),
+            Self::LeaderAlreadyUpdatedThisBlock(_) => f.write_str("LeaderAlreadyUpdatedThisBlock"),
+            Self::StaleLeadershipEpoch(_) => f.write_str("StaleLeadershipEpoch"),
         }
     }
 }
