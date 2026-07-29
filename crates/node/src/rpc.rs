@@ -23,7 +23,7 @@ use alloy_rpc_types_eth::{
 use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use futures::StreamExt;
-use jsonrpsee::{RpcModule, types::ErrorObjectOwned};
+use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_provider::CanonStateSubscriptions;
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
@@ -50,9 +50,7 @@ use tokio::{
 use zone_l1::TempoStateExt as _;
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneConfig, ZonePortal,
-};
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_p2p::{LeadershipSchedule, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
@@ -111,6 +109,77 @@ impl SequencerRpcContext {
     }
 }
 
+/// Public, authentication-independent Zone metadata methods.
+#[rpc(server, namespace = "zone")]
+pub(crate) trait ZoneApi {
+    /// Returns metadata for this Zone.
+    #[method(name = "getZoneInfo")]
+    async fn get_zone_info(&self) -> RpcResult<Box<serde_json::value::RawValue>>;
+
+    /// Returns the encryption key active at the current Tempo L1 head.
+    #[method(name = "getEncryptionKey")]
+    async fn get_encryption_key(&self) -> RpcResult<Box<serde_json::value::RawValue>>;
+}
+
+/// Public Zone API backed directly by the node and Tempo L1 providers.
+#[derive(Clone)]
+pub(crate) struct PublicZoneApi<P> {
+    zone_id: u32,
+    chain_id: u64,
+    portal_address: Address,
+    l1_provider: DynProvider<TempoNetwork>,
+    zone_provider: P,
+}
+
+impl<P> PublicZoneApi<P> {
+    pub(crate) const fn new(
+        zone_id: u32,
+        chain_id: u64,
+        portal_address: Address,
+        l1_provider: DynProvider<TempoNetwork>,
+        zone_provider: P,
+    ) -> Self {
+        Self {
+            zone_id,
+            chain_id,
+            portal_address,
+            l1_provider,
+            zone_provider,
+        }
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<P> ZoneApiServer for PublicZoneApi<P>
+where
+    P: StateProviderFactory + Clone + Send + Sync + 'static,
+{
+    async fn get_zone_info(&self) -> RpcResult<Box<serde_json::value::RawValue>> {
+        let tempo_block_number = self
+            .zone_provider
+            .latest()
+            .map_err(internal)
+            .and_then(|state| state.tempo_block_number().map_err(internal))
+            .map_err(public_rpc_error)?;
+
+        zone_info(
+            self.zone_id,
+            self.chain_id,
+            self.portal_address,
+            tempo_block_number,
+            &self.l1_provider,
+        )
+        .await
+        .map_err(public_rpc_error)
+    }
+
+    async fn get_encryption_key(&self) -> RpcResult<Box<serde_json::value::RawValue>> {
+        encryption_key(self.portal_address, &self.l1_provider)
+            .await
+            .map_err(public_rpc_error)
+    }
+}
+
 /// Build the unauthenticated Zone extension installed on the node's public HTTP RPC.
 pub(crate) fn public_zone_rpc_module<P>(
     portal_address: Address,
@@ -144,6 +213,93 @@ where
 
 fn public_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(error.code as i32, error.message, error.data)
+}
+
+async fn zone_tokens(
+    portal_address: Address,
+    l1_provider: &DynProvider<TempoNetwork>,
+) -> Result<Vec<Address>, JsonRpcError> {
+    if portal_address.is_zero() {
+        return Ok(vec![ZONE_TOKEN_ADDRESS]);
+    }
+
+    ZonePortal::new(portal_address, l1_provider)
+        .enabled_tokens()
+        .await
+        .map_err(internal)
+}
+
+async fn zone_sequencers(
+    portal_address: Address,
+    l1_provider: &DynProvider<TempoNetwork>,
+) -> Result<Vec<Address>, JsonRpcError> {
+    let portal = ZonePortal::new(portal_address, l1_provider);
+    let count = portal.sequencerCount().call().await.map_err(internal)?;
+    let count = count.to::<usize>();
+    let mut sequencers = Vec::with_capacity(count);
+    for index in 0..count {
+        sequencers.push(
+            portal
+                .sequencerAt(U256::from(index))
+                .call()
+                .await
+                .map_err(internal)?,
+        );
+    }
+    Ok(sequencers)
+}
+
+async fn zone_info(
+    zone_id: u32,
+    chain_id: u64,
+    portal_address: Address,
+    tempo_block_number: u64,
+    l1_provider: &DynProvider<TempoNetwork>,
+) -> Result<Box<serde_json::value::RawValue>, JsonRpcError> {
+    let portal = ZonePortal::new(portal_address, l1_provider);
+    let (zone_tokens, sequencers, is_access_enforced, is_gateway_open) = tokio::try_join!(
+        zone_tokens(portal_address, l1_provider),
+        zone_sequencers(portal_address, l1_provider),
+        async {
+            if portal_address.is_zero() {
+                Ok(false)
+            } else {
+                portal.isAccessEnforced().call().await.map_err(internal)
+            }
+        },
+        async {
+            if portal_address.is_zero() {
+                Ok(true)
+            } else {
+                portal.isGatewayOpen().call().await.map_err(internal)
+            }
+        },
+    )?;
+
+    to_raw(&ZoneInfoResponse {
+        zone_id: U64::from(zone_id),
+        is_access_enforced,
+        is_gateway_open,
+        zone_tokens,
+        sequencers,
+        chain_id: U64::from(chain_id),
+        tempo_block_number: U64::from(tempo_block_number),
+    })
+}
+
+async fn encryption_key(
+    portal_address: Address,
+    l1_provider: &DynProvider<TempoNetwork>,
+) -> Result<Box<serde_json::value::RawValue>, JsonRpcError> {
+    let block_number = l1_provider.get_block_number().await.map_err(internal)?;
+    let key = ZonePortal::new(portal_address, l1_provider)
+        .encryptionKeyAtBlock(block_number)
+        .block(BlockId::number(block_number))
+        .call()
+        .await
+        .map_err(internal)?;
+
+    to_raw(&key)
 }
 
 fn get_sequencer_info<P>(
@@ -330,7 +486,6 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::PrivateRpcConfig,
     l1_provider: DynProvider<TempoNetwork>,
-    zone_provider: DynProvider<TempoNetwork>,
     tempo_state: tempo_zone_contracts::TempoState::TempoStateInstance<
         DynProvider<TempoNetwork>,
         TempoNetwork,
@@ -364,13 +519,11 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .await
             .wrap_err("failed to connect private RPC zone provider")?
             .erased();
-        let tempo_state =
-            tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
+        let tempo_state = tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider);
         let rpc = Self {
             eth,
             config,
             l1_provider,
-            zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
         };
@@ -435,55 +588,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     }
 
     async fn zone_tokens(&self) -> Result<Vec<Address>, JsonRpcError> {
-        if self.config.zone_portal.is_zero() {
-            return Ok(vec![ZONE_TOKEN_ADDRESS]);
-        }
-
-        ZonePortal::new(self.config.zone_portal, &self.l1_provider)
-            .enabled_tokens()
-            .await
-            .map_err(internal)
-    }
-
-    async fn zone_sequencers(&self) -> Result<Vec<Address>, JsonRpcError> {
-        let portal = ZonePortal::new(self.config.zone_portal, &self.l1_provider);
-        let count = portal.sequencerCount().call().await.map_err(internal)?;
-        let count = count.to::<usize>();
-        let mut sequencers = Vec::with_capacity(count);
-        for index in 0..count {
-            sequencers.push(
-                portal
-                    .sequencerAt(U256::from(index))
-                    .call()
-                    .await
-                    .map_err(internal)?,
-            );
-        }
-        Ok(sequencers)
-    }
-
-    async fn zone_is_access_enforced(&self) -> Result<bool, JsonRpcError> {
-        if self.config.zone_portal.is_zero() {
-            return Ok(false);
-        }
-
-        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
-            .isAccessEnforced()
-            .call()
-            .await
-            .map_err(internal)
-    }
-
-    async fn zone_is_gateway_open(&self) -> Result<bool, JsonRpcError> {
-        if self.config.zone_portal.is_zero() {
-            return Ok(true);
-        }
-
-        ZoneConfig::new(ZONE_CONFIG_ADDRESS, &self.zone_provider)
-            .isGatewayOpen()
-            .call()
-            .await
-            .map_err(internal)
+        zone_tokens(self.config.zone_portal, &self.l1_provider).await
     }
 
     fn enforce_authorized(
@@ -1003,44 +1108,25 @@ where
 
     fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            let zone_tokens = self.zone_tokens().await?;
-            let sequencers = self.zone_sequencers().await?;
-            let is_access_enforced = self.zone_is_access_enforced().await?;
-            let is_gateway_open = self.zone_is_gateway_open().await?;
             let tempo_block_number = self
                 .tempo_state
                 .tempoBlockNumber()
                 .call()
                 .await
                 .map_err(internal)?;
-            to_raw(&ZoneInfoResponse {
-                zone_id: U64::from(self.config.zone_id),
-                is_access_enforced,
-                is_gateway_open,
-                zone_tokens,
-                sequencers,
-                chain_id: U64::from(self.config.chain_id),
-                tempo_block_number: U64::from(tempo_block_number),
-            })
+            zone_info(
+                self.config.zone_id,
+                self.config.chain_id,
+                self.config.zone_portal,
+                tempo_block_number,
+                &self.l1_provider,
+            )
+            .await
         })
     }
 
     fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move {
-            let block_number = self
-                .l1_provider
-                .get_block_number()
-                .await
-                .map_err(internal)?;
-            let key = ZonePortal::new(self.config.zone_portal, &self.l1_provider)
-                .encryptionKeyAtBlock(block_number)
-                .block(BlockId::number(block_number))
-                .call()
-                .await
-                .map_err(internal)?;
-
-            to_raw(&key)
-        })
+        Box::pin(encryption_key(self.config.zone_portal, &self.l1_provider))
     }
 }
 
@@ -1235,6 +1321,27 @@ mod tests {
                 .to_string()
                 .contains("zone_setLeader requires multi-sequencer mode")
         );
+    }
+
+    #[test]
+    fn public_zone_api_exposes_only_metadata_methods_without_auth() {
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http("http://127.0.0.1:1".parse().expect("valid URL"))
+            .erased();
+        let module = PublicZoneApi::new(
+            1,
+            42431,
+            Address::repeat_byte(0x11),
+            l1_provider,
+            Arc::new(reth_provider::test_utils::MockEthProvider::default()),
+        )
+        .into_rpc();
+
+        let methods = module.method_names().collect::<HashSet<_>>();
+        assert_eq!(methods.len(), 2);
+        assert!(methods.contains("zone_getZoneInfo"));
+        assert!(methods.contains("zone_getEncryptionKey"));
+        assert!(!methods.contains("zone_getAuthorizationTokenInfo"));
     }
 
     #[test]
