@@ -261,8 +261,6 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
-    /// Optional genesis Tempo block number used to backfill a fresh zone.
-    pub genesis_tempo_block_number: Option<u64>,
     /// Shared registry of tokens enabled for this zone.
     pub enabled_tokens: crate::state::EnabledTokenRegistry,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
@@ -535,38 +533,21 @@ impl L1Subscriber {
 
     /// Determine the starting block number for backfill.
     ///
-    /// Uses the zone's local `tempoBlockNumber` as the primary starting point —
-    /// this is the authoritative source for where the zone left off. Falls back
-    /// to the CLI genesis override when the zone hasn't processed any blocks
-    /// yet. Without either checkpoint, live subscription starts at the L1 tip.
-    pub(crate) async fn resolve_start_block(&self) -> eyre::Result<Option<u64>> {
-        // The zone's local state is the authoritative source for where to
-        // resume. This avoids the bug where the portal's
-        // lastSyncedTempoBlockNumber runs ahead of local zone state.
+    /// The zone's persisted `tempoBlockNumber` is the authoritative source for
+    /// where ingestion resumes.
+    pub(crate) fn resolve_start_block(&self) -> eyre::Result<u64> {
         let local_tempo_block_number = self.local_state.latest_tempo_block_number()?;
-        if local_tempo_block_number > 0 {
-            info!(local_tempo_block_number, "Resuming from local zone state");
-            return Ok(Some(local_tempo_block_number + 1));
-        }
-
-        if let Some(genesis) = self.config.genesis_tempo_block_number {
-            info!(genesis, "Using CLI genesis block number override");
-            return Ok(Some(genesis + 1));
-        }
-
-        warn!(
-            "No local Tempo checkpoint or genesis block override — skipping backfill. \
-             Set --l1.genesis-block-number to backfill from the correct block."
+        eyre::ensure!(
+            local_tempo_block_number > 0,
+            "zone genesis is not anchored to an L1 block"
         );
-        Ok(None)
+        info!(local_tempo_block_number, "Resuming from local zone state");
+        Ok(local_tempo_block_number + 1)
     }
 
     /// Resolve the first L1 block that has not already been ingested.
-    pub(crate) async fn next_block_to_sync(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<u64> {
-        let resolved = self.resolve_start_block().await?;
+    pub(crate) fn next_block_to_sync(&self) -> eyre::Result<u64> {
+        let resolved = self.resolve_start_block()?;
         let queued = self
             .deposit_sink
             .last_enqueued()
@@ -577,29 +558,18 @@ impl L1Subscriber {
             .latest()
             .map(|last| last.number.saturating_add(1));
 
-        let next = resolved.into_iter().chain(queued).chain(observed).max();
-        match next {
-            Some(next) => {
-                // Only the persisted zone checkpoint proves consumption.
-                // Queue and observation cursors are fetch high-water marks.
-                if let Some(resolved) = resolved {
-                    self.config
-                        .block_tracker
-                        .initialize_consumed_through(resolved.saturating_sub(1));
-                }
-                Ok(next)
-            }
-            None => {
-                let next = self
-                    .finalized_block_number(l1_provider)
-                    .await?
-                    .saturating_add(1);
-                self.config
-                    .block_tracker
-                    .initialize_consumed_through(next.saturating_sub(1));
-                Ok(next)
-            }
-        }
+        let next = [Some(resolved), queued, observed]
+            .into_iter()
+            .flatten()
+            .max()
+            .expect("resolved checkpoint is always present");
+
+        // Only the persisted zone checkpoint proves consumption.
+        // Queue and observation cursors are fetch high-water marks.
+        self.config
+            .block_tracker
+            .initialize_consumed_through(resolved.saturating_sub(1));
+        Ok(next)
     }
 
     /// Return the block number referenced by the L1 `finalized` tag.
@@ -661,7 +631,7 @@ impl L1Subscriber {
         S: Stream<Item = eyre::Result<()>> + Send,
     {
         let mut triggers = Box::pin(triggers);
-        let mut next_block = self.next_block_to_sync(l1_provider).await?;
+        let mut next_block = self.next_block_to_sync()?;
 
         // Subscribe before the initial sync so a head published while catching
         // up remains queued as another trigger.

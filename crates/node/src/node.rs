@@ -224,7 +224,6 @@ impl ZoneNode {
     pub fn new(
         l1_rpc_url: String,
         portal_address: Address,
-        genesis_tempo_block_number: Option<u64>,
         l1_fetch_concurrency: usize,
         retry_connection_interval: Duration,
     ) -> Self {
@@ -236,7 +235,6 @@ impl ZoneNode {
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
-            genesis_tempo_block_number,
             enabled_tokens: enabled_tokens.clone(),
             l1_state_cache: l1_state_cache.clone(),
             block_tracker: l1_block_tracker.clone(),
@@ -519,11 +517,7 @@ where
         // leadership transition.
         if let Some(p2p) = self.p2p_config.as_ref() {
             let schedule = p2p.leadership();
-            let snapshot_anchor = if tempo_block_number > 0 {
-                tempo_block_number
-            } else {
-                self.l1_config.genesis_tempo_block_number.unwrap_or(0)
-            };
+            let snapshot_anchor = tempo_block_number;
             seed_leadership_schedule(
                 &l1_provider,
                 self.portal_address,
