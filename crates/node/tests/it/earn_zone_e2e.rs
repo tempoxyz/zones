@@ -599,11 +599,7 @@ impl EarnZoneFixture {
             .is_auth_as(account, self.user.address(), AuthRole::Recipient)
             .await;
         let mint_authorized = registry
-            .is_auth_as(
-                account,
-                self.contribution_controller,
-                AuthRole::MintRecipient,
-            )
+            .is_auth_as(account, self.earn_vault, AuthRole::MintRecipient)
             .await;
         eyre::ensure!(
             recipient_authorized == eligible && mint_authorized == eligible,
