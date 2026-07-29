@@ -25,7 +25,7 @@ use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
     ITIP20 as ContractTip20,
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
@@ -560,7 +560,7 @@ async fn test_public_methods() -> eyre::Result<()> {
     }
 
     for (method, expected) in [
-        ("eth_gasPrice", U256::from(TEMPO_T0_BASE_FEE)),
+        ("eth_gasPrice", U256::from(TEMPO_T1_BASE_FEE)),
         ("eth_maxPriorityFeePerGas", U256::ZERO),
     ] {
         for response in [

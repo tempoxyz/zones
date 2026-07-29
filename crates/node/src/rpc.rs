@@ -37,7 +37,7 @@ use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoCallBuilderExt as _, TempoHeaderResponse, TempoTransactionRequest},
 };
-use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
@@ -670,7 +670,7 @@ where
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&U256::from(TEMPO_T0_BASE_FEE)) })
+        Box::pin(async move { to_raw(&U256::from(TEMPO_T1_BASE_FEE)) })
     }
 
     fn max_priority_fee_per_gas(&self) -> BoxFut<'_> {
