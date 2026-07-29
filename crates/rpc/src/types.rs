@@ -201,7 +201,7 @@ pub struct LocalSequencerInfo {
     pub sequencer_address: Option<Address>,
     /// Hex-encoded Ed25519 Commonware public key.
     pub p2p_public_key: String,
-    /// Current role: `leader`, `follower`, `rpc-follower`, or `fenced`.
+    /// Current role: `leader`, `follower`, or `fenced`.
     pub role: String,
 }
 

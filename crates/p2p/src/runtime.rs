@@ -79,6 +79,13 @@ struct OutstandingBackfill {
     sent_at: Instant,
 }
 
+impl OutstandingBackfill {
+    /// Whether the response window has closed, freeing the peer to be asked again.
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.sent_at) >= BACKFILL_RESPONSE_TIMEOUT
+    }
+}
+
 #[derive(Debug, Default)]
 struct BackfillJob {
     next_request_id: u64,
@@ -94,9 +101,9 @@ impl BackfillJob {
         let request_peers = peers
             .iter()
             .filter(|peer| {
-                self.outstanding.get(*peer).is_none_or(|request| {
-                    now.duration_since(request.sent_at) >= BACKFILL_RESPONSE_TIMEOUT
-                })
+                self.outstanding
+                    .get(*peer)
+                    .is_none_or(|request| request.expired(now))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -129,10 +136,9 @@ impl BackfillJob {
     }
 
     fn accepts(&self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
-        self.outstanding.get(peer).is_some_and(|request| {
-            request.request_id == request_id
-                && now.duration_since(request.sent_at) < BACKFILL_RESPONSE_TIMEOUT
-        })
+        self.outstanding
+            .get(peer)
+            .is_some_and(|request| request.request_id == request_id && !request.expired(now))
     }
 
     /// Whether `peer` has left a request unanswered past the response timeout.
@@ -142,7 +148,7 @@ impl BackfillJob {
     fn is_unresponsive(&self, peer: &PublicKey, now: Instant) -> bool {
         self.outstanding
             .get(peer)
-            .is_some_and(|request| now.duration_since(request.sent_at) >= BACKFILL_RESPONSE_TIMEOUT)
+            .is_some_and(|request| request.expired(now))
     }
 
     fn complete(&mut self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
@@ -268,7 +274,7 @@ impl P2pConfig {
     pub fn block_attestation_addresses(&self) -> HashMap<PublicKey, EthereumAddress> {
         self.manifest
             .quorum_nodes()
-            .filter_map(|node| Some((node.ed25519_public_key().clone(), node.secp256k1_address()?)))
+            .map(|(node, address)| (node.ed25519_public_key().clone(), address))
             .collect()
     }
 
@@ -633,42 +639,40 @@ async fn run_commands(
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
     while let Some(command) = commands.recv().await {
-        if let P2pCommand::RequestBackfill { start } = command {
-            // Chain data always comes from a quorum member. RPC-only standbys hold the same
-            // chain, but they are the internet-facing members — keeping them out of every
-            // node's catch-up source set is the point of the role.
-            let backfill_peers = peers
+        // Built only in arms that actually address a peer set — forwarding a transaction must
+        // not allocate one.
+        let others = || {
+            peers
                 .iter()
-                .filter(|peer| {
-                    *peer != &local_ed25519_public_key && leadership.is_quorum_member(peer)
-                })
+                .filter(|peer| *peer != &local_ed25519_public_key)
                 .cloned()
-                .collect::<Vec<_>>();
+                .collect::<Vec<_>>()
+        };
+        if let P2pCommand::RequestBackfill { start } = command {
+            // Chain data always comes from a quorum member: standbys hold the same chain but are
+            // the internet-facing members, and keeping them out of every node's catch-up source
+            // set is the point of the role.
+            let candidates = leadership.quorum_peers(&others());
             let now = Instant::now();
             // Ask only the leader while it answers. Backfilled blocks carry no producer claim,
             // so a page from anyone else could be a valid alternative chain rather than the
-            // leader's; widening only on timeout limits that to a leader outage.
-            let (backfill_peers, leader_only) = {
-                let job = backfill_job.lock().await;
+            // leader's; widening only on timeout limits that to a leader outage. One guard spans
+            // both reads so the source set cannot change between them.
+            let (request, sources, leader_only) = {
+                let mut job = backfill_job.lock().await;
                 let leader = leadership.next_anchor_record().map(|record| record.leader);
-                match leader {
+                let (sources, leader_only) = match leader {
                     Some(leader)
-                        if backfill_peers.contains(&leader)
-                            && !job.is_unresponsive(&leader, now) =>
+                        if candidates.contains(&leader) && !job.is_unresponsive(&leader, now) =>
                     {
                         (vec![leader], true)
                     }
-                    _ => (backfill_peers, false),
-                }
-            };
-            let request = {
-                backfill_job
-                    .lock()
-                    .await
-                    .begin_request(&backfill_peers, now)
+                    _ => (candidates, false),
+                };
+                (job.begin_request(&sources, now), sources, leader_only)
             };
             let Some((request_id, request_peers)) = request else {
-                debug!(target: "zone::p2p", start, configured = backfill_peers.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
+                debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
                 continue;
             };
             let mut request_frame = Vec::with_capacity(16);
@@ -689,19 +693,10 @@ async fn run_commands(
             if !leader_only {
                 metrics::counter!("zone_p2p_backfill_requests_without_leader_total").increment(1);
             }
-            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), configured = backfill_peers.len(), leader_only, "Sent block backfill request");
+            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), sources = sources.len(), leader_only, "Sent block backfill request");
             continue;
         }
 
-        // Built only in arms that actually address a peer set — forwarding a transaction must
-        // not allocate one.
-        let others = || {
-            peers
-                .iter()
-                .filter(|peer| *peer != &local_ed25519_public_key)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
         match command {
             P2pCommand::BroadcastBlock(block) => {
                 // Mirror of the inbound transport check: the sender must lead somewhere in
@@ -1182,27 +1177,43 @@ mod tests {
         .await;
     }
 
-    #[test]
-    fn attestation_addresses_and_peer_sets_exclude_rpc_only_members() {
-        let identities = [41_u64, 42, 43, 44].map(ed25519_identity);
+    /// Manifest TOML for a topology with one `rpc_only` standby.
+    ///
+    /// Node `index` gets `secp256k1_identity(seed_base + index)`, except the standby, which
+    /// declares no address at all — the shape the loader requires.
+    fn manifest_with_standby(
+        identities: &[Ed25519Identity],
+        addresses: &[SocketAddr],
+        seed_base: u64,
+        standby: usize,
+    ) -> String {
         let mut input = format!(
             "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
             const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
-        for (index, identity) in identities.iter().enumerate() {
-            let rpc_only = index == 3;
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let rpc_only = index == standby;
             input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"127.0.0.1:{}\"\nrpc_only = {rpc_only}\n",
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
                 const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
-                9200 + index,
             ));
             if !rpc_only {
                 input.push_str(&format!(
                     "secp256k1_address = \"{}\"\n",
-                    secp256k1_identity(index as u64 + 41).address(),
+                    secp256k1_identity(seed_base + index as u64).address(),
                 ));
             }
         }
+        input
+    }
+
+    #[test]
+    fn attestation_addresses_and_peer_sets_exclude_rpc_only_members() {
+        let identities = [41_u64, 42, 43, 44].map(ed25519_identity);
+        let addresses: Vec<SocketAddr> = (0..4)
+            .map(|index| format!("127.0.0.1:{}", 9200 + index).parse().unwrap())
+            .collect();
+        let input = manifest_with_standby(&identities, &addresses, 41, 3);
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
         let config = P2pConfig {
             manifest: manifest.clone(),
@@ -1888,23 +1899,7 @@ mod tests {
             available_address(),
         ];
         let identities = [31_u64, 32, 33, 34].map(ed25519_identity);
-        let mut input = format!(
-            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
-            const_hex::encode_prefixed(identities[LEADER].ed25519_public_key().as_ref())
-        );
-        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
-            let rpc_only = index == RPC_FOLLOWER;
-            input.push_str(&format!(
-                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
-                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
-            ));
-            if !rpc_only {
-                input.push_str(&format!(
-                    "secp256k1_address = \"{}\"\n",
-                    secp256k1_identity(index as u64 + 31).address(),
-                ));
-            }
-        }
+        let input = manifest_with_standby(&identities, &addresses, 31, RPC_FOLLOWER);
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
         let leader_peer = identities[LEADER].ed25519_public_key();
         let rpc_follower_peer = identities[RPC_FOLLOWER].ed25519_public_key();

@@ -42,12 +42,10 @@ pub(crate) async fn validate_registered_sequencer_set(
     let quorum: Vec<_> = manifest.quorum_nodes().collect();
     let threshold_call = portal.sequencerThreshold().block(BlockId::finalized());
     let count_call = portal.sequencerCount().block(BlockId::finalized());
-    let registered = futures::future::try_join_all(quorum.iter().map(|node| {
-        let address = node
-            .secp256k1_address()
-            .expect("the manifest requires an address on every quorum node");
+    let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
+        let (name, address) = (node.name(), *address);
         let call = portal.isSequencer(address).block(BlockId::finalized());
-        async move { call.call().await.map(|ok| (node.name(), address, ok)) }
+        async move { call.call().await.map(|ok| (name, address, ok)) }
     }));
     let (threshold, registered_count, registered) =
         tokio::try_join!(threshold_call.call(), count_call.call(), registered)
@@ -60,7 +58,7 @@ pub(crate) async fn validate_registered_sequencer_set(
         );
     }
     eyre::ensure!(
-        threshold > 0 && U256::from(threshold) <= U256::from(quorum.len()),
+        threshold > 0 && usize::from(threshold) <= quorum.len(),
         "ZonePortal settlement threshold {threshold} is not reachable by the manifest's {} quorum nodes",
         quorum.len()
     );

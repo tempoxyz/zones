@@ -51,17 +51,14 @@ also give each node an individual secp256k1 key whose Ethereum address is
 registered with `ZonePortal`. 
 
 The authenticated-network namespace includes the P2P wire-protocol version,
-Tempo L1 chain ID, ZonePortal address, zone ID, and a digest of the manifest's
-settlement membership. The first four prevent nodes from different local, test, or production
-environments from connecting when a key or endpoint is accidentally reused.
+Tempo L1 chain ID, ZonePortal address, and zone ID. This keeps nodes from different local, test,
+or production environments from connecting when a key or endpoint is accidentally reused.
 
-The membership digest covers each member's Ed25519 identity, whether it is `rpc_only`, and the
-individual address its signatures must recover to. Roles are derived locally from each node's own
-manifest copy, so peers holding different copies would disagree about who settles — one collecting
-signatures from a member the other treats as a non-signing standby. Binding the digest into the
-handshake makes that disagreement a failure to authenticate rather than two views of the quorum.
-Changing membership therefore requires restarting every node together. Peer *addresses* are
-excluded from the digest, so relocating a node stays a rolling operation.
+Each node also logs a `membership_digest` covering every member's Ed25519 identity, `rpc_only`
+standing, and settlement address. It is diagnostic only — compare it across nodes to spot a
+manifest mismatch, whose symptom is settlement stalling because the leader collects signatures
+from a different set than it needs. Peer addresses are excluded, so relocating a node does not
+change it.
 
 ## Manifest example
 

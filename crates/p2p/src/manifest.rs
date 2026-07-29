@@ -41,18 +41,6 @@ pub enum Role {
     RpcFollower,
 }
 
-impl Role {
-    /// Whether this role replicates the leader's chain instead of producing blocks.
-    pub const fn follows_leader(self) -> bool {
-        matches!(self, Self::Follower | Self::RpcFollower)
-    }
-
-    /// Whether this role signs settlement attestations for the on-chain quorum.
-    pub const fn in_quorum(self) -> bool {
-        matches!(self, Self::Leader | Self::Follower)
-    }
-}
-
 /// One finalized leadership transition.
 ///
 /// A record authorizes `leader` for every Tempo anchor with
@@ -743,9 +731,16 @@ impl ZoneManifest {
         &self.nodes
     }
 
-    /// Nodes registered with `ZonePortal` for the on-chain settlement quorum.
-    pub fn quorum_nodes(&self) -> impl Iterator<Item = &ManifestNode> {
-        self.nodes.iter().filter(|node| !node.rpc_only)
+    /// Nodes registered with `ZonePortal` for the on-chain settlement quorum, each with the
+    /// address its settlement signatures must recover to.
+    ///
+    /// Filtering on the address rather than on `!rpc_only` is what lets this yield the address
+    /// directly: [`Self::parse`] accepts one exactly when the other holds, so no caller has to
+    /// re-discharge that invariant.
+    pub fn quorum_nodes(&self) -> impl Iterator<Item = (&ManifestNode, EthereumAddress)> {
+        self.nodes
+            .iter()
+            .filter_map(|node| Some((node, node.secp256k1_address?)))
     }
 
     /// Digest of the settlement-relevant membership, logged at startup.
@@ -1284,8 +1279,6 @@ mod tests {
         assert_eq!(manifest.bootstrap_role_of(&leader), Role::Leader);
         assert_eq!(manifest.bootstrap_role_of(&follower), Role::Follower);
         assert_eq!(manifest.bootstrap_role_of(&rpc_follower), Role::RpcFollower);
-        assert!(Role::RpcFollower.follows_leader());
-        assert!(!Role::RpcFollower.in_quorum());
 
         // The standby replicates, but the on-chain quorum is unchanged by its presence, and it
         // carries no address that could be registered with `ZonePortal`.
@@ -1294,7 +1287,7 @@ mod tests {
         assert!(
             manifest
                 .quorum_nodes()
-                .all(|node| node.ed25519_public_key() != &rpc_follower)
+                .all(|(node, _)| node.ed25519_public_key() != &rpc_follower)
         );
         let standby = manifest
             .node_by_ed25519_public_key(&rpc_follower)

@@ -151,8 +151,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         // is deliberately left without the shared sequencer key, which is also the zone's ECIES
         // private key for encrypted deposits and must not sit on an internet-facing host.
         let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
-        let should_sequence_blocks =
-            sequencer_enabled(args.enable_sequencer, manifest_mode, rpc_only);
+        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, p2p_config.as_ref());
         if rpc_only && (args.sequencer_key.is_some() || args.sequencer_key_file.is_some()) {
             return Err(eyre::eyre!(
                 "this node is `rpc_only` in the manifest, so --sequencer-key/--sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
@@ -459,8 +458,8 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
 ///
 /// `rpc_only` nodes are excluded: they never produce blocks and cannot be promoted without a
 /// restart, so they must not be given the shared sequencer key.
-const fn sequencer_enabled(cli_flag: bool, manifest_mode: bool, rpc_only: bool) -> bool {
-    (manifest_mode && !rpc_only) || cli_flag
+fn sequencer_enabled(cli_flag: bool, p2p_config: Option<&P2pConfig>) -> bool {
+    cli_flag || p2p_config.is_some_and(|config| !config.is_rpc_only())
 }
 
 fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
@@ -761,15 +760,12 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_configures_sequencer_resources_except_on_standbys() {
-        // Quorum followers must hold the complete leader construction so runtime promotion
-        // never requires a restart; activation is gated by the leadership schedule instead.
-        assert!(sequencer_enabled(false, true, false));
-        assert!(sequencer_enabled(true, true, false));
-        assert!(sequencer_enabled(true, false, false));
-        assert!(!sequencer_enabled(false, false, false));
-        // An rpc-only standby produces nothing, so it holds no shared sequencer key.
-        assert!(!sequencer_enabled(false, true, true));
+    fn sequencer_resources_follow_the_cli_flag_without_a_manifest() {
+        // Manifest mode is covered by `sequencer_enabled`'s other arm, which needs a real
+        // `P2pConfig`; see `manifest_mode_configures_sequencer_resources_except_on_standbys`
+        // in the integration tests.
+        assert!(sequencer_enabled(true, None));
+        assert!(!sequencer_enabled(false, None));
     }
 
     #[test]

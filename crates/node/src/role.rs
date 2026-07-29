@@ -506,11 +506,11 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
     let mut generation_id: u64 = 0;
     let mut current: Option<RunningGeneration> = None;
-    // The attestation addresses are the on-chain quorum, so this excludes rpc-only standbys.
-    // That is deliberate: a standby is never a catch-up source for a quorum node, so it never
-    // returns the backfill completion that carries tip evidence, and requiring evidence from
-    // one would block same-identity recovery forever.
-    let quorum_peers: Vec<P2pPeerId> = context.attestation.addresses.keys().cloned().collect();
+    // Standbys are excluded: one is never a catch-up source for a quorum node, so it never
+    // returns the backfill completion that carries tip evidence, and requiring evidence from one
+    // would block same-identity recovery forever.
+    let manifest_peers: Vec<P2pPeerId> = context.attestation.addresses.keys().cloned().collect();
+    let quorum_peers = context.schedule.quorum_peers(&manifest_peers);
 
     loop {
         // An rpc-only member is not registered with `ZonePortal`, so it can never be named
