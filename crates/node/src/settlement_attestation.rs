@@ -1,6 +1,6 @@
 //! Batch-boundary settlement attestation construction and leader-side proposal recovery.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
@@ -294,19 +294,8 @@ pub(crate) async fn collect_leader_settlements<P>(
         }
     };
 
-    let mut pending_boundary = None;
-    for number in 1..=head {
-        match propose_settlement(&provider, number, &commands, &context).await {
-            Ok(true) => {
-                pending_boundary = Some(number);
-                break;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                debug!(target: "zone::p2p", %err, number, "Skipped non-current settlement boundary during recovery")
-            }
-        }
-    }
+    let mut pending_boundary =
+        propose_persisted_settlement_range(&provider, &commands, &context, 1, head).await;
 
     let mut last_scanned = head;
     let mut retry = tokio::time::interval(Duration::from_secs(5));
@@ -422,8 +411,19 @@ async fn propose_persisted_settlement_range<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
+    scan_settlement_range(start, end, |candidate| {
+        propose_settlement(provider, candidate, commands, context)
+    })
+    .await
+}
+
+async fn scan_settlement_range<F, Fut>(start: u64, end: u64, mut propose: F) -> Option<u64>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = eyre::Result<bool>>,
+{
     for candidate in start..=end {
-        match propose_settlement(provider, candidate, commands, context).await {
+        match propose(candidate).await {
             Ok(true) => return Some(candidate),
             Ok(false) => {}
             Err(err) => {
@@ -473,7 +473,39 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use zone_sequencer::attestation::AttestationStore;
+
+    #[tokio::test]
+    async fn startup_recovery_retries_first_erroring_boundary() {
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let failed_once = failed_once.clone();
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                if number % 2 != 0 {
+                    return Ok(false);
+                }
+                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
+                    eyre::bail!("transient proposal failure");
+                }
+                Ok(number == 2)
+            }
+        };
+
+        let pending = scan_settlement_range(1, 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
+
+        let pending = scan_settlement_range(pending.unwrap(), 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2]);
+    }
 
     #[tokio::test]
     async fn submission_confirmation_wakes_pending_boundary_without_retry_tick() {
