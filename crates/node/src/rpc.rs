@@ -114,7 +114,7 @@ impl SequencerRpcContext {
 pub(crate) trait ZoneApi {
     /// Returns metadata for this Zone.
     #[method(name = "getZoneInfo")]
-    async fn get_zone_info(&self) -> RpcResult<Box<serde_json::value::RawValue>>;
+    async fn get_zone_info(&self) -> RpcResult<ZoneInfoResponse>;
 
     /// Returns the encryption key active at the current Tempo L1 head.
     #[method(name = "getEncryptionKey")]
@@ -154,7 +154,7 @@ impl<P> ZoneApiServer for PublicZoneApi<P>
 where
     P: StateProviderFactory + Clone + Send + Sync + 'static,
 {
-    async fn get_zone_info(&self) -> RpcResult<Box<serde_json::value::RawValue>> {
+    async fn get_zone_info(&self) -> RpcResult<ZoneInfoResponse> {
         let tempo_block_number = self
             .zone_provider
             .latest()
@@ -255,7 +255,7 @@ async fn zone_info(
     portal_address: Address,
     tempo_block_number: u64,
     l1_provider: &DynProvider<TempoNetwork>,
-) -> Result<Box<serde_json::value::RawValue>, JsonRpcError> {
+) -> Result<ZoneInfoResponse, JsonRpcError> {
     let portal = ZonePortal::new(portal_address, l1_provider);
     let (zone_tokens, sequencers, is_access_enforced, is_gateway_open) = tokio::try_join!(
         zone_tokens(portal_address, l1_provider),
@@ -276,7 +276,7 @@ async fn zone_info(
         },
     )?;
 
-    to_raw(&ZoneInfoResponse {
+    Ok(ZoneInfoResponse {
         zone_id: U64::from(zone_id),
         is_access_enforced,
         is_gateway_open,
@@ -1114,14 +1114,15 @@ where
                 .call()
                 .await
                 .map_err(internal)?;
-            zone_info(
+            let info = zone_info(
                 self.config.zone_id,
                 self.config.chain_id,
                 self.config.zone_portal,
                 tempo_block_number,
                 &self.l1_provider,
             )
-            .await
+            .await?;
+            to_raw(&info)
         })
     }
 
