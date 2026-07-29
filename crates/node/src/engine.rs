@@ -56,10 +56,10 @@ use zone_l1::{DepositQueue, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Per-anchor production permit backed by the leadership schedule.
+/// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if
-/// `schedule.leader_for(N)` is this node.
+/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or an
+/// active bounded forced-recovery override assigns `N` to this node.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -571,6 +571,7 @@ mod tests {
 
     #[test]
     fn production_permit_is_a_single_schedule_lookup() {
+        use alloy_primitives::B256;
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use zone_p2p::LeadershipState;
 
@@ -578,14 +579,30 @@ mod tests {
         let other = PrivateKey::from_seed(2).public_key();
         let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, me.clone(), 0));
         schedule
-            .publish(LeadershipState::new(2, other, 100))
+            .publish(LeadershipState::new(2, other.clone(), 100))
             .unwrap();
-        let permit = ProductionPermit::new(schedule, me);
+        let permit = ProductionPermit::new(schedule, me.clone());
 
         assert_eq!(permit.check(0), PermitDecision::Produce);
         assert_eq!(permit.check(99), PermitDecision::Produce);
         assert_eq!(permit.check(100), PermitDecision::Demoted { epoch: 2 });
         assert_eq!(permit.check(u64::MAX), PermitDecision::Demoted { epoch: 2 });
+
+        let recovery_schedule = LeadershipSchedule::seeded(LeadershipState::new(7, me, 0));
+        recovery_schedule
+            .prepare_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
+            .unwrap();
+        recovery_schedule
+            .publish(LeadershipState::new(8, other.clone(), 60))
+            .unwrap();
+        let recovery_permit = ProductionPermit::new(recovery_schedule, other);
+        assert_eq!(
+            recovery_permit.check(50),
+            PermitDecision::Demoted { epoch: 7 }
+        );
+        assert_eq!(recovery_permit.check(51), PermitDecision::Produce);
+        assert_eq!(recovery_permit.check(59), PermitDecision::Produce);
+        assert_eq!(recovery_permit.check(60), PermitDecision::Produce);
 
         let uninitialized = ProductionPermit::new(
             LeadershipSchedule::uninitialized(),
