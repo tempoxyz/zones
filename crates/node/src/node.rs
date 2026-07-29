@@ -576,21 +576,27 @@ where
             let (sinks, commands) =
                 Self::launch_p2p_network(config, network_id, &task_executor, backfill_requests_tx)?;
 
-            // Operator RPC handles: every node holds a wallet-backed L1 provider signing
-            // with its individual key so any member can relay setLeader.
+            // Operator RPC handles: every quorum member holds a wallet-backed L1 provider
+            // signing with its individual key so any of them can relay setLeader. An rpc-only
+            // standby holds no individual key, so it cannot relay and gets no provider.
             let role_status: SharedRoleStatus = Default::default();
             let peer_tips = PeerTipRegistry::default();
-            let relayer = {
-                use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
-                alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                    .with_nonce_key_filler()
-                    .wallet(alloy_network::EthereumWallet::from(individual_signer))
-                    .connect_with_config(
-                        &self.l1_config.l1_rpc_url,
-                        rpc_connection_config(self.l1_config.retry_connection_interval),
+            let relayer = match individual_signer {
+                Some(signer) => {
+                    use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
+                    Some(
+                        alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                            .with_nonce_key_filler()
+                            .wallet(alloy_network::EthereumWallet::from(signer))
+                            .connect_with_config(
+                                &self.l1_config.l1_rpc_url,
+                                rpc_connection_config(self.l1_config.retry_connection_interval),
+                            )
+                            .await?
+                            .erased(),
                     )
-                    .await?
-                    .erased()
+                }
+                None => None,
             };
             sequencer_rpc_slot
                 .set(SequencerRpcContext::new(

@@ -114,13 +114,12 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 let ed25519_key_path = args.p2p_key.as_ref().ok_or_else(|| {
                     eyre::eyre!("--p2p.key is required with --sequencer.manifest")
                 })?;
-                let secp256k1_key_path = args.secp256k1_key.as_ref().ok_or_else(|| {
-                    eyre::eyre!("--secp256k1.key is required with --sequencer.manifest")
-                })?;
+                // Required for a quorum member and rejected for an `rpc_only` node, which never
+                // signs a settlement attestation; the manifest decides which this node is.
                 P2pConfig::load(
                     manifest_path,
                     ed25519_key_path,
-                    secp256k1_key_path,
+                    args.secp256k1_key.as_ref(),
                     args.p2p_listen,
                     args.p2p_bypass_ip_check,
                     args.zone_id,
@@ -132,7 +131,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             info!(
                 target: "reth::cli",
                 ed25519_public_key = %config.ed25519_public_key(),
-                secp256k1_address = %config.secp256k1_address(),
+                secp256k1_address = ?config.secp256k1_address(),
                 listen = %config.listen(),
                 "Validated multi-sequencer manifest and local identity"
             );
@@ -181,8 +180,11 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
                 .expect("sequencer signer is parsed whenever sequencing is enabled");
-            let l1_transaction_signer =
-                p2p_config.as_ref().map(P2pConfig::block_attestation_signer);
+            // `None` on an rpc-only node: it holds no individual key, and it is never the
+            // scheduled leader, so it never submits an L1 settlement transaction.
+            let l1_transaction_signer = p2p_config
+                .as_ref()
+                .and_then(P2pConfig::block_attestation_signer);
             node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                 sequencer_signer,
                 l1_transaction_signer,
@@ -287,7 +289,7 @@ pub struct ZoneArgs {
         long = "sequencer.manifest",
         env = "SEQUENCER_MANIFEST",
         value_name = "PATH",
-        requires_all = ["p2p_key", "secp256k1_key"],
+        requires = "p2p_key",
         conflicts_with = "enable_sequencer"
     )]
     pub sequencer_manifest: Option<PathBuf>,
@@ -330,6 +332,8 @@ pub struct ZoneArgs {
     pub p2p_bypass_ip_check: bool,
 
     /// (Optional) Checked against the role derived from the manifest.
+    ///
+    /// One of `leader`, `follower`, or `rpc-follower`.
     #[arg(
         long = "sequencer.role",
         env = "SEQUENCER_ROLE",
@@ -471,7 +475,7 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url,
+        Role, ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url,
         validate_portal_address,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
@@ -749,6 +753,30 @@ mod tests {
         assert!(sequencer_enabled(true, true));
         assert!(sequencer_enabled(true, false));
         assert!(!sequencer_enabled(false, false));
+    }
+
+    #[test]
+    fn sequencer_role_argument_accepts_the_rpc_follower_spelling() {
+        let parsed = ZoneArgsParser::try_parse_from([
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+            "--sequencer-key",
+            "0x01",
+            "--sequencer.manifest",
+            "zone.toml",
+            "--p2p.key",
+            "node.key",
+            "--sequencer.role",
+            "rpc-follower",
+        ])
+        .unwrap();
+        assert_eq!(parsed.zone.sequencer_role, Some(Role::RpcFollower));
+        // An rpc-only node holds no individual secp256k1 key, so the flag is not required
+        // alongside the manifest; the manifest decides whether one is expected.
+        assert_eq!(parsed.zone.secp256k1_key, None);
     }
 
     #[test]

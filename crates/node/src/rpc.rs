@@ -79,11 +79,13 @@ pub struct SequencerRpcContext {
     /// Validated static topology manifest.
     pub manifest: Arc<ZoneManifest>,
     /// This node's individual secp256k1 address (the `setLeader` relayer identity).
-    pub local_secp256k1_address: Address,
+    ///
+    /// `None` on an rpc-only member: it holds no individual key, so it cannot relay.
+    pub local_secp256k1_address: Option<Address>,
     /// This node's Ed25519 public key.
     pub local_ed25519_public_key: zone_p2p::P2pPeerId,
-    /// Wallet-backed L1 provider signing with the individual key.
-    pub relayer: DynProvider<TempoNetwork>,
+    /// Wallet-backed L1 provider signing with the individual key, when this node holds one.
+    pub relayer: Option<DynProvider<TempoNetwork>>,
 }
 
 impl SequencerRpcContext {
@@ -93,9 +95,9 @@ impl SequencerRpcContext {
         status: SharedRoleStatus,
         peer_tips: PeerTipRegistry,
         manifest: Arc<ZoneManifest>,
-        local_secp256k1_address: Address,
+        local_secp256k1_address: Option<Address>,
         local_ed25519_public_key: zone_p2p::P2pPeerId,
-        relayer: DynProvider<TempoNetwork>,
+        relayer: Option<DynProvider<TempoNetwork>>,
     ) -> Self {
         Self {
             schedule,
@@ -332,9 +334,7 @@ where
         let node = context.manifest.node_by_ed25519_public_key(&record.leader);
         ActiveLeaderInfo {
             name: node.map(|node| node.name().to_owned()),
-            sequencer_address: node
-                .map(|node| node.secp256k1_address())
-                .unwrap_or_default(),
+            sequencer_address: node.and_then(|node| node.secp256k1_address()),
             p2p_public_key: record.leader.to_string(),
             epoch: U64::from(record.epoch),
             activation_tempo_block: U64::from(record.activation_tempo_block),
@@ -354,6 +354,7 @@ where
         .map(|node| SequencerPeerInfo {
             name: node.name().to_owned(),
             sequencer_address: node.secp256k1_address(),
+            rpc_only: node.is_rpc_only(),
             is_local: node.ed25519_public_key() == &context.local_ed25519_public_key,
             tip: tips.get(node.ed25519_public_key()).map(|tip| PeerTipInfo {
                 zone_height: U64::from(tip.zone_height),
@@ -1155,7 +1156,16 @@ async fn set_leader(
 
     // The public endpoint is intentionally unauthenticated. The transaction itself is still
     // signed by this node's individual sequencer key, and the portal enforces relayer authority.
-    let portal = ZonePortal::new(portal_address, &context.relayer);
+    // An rpc-only node holds no such key, so it cannot relay: operators call this on a quorum
+    // member instead.
+    let (Some(relayer), Some(relayer_address)) =
+        (context.relayer.as_ref(), context.local_secp256k1_address)
+    else {
+        return Err(JsonRpcError::invalid_params(
+            "zone_setLeader requires a node holding an individual secp256k1 key; this node is rpc-only",
+        ));
+    };
+    let portal = ZonePortal::new(portal_address, relayer);
 
     // The target must be a manifest member and a registered portal sequencer.
     if context.manifest.node_by_secp256k1_address(target).is_none() {
@@ -1187,7 +1197,7 @@ async fn set_leader(
         return Ok(SetLeaderResponse {
             status: "alreadyActive".to_owned(),
             tx_hash: None,
-            relayer: context.local_secp256k1_address,
+            relayer: relayer_address,
             requested_leader: target,
         });
     }
@@ -1213,7 +1223,7 @@ async fn set_leader(
     Ok(SetLeaderResponse {
         status: "submitted".to_owned(),
         tx_hash: Some(tx_hash),
-        relayer: context.local_secp256k1_address,
+        relayer: relayer_address,
         requested_leader: target,
     })
 }

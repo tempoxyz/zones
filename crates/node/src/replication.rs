@@ -44,7 +44,8 @@ use crate::settlement_attestation::build_settlement_attestation;
 #[derive(Clone)]
 pub(crate) struct AttestationContext {
     pub(crate) domain: AttestationDomain,
-    pub(crate) signer: PrivateKeySigner,
+    /// `None` on an rpc-only member: it holds no individual key and never signs.
+    pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
     pub(crate) store: Option<AttestationStore>,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
@@ -54,7 +55,7 @@ pub(crate) struct AttestationContext {
 impl AttestationContext {
     pub(crate) fn new(
         domain: AttestationDomain,
-        signer: PrivateKeySigner,
+        signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
         store: Option<AttestationStore>,
         l1_provider: DynProvider<TempoNetwork>,
@@ -660,10 +661,15 @@ pub(crate) async fn run_follower_block_sync<P>(
                             ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
                             eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
 
+                            // Unreachable on an rpc-only member: the P2P layer never routes a
+                            // proposal to one. Fails closed rather than panicking if it ever does.
+                            let signer = attestation.signer.as_ref().ok_or_eyre(
+                                "this node holds no individual secp256k1 key, so it cannot sign a settlement attestation",
+                            )?;
                             let signed = SignedSettlementAttestation::sign(
                                 proposal,
                                 attestation.domain,
-                                &attestation.signer,
+                                signer,
                             )?;
 
                             // Return the signed settlement attestation to the peer that

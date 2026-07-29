@@ -452,8 +452,12 @@ where
     else {
         return Ok(false);
     };
+    let signer_key = context
+        .signer
+        .as_ref()
+        .ok_or_eyre("this node holds no individual secp256k1 key, so it cannot settle")?;
     let signed =
-        SignedSettlementAttestation::sign(attestation.clone(), context.domain, &context.signer)?;
+        SignedSettlementAttestation::sign(attestation.clone(), context.domain, signer_key)?;
     let signer = signed.recover_signer(context.domain)?;
     let (_, signatures) = context
         .store

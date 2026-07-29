@@ -3479,7 +3479,7 @@ pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2
         configs.push(P2pConfig::load(
             &manifest_path,
             &key_path,
-            &secp256k1_key_path,
+            Some(&secp256k1_key_path),
             addresses[index],
             false,
             0,
@@ -3576,7 +3576,7 @@ pub(crate) fn leader_p2p_config(listen: SocketAddr) -> eyre::Result<P2pConfig> {
     let config = P2pConfig::load(
         &manifest_path,
         &key_path,
-        &secp256k1_key_path,
+        Some(&secp256k1_key_path),
         listen,
         false,
         0,
