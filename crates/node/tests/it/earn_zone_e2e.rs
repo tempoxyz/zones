@@ -592,7 +592,7 @@ impl EarnZoneFixture {
             .await?;
         let provider = self.zone.provider();
         let registry = Check403Registry {
-            provider: &provider,
+            provider,
             token: self.earn_share,
         };
         let recipient_authorized = registry

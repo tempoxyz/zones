@@ -17,8 +17,8 @@ use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_regist
 use zone_precompiles::ZONE_FEE_MANAGER_ADDRESS;
 
 use crate::utils::{
-    Check403Registry, DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS,
-    seed_raw_tip403_policy, seed_raw_tip403_token_policy, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, PolicySeed, TEST_MNEMONIC, TIP20_TX_GAS, seed_raw_tip403_policy,
+    seed_raw_tip403_token_policy, start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to Alice, then transfer a portion to Bob on the zone.
@@ -178,11 +178,8 @@ async fn test_policy_proxy_whitelist_authorization() -> eyre::Result<()> {
 
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
-    fixture.seed_no_receive_policy(alice)?;
-    fixture.seed_no_receive_policy(bob)?;
 
     // Populate raw L1 state at block 1.
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 1, PATH_USD_ADDRESS, 5);
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -195,11 +192,7 @@ async fn test_policy_proxy_whitelist_authorization() -> eyre::Result<()> {
     fixture.inject_empty_blocks(zone.deposit_queue(), 3);
     zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
 
-    let provider = zone.provider();
-    let registry = Check403Registry {
-        provider: &provider,
-        token: PATH_USD_ADDRESS,
-    };
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob], 1, 5)?;
 
     // Alice is whitelisted → authorized
     let alice_authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
@@ -223,11 +216,8 @@ async fn test_policy_proxy_blacklist_authorization() -> eyre::Result<()> {
 
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
-    fixture.seed_no_receive_policy(alice)?;
-    fixture.seed_no_receive_policy(bob)?;
 
     // Populate raw L1 state at block 1.
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 1, PATH_USD_ADDRESS, 5);
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -240,11 +230,7 @@ async fn test_policy_proxy_blacklist_authorization() -> eyre::Result<()> {
     fixture.inject_empty_blocks(zone.deposit_queue(), 3);
     zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
 
-    let provider = zone.provider();
-    let registry = Check403Registry {
-        provider: &provider,
-        token: PATH_USD_ADDRESS,
-    };
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob], 1, 5)?;
 
     // Alice is in blacklist → NOT authorized
     let alice_authorized = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
@@ -269,13 +255,10 @@ async fn test_policy_proxy_compound_policy() -> eyre::Result<()> {
 
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
-    fixture.seed_no_receive_policy(alice)?;
-    fixture.seed_no_receive_policy(bob)?;
 
     // Seed the compound policy graph at block 1.
     // Policy 5 = sender whitelist, policy 6 = recipient blacklist; compound policy 10
     // references them.
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 1, PATH_USD_ADDRESS, 10);
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -289,11 +272,7 @@ async fn test_policy_proxy_compound_policy() -> eyre::Result<()> {
     fixture.inject_empty_blocks(zone.deposit_queue(), 3);
     zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
 
-    let provider = zone.provider();
-    let registry = Check403Registry {
-        provider: &provider,
-        token: PATH_USD_ADDRESS,
-    };
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob], 1, 10)?;
 
     // Alice is in sender whitelist → authorized as sender
     let alice_sender = registry.is_auth_as(alice, alice, AuthRole::Sender).await;
@@ -317,14 +296,8 @@ async fn test_policy_proxy_builtin_policies() -> eyre::Result<()> {
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
     let alice = address!("0x000000000000000000000000000000000000A11C");
-    fixture.seed_no_receive_policy(alice)?;
-    let provider = zone.provider();
-    let registry = Check403Registry {
-        provider: &provider,
-        token: PATH_USD_ADDRESS,
-    };
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice], 1, 0)?;
 
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 1, PATH_USD_ADDRESS, 0);
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
     assert!(
@@ -332,7 +305,7 @@ async fn test_policy_proxy_builtin_policies() -> eyre::Result<()> {
         "policy 0 should reject all"
     );
 
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 2, PATH_USD_ADDRESS, 1);
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice], 2, 1)?;
     fixture.inject_empty_block(zone.deposit_queue());
     zone.wait_for_tempo_block_number(2, DEFAULT_TIMEOUT).await?;
     assert!(
@@ -379,12 +352,8 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
     let carol = address!("0x000000000000000000000000000000000000CA01");
-    fixture.seed_no_receive_policy(alice)?;
-    fixture.seed_no_receive_policy(bob)?;
-    fixture.seed_no_receive_policy(carol)?;
 
     // Seed the complete policy membership at block 1.
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 1, PATH_USD_ADDRESS, 10);
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -406,11 +375,8 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
     fixture.inject_empty_blocks(zone.deposit_queue(), 3);
     zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
 
-    let provider = zone.provider();
-    let registry = Check403Registry {
-        provider: &provider,
-        token: PATH_USD_ADDRESS,
-    };
+    let registry =
+        fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice, bob, carol], 1, 10)?;
 
     // Alice: whitelisted as sender + NOT in recipient blacklist → true
     let alice_auth = registry.is_auth_as(alice, alice, AuthRole::Transfer).await;
@@ -444,15 +410,8 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
     let alice = address!("0x000000000000000000000000000000000000A11C");
-    let provider = zone.provider();
-    let registry = Check403Registry {
-        provider: &provider,
-        token: PATH_USD_ADDRESS,
-    };
-    fixture.seed_no_receive_policy(alice)?;
-
     // Step 1: materialize block-1 state before accepting block 1, then query at anchor 1.
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 1, PATH_USD_ADDRESS, 5);
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice], 1, 5)?;
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         1,
@@ -485,7 +444,7 @@ async fn test_policy_proxy_uses_block_versioned_raw_state() -> eyre::Result<()> 
     assert!(!authorized, "alice should NOT be authorized at block 2");
 
     // Step 3: materialize the compound policy before accepting block 3.
-    seed_raw_tip403_token_policy(&mut zone.l1_state_cache().lock(), 3, PATH_USD_ADDRESS, 10);
+    let registry = fixture.tip403_registry_check(&zone, PATH_USD_ADDRESS, &[alice], 3, 10)?;
     seed_raw_tip403_policy(
         zone.l1_state_cache(),
         3,

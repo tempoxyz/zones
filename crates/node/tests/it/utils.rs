@@ -413,14 +413,14 @@ async fn handle_test_l1_rpc_request(
 /// Helper to check TIP-403 authorization through a TIP-20 operation.
 ///
 /// Direct zone calls to the TIP-403 registry are forbidden, so tests use an internal consumer.
-pub(crate) struct Check403Registry<'a> {
-    pub(crate) provider: &'a DynProvider,
+pub(crate) struct Check403Registry {
+    pub(crate) provider: DynProvider,
     pub(crate) token: Address,
 }
 
-impl Check403Registry<'_> {
+impl Check403Registry {
     pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
-        let token = ITIP20::new(self.token, self.provider);
+        let token = ITIP20::new(self.token, &self.provider);
         match role {
             AuthRole::Transfer => token
                 .transfer(from, U256::ZERO)
@@ -4201,6 +4201,30 @@ impl L1Fixture {
             .lock()
             .unwrap()
             .push(enabled_tokens.clone());
+    }
+
+    /// Build a TIP-403 checker and seed the token and account policy state it consumes.
+    pub(crate) fn tip403_registry_check(
+        &self,
+        zone: &ZoneTestNode,
+        token: Address,
+        no_receive_policy_accounts: &[Address],
+        block_number: u64,
+        policy_id: u64,
+    ) -> eyre::Result<Check403Registry> {
+        for &account in no_receive_policy_accounts {
+            self.seed_no_receive_policy_at(block_number, account)?;
+        }
+        seed_raw_tip403_token_policy(
+            &mut zone.l1_state_cache().lock(),
+            block_number,
+            token,
+            policy_id,
+        );
+        Ok(Check403Registry {
+            provider: zone.provider(),
+            token,
+        })
     }
 
     /// Seed the absence of an address-level TIP-403 receive policy at the current Zone anchor.
