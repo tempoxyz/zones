@@ -113,8 +113,8 @@ The manifest loader validates that:
 - the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
 
-At startup the node also checks the manifest against `ZonePortal` at the finalized head, and
-refuses to start unless every quorum node's `secp256k1_address` is a registered portal sequencer
+At startup, once the portal is deployed, the node also checks the manifest against `ZonePortal`
+and refuses to start unless every quorum node's `secp256k1_address` is a registered portal sequencer
 and `sequencerThreshold()` is nonzero and reachable by the manifest quorum. Both would otherwise
 surface as stalled settlement at the next batch boundary.
 

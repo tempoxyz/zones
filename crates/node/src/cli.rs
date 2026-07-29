@@ -619,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_requires_node_keys_and_conflicts_with_legacy_sequencer() {
+    fn manifest_mode_requires_the_p2p_key_and_conflicts_with_legacy_sequencer() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -641,17 +641,17 @@ mod tests {
             clap::error::ErrorKind::MissingRequiredArgument
         );
 
-        let missing_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+        // `--secp256k1.key` is deliberately not a parse-time requirement: an `rpc_only` node
+        // holds no individual key. Whether one is expected is decided against the manifest in
+        // `ZoneManifest::validate_node`.
+        let without_secp256k1_key = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
             "node.key",
         ]))
-        .unwrap_err();
-        assert_eq!(
-            missing_secp256k1_key.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
+        .unwrap();
+        assert_eq!(without_secp256k1_key.zone.secp256k1_key, None);
 
         let conflict = ZoneArgsParser::try_parse_from(common.into_iter().chain([
             "--sequencer.manifest",

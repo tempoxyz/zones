@@ -27,24 +27,45 @@ use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttesta
 ///
 /// A quorum node the portal has not registered can never settle, and an unreachable threshold
 /// stalls settlement — both otherwise surface as a mysterious stall at the next batch boundary.
-/// Read at the finalized head, like every other portal read.
 ///
 /// Extra registered signers only warn: deregistering is a cleanup task, and failing on it would
 /// make every membership change a window in which no node can start.
+///
+/// Skipped when no portal is deployed yet, matching `seed_leadership_schedule`: a zone whose
+/// creation block has not replayed has nothing to reconcile against.
 pub(crate) async fn validate_registered_sequencer_set(
     manifest: &zone_p2p::ZoneManifest,
     portal_address: alloy_primitives::Address,
     l1_provider: &alloy_provider::DynProvider<tempo_alloy::TempoNetwork>,
 ) -> eyre::Result<()> {
-    use alloy_eips::BlockId;
+    // No portal configured (dev and test harnesses) means there is nothing to reconcile against.
+    if portal_address.is_zero() {
+        info!(target: "zone::p2p", "No ZonePortal configured; skipping the manifest quorum check");
+        return Ok(());
+    }
+    let portal_code = l1_provider
+        .get_code_at(portal_address)
+        .await
+        .map_err(|err| eyre::eyre!("failed to check portal {portal_address} deployment: {err}"))?;
+    if portal_code.is_empty() {
+        info!(
+            target: "zone::p2p",
+            %portal_address,
+            "Portal is not deployed yet; skipping the manifest quorum check"
+        );
+        return Ok(());
+    }
 
+    // Read at the chain tip rather than the finalized head: a fresh or local L1 may have no
+    // finalized block at all, and an unfinalized registration satisfying this check early is
+    // harmless for a startup sanity check.
     let portal = ZonePortal::new(portal_address, l1_provider);
     let quorum: Vec<_> = manifest.quorum_nodes().collect();
-    let threshold_call = portal.sequencerThreshold().block(BlockId::finalized());
-    let count_call = portal.sequencerCount().block(BlockId::finalized());
+    let threshold_call = portal.sequencerThreshold();
+    let count_call = portal.sequencerCount();
     let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
         let (name, address) = (node.name(), *address);
-        let call = portal.isSequencer(address).block(BlockId::finalized());
+        let call = portal.isSequencer(address);
         async move { call.call().await.map(|ok| (name, address, ok)) }
     }));
     let (threshold, registered_count, registered) =
