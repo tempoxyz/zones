@@ -177,6 +177,7 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
             leadership_sink: None,
+            encryption_keys: None,
         },
         local_state,
         deposit_sink: DepositSink::Queue(DepositQueue::default()),
@@ -231,6 +232,7 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
             symbol: "aUSD".to_owned(),
             currency: "USD".to_owned(),
         }],
+        encryption_key_rotations: vec![],
         leader_transitions: vec![],
     };
     let deposits: Vec<_> = events
@@ -1126,6 +1128,15 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         U256::ZERO,
     )
     .expect("encrypted deposit should be valid");
+    let encryption_keys = EncryptionKeyRing::new([sequencer_key.clone()]);
+    encryption_keys
+        .apply_rotation(&EncryptionKeyRotation {
+            x: seq_pub_x,
+            y_parity: seq_pub_y_parity,
+            key_index: U256::ZERO,
+            activation_block: block_number,
+        })
+        .unwrap();
 
     let block = L1BlockDeposits {
         header: seal(make_test_header(block_number)),
@@ -1145,7 +1156,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
     };
 
     let prepared = block
-        .prepare(&sequencer_key, portal)
+        .prepare(&encryption_keys, portal)
         .await
         .expect("decrypted deposit should prepare without an engine-side policy read");
 
@@ -1158,6 +1169,93 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         prepared.decryptions.len(),
         1,
         "successfully decrypted deposits must provide on-chain decryption data"
+    );
+}
+
+#[tokio::test]
+async fn encrypted_deposits_select_the_private_key_by_portal_index() {
+    let token = address!("0x0000000000000000000000000000000000001000");
+    let sender = address!("0x0000000000000000000000000000000000001234");
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let old = k256::SecretKey::from_slice(&[0x11; 32]).unwrap();
+    let current = k256::SecretKey::from_slice(&[0x22; 32]).unwrap();
+    let encryption_keys = EncryptionKeyRing::new([old.clone(), current.clone()]);
+    let mut deposits = Vec::new();
+    let mut expected_shared_secrets = Vec::new();
+
+    for (key_index, key, recipient) in [
+        (
+            U256::ZERO,
+            old,
+            address!("0x000000000000000000000000000000000000BEEF"),
+        ),
+        (
+            U256::from(1),
+            current,
+            address!("0x000000000000000000000000000000000000CAFE"),
+        ),
+    ] {
+        let public = key.public_key();
+        let (x, y_parity) = crate::precompiles::ecies::compressed_x_and_parity(public.as_affine());
+        encryption_keys
+            .apply_rotation(&EncryptionKeyRotation {
+                x,
+                y_parity,
+                key_index,
+                activation_block: key_index.to::<u64>() + 10,
+            })
+            .unwrap();
+        let encrypted = crate::precompiles::ecies::encrypt_deposit(
+            &x,
+            y_parity,
+            recipient,
+            B256::ZERO,
+            portal,
+            key_index,
+        )
+        .unwrap();
+        let decrypted = crate::precompiles::ecies::decrypt_deposit(
+            &key,
+            &encrypted.eph_pub_x,
+            encrypted.eph_pub_y_parity,
+            &encrypted.ciphertext,
+            &encrypted.nonce,
+            &encrypted.tag,
+            portal,
+            key_index,
+        )
+        .unwrap();
+        expected_shared_secrets.push(decrypted.proof.shared_secret);
+        deposits.push(L1Deposit::Encrypted(EncryptedDeposit {
+            token,
+            sender,
+            amount: 1_000_000,
+            fee: 0,
+            tempo_refund_recipient: sender,
+            key_index,
+            ephemeral_pubkey_x: encrypted.eph_pub_x,
+            ephemeral_pubkey_y_parity: encrypted.eph_pub_y_parity,
+            ciphertext: encrypted.ciphertext,
+            nonce: encrypted.nonce,
+            tag: encrypted.tag,
+        }));
+    }
+
+    let prepared = L1BlockDeposits {
+        header: seal(make_test_header(20)),
+        events: L1PortalEvents::from_deposits(deposits),
+    }
+    .prepare(&encryption_keys, portal)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .decryptions
+            .iter()
+            .map(|decryption| decryption.sharedSecret)
+            .collect::<Vec<_>>(),
+        expected_shared_secrets
     );
 }
 
@@ -1437,6 +1535,52 @@ fn leader_updated_log(
         },
         ..Default::default()
     }
+}
+
+fn encryption_key_updated_log(
+    portal: Address,
+    x: B256,
+    y_parity: u8,
+    key_index: U256,
+    activation_block: u64,
+) -> Log {
+    let event = crate::abi::ZonePortal::SequencerEncryptionKeyUpdated {
+        x,
+        yParity: y_parity,
+        keyIndex: key_index,
+        activationBlock: activation_block,
+    };
+    Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn decodes_encryption_key_rotation_into_portal_events() {
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let x = B256::repeat_byte(0x42);
+    let mut events = L1PortalEvents::default();
+
+    events
+        .push_log(
+            &encryption_key_updated_log(portal, x, 0x03, U256::from(7), 77),
+            77,
+        )
+        .unwrap();
+
+    assert_eq!(
+        events.encryption_key_rotations,
+        vec![EncryptionKeyRotation {
+            x,
+            y_parity: 0x03,
+            key_index: U256::from(7),
+            activation_block: 77,
+        }]
+    );
 }
 
 #[test]

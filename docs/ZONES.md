@@ -259,6 +259,12 @@ just send-deposit-encrypted 1000000                       # to your own address
 just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
 ```
 
+Before registering a replacement encryption key, add its private key to
+`--deposit-decryption-keys-file`, restart every node that may sequence, and confirm the nodes are
+healthy. Keep each previous key in the file while the Portal still accepts deposits for it during
+the rotation grace period. File order does not matter: finalized Portal registrations bind each
+configured key to its on-chain index. The active sequencer key is included automatically.
+
 Set `ZONE_RPC_URL` to poll the zone for processing confirmation:
 
 ```bash
@@ -613,6 +619,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled; conflicts with `--sequencer-key-file` |
 | `--sequencer-key-file` | (optional) | File or FIFO containing the sequencer private key; avoids exposing it in process arguments |
+| `--deposit-decryption-keys-file` | (optional) | File containing additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
 | `--zone.poll-interval-secs` | 1 | Fallback interval for reconciling the canonical Zone head when no native notification arrives |
@@ -630,6 +637,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `L1_RPC_URL` | Yes | Certified Tempo follower WebSocket RPC URL (`wss://...`) |
 | `SEQUENCER_KEY` | For sequencing | Sequencer private key |
 | `SEQUENCER_KEY_FILE` | For sequencing | File or FIFO containing the sequencer private key |
+| `DEPOSIT_DECRYPTION_KEYS_FILE` | During encryption-key rotation | Additional historical or pre-provisioned deposit decryption keys, one hex key per line |
 | `ADMIN_KEY` | For portal governance | Portal admin private key for `enableToken` / deposit pause controls. `SEQUENCER_KEY` only works for legacy zones where admin == sequencer. |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |

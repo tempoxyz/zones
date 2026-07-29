@@ -1988,6 +1988,142 @@ async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient
     Ok(())
 }
 
+/// Both the current key and a historical key accepted during rotation grace must decrypt.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_encrypted_deposit_old_key_during_grace_mints_after_rotation() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    use k256::{AffinePoint, ProjectivePoint, Scalar};
+    use tempo_contracts::precompiles::ITIP20;
+    use tempo_zone_contracts::EncryptedDepositPayload;
+    use zone_precompiles::ecies;
+
+    let l1 = L1TestNode::start().await?;
+    let current_key = k256::SecretKey::from(l1.dev_signer().credential());
+    let old_key = k256::SecretKey::from_slice(&[0x42; 32])?;
+    let portal_address = l1.deploy_zone().await?;
+
+    // Register both keys before startup so the node must reconstruct their index bindings from
+    // the Portal snapshot at its persisted L1 anchor.
+    l1.set_sequencer_encryption_key(portal_address, &old_key)
+        .await?;
+    l1.set_sequencer_encryption_key(portal_address, &current_key)
+        .await?;
+
+    let zone = ZoneTestNode::start_from_l1_with_decryption_keys(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        vec![old_key.clone()],
+    )
+    .await?;
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    let depositor = l1.user_signer();
+    let provider = l1.provider_with_signer(depositor.clone());
+    let portal = ZonePortal::new(portal_address, &provider);
+    assert_eq!(portal.encryptionKeyCount().call().await?, U256::from(2));
+    assert!(
+        portal.isEncryptionKeyValid(U256::ZERO).call().await?.valid,
+        "the historical key must still be accepted during its grace period"
+    );
+
+    let current_amount = 300_000u128;
+    let historical_amount = 400_000u128;
+    l1.fund_user(depositor.address(), current_amount + historical_amount)
+        .await?;
+    ITIP20::new(PATH_USD_ADDRESS, &provider)
+        .approve(portal_address, U256::MAX)
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+
+    let current_recipient = l1.signer_at(2).address();
+    let current_entry = portal.sequencerEncryptionKey().call().await?;
+    let current = ecies::encrypt_deposit(
+        &current_entry.x,
+        current_entry.yParity,
+        current_recipient,
+        B256::ZERO,
+        portal_address,
+        U256::ONE,
+    )
+    .ok_or_else(|| eyre::eyre!("current-key encryption failed"))?;
+    let current_receipt = portal
+        .depositEncrypted(
+            PATH_USD_ADDRESS,
+            current_amount,
+            U256::ONE,
+            EncryptedDepositPayload {
+                ephemeralPubkeyX: current.eph_pub_x,
+                ephemeralPubkeyYParity: current.eph_pub_y_parity,
+                ciphertext: current.ciphertext.into(),
+                nonce: alloy_primitives::FixedBytes(current.nonce),
+                tag: alloy_primitives::FixedBytes(current.tag),
+            },
+            depositor.address(),
+        )
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(current_receipt.status(), "current-key deposit was rejected");
+
+    let historical_recipient = l1.signer_at(3).address();
+    let old_scalar: Scalar = *old_key.to_nonzero_scalar();
+    let old_point = AffinePoint::from(ProjectivePoint::GENERATOR * old_scalar);
+    let (old_x, old_y_parity) = ecies::compressed_x_and_parity(&old_point);
+    let historical = ecies::encrypt_deposit(
+        &old_x,
+        old_y_parity,
+        historical_recipient,
+        B256::ZERO,
+        portal_address,
+        U256::ZERO,
+    )
+    .ok_or_else(|| eyre::eyre!("historical-key encryption failed"))?;
+    let historical_receipt = portal
+        .depositEncrypted(
+            PATH_USD_ADDRESS,
+            historical_amount,
+            U256::ZERO,
+            EncryptedDepositPayload {
+                ephemeralPubkeyX: historical.eph_pub_x,
+                ephemeralPubkeyYParity: historical.eph_pub_y_parity,
+                ciphertext: historical.ciphertext.into(),
+                nonce: alloy_primitives::FixedBytes(historical.nonce),
+                tag: alloy_primitives::FixedBytes(historical.tag),
+            },
+            depositor.address(),
+        )
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    eyre::ensure!(
+        historical_receipt.status(),
+        "grace-valid historical-key deposit was rejected"
+    );
+
+    zone.wait_for_balance(
+        ZONE_TOKEN_ADDRESS,
+        current_recipient,
+        U256::from(current_amount),
+        L1_TIMEOUT,
+    )
+    .await?;
+    zone.wait_for_balance(
+        ZONE_TOKEN_ADDRESS,
+        historical_recipient,
+        U256::from(historical_amount),
+        L1_TIMEOUT,
+    )
+    .await?;
+
+    Ok(())
+}
+
 /// Test that an encrypted deposit whose decrypted recipient is blacklisted
 /// gets bounced back to the sender on L1 instead of minting to the recipient.
 ///

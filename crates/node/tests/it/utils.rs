@@ -959,6 +959,30 @@ impl ZoneTestNode {
         .await
     }
 
+    /// Start a zone node with additional private keys for historical encrypted deposits.
+    pub(crate) async fn start_from_l1_with_decryption_keys(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        additional_decryption_keys: Vec<SecretKey>,
+    ) -> eyre::Result<Self> {
+        let (genesis, _) = build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+
+        let signer = l1_dev_signer();
+        Self::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
+            l1_ws_url.to_string(),
+            portal_address,
+            next_unique_chain_id(),
+            Some(genesis),
+            signer,
+            8,
+            None,
+            true,
+            additional_decryption_keys,
+        )
+        .await
+    }
+
     /// Start a zone node connected to a real L1, anchoring genesis to a specific L1 block.
     pub(crate) async fn start_from_l1_at_block(
         l1_http_url: &url::Url,
@@ -1125,6 +1149,32 @@ impl ZoneTestNode {
         p2p_config: Option<P2pConfig>,
         spawn_engine: bool,
     ) -> eyre::Result<Self> {
+        Self::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
+            l1_ws_url,
+            portal_address,
+            chain_id,
+            custom_genesis,
+            sequencer_signer,
+            withdrawal_batch_interval_blocks,
+            p2p_config,
+            spawn_engine,
+            Vec::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
+        l1_ws_url: String,
+        portal_address: Address,
+        chain_id: u64,
+        custom_genesis: Option<Genesis>,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
+        withdrawal_batch_interval_blocks: u64,
+        p2p_config: Option<P2pConfig>,
+        spawn_engine: bool,
+        additional_decryption_keys: Vec<SecretKey>,
+    ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
         let l1_ws_url = if is_local_dummy_l1 {
@@ -1146,7 +1196,11 @@ impl ZoneTestNode {
             4,
             std::time::Duration::from_millis(100),
         )
-        .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks);
+        .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks)
+        .with_deposit_decryption_keys(
+            std::iter::once(SecretKey::from(sequencer_signer.credential()))
+                .chain(additional_decryption_keys),
+        );
         if is_local_dummy_l1 {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
@@ -1216,6 +1270,9 @@ impl ZoneTestNode {
         let enabled_tokens = zone_node.enabled_tokens();
         let l1_state_cache = zone_node.l1_state_cache();
         let l1_block_tracker = zone_node.l1_block_tracker();
+        let deposit_decryption_keys = zone_node
+            .deposit_decryption_keys()
+            .expect("test sequencer configures deposit decryption keys");
         if is_local_dummy_l1 {
             let mut cache = l1_state_cache.lock();
             seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
@@ -1243,7 +1300,7 @@ impl ZoneTestNode {
                 l1_block_tracker.clone(),
                 last_header,
                 sequencer_signer.address(),
-                SecretKey::from(sequencer_signer.credential()),
+                deposit_decryption_keys,
                 portal_address,
             );
             node_handle
@@ -4479,6 +4536,7 @@ impl L1Fixture {
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
+            encryption_key_rotations: vec![],
             leader_transitions: vec![],
         };
         queue.enqueue(header, events);

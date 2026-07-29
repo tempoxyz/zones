@@ -51,6 +51,12 @@ crate::sol! {
             EncryptedDepositPayload encrypted;
         }
 
+        struct EncryptionKeyEntry {
+            bytes32 x;
+            uint8 yParity;
+            uint64 activationBlock;
+        }
+
         struct BlockTransition {
             bytes32 prevBlockHash;
             bytes32 nextBlockHash;
@@ -96,6 +102,13 @@ crate::sol! {
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
+        event SequencerEncryptionKeyUpdated(
+            bytes32 x,
+            uint8 yParity,
+            uint256 keyIndex,
+            uint64 activationBlock
+        );
 
         /// `withdrawalQueueIndex` is the logical withdrawal queue index the batch's hash
         /// chain was enqueued under, or `NO_QUEUE_INDEX` when the batch
@@ -293,6 +306,10 @@ crate::sol! {
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAt(uint256 index)
+            external view returns (EncryptionKeyEntry memory entry);
+        function isEncryptionKeyValid(uint256 keyIndex)
+            external view returns (bool valid, uint64 expiresAtBlock);
         function encryptionKeyAtBlock(uint64 tempoBlockNumber)
             external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);

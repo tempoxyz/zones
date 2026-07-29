@@ -18,7 +18,7 @@ impl L1BlockDeposits {
     /// builder.
     pub async fn prepare(
         self,
-        sequencer_key: &k256::SecretKey,
+        encryption_keys: &EncryptionKeyRing,
         portal_address: Address,
     ) -> eyre::Result<PreparedL1Block> {
         use crate::precompiles::ecies;
@@ -34,10 +34,11 @@ impl L1BlockDeposits {
                 L1Deposit::Regular(_) => queued_deposits.push(deposit.to_abi_queued_deposit()),
                 L1Deposit::Encrypted(d) => {
                     let queued = deposit.to_abi_queued_deposit();
+                    let decryption_key = encryption_keys.key(d.key_index)?;
 
                     // Attempt full ECIES decryption.
                     let dec = ecies::decrypt_deposit(
-                        sequencer_key,
+                        &decryption_key,
                         &d.ephemeral_pubkey_x,
                         d.ephemeral_pubkey_y_parity,
                         &d.ciphertext,
@@ -73,7 +74,7 @@ impl L1BlockDeposits {
 
                     // Full decryption failed — try ECDH proof for on-chain refund.
                     let proof = ecies::compute_ecdh_proof(
-                        sequencer_key,
+                        &decryption_key,
                         &d.ephemeral_pubkey_x,
                         d.ephemeral_pubkey_y_parity,
                     );

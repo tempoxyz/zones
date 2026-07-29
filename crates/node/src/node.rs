@@ -18,7 +18,7 @@ use crate::{
         public_zone_rpc_module, rpc_connection_config, start_private_rpc,
     },
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
@@ -73,8 +73,8 @@ use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    DepositQueue, L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeaderTransition,
-    LeadershipSink, TempoStateExt,
+    DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
+    L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
@@ -242,6 +242,7 @@ impl ZoneNode {
             retry_connection_interval,
             retain_observations: false,
             leadership_sink: None,
+            encryption_keys: None,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -279,10 +280,26 @@ impl ZoneNode {
     pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
         let encryption_key = SecretKey::from(config.sequencer_signer.credential());
         self.withdrawal_reveal_encryptor = Some(Arc::new(SequencerWithdrawalRevealEncryptor::new(
-            encryption_key,
+            encryption_key.clone(),
             config.zone_id,
         )));
+        self = self.with_deposit_decryption_keys([encryption_key]);
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Add private keys that may be referenced by finalized encrypted deposits.
+    pub fn with_deposit_decryption_keys(
+        mut self,
+        keys: impl IntoIterator<Item = SecretKey>,
+    ) -> Self {
+        let ring = self
+            .l1_config
+            .encryption_keys
+            .get_or_insert_with(EncryptionKeyRing::default);
+        for key in keys {
+            ring.add_candidate(key);
+        }
         self
     }
 
@@ -356,6 +373,11 @@ impl ZoneNode {
     /// Returns the L1 block observation tracker.
     pub fn l1_block_tracker(&self) -> L1BlockTracker {
         self.l1_block_tracker.clone()
+    }
+
+    /// Returns the shared encrypted-deposit key ring, when configured.
+    pub fn deposit_decryption_keys(&self) -> Option<EncryptionKeyRing> {
+        self.l1_config.encryption_keys.clone()
     }
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
@@ -510,6 +532,10 @@ where
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
+        if let Some(keys) = self.l1_config.encryption_keys.clone() {
+            self.resolve_and_seed_encryption_keys(&l1_provider, tempo_block_number, &keys)
+                .await?;
+        }
 
         // Multi-sequencer mode: bootstrap the leadership schedule from the portal
         // snapshot at the local Tempo anchor, and install the transition sink before
@@ -616,8 +642,7 @@ where
         } else if let Some(ref config) = self.sequencer_config {
             // Legacy single-sequencer mode keeps the static engine.
             let sequencer_addr = config.sequencer_signer.address();
-            let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
-            self.spawn_zone_engine(&ctx, sequencer_addr, sequencer_key)?;
+            self.spawn_zone_engine(&ctx, sequencer_addr)?;
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
@@ -700,6 +725,8 @@ where
                 chain_spec: provider.chain_spec(),
                 deposit_queue: self.deposit_queue.clone(),
                 l1_block_tracker: self.l1_config.block_tracker.clone(),
+                // Follower-only nodes have no private keys and never construct an engine.
+                encryption_keys: self.l1_config.encryption_keys.clone().unwrap_or_default(),
                 commands,
                 attestation,
                 portal_address: self.portal_address,
@@ -1009,6 +1036,61 @@ where
         Ok(())
     }
 
+    /// Bind configured private keys to the Portal key history at the persisted L1 anchor.
+    async fn resolve_and_seed_encryption_keys(
+        &mut self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        block_number: u64,
+        keys: &EncryptionKeyRing,
+    ) -> eyre::Result<()> {
+        let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+        let portal_code = l1_provider
+            .get_code_at(self.portal_address)
+            .block_id(block_id)
+            .await?;
+        if portal_code.is_empty() {
+            return Ok(());
+        }
+
+        let portal = ZonePortal::new(self.portal_address, l1_provider);
+        let count = portal.encryptionKeyCount().block(block_id).call().await?;
+        let count: u64 = count
+            .try_into()
+            .map_err(|_| eyre::eyre!("Portal encryption key count does not fit in u64"))?;
+
+        for index in 0..count {
+            let key_index = U256::from(index);
+            let entry = portal
+                .encryptionKeyAt(key_index)
+                .block(block_id)
+                .call()
+                .await?;
+            let rotation = EncryptionKeyRotation {
+                x: entry.x,
+                y_parity: entry.yParity,
+                key_index,
+                activation_block: entry.activationBlock,
+            };
+            if keys.has_candidate(rotation.x, rotation.y_parity) {
+                keys.apply_rotation(&rotation)?;
+                continue;
+            }
+
+            let validity = portal
+                .isEncryptionKeyValid(key_index)
+                .block(block_id)
+                .call()
+                .await?;
+            eyre::ensure!(
+                !validity.valid,
+                "missing private decryption key for grace-valid Portal key index {key_index} at \
+                 L1 block {block_number}"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Spawn shared L1 observation.
     ///
     /// Sequencers, P2P replicas, and externally driven queue consumers retain finalized blocks
@@ -1041,7 +1123,6 @@ where
         &self,
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
-        sequencer_key: SecretKey,
     ) -> eyre::Result<()> {
         let provider = ctx.node.provider();
         let last_header = provider
@@ -1055,7 +1136,10 @@ where
             self.l1_config.block_tracker.clone(),
             last_header,
             fee_recipient,
-            sequencer_key,
+            self.l1_config
+                .encryption_keys
+                .clone()
+                .expect("sequencer mode configures deposit decryption keys"),
             self.portal_address,
         );
         ctx.node

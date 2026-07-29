@@ -278,6 +278,8 @@ pub struct L1SubscriberConfig {
     /// Optional sink that receives leadership transitions before the block that
     /// recorded them is enqueued.
     pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    pub encryption_keys: Option<crate::EncryptionKeyRing>,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
@@ -753,6 +755,17 @@ impl L1Subscriber {
                                 err,
                             )
                         })?;
+                }
+            }
+            if let Some(keys) = &self.config.encryption_keys {
+                for rotation in &events.encryption_key_rotations {
+                    keys.apply_rotation(rotation).map_err(|err| {
+                        FencedIngestionError::new(
+                            block_number,
+                            "encryption key rotation application",
+                            err,
+                        )
+                    })?;
                 }
             }
             let appended = self
