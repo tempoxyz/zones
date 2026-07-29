@@ -1148,31 +1148,15 @@ contract ZoneOutboxTest is Test {
                           ZERO AMOUNT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_requestWithdrawal_zeroAmountAndZeroFee_reverts() public {
+    function test_requestWithdrawal_zeroAmount_reverts() public {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 0);
-        vm.expectRevert(ZoneOutbox.ZeroValueWithdrawal.selector);
+        vm.expectRevert(ZoneOutbox.ZeroAmountWithdrawal.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         assertEq(_pendingWithdrawalsCount(), 0);
         assertEq(outbox.lastFallbackNonce(), 0);
-    }
-
-    function test_requestWithdrawal_zeroAmountWithPositiveFee_succeeds() public {
-        uint128 rate = 1;
-        uint128 expectedFee = uint128(outbox.WITHDRAWAL_BASE_GAS()) * rate;
-        vm.prank(sequencer);
-        outbox.setTempoGasRate(rate);
-
-        uint256 balanceBefore = zoneToken.balanceOf(alice);
-        vm.startPrank(alice);
-        zoneToken.approve(address(outbox), expectedFee);
-        outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
-        vm.stopPrank();
-
-        assertEq(_pendingWithdrawalsCount(), 1);
-        assertEq(zoneToken.balanceOf(alice), balanceBefore - expectedFee);
     }
 
     /*//////////////////////////////////////////////////////////////

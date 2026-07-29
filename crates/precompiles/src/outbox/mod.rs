@@ -158,6 +158,9 @@ impl ZoneOutbox {
         if call.zoneFallbackRecipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
         }
+        if call.amount == 0 {
+            return Err(ZoneOutboxError::zero_amount_withdrawal().into());
+        }
         if call.data.len() > MAX_CALLBACK_DATA_SIZE {
             return Err(ZoneOutboxError::callback_data_too_large().into());
         }
@@ -180,9 +183,6 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
-        if call.amount == 0 && fee == 0 {
-            return Err(ZoneOutboxError::zero_value_withdrawal().into());
-        }
         if caller == fee_payer {
             let total = call
                 .amount
