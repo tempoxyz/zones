@@ -24,7 +24,9 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_registry::AuthRole,
 };
 use tempo_primitives::transaction::Call;
-use tempo_zone_contracts::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{
+    EncryptedDepositPayload, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+};
 
 const AMOUNT: u128 = 1_000_000;
 const REWARD_AMOUNT: u128 = AMOUNT / 10;
@@ -599,7 +601,7 @@ impl EarnZoneFixture {
             .is_auth_as(account, self.user.address(), AuthRole::Recipient)
             .await;
         let mint_authorized = registry
-            .is_auth_as(account, self.earn_vault, AuthRole::MintRecipient)
+            .is_auth_as(account, ZONE_INBOX_ADDRESS, AuthRole::MintRecipient)
             .await;
         eyre::ensure!(
             recipient_authorized == eligible && mint_authorized == eligible,
