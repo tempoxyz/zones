@@ -41,7 +41,7 @@ use reth_node_builder::{
 };
 use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
-use reth_rpc_builder::Identity;
+use reth_rpc_builder::{Identity, TransportRpcModules};
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
     BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
@@ -88,6 +88,21 @@ use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
     attestation::AttestationDomain, spawn_zone_sequencer,
 };
+
+const PUBLIC_SIMULATION_METHODS: [&str; 2] = ["eth_call", "eth_estimateGas"];
+
+/// Remove simulation methods from a sequencer's unauthenticated RPC transports.
+///
+/// Simulations can execute TIP-20 policy checks backed by finalized L1 state. Keeping them on the
+/// authenticated private RPC prevents arbitrary public callers from forcing sequencer L1 reads,
+/// while non-sequencer RPC nodes can continue serving simulations.
+fn configure_public_simulation_methods(modules: &mut TransportRpcModules, is_sequencer: bool) {
+    if is_sequencer {
+        modules.remove_http_methods(PUBLIC_SIMULATION_METHODS);
+        modules.remove_ws_methods(PUBLIC_SIMULATION_METHODS);
+        modules.remove_ipc_methods(PUBLIC_SIMULATION_METHODS);
+    }
+}
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
@@ -636,9 +651,11 @@ where
             provider.clone(),
         );
         let portal_address = self.portal_address;
+        let is_sequencer = self.sequencer_config.is_some();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
+                configure_public_simulation_methods(&mut container.modules, is_sequencer);
                 container
                     .modules
                     .merge_configured(public_zone_api.into_rpc())?;
@@ -1523,6 +1540,42 @@ mod tests {
     use tempo_primitives::transaction::{
         AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
     };
+
+    #[test]
+    fn public_rpc_simulation_methods_depend_on_node_role() {
+        fn module() -> jsonrpsee::RpcModule<()> {
+            let mut module = jsonrpsee::RpcModule::new(());
+            for method in ["eth_call", "eth_estimateGas", "eth_chainId"] {
+                module
+                    .register_method(method, |_, _, _| "ok")
+                    .expect("test method should register");
+            }
+            module
+        }
+
+        for (is_sequencer, expected) in [
+            (true, vec!["eth_chainId"]),
+            (false, vec!["eth_call", "eth_estimateGas", "eth_chainId"]),
+        ] {
+            let mut modules = TransportRpcModules::default()
+                .with_http(module())
+                .with_ws(module())
+                .with_ipc(module());
+            configure_public_simulation_methods(&mut modules, is_sequencer);
+
+            for methods in [
+                modules.http_methods(|_| true),
+                modules.ws_methods(|_| true),
+                modules.ipc_methods(|_| true),
+            ] {
+                let names = methods
+                    .expect("transport should be configured")
+                    .method_names()
+                    .collect::<Vec<_>>();
+                assert_eq!(names, expected);
+            }
+        }
+    }
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
         TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))
