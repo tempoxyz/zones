@@ -654,46 +654,62 @@ async fn run_commands(
             // set is the point of the role.
             let candidates = leadership.quorum_peers(&others());
             let now = Instant::now();
-            // Ask only the leader while it answers. Backfilled blocks carry no producer claim,
-            // so a page from anyone else could be a valid alternative chain rather than the
-            // leader's; widening only on timeout limits that to a leader outage. One guard spans
-            // both reads so the source set cannot change between them.
-            let (request, sources, leader_only) = {
-                let mut job = backfill_job.lock().await;
-                let leader = leadership.next_anchor_record().map(|record| record.leader);
-                let (sources, leader_only) = match leader {
-                    Some(leader)
-                        if candidates.contains(&leader) && !job.is_unresponsive(&leader, now) =>
-                    {
-                        (vec![leader], true)
-                    }
-                    _ => (candidates, false),
-                };
-                (job.begin_request(&sources, now), sources, leader_only)
-            };
-            let Some((request_id, request_peers)) = request else {
-                debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
-                continue;
-            };
-            let mut request_frame = Vec::with_capacity(16);
-            request_frame.extend_from_slice(&request_id.to_be_bytes());
-            request_frame.extend_from_slice(&start.to_be_bytes());
-            let sent = match senders
-                .backfill_requests
-                .send(Recipients::Some(request_peers.clone()), request_frame, true)
-                .await
-            {
-                Ok(sent) => sent,
-                Err(err) => {
-                    backfill_job.lock().await.cancel_request(request_id);
-                    return Err(eyre::eyre!("failed requesting block backfill: {err}"));
+            // Ask the leader alone first: backfilled blocks carry no producer claim, so a page
+            // from any other member could be a valid alternative chain rather than the leader's.
+            //
+            // Two different failures have to widen the source set. A leader that received the
+            // request and went quiet is caught by `is_unresponsive` on a later tick. A leader
+            // that is not connected never receives one — the send reaches nobody and
+            // `finish_send` drops its outstanding entry, so `is_unresponsive` would stay false
+            // forever and every retry would re-pick it. Attempting the wider set in the same
+            // pass is what keeps a leader outage from wedging catch-up entirely.
+            let leader = leadership.next_anchor_record().map(|record| record.leader);
+            let leader_first = match &leader {
+                Some(leader) => {
+                    candidates.contains(leader)
+                        && !backfill_job.lock().await.is_unresponsive(leader, now)
                 }
+                None => false,
             };
-            backfill_job.lock().await.finish_send(request_id, &sent);
-            if !leader_only {
-                metrics::counter!("zone_p2p_backfill_requests_without_leader_total").increment(1);
+            let mut attempts = Vec::with_capacity(2);
+            if let Some(leader) = leader.filter(|_| leader_first) {
+                attempts.push(vec![leader]);
             }
-            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), sources = sources.len(), leader_only, "Sent block backfill request");
+            attempts.push(candidates);
+
+            for (attempt, sources) in attempts.into_iter().enumerate() {
+                let leader_only = leader_first && attempt == 0;
+                let request = backfill_job.lock().await.begin_request(&sources, now);
+                let Some((request_id, request_peers)) = request else {
+                    debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
+                    continue;
+                };
+                let mut request_frame = Vec::with_capacity(16);
+                request_frame.extend_from_slice(&request_id.to_be_bytes());
+                request_frame.extend_from_slice(&start.to_be_bytes());
+                let sent = match senders
+                    .backfill_requests
+                    .send(Recipients::Some(request_peers.clone()), request_frame, true)
+                    .await
+                {
+                    Ok(sent) => sent,
+                    Err(err) => {
+                        backfill_job.lock().await.cancel_request(request_id);
+                        return Err(eyre::eyre!("failed requesting block backfill: {err}"));
+                    }
+                };
+                backfill_job.lock().await.finish_send(request_id, &sent);
+                if sent.is_empty() {
+                    debug!(target: "zone::p2p", request_id, start, requested = request_peers.len(), leader_only, "Block backfill request reached no peer");
+                    continue;
+                }
+                if !leader_only {
+                    metrics::counter!("zone_p2p_backfill_requests_without_leader_total")
+                        .increment(1);
+                }
+                debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), sources = sources.len(), leader_only, "Sent block backfill request");
+                break;
+            }
             continue;
         }
 
@@ -2031,6 +2047,79 @@ mod tests {
         .await
         .expect("leader did not receive the RPC-only follower's forwarded transaction");
         forwarder.abort();
+
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
+        }
+    }
+
+    /// Catch-up must reach a reachable quorum follower while the leader is offline.
+    ///
+    /// The leader is preferred as the sole source, but a leader that is not connected never
+    /// receives a request, so its outstanding entry is cleared on every attempt and
+    /// `is_unresponsive` never fires. Without widening in the same pass the node would re-pick
+    /// the unreachable leader forever and stay stuck for the whole outage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_reaches_a_quorum_follower_while_the_leader_is_offline() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [51_u64, 52, 53].map(ed25519_identity);
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity(index as u64 + 51).address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+
+        // The leader (node 0) is never spawned, so it is a configured peer that never connects.
+        let mut handles = [1_usize, 2]
+            .map(|index| {
+                spawn_p2p(
+                    P2pConfig {
+                        manifest: manifest.clone(),
+                        ed25519_identity: ed25519_identity(index as u64 + 51),
+                        secp256k1_identity: Some(secp256k1_identity(index as u64 + 51)),
+                        listen: addresses[index],
+                        bypass_ip_check: false,
+                        leadership: crate::LeadershipSchedule::seeded(
+                            manifest.bootstrap_leadership(),
+                        ),
+                    },
+                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let requester_commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        let requester = repeat(requester_commands, P2pCommand::RequestBackfill { start: 1 });
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(P2pEvent::BackfillRequested { peer, start, .. }) =
+                    handles[1].events_mut().recv().await
+                {
+                    assert_eq!(peer, identities[1].ed25519_public_key());
+                    assert_eq!(start, 1);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("catch-up never widened past the offline leader to a reachable quorum follower");
+        requester.abort();
 
         for handle in handles {
             tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
