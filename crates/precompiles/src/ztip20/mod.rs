@@ -22,6 +22,11 @@ use crate::{
     storage::{L1State, L1StorageReader},
 };
 
+alloy_sol_types::sol! {
+    /// Returned instead of the upstream balance error that reveal the user balance to the spender.
+    error InsufficientBalance();
+}
+
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
 ///
 /// A constant charge hides storage-dependent execution costs that could reveal whether a recipient
@@ -563,7 +568,7 @@ mod tests {
         assert!(result.is_revert());
         assert_eq!(
             result.bytes,
-            Bytes::from(crate::InsufficientBalance {}.abi_encode())
+            Bytes::from(InsufficientBalance {}.abi_encode())
         );
         assert_eq!(harness.balance_of(harness.alice)?, U256::from(1_000_000u64));
 
