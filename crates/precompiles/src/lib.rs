@@ -28,7 +28,14 @@
 extern crate alloc;
 
 pub mod error;
+use alloy_sol_types::SolError;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
+
+alloy_sol_types::sol! {
+    /// Returned instead of the upstream balance error for delegated transfers, which must not
+    /// reveal the source account's balance to the spender.
+    error InsufficientBalance();
+}
 
 pub mod aes_gcm;
 pub mod chaum_pedersen;
@@ -65,7 +72,11 @@ pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Address;
-use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
+use tempo_precompiles::{
+    Precompile as _,
+    tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
+    tip403_registry::TIP403Registry,
+};
 
 /// Creates the zone-native fee manager precompile.
 pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
@@ -114,11 +125,23 @@ pub fn create_tip20_precompile<P>(
 where
     P: L1StorageReader,
 {
+    // Transforms internal reverts into generic InsufficientBalance errors
+    let anonymize = |mut res: revm::precompile::PrecompileOutput| {
+        if res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
+            res.bytes = InsufficientBalance {}.abi_encode().into();
+        }
+        res
+    };
+
     execution::create_precompile(
         "TIP20Token",
         env,
         ztip20::TIP20Rules::new(l1),
-        move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
+        move |data, caller| {
+            TIP20Token::from_address_unchecked(address)
+                .call(data, caller)
+                .map(anonymize)
+        },
     )
 }
 
