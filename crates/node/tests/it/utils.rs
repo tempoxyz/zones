@@ -53,8 +53,8 @@ use tempo_precompiles::{
         Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
     },
     tip403_registry::{
-        ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
-        TIP403Registry, tip403_registry_slots,
+        ALLOW_ALL_POLICY_ID, AuthRole, CompoundPolicyData as RawCompoundPolicyData, PolicyData,
+        PolicyType, TIP403Registry, tip403_registry_slots,
     },
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
@@ -408,6 +408,47 @@ async fn handle_test_l1_rpc_request(
         body
     );
     let _ = stream.write_all(response.as_bytes()).await;
+}
+
+/// Helper to check TIP-403 authorization through a TIP-20 operation.
+///
+/// Direct zone calls to the TIP-403 registry are forbidden, so tests use an internal consumer.
+pub(crate) struct Check403Registry<'a> {
+    pub(crate) provider: &'a DynProvider,
+    pub(crate) token: Address,
+}
+
+impl Check403Registry<'_> {
+    pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
+        let token = ITIP20::new(self.token, self.provider);
+        match role {
+            AuthRole::Transfer => token
+                .transfer(from, U256::ZERO)
+                .from(from)
+                .call()
+                .await
+                .map(|_| ()),
+            AuthRole::Sender => token
+                .transfer(to, U256::ZERO)
+                .from(from)
+                .call()
+                .await
+                .map(|_| ()),
+            AuthRole::Recipient => token
+                .transfer(from, U256::ZERO)
+                .from(to)
+                .call()
+                .await
+                .map(|_| ()),
+            AuthRole::MintRecipient => token
+                .mint(from, U256::ZERO)
+                .from(to)
+                .call()
+                .await
+                .map(|_| ()),
+        }
+        .is_ok()
+    }
 }
 
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.

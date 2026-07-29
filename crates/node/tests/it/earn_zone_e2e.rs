@@ -6,7 +6,8 @@
 //! originating Zone.
 
 use crate::utils::{
-    L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, forge_bytecode, spawn_sequencer,
+    Check403Registry, L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, forge_bytecode,
+    spawn_sequencer,
 };
 use alloy::{
     primitives::{Address, B256, Bytes, TxKind, U256, keccak256},
@@ -19,7 +20,9 @@ use eyre::WrapErr;
 use std::time::Duration;
 use tempo_alloy::{TempoNetwork, rpc::TempoTransactionRequest};
 use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP403Registry};
-use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS};
+use tempo_precompiles::{
+    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_registry::AuthRole,
+};
 use tempo_primitives::transaction::Call;
 use tempo_zone_contracts::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
 
@@ -587,18 +590,25 @@ impl EarnZoneFixture {
         self.zone
             .wait_for_l2_tempo_finalized(policy_block, E2E_TIMEOUT)
             .await?;
-        let zone_registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, self.zone.provider());
-        let recipient_authorized = zone_registry
-            .isAuthorizedRecipient(policy.compound_id, account)
-            .call()
-            .await?;
-        let mint_authorized = zone_registry
-            .isAuthorizedMintRecipient(policy.compound_id, account)
-            .call()
-            .await?;
+        let provider = self.zone.provider();
+        let registry = Check403Registry {
+            provider: &provider,
+            token: self.earn_share,
+        };
+        let recipient_authorized = registry
+            .is_auth_as(account, self.user.address(), AuthRole::Recipient)
+            .await;
+        let mint_authorized = registry
+            .is_auth_as(
+                account,
+                self.contribution_controller,
+                AuthRole::MintRecipient,
+            )
+            .await;
         eyre::ensure!(
             recipient_authorized == eligible && mint_authorized == eligible,
-            "Zone did not mirror Earn eligibility for {account}: recipient={recipient_authorized}, mint={mint_authorized}, expected={eligible}"
+            "Zone did not mirror Earn eligibility for policy {} and {account}: recipient={recipient_authorized}, mint={mint_authorized}, expected={eligible}",
+            policy.compound_id
         );
         Ok(())
     }
