@@ -249,6 +249,10 @@ async fn zone_sequencers(
     Ok(sequencers)
 }
 
+/// Builds the Zone metadata shared by the public and private RPC surfaces.
+///
+/// The caller supplies the local Zone's processed Tempo block number; the
+/// remaining dynamic fields are read directly from the ZonePortal on Tempo L1.
 async fn zone_info(
     zone_id: u32,
     chain_id: u64,
