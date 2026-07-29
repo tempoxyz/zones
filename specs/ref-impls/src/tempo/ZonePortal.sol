@@ -56,10 +56,14 @@ contract ZonePortal is IZonePortal {
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
     /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
-    /// @dev Across the T7 and T9 gas schedules, the worst measurement for 640 encrypted
-    ///      deposits is 185,613,414 of the 250,000,000 gas available to `advanceTempo`.
-    ///      This leaves 64,386,586 gas (25.75%) for fixed overhead and gas-cost variance.
+    /// @dev Under T9, processing 640 encrypted deposits uses 185,349,414 of the
+    ///      250,000,000 gas available to `advanceTempo`. This leaves 64,650,586 gas
+    ///      (25.86%) for fixed overhead and gas-cost variance.
     uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 640;
+
+    /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
+    ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
+    uint64 internal constant WITHDRAWAL_BOUNCEBACK_RESERVE = 20;
 
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
@@ -785,7 +789,10 @@ contract ZonePortal is IZonePortal {
         }
     }
 
-    function _recordDeposit(bytes32 newCurrentDepositQueueHash)
+    function _recordDeposit(
+        bytes32 newCurrentDepositQueueHash,
+        uint64 maximum
+    )
         internal
         returns (uint64 thisDeposit)
     {
@@ -794,8 +801,8 @@ contract ZonePortal is IZonePortal {
             _depositCountBlock = currentBlock;
             _depositsInCurrentBlock = 0;
         }
-        if (_depositsInCurrentBlock >= MAX_DEPOSITS_PER_TEMPO_BLOCK) {
-            revert DepositBlockCapacityExceeded(MAX_DEPOSITS_PER_TEMPO_BLOCK);
+        if (_depositsInCurrentBlock >= maximum) {
+            revert DepositBlockCapacityExceeded(maximum);
         }
         unchecked {
             ++_depositsInCurrentBlock;
@@ -844,7 +851,9 @@ contract ZonePortal is IZonePortal {
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
+        uint64 thisDeposit = _recordDeposit(
+            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+        );
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -935,7 +944,9 @@ contract ZonePortal is IZonePortal {
         // Insert encrypted deposit into queue
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
+        uint64 thisDeposit = _recordDeposit(
+            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+        );
 
         emit EncryptedDepositMade(
             newCurrentDepositQueueHash,
@@ -1142,7 +1153,8 @@ contract ZonePortal is IZonePortal {
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
+        uint64 thisDeposit =
+            _recordDeposit(newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK);
 
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit

@@ -1501,13 +1501,14 @@ contract ZonePortalTest is BaseTest {
 
     function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
         uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximumPublicDeposits = maximum - 20;
         assertEq(maximum, 640);
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 amount = 1;
         vm.startPrank(alice);
         pathUSD.approve(address(portal), uint256(maximum) + 2);
-        for (uint256 i; i < maximum - 1; ++i) {
+        for (uint256 i; i < maximumPublicDeposits - 1; ++i) {
             portal.deposit(address(pathUSD), bob, amount, bytes32(i), bob);
         }
         portal.depositEncrypted(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
@@ -1515,15 +1516,17 @@ contract ZonePortalTest is BaseTest {
         bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
         uint256 aliceBalanceAtCapacity = pathUSD.balanceOf(alice);
         uint256 portalBalanceAtCapacity = pathUSD.balanceOf(address(portal));
-        assertEq(portal.depositCount(), maximum);
+        assertEq(portal.depositCount(), maximumPublicDeposits);
 
         vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
+            abi.encodeWithSelector(
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+            )
         );
         portal.deposit(address(pathUSD), bob, amount, bytes32("over cap"), bob);
 
         assertEq(portal.currentDepositQueueHash(), queueHashAtCapacity);
-        assertEq(portal.depositCount(), maximum);
+        assertEq(portal.depositCount(), maximumPublicDeposits);
         assertEq(pathUSD.balanceOf(alice), aliceBalanceAtCapacity);
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
 
@@ -1531,10 +1534,10 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), bob, amount, bytes32("next block"), bob);
         vm.stopPrank();
 
-        assertEq(portal.depositCount(), maximum + 1);
+        assertEq(portal.depositCount(), maximumPublicDeposits + 1);
     }
 
-    function test_withdrawalBounceBack_sharesPerTempoBlockDepositCap() public {
+    function test_withdrawalBounceBack_usesReservedBatchCapacityWithoutBlockingQueue() public {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
         portal.deposit(address(pathUSD), alice, 1000e6, bytes32("escrow"), alice);
@@ -1545,13 +1548,19 @@ contract ZonePortalTest is BaseTest {
             address(pathUSD),
             alice,
             address(gasConsumingReceiver),
-            500e6,
-            bytes32("payment"),
+            1,
+            bytes32("failed"),
             50_000,
             bob,
             ""
         );
-        bytes32 withdrawalHash = keccak256(abi.encode(withdrawal, EMPTY_SENTINEL));
+        uint256 reserve = 20;
+        Withdrawal[] memory withdrawals = new Withdrawal[](reserve);
+        bytes32 withdrawalHash = EMPTY_SENTINEL;
+        for (uint256 i = reserve; i > 0; --i) {
+            withdrawals[i - 1] = withdrawal;
+            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
+        }
 
         vm.roll(block.number + 1);
         _submitBatch(
@@ -1573,25 +1582,30 @@ contract ZonePortalTest is BaseTest {
         );
 
         uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximumPublicDeposits = maximum - uint64(reserve);
         vm.startPrank(alice);
         pathUSD.approve(address(portal), maximum);
-        for (uint256 i; i < maximum; ++i) {
+        for (uint256 i; i < maximumPublicDeposits; ++i) {
             portal.deposit(address(pathUSD), bob, 1, bytes32(i), bob);
         }
         vm.stopPrank();
 
-        bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
-        vm.expectRevert(
-            abi.encodeWithSelector(IZonePortal.DepositBlockCapacityExceeded.selector, maximum)
-        );
-        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
-        assertEq(portal.currentDepositQueueHash(), queueHashAtCapacity);
-        assertEq(portal.withdrawalQueueHead(), 0);
+        bytes32 queueHashAtPublicCapacity = portal.currentDepositQueueHash();
+        portal.processWithdrawals(withdrawals, bytes32(0));
 
-        vm.roll(block.number + 1);
-        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
-        assertTrue(portal.currentDepositQueueHash() != queueHashAtCapacity);
+        bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
+        assertTrue(queueHashAtCapacity != queueHashAtPublicCapacity);
+        assertEq(portal.depositCount(), maximum + 1);
         assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        vm.prank(alice);
+        portal.deposit(address(pathUSD), bob, 1, bytes32("reserved"), bob);
     }
 
     function test_deposit_hashChainStructure() public {

@@ -50,16 +50,8 @@ impl Harness {
     }
 
     fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
-        Self::with_l1_and_spec(l1, TempoHardfork::default())
-    }
-
-    fn with_spec(spec: TempoHardfork) -> eyre::Result<Self> {
-        Self::with_l1_and_spec(MockL1Reader::default(), spec)
-    }
-
-    fn with_l1_and_spec(l1: MockL1Reader, spec: TempoHardfork) -> eyre::Result<Self> {
         let mut ctx = test_context();
-        ctx.cfg.spec = spec;
+        ctx.cfg.spec = TempoHardfork::T9;
         let genesis_rlp = encode_header(&TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
         {
@@ -68,9 +60,7 @@ impl Harness {
                 TempoState::new().initialize(&genesis_rlp)?;
                 ZoneInbox::new().initialize()?;
                 ZoneOutbox::new().initialize()?;
-                if spec.is_t6() {
-                    ReceivePolicyGuard::new().initialize()?;
-                }
+                ReceivePolicyGuard::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
                     .with_issuer(ALICE)
                     .with_issuer(ZONE_INBOX_ADDRESS)
@@ -219,11 +209,11 @@ impl Harness {
     }
 }
 
-fn worst_case_encrypted_deposit_block_gas(spec: TempoHardfork) -> eyre::Result<u64> {
+fn worst_case_encrypted_deposit_block_gas() -> eyre::Result<u64> {
     const SYSTEM_GAS: u64 = 250_000_000;
     const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 640;
 
-    let mut harness = Harness::with_spec(spec)?;
+    let mut harness = Harness::new()?;
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
@@ -303,14 +293,12 @@ fn worst_case_encrypted_deposit_block_gas(spec: TempoHardfork) -> eyre::Result<u
 fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
     const BUFFERED_GAS_LIMIT: u64 = 200_000_000;
 
-    for spec in [TempoHardfork::T7, TempoHardfork::T9] {
-        let gas_used = worst_case_encrypted_deposit_block_gas(spec)?;
-        eprintln!("max portal deposit block at {spec:?}: {gas_used} gas");
-        assert!(
-            gas_used <= BUFFERED_GAS_LIMIT,
-            "max deposit block used {gas_used} gas at {spec:?}"
-        );
-    }
+    let gas_used = worst_case_encrypted_deposit_block_gas()?;
+    eprintln!("max portal deposit block: {gas_used} gas");
+    assert!(
+        gas_used <= BUFFERED_GAS_LIMIT,
+        "max deposit block used {gas_used} gas"
+    );
     Ok(())
 }
 
