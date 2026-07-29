@@ -916,6 +916,8 @@ The RPC uses a default-deny model. Any method not explicitly listed returns `-32
 
 **Allowed.** `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber` and `eth_getBlockByHash` (without full transactions), `eth_syncing`, `eth_coinbase`, `net_version`, `net_listening`, `web3_clientVersion`, `web3_sha3`.
 
+Fee quotes are caller-independent: `eth_gasPrice` returns the fixed T0 gas price and `eth_maxPriorityFeePerGas` returns `0`.
+
 **Scoped.** Available to any authenticated caller but filtered to the caller's account:
 
 - `eth_getBalance`, `eth_getTransactionCount`: return `0x0` for non-self queries (no error, to avoid leaking account existence).

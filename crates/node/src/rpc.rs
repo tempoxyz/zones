@@ -670,19 +670,11 @@ where
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
-        Box::pin(async move {
-            let price = EthFees::gas_price(&self.eth.api).await.map_err(internal)?;
-            to_raw(&price)
-        })
+        Box::pin(async move { to_raw(&U256::from(TEMPO_T0_BASE_FEE)) })
     }
 
     fn max_priority_fee_per_gas(&self) -> BoxFut<'_> {
-        Box::pin(async move {
-            let fee = EthFees::suggested_priority_fee(&self.eth.api)
-                .await
-                .map_err(internal)?;
-            to_raw(&fee)
-        })
+        Box::pin(async move { to_raw(&U256::ZERO) })
     }
 
     fn fee_history(

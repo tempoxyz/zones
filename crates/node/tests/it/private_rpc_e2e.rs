@@ -535,7 +535,7 @@ async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Public methods (blockNumber, chainId, gasPrice) work for both sequencer and users.
+/// Public methods work for both sequencer and users without leaking private fee activity.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_public_methods() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -543,7 +543,7 @@ async fn test_public_methods() -> eyre::Result<()> {
     let ctx = start_zone_with_private_rpc().await?;
     let user_signer = PrivateKeySigner::random();
 
-    for method in ["eth_blockNumber", "eth_chainId", "eth_gasPrice"] {
+    for method in ["eth_blockNumber", "eth_chainId"] {
         let seq_resp = ctx.call_as_sequencer(method, serde_json::json!([])).await?;
         assert!(
             seq_resp.get("result").is_some() && seq_resp.get("error").is_none(),
@@ -557,6 +557,18 @@ async fn test_public_methods() -> eyre::Result<()> {
             user_resp.get("result").is_some() && user_resp.get("error").is_none(),
             "user should succeed for {method}"
         );
+    }
+
+    for (method, expected) in [
+        ("eth_gasPrice", U256::from(TEMPO_T0_BASE_FEE)),
+        ("eth_maxPriorityFeePerGas", U256::ZERO),
+    ] {
+        for response in [
+            ctx.call_as_sequencer(method, json!([])).await?,
+            ctx.call_as_user(method, json!([]), &user_signer).await?,
+        ] {
+            assert_eq!(response["result"], json!(format!("{expected:#x}")));
+        }
     }
 
     Ok(())
