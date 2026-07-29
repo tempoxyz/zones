@@ -137,8 +137,8 @@ impl BackfillJob {
 
     /// Whether `peer` has left a request unanswered past the response timeout.
     ///
-    /// Distinguishes "being served" from "not answering", so catch-up can stay pointed at one
-    /// authoritative source while it responds and widen only once it stops.
+    /// Separates "still serving" from "stopped answering", so a page in flight does not widen
+    /// the source set.
     fn is_unresponsive(&self, peer: &PublicKey, now: Instant) -> bool {
         self.outstanding
             .get(peer)
@@ -645,13 +645,9 @@ async fn run_commands(
                 .cloned()
                 .collect::<Vec<_>>();
             let now = Instant::now();
-            // Prefer the single peer whose blocks the import path can bind to a producer: the
-            // scheduled leader of the next anchor. Backfilled blocks carry no producer claim, so
-            // a page from any other member is judged by parent/anchor/execution validation alone
-            // — enough to reject garbage, but not enough to distinguish the leader's chain from a
-            // valid alternative one built by a compromised quorum follower. Fanning out only
-            // once the leader stops answering confines that exposure to a leader outage instead
-            // of leaving it open on every request.
+            // Ask only the leader while it answers. Backfilled blocks carry no producer claim,
+            // so a page from anyone else could be a valid alternative chain rather than the
+            // leader's; widening only on timeout limits that to a leader outage.
             let (backfill_peers, leader_only) = {
                 let job = backfill_job.lock().await;
                 let leader = leadership.next_anchor_record().map(|record| record.leader);

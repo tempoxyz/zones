@@ -177,23 +177,20 @@ Every node probes for missing blocks when P2P starts and retries while its eligi
 offline or a gap remains. Every role can serve bounded 64-block response pages from its persisted
 canonical chain.
 
-Catch-up sources are always quorum members, and the leader of the next anchor is preferred as the
-sole source while it answers. A node widens the request to the rest of the quorum only once the
-leader leaves a request unanswered past the response timeout, which is what lets an rpc-follower
-keep serving reads through a leader outage — but it never requests from another standby, and no
-quorum node ever takes chain data from an internet-facing one.
+Catch-up sources are always quorum members — never a standby, so no node takes chain data from an
+internet-facing one. Within the quorum, a node asks only the leader while it answers, and widens to
+the other quorum members once the leader misses the response timeout. That fallback is what lets an
+rpc-follower catch up through a leader outage.
 
-The preference is a trust boundary, not just a load choice. Live blocks are fenced on the sender
-being the scheduled leader of the block's embedded anchor; a backfilled block carries no producer
-claim, so it is judged by parent linkage, independent L1 anchor observation, execution, and hash
-alone. That rejects garbage, but it cannot distinguish the leader's chain from a valid alternative
-built by a compromised quorum follower, so a poisoned page could canonicalize a fork the quorum
-will not settle. Preferring the leader confines that exposure to a leader outage.
+Preferring the leader is a trust boundary, not load balancing. A live block is checked against the
+scheduled leader of the anchor it embeds, but a backfilled block has no sender to check — only
+parent linkage, L1 anchor, execution and hash. Those pass for a valid *alternative* chain too, so a
+compromised quorum member could serve pages that build a fork the quorum will never settle. Asking
+the leader first limits that to a leader outage, counted by
+`zone_p2p_backfill_requests_without_leader_total`.
 
-Closing it entirely needs a producer claim on the block itself — a leader signature over the
-sealed block hash, propagated with the block and re-served during backfill — which is a wire-format
-change tracked separately. `zone_p2p_backfill_requests_without_leader_total` counts the requests
-issued while the exposure is open.
+Removing it altogether needs the block to carry a leader signature over its own hash, which is a
+wire-format change tracked separately.
 
 Backfilled blocks use the same RLP representation and import path as live replicated blocks. A
 node buffers out-of-order arrivals, then re-executes and canonicalizes only the next block after
