@@ -32,12 +32,11 @@ const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
 const LEADER_INCLUSION_TIMEOUT: Duration = Duration::from_secs(30);
 const P2P_RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// A follower imports the leader's executed block and exposes the resulting state over RPC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
+async fn test_sequencer_blocks_simulation_endpoints() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let mut cluster = start_local_p2p_cluster(10).await?;
+    let cluster = start_local_p2p_cluster(10).await?;
 
     for method in ["eth_call", "eth_estimateGas"] {
         let response = reqwest::Client::new()
@@ -54,6 +53,16 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
             .await?;
         assert_eq!(response["error"]["code"], -32601, "{method}: {response}");
     }
+
+    Ok(())
+}
+
+/// A follower imports the leader's executed block and exposes the resulting state over RPC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut cluster = start_local_p2p_cluster(10).await?;
 
     // Commonware deliberately drops messages for offline peers. Wait for
     // peer dial/handshake (loopback dials every 500ms) before producing the
