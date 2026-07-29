@@ -55,6 +55,12 @@ contract ZonePortal is IZonePortal {
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
+    /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
+    /// @dev Across the T7 and T9 gas schedules, the worst measurement for 640 encrypted
+    ///      deposits is 185,613,414 of the 250,000,000 gas available to `advanceTempo`.
+    ///      This leaves 64,386,586 gas (25.75%) for fixed overhead and gas-cost variance.
+    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 640;
+
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
@@ -179,6 +185,10 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Tempo block number that recorded the most recent leader transition.
     uint64 public leaderActivationTempoBlock;
+
+    /// @dev Per-Tempo-block deposit admission counter. Appended for upgrade-safe storage layout.
+    uint64 internal _depositCountBlock;
+    uint64 internal _depositsInCurrentBlock;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -779,6 +789,18 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
+        uint64 currentBlock = uint64(block.number);
+        if (_depositCountBlock != currentBlock) {
+            _depositCountBlock = currentBlock;
+            _depositsInCurrentBlock = 0;
+        }
+        if (_depositsInCurrentBlock >= MAX_DEPOSITS_PER_TEMPO_BLOCK) {
+            revert DepositBlockCapacityExceeded(MAX_DEPOSITS_PER_TEMPO_BLOCK);
+        }
+        unchecked {
+            ++_depositsInCurrentBlock;
+        }
+
         currentDepositQueueHash = newCurrentDepositQueueHash;
         thisDeposit = ++depositCount;
     }
@@ -1120,8 +1142,7 @@ contract ZonePortal is IZonePortal {
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        currentDepositQueueHash = newCurrentDepositQueueHash;
-        uint64 thisDeposit = ++depositCount;
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
 
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
