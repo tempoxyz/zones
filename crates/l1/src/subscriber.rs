@@ -281,7 +281,7 @@ pub struct L1SubscriberConfig {
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
-    fn latest_tempo_block_number(&self) -> eyre::Result<u64>;
+    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash>;
 }
 
 /// Optional sink for finalized deposit-bearing L1 blocks.
@@ -322,9 +322,9 @@ impl<P> LocalTempoCheckpointReader for ProviderLocalTempoCheckpointReader<P>
 where
     P: StateProviderFactory + Clone + Send + Sync + 'static,
 {
-    fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
+    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
         let state = self.provider.latest()?;
-        Ok(state.tempo_block_number()?)
+        Ok(state.tempo_num_hash()?)
     }
 }
 
@@ -533,14 +533,16 @@ impl L1Subscriber {
 
     /// Determine the starting block number for backfill.
     ///
-    /// The zone's persisted `tempoBlockNumber` is the authoritative source for
-    /// where ingestion resumes.
+    /// The zone's persisted Tempo checkpoint is the authoritative source for
+    /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
+    /// block-zero genesis from the unanchored template.
     pub(crate) fn resolve_start_block(&self) -> eyre::Result<u64> {
-        let local_tempo_block_number = self.local_state.latest_tempo_block_number()?;
+        let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
         eyre::ensure!(
-            local_tempo_block_number > 0,
+            local_checkpoint.hash != B256::ZERO,
             "zone genesis is not anchored to an L1 block"
         );
+        let local_tempo_block_number = local_checkpoint.number;
         info!(local_tempo_block_number, "Resuming from local zone state");
         Ok(local_tempo_block_number + 1)
     }

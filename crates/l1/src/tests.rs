@@ -130,23 +130,34 @@ fn make_deposit(amount: u128) -> L1Deposit {
 }
 
 struct SequenceLocalTempoCheckpointReader {
-    values: Mutex<VecDeque<u64>>,
-    last_value: u64,
+    values: Mutex<VecDeque<NumHash>>,
+    last_value: NumHash,
 }
 
 impl SequenceLocalTempoCheckpointReader {
     fn new(values: impl Into<VecDeque<u64>>) -> Self {
-        let values = values.into();
+        let values = values
+            .into()
+            .into_iter()
+            .map(|number| NumHash::new(number, B256::with_last_byte(1)))
+            .collect::<VecDeque<_>>();
         let last_value = values.back().copied().unwrap_or_default();
         Self {
             values: Mutex::new(values),
             last_value,
         }
     }
+
+    fn unanchored() -> Self {
+        Self {
+            values: Mutex::new(VecDeque::from([NumHash::default()])),
+            last_value: NumHash::default(),
+        }
+    }
 }
 
 impl LocalTempoCheckpointReader for SequenceLocalTempoCheckpointReader {
-    fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
+    fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash> {
         let mut values = self.values.lock();
         Ok(values.pop_front().unwrap_or(self.last_value))
     }
@@ -703,8 +714,14 @@ fn test_resolve_start_block_reads_live_local_state_each_time() {
 }
 
 #[test]
-fn test_resolve_start_block_rejects_unanchored_genesis() {
+fn test_resolve_start_block_accepts_block_zero_with_nonzero_hash() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
+    assert_eq!(subscriber.resolve_start_block().unwrap(), 1);
+}
+
+#[test]
+fn test_resolve_start_block_rejects_unanchored_genesis() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::unanchored()));
     assert!(
         subscriber
             .resolve_start_block()
