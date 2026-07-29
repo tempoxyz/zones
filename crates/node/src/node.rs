@@ -652,9 +652,9 @@ where
         let is_sequencer = self.sequencer_config.is_some();
         let handle = self
             .inner
-            .launch_add_ons_with(ctx, move |mut container| {
+            .launch_add_ons_with(ctx, move |container| {
                 if is_sequencer {
-                    disable_simulation_methods(&mut container.modules);
+                    disable_simulation_methods(container.modules);
                 }
                 container
                     .modules
