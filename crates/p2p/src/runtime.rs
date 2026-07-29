@@ -232,6 +232,11 @@ impl P2pConfig {
         self.ed25519_identity.ed25519_public_key()
     }
 
+    /// Whether this node replicates without joining the on-chain settlement quorum.
+    pub fn is_rpc_only(&self) -> bool {
+        self.leadership.is_rpc_only(&self.ed25519_public_key())
+    }
+
     /// This node's address derived from its individual secp256k1 key, when it holds one.
     pub fn secp256k1_address(&self) -> Option<EthereumAddress> {
         self.secp256k1_identity

@@ -144,10 +144,20 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             builder.config_mut().engine.persistence_threshold = 0;
             builder.config_mut().engine.memory_block_buffer_target = 0;
         }
-        // Every node constructs all the sequencer resources: activation
-        // is gated at runtime by the leadership schedule, so a follower must be
-        // able to become a leader without a restart.
-        let should_sequence_blocks = sequencer_enabled(args.enable_sequencer, manifest_mode);
+        // Every promotable node constructs all the sequencer resources: activation is gated at
+        // runtime by the leadership schedule, so a quorum follower must be able to become a
+        // leader without a restart. An rpc-only standby is not promotable at runtime — that
+        // needs a new individual key registered with `ZonePortal` and a manifest change — so it
+        // is deliberately left without the shared sequencer key, which is also the zone's ECIES
+        // private key for encrypted deposits and must not sit on an internet-facing host.
+        let rpc_only = p2p_config.as_ref().is_some_and(P2pConfig::is_rpc_only);
+        let should_sequence_blocks =
+            sequencer_enabled(args.enable_sequencer, manifest_mode, rpc_only);
+        if rpc_only && (args.sequencer_key.is_some() || args.sequencer_key_file.is_some()) {
+            return Err(eyre::eyre!(
+                "this node is `rpc_only` in the manifest, so --sequencer-key/--sequencer-key-file must not be provided: the shared key is never used here and is also the zone ECIES private key for encrypted deposits"
+            ));
+        }
         let sequencer_signer = if should_sequence_blocks {
             Some(
                 load_sequencer_signer(args.sequencer_key, args.sequencer_key_file.as_deref())
@@ -263,22 +273,24 @@ pub struct ZoneArgs {
     )]
     pub block_interval_ms: u64,
 
-    /// Sequencer private key (hex, with or without 0x prefix).
+    /// Shared sequencer private key (hex, with or without 0x prefix).
+    ///
+    /// Required by every node that can produce blocks. Requiredness is checked after the
+    /// manifest is read rather than by `clap`, because an `rpc_only` node must not hold this
+    /// key: it is also the zone's ECIES private key for encrypted deposits.
     #[arg(
         long = "sequencer-key",
         env = "SEQUENCER_KEY",
         value_name = "HEX",
-        required_unless_present = "sequencer_key_file",
         conflicts_with = "sequencer_key_file"
     )]
     pub sequencer_key: Option<String>,
 
-    /// Path to a file or FIFO containing the sequencer private key.
+    /// Path to a file or FIFO containing the shared sequencer private key.
     #[arg(
         long = "sequencer-key-file",
         env = "SEQUENCER_KEY_FILE",
         value_name = "PATH",
-        required_unless_present = "sequencer_key",
         conflicts_with = "sequencer_key"
     )]
     pub sequencer_key_file: Option<PathBuf>,
@@ -444,8 +456,11 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
 }
 
 /// Whether the sequencer add-on is configured at boot.
-const fn sequencer_enabled(cli_flag: bool, manifest_mode: bool) -> bool {
-    manifest_mode || cli_flag
+///
+/// `rpc_only` nodes are excluded: they never produce blocks and cannot be promoted without a
+/// restart, so they must not be given the shared sequencer key.
+const fn sequencer_enabled(cli_flag: bool, manifest_mode: bool, rpc_only: bool) -> bool {
+    (manifest_mode && !rpc_only) || cli_flag
 }
 
 fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
@@ -746,13 +761,15 @@ mod tests {
     }
 
     #[test]
-    fn manifest_mode_always_configures_sequencer_resources() {
-        // Followers must hold the complete leader construction so runtime promotion never
-        // requires a restart; activation is gated by the leadership schedule instead.
-        assert!(sequencer_enabled(false, true));
-        assert!(sequencer_enabled(true, true));
-        assert!(sequencer_enabled(true, false));
-        assert!(!sequencer_enabled(false, false));
+    fn manifest_mode_configures_sequencer_resources_except_on_standbys() {
+        // Quorum followers must hold the complete leader construction so runtime promotion
+        // never requires a restart; activation is gated by the leadership schedule instead.
+        assert!(sequencer_enabled(false, true, false));
+        assert!(sequencer_enabled(true, true, false));
+        assert!(sequencer_enabled(true, false, false));
+        assert!(!sequencer_enabled(false, false, false));
+        // An rpc-only standby produces nothing, so it holds no shared sequencer key.
+        assert!(!sequencer_enabled(false, true, true));
     }
 
     #[test]
@@ -763,8 +780,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--sequencer-key",
-            "0x01",
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
@@ -774,9 +789,11 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(parsed.zone.sequencer_role, Some(Role::RpcFollower));
-        // An rpc-only node holds no individual secp256k1 key, so the flag is not required
-        // alongside the manifest; the manifest decides whether one is expected.
+        // A standby holds neither key. Requiredness is checked against the manifest after it is
+        // read, so neither flag is a parse-time requirement.
         assert_eq!(parsed.zone.secp256k1_key, None);
+        assert_eq!(parsed.zone.sequencer_key, None);
+        assert_eq!(parsed.zone.sequencer_key_file, None);
     }
 
     #[test]
