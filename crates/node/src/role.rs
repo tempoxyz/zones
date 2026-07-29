@@ -30,7 +30,9 @@ use zone_chainspec::ZoneChainSpec;
 use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
 use zone_p2p::{LeadershipSchedule, P2pCommand, P2pEvent, P2pPeerId};
 use zone_payload::ZonePayloadTypes;
-use zone_sequencer::{ZoneSequencerConfig, ZoneSequencerProvider, spawn_zone_sequencer};
+use zone_sequencer::{
+    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, spawn_zone_sequencer,
+};
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
 mod zone_transaction_pool_alias {
@@ -244,6 +246,54 @@ enum TaskEnd {
     Engine(EngineExit),
     SequencerStopped,
     Ended(&'static str),
+}
+
+/// Supervise the two long-running sequencer children as one role-generation task.
+///
+/// An unexpected child exit must restart the whole generation immediately. During an intentional
+/// generation stop, however, both children retain the graceful shutdown window needed to finish
+/// in-flight L1 transactions.
+async fn supervise_sequencer_tasks(
+    handle: ZoneSequencerHandle,
+    stop: CancellationToken,
+) -> TaskEnd {
+    let mut withdrawal = AbortOnDropHandle::new(handle.withdrawal_handle);
+    let mut monitor = AbortOnDropHandle::new(handle.monitor_handle);
+
+    tokio::select! {
+        biased;
+        () = stop.cancelled() => {
+            // Both children observe the same token at their poll boundaries. Keep both handles
+            // alive until they finish; the outer generation timeout will abort this supervisor
+            // and AbortOnDropHandle will then abort either child that is still stuck.
+            let (withdrawal_result, monitor_result) =
+                tokio::join!(&mut withdrawal, &mut monitor);
+            if let Err(err) = withdrawal_result {
+                warn!(target: "zone::role", %err, "Withdrawal processor task failed during shutdown");
+            }
+            if let Err(err) = monitor_result {
+                warn!(target: "zone::role", %err, "Zone monitor task failed during shutdown");
+            }
+            TaskEnd::SequencerStopped
+        }
+        result = &mut withdrawal => {
+            match result {
+                Ok(()) => warn!(target: "zone::role", "Withdrawal processor task stopped unexpectedly"),
+                Err(err) => warn!(target: "zone::role", %err, "Withdrawal processor task failed"),
+            }
+            // Returning drops and aborts the monitor handle. The role controller observes
+            // TaskEnd::Ended and restarts the complete generation.
+            TaskEnd::Ended("withdrawal-processor")
+        }
+        result = &mut monitor => {
+            match result {
+                Ok(()) => warn!(target: "zone::role", "Zone monitor task stopped unexpectedly"),
+                Err(err) => warn!(target: "zone::role", %err, "Zone monitor task failed"),
+            }
+            // Returning drops and aborts the withdrawal handle before the generation restarts.
+            TaskEnd::Ended("zone-monitor")
+        }
+    }
 }
 
 struct RunningGeneration {
@@ -520,16 +570,87 @@ pub(crate) async fn run_role_controller<P, Pool>(
                 }
             }
         }
+        let switch = current.as_ref().map(|generation| generation.kind) != Some(desired.kind());
+        if switch {
+            if let Some(generation) = current.take() {
+                generation.stop(&sinks).await;
+            }
+            generation_id += 1;
+            match start_generation(&context, &sinks, desired, generation_id).await {
+                Ok(generation) => {
+                    current = Some(generation);
+                }
+                Err(err) => {
+                    // Starting a role generation is atomic: none of its task graph remains
+                    // active after a startup failure. Leave the node fenced and retry the
+                    // complete desired generation after the decision backoff.
+                    sinks.clear();
+                    retry_decision = true;
+                    ready_for_promotion = false;
+                    promotion_reasons = vec![format!(
+                        "failed to start {:?} generation: {err:#}",
+                        desired.kind()
+                    )];
+                    error!(
+                        target: "zone::role",
+                        generation = generation_id,
+                        kind = ?desired.kind(),
+                        %err,
+                        "Role generation failed to start; fencing before retry"
+                    );
+                }
+            }
+
+            let active_kind = current
+                .as_ref()
+                .map(|generation| generation.kind)
+                .unwrap_or(GenerationKind::Fenced);
+            metrics::counter!(
+                "zone_leadership_transitions_total",
+                "to" => match active_kind {
+                    GenerationKind::Leader => "leader",
+                    GenerationKind::Follower => "follower",
+                    GenerationKind::Fenced => "fenced",
+                },
+            )
+            .increment(1);
+            metrics::gauge!("zone_leadership_role").set(match active_kind {
+                GenerationKind::Leader => 2.0,
+                GenerationKind::Follower => 1.0,
+                GenerationKind::Fenced => 0.0,
+            });
+            if active_kind == desired.kind()
+                && let Some(epoch) = match desired {
+                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
+                        Some(epoch)
+                    }
+                    DesiredRole::Fenced => None,
+                }
+            {
+                metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
+            }
+        }
+
+        let active_kind = current
+            .as_ref()
+            .map(|generation| generation.kind)
+            .unwrap_or(GenerationKind::Fenced);
         {
             let mut status = context.status.lock().expect("poisoned");
-            status.role = match desired.kind() {
+            status.role = match active_kind {
                 GenerationKind::Leader => "leader",
                 GenerationKind::Follower => "follower",
                 GenerationKind::Fenced => "fenced",
             };
-            status.epoch = match desired {
-                DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => Some(epoch),
-                DesiredRole::Fenced => None,
+            status.epoch = if active_kind == desired.kind() {
+                match desired {
+                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
+                        Some(epoch)
+                    }
+                    DesiredRole::Fenced => None,
+                }
+            } else {
+                None
             };
             status.generation = generation_id;
             status.ready_for_promotion = ready_for_promotion;
@@ -540,35 +661,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
         } else {
             0.0
         });
-
-        let switch = current.as_ref().map(|generation| generation.kind) != Some(desired.kind());
-        if switch {
-            if let Some(generation) = current.take() {
-                generation.stop(&sinks).await;
-            }
-            generation_id += 1;
-            metrics::counter!(
-                "zone_leadership_transitions_total",
-                "to" => match desired.kind() {
-                    GenerationKind::Leader => "leader",
-                    GenerationKind::Follower => "follower",
-                    GenerationKind::Fenced => "fenced",
-                },
-            )
-            .increment(1);
-            metrics::gauge!("zone_leadership_role").set(match desired.kind() {
-                GenerationKind::Leader => 2.0,
-                GenerationKind::Follower => 1.0,
-                GenerationKind::Fenced => 0.0,
-            });
-            if let Some(epoch) = match desired {
-                DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => Some(epoch),
-                DesiredRole::Fenced => None,
-            } {
-                metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
-            }
-            current = Some(start_generation(&context, &sinks, desired, generation_id).await);
-        }
 
         // A fenced generation has no tasks; an empty JoinSet's join_next() is immediately
         // ready with None, so polling it would spin this loop hot. Stay pending instead and
@@ -655,7 +747,7 @@ async fn start_generation<P, Pool>(
     sinks: &EventSinks,
     desired: DesiredRole,
     id: u64,
-) -> RunningGeneration
+) -> eyre::Result<RunningGeneration>
 where
     P: BlockNumReader
         + BlockReader<Block = Block>
@@ -733,37 +825,24 @@ where
             info!(target: "zone::role", generation = id, epoch, "Follower generation started");
         }
         DesiredRole::Leader { epoch, .. } => {
-            let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, Some(transactions_tx));
-
             let sequencer = context
                 .sequencer
                 .as_ref()
                 .expect("leader generation requires sequencer resources");
 
+            // Acquire every fallible prerequisite before installing sinks or spawning any
+            // leader task. Otherwise a transient head-read failure could leave a partial
+            // generation classified as Leader without its canonical head writer.
+            let last_header = latest_sealed_header(&context.provider)?;
+
+            let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            sinks.install(sync_tx, Some(transactions_tx));
+
             // Canonical head writer: the engine with the per-anchor production permit.
-            match context
-                .provider
-                .best_block_number()
-                .map_err(eyre::Report::from)
-                .and_then(|number| {
-                    context
-                        .provider
-                        .sealed_header(number)?
-                        .ok_or_else(|| eyre::eyre!("no latest block header"))
-                }) {
-                Ok(last_header) => {
-                    let engine = build_engine(context, sequencer, last_header);
-                    let engine_token = token.clone();
-                    tasks.spawn(
-                        async move { TaskEnd::Engine(engine.run_until(engine_token).await) },
-                    );
-                }
-                Err(err) => {
-                    error!(target: "zone::role", %err, "Failed reading the local head; leader generation degenerates to fenced");
-                }
-            }
+            let engine = build_engine(context, sequencer, last_header);
+            let engine_token = token.clone();
+            tasks.spawn(async move { TaskEnd::Engine(engine.run_until(engine_token).await) });
 
             let broadcast_token = token.clone();
             let provider = context.provider.clone();
@@ -830,36 +909,30 @@ where
                     sequencer_token.clone(),
                 )
                 .await;
-                // Abort-on-drop: if this wrapper is aborted by the generation stop timeout,
-                // dropping the handles must abort the sequencer tasks rather than detach
-                // them, or a stuck iteration could submit L1 work past its demotion.
-                let (withdrawal, monitor) = tokio::join!(
-                    AbortOnDropHandle::new(handle.withdrawal_handle),
-                    AbortOnDropHandle::new(handle.monitor_handle)
-                );
-                if let Err(err) = withdrawal {
-                    warn!(target: "zone::role", %err, "Withdrawal processor task failed");
-                }
-                if let Err(err) = monitor {
-                    warn!(target: "zone::role", %err, "Zone monitor task failed");
-                }
-                if sequencer_token.is_cancelled() {
-                    TaskEnd::SequencerStopped
-                } else {
-                    TaskEnd::Ended("sequencer-tasks")
-                }
+                supervise_sequencer_tasks(handle, sequencer_token).await
             });
 
             info!(target: "zone::role", generation = id, epoch, "Leader generation started");
         }
     }
 
-    RunningGeneration {
+    Ok(RunningGeneration {
         id,
         kind: desired.kind(),
         token,
         tasks,
-    }
+    })
+}
+
+fn latest_sealed_header<P>(provider: &P) -> eyre::Result<SealedHeader<TempoHeader>>
+where
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+{
+    let number = provider.best_block_number().map_err(eyre::Report::from)?;
+    provider
+        .sealed_header(number)
+        .map_err(eyre::Report::from)?
+        .ok_or_else(|| eyre::eyre!("no latest block header"))
 }
 
 fn build_engine<P, Pool>(
@@ -890,13 +963,129 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{net::SocketAddr, time::Duration};
+    use std::{future::pending, net::SocketAddr, time::Duration};
 
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
-    use tokio::sync::mpsc;
+    use reth_provider::test_utils::MockEthProvider;
+    use tempo_primitives::TempoPrimitives;
+    use tokio::sync::{mpsc, oneshot};
+    use tokio_util::sync::CancellationToken;
     use zone_p2p::P2pEvent;
+    use zone_sequencer::ZoneSequencerHandle;
 
-    use super::{EventSinks, route_events_to_generations};
+    use super::{
+        EventSinks, TaskEnd, latest_sealed_header, route_events_to_generations,
+        supervise_sequencer_tasks,
+    };
+
+    struct DropSignal(Option<oneshot::Sender<()>>);
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            if let Some(signal) = self.0.take() {
+                let _ = signal.send(());
+            }
+        }
+    }
+
+    #[test]
+    fn unavailable_canonical_head_fails_leader_prerequisite() {
+        let provider = MockEthProvider::<TempoPrimitives>::new();
+
+        assert!(
+            latest_sealed_header(&provider).is_err(),
+            "leader startup must fail when its canonical head cannot be read"
+        );
+    }
+
+    #[tokio::test]
+    async fn sequencer_supervisor_reports_panicking_child_without_waiting_for_sibling() {
+        let (monitor_started_tx, monitor_started_rx) = oneshot::channel();
+        let (monitor_dropped_tx, monitor_dropped_rx) = oneshot::channel();
+        let monitor_handle = tokio::spawn(async move {
+            let _drop_signal = DropSignal(Some(monitor_dropped_tx));
+            let _ = monitor_started_tx.send(());
+            pending::<()>().await;
+        });
+        monitor_started_rx
+            .await
+            .expect("monitor task must start before the panic");
+
+        let withdrawal_handle = tokio::spawn(async move {
+            panic!("simulated withdrawal processor panic");
+        });
+        let handle = ZoneSequencerHandle {
+            withdrawal_handle,
+            monitor_handle,
+        };
+
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(1),
+            supervise_sequencer_tasks(handle, CancellationToken::new()),
+        )
+        .await
+        .expect("supervisor waited for the healthy long-running sibling");
+        assert!(matches!(outcome, TaskEnd::Ended("withdrawal-processor")));
+        tokio::time::timeout(Duration::from_secs(1), monitor_dropped_rx)
+            .await
+            .expect("sibling was not aborted when the supervisor returned")
+            .expect("monitor drop signal was lost");
+    }
+
+    #[tokio::test]
+    async fn sequencer_supervisor_waits_for_both_children_during_graceful_stop() {
+        let stop = CancellationToken::new();
+        let (ready_tx, mut ready_rx) = mpsc::channel(2);
+
+        let withdrawal_stop = stop.clone();
+        let withdrawal_ready = ready_tx.clone();
+        let withdrawal_handle = tokio::spawn(async move {
+            withdrawal_ready.send(()).await.unwrap();
+            withdrawal_stop.cancelled().await;
+        });
+
+        let monitor_stop = stop.clone();
+        let (monitor_stopping_tx, monitor_stopping_rx) = oneshot::channel();
+        let (release_monitor_tx, release_monitor_rx) = oneshot::channel();
+        let monitor_handle = tokio::spawn(async move {
+            ready_tx.send(()).await.unwrap();
+            monitor_stop.cancelled().await;
+            let _ = monitor_stopping_tx.send(());
+            let _ = release_monitor_rx.await;
+        });
+
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(1), ready_rx.recv())
+                .await
+                .expect("sequencer child did not start")
+                .expect("sequencer child readiness channel closed");
+        }
+
+        let supervisor = tokio::spawn(supervise_sequencer_tasks(
+            ZoneSequencerHandle {
+                withdrawal_handle,
+                monitor_handle,
+            },
+            stop.clone(),
+        ));
+        stop.cancel();
+        tokio::time::timeout(Duration::from_secs(1), monitor_stopping_rx)
+            .await
+            .expect("monitor did not observe graceful shutdown")
+            .expect("monitor stopping signal was lost");
+        tokio::task::yield_now().await;
+        assert!(
+            !supervisor.is_finished(),
+            "supervisor aborted the slower child during graceful shutdown"
+        );
+
+        let _ = release_monitor_tx.send(());
+        let outcome = tokio::time::timeout(Duration::from_secs(1), supervisor)
+            .await
+            .expect("supervisor did not finish after both children stopped")
+            .expect("supervisor task panicked");
+        assert!(matches!(outcome, TaskEnd::SequencerStopped));
+    }
 
     /// Reproduces the startup ordering from the native stress test: the P2P router is live
     /// and receives a peer's backfill request before the role controller installs its first

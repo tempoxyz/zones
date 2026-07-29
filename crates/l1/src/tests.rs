@@ -1,5 +1,8 @@
 use super::*;
-use crate::{abi::DepositType, subscriber::DepositSink};
+use crate::{
+    abi::DepositType,
+    subscriber::{DepositSink, is_fenced_ingestion_error},
+};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
@@ -1529,13 +1532,8 @@ fn make_receipt_with_logs(
     }
 }
 
-#[test]
-fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
-    let portal = subscriber.config.portal_address;
-
-    // A recognized topic0 with garbage payload must fence the whole block, never be skipped.
-    let corrupt = Log {
+fn corrupt_recognized_portal_log(portal: Address) -> Log {
+    Log {
         inner: alloy_primitives::Log {
             address: portal,
             data: alloy_primitives::LogData::new_unchecked(
@@ -1544,7 +1542,16 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
             ),
         },
         ..Default::default()
-    };
+    }
+}
+
+#[test]
+fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let portal = subscriber.config.portal_address;
+
+    // A recognized topic0 with garbage payload must fence the whole block, never be skipped.
+    let corrupt = corrupt_recognized_portal_log(portal);
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![corrupt]);
 
     let err = subscriber.extract_events(10, &[receipt]).unwrap_err();
@@ -1568,6 +1575,43 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
     let (events, _) = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
+}
+
+#[tokio::test]
+async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])), None);
+    let portal = subscriber.config.portal_address;
+    let DepositSink::Queue(queue) = subscriber.deposit_sink.clone() else {
+        panic!("test subscriber must retain deposits");
+    };
+
+    let receipt =
+        make_receipt_with_logs(10, B256::ZERO, vec![corrupt_recognized_portal_log(portal)]);
+    let mut header_10 = make_test_header(10);
+    header_10.inner.receipts_root = calculate_test_receipts_root(std::slice::from_ref(&receipt));
+    header_10.inner.logs_bloom = *receipt.inner.inner.bloom_ref();
+
+    let asserter = Asserter::new();
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    asserter.push_success(&Some(header_response(header_10.clone())));
+    asserter.push_success(&Some(header_response(header_10)));
+    asserter.push_success(&Some(vec![receipt]));
+
+    let err = subscriber
+        .sync_finalized_once(&l1_provider, 10)
+        .await
+        .unwrap_err();
+    assert!(is_fenced_ingestion_error(&err));
+    assert_eq!(queue.last_enqueued(), None);
+    assert_eq!(subscriber.config.block_tracker.latest(), None);
+}
+
+#[test]
+fn ordinary_subscriber_errors_remain_retryable() {
+    assert!(!is_fenced_ingestion_error(&eyre::eyre!(
+        "transient L1 RPC failure"
+    )));
 }
 
 #[derive(Debug)]
@@ -1672,6 +1716,7 @@ async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition()
         .await
         .unwrap_err();
     assert!(err.to_string().contains("leadership transition"));
+    assert!(is_fenced_ingestion_error(&err));
 
     // Nothing was enqueued and no observation advanced: the block is fenced, not half-applied.
     assert_eq!(queue.last_enqueued(), None);

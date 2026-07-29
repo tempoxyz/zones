@@ -341,12 +341,58 @@ pub struct L1Subscriber {
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
 
+/// A deterministic failure while applying an already receipt-verified finalized block.
+///
+/// Reconnecting cannot change these inputs, so retrying would loop forever on the same block.
+#[derive(Debug)]
+struct FencedIngestionError {
+    block_number: u64,
+    stage: &'static str,
+    source: eyre::Report,
+}
+
+impl FencedIngestionError {
+    const fn new(block_number: u64, stage: &'static str, source: eyre::Report) -> Self {
+        Self {
+            block_number,
+            stage,
+            source,
+        }
+    }
+}
+
+impl std::fmt::Display for FencedIngestionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "L1 ingestion fenced at block {} during {}: {}",
+            self.block_number, self.stage, self.source
+        )
+    }
+}
+
+impl std::error::Error for FencedIngestionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+fn fenced_ingestion_error(error: &eyre::Report) -> Option<&FencedIngestionError> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<FencedIngestionError>())
+}
+
+#[cfg(test)]
+pub(crate) fn is_fenced_ingestion_error(error: &eyre::Report) -> bool {
+    fenced_ingestion_error(error).is_some()
+}
+
 impl L1Subscriber {
     /// Create and spawn the L1 subscriber as a critical background task.
     ///
-    /// The subscriber runs in a retry loop — if the connection drops or
-    /// [`Self::run`] returns an error, it reconnects after the configured retry
-    /// interval.
+    /// Transient failures reconnect after the configured retry interval. Deterministic failures
+    /// while applying a receipt-verified finalized block fail the critical task instead.
     pub fn spawn<P>(
         config: L1SubscriberConfig,
         local_state_provider: P,
@@ -402,6 +448,17 @@ impl L1Subscriber {
             Box::pin(async move {
                 loop {
                     if let Err(e) = subscriber.run().await {
+                        if let Some(fenced) = fenced_ingestion_error(&e) {
+                            error!(
+                                block_number = fenced.block_number,
+                                stage = fenced.stage,
+                                error = %e,
+                                "Fatal L1 ingestion fence; refusing to retry an immutable finalized block"
+                            );
+                            // This is a critical task: panicking notifies the task manager and
+                            // shuts the node down instead of leaving it alive with frozen L1 state.
+                            panic!("{fenced}");
+                        }
                         let retry_interval = subscriber.config.retry_connection_interval;
                         subscriber.subscriber_metrics.reconnects.increment(1);
                         error!(
@@ -698,13 +755,7 @@ impl L1Subscriber {
                 self.extract_events(block_number, &receipts)
                     .map_err(|err| {
                         self.subscriber_metrics.decode_fence_failures.increment(1);
-                        error!(
-                            block_number,
-                            %err,
-                            "Halting L1 ingestion: portal event decoding failed; refusing to \
-                             process the block under a partial event view"
-                        );
-                        err
+                        FencedIngestionError::new(block_number, "portal event decoding", err)
                     })?;
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
@@ -712,12 +763,25 @@ impl L1Subscriber {
             let anchor = sealed.num_hash();
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
-            if let Some(sink) = &self.config.leadership_sink
-                && let Some(transition) = events.final_leader_transition()?
-            {
-                sink.apply_leader_transition(transition).wrap_err_with(|| {
-                    format!("cannot apply the leadership transition from block {block_number}")
+            if let Some(sink) = &self.config.leadership_sink {
+                let transition = events.final_leader_transition().map_err(|err| {
+                    FencedIngestionError::new(block_number, "leadership event validation", err)
                 })?;
+                if let Some(transition) = transition {
+                    sink.apply_leader_transition(transition)
+                        .wrap_err_with(|| {
+                            format!(
+                                "cannot apply the leadership transition from block {block_number}"
+                            )
+                        })
+                        .map_err(|err| {
+                            FencedIngestionError::new(
+                                block_number,
+                                "leadership transition application",
+                                err,
+                            )
+                        })?;
+                }
             }
             let appended = self
                 .deposit_sink
@@ -771,7 +835,8 @@ impl L1Subscriber {
     /// `newHeads` or HTTP block-filter updates are used as wakeups; each
     /// notification ingests the missing finalized range in order.
     ///
-    /// Callers should retry on error (see [`Self::spawn`]).
+    /// [`Self::spawn`] retries transient errors and treats deterministic finalized-block
+    /// ingestion failures as fatal.
     pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
         let triggers = self.head_triggers(&provider).await?;
