@@ -1043,6 +1043,11 @@ where
         block_number: u64,
         keys: &EncryptionKeyRing,
     ) -> eyre::Result<()> {
+        // Synthetic-L1 nodes use the zero address to mean that no Portal is configured.
+        if self.portal_address.is_zero() {
+            return Ok(());
+        }
+
         let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
         let portal_code = l1_provider
             .get_code_at(self.portal_address)
