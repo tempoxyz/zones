@@ -180,6 +180,9 @@ impl ZoneOutbox {
         }
 
         let fee = self.calculate_fee_unchecked(call.gasLimit)?;
+        if call.amount == 0 && fee == 0 {
+            return Err(ZoneOutboxError::zero_value_withdrawal().into());
+        }
         if caller == fee_payer {
             let total = call
                 .amount

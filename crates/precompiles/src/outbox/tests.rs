@@ -635,7 +635,7 @@ fn callback_and_reveal_boundaries_are_enforced() -> eyre::Result<()> {
 }
 
 #[test]
-fn fallback_recipient_and_zero_amount_semantics_match_reference() -> eyre::Result<()> {
+fn request_rejects_zero_fallback_recipient() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let token = harness.token;
     assert_revert(
@@ -651,8 +651,27 @@ fn fallback_recipient_and_zero_amount_semantics_match_reference() -> eyre::Resul
         }),
         ZoneOutboxError::invalid_fallback_recipient(),
     );
+    Ok(())
+}
+
+#[test]
+fn request_rejects_zero_value_but_allows_fee_only_withdrawal() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    assert_revert(
+        harness.request(0, BOB, B256::ZERO),
+        ZoneOutboxError::zero_value_withdrawal(),
+    );
+    assert!(harness.pending()?.is_empty());
+    assert_eq!(harness.last_fallback_nonce()?, 0);
+
+    harness.set_gas_rate(1)?;
+    let balance_before = harness.balance_of(ALICE)?;
     harness.request(0, BOB, B256::ZERO)?;
     assert_eq!(harness.pending()?[0].amount, 0);
+    assert_eq!(
+        harness.balance_of(ALICE)?,
+        balance_before - U256::from(WITHDRAWAL_BASE_GAS)
+    );
     Ok(())
 }
 

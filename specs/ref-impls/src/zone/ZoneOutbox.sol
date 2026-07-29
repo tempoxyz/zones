@@ -105,6 +105,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error ZeroValueWithdrawal();
     error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
@@ -283,6 +284,7 @@ contract ZoneOutbox is IZoneOutbox {
         // Calculate processing fee (locked in at request time)
         // Fee is paid in the same token being withdrawn
         uint128 fee = _calculateWithdrawalFee(gasLimit);
+        if (amount == 0 && fee == 0) revert ZeroValueWithdrawal();
         uint128 totalBurn = amount + fee;
         bytes32 txHash = IZoneTxContext(ZONE_TX_CONTEXT).currentTxHash();
         if (txHash == bytes32(0)) revert InvalidCurrentTxHash();
