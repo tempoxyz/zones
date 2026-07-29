@@ -126,6 +126,7 @@ alloy_sol_types::sol! {
         address owner;
         EarnVaultControls controls;
         FeeConfig fees;
+        uint64 transferPolicyId;
     }
 
     #[sol(rpc)]
@@ -375,6 +376,7 @@ impl EarnZoneFixture {
                 migrationMode: EngineMigrationMode::OperatorEnabled,
             },
             fees,
+            transferPolicyId: 0,
         };
 
         let provider = l1.dev_provider();
