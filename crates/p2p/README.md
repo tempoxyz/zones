@@ -125,21 +125,8 @@ Registered sequencers the manifest does not list only warn — a demoted standby
 deregistered holds a share of the threshold nobody signs for, but failing on it would make every
 membership change a window in which no node can start.
 
-## Rolling out a manifest change
-
-The manifest is shared across the fleet, so a change to it and a change to the binaries are two
-separate rollouts. **Deploy binaries first, then the manifest.** A node restarting on an older
-binary must be able to read the newer manifest, or the restart aborts during parsing and takes
-block production or settlement availability with it.
-
-Unknown keys are therefore ignored with a warning rather than rejected, so an older binary
-tolerates a manifest naming fields it does not know. This does not weaken validation of the fields
-that decide a role: a misspelled `rpc_only` leaves an entry that declares no `secp256k1_address`
-looking like a quorum node, which fails to load, and a misspelled `secp256k1_address` fails the
-same way. Check startup logs for `Ignoring sequencer manifest keys` after any manifest edit.
-
-Apply a `ZonePortal` registration before the manifest edit that adds the node, and the manifest
-edit before deregistering: a quorum node the portal does not know refuses to start.
+Apply a `ZonePortal` registration before the manifest edit that adds the node, and the manifest edit
+before deregistering.
 
 ## Generate a Commonware identity
 
