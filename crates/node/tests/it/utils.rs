@@ -425,7 +425,7 @@ impl Check403Registry {
             AuthRole::Transfer => token.transfer(from, zero).from(from).call().await.is_ok(),
             AuthRole::Sender => token.transfer(to, zero).from(from).call().await.is_ok(),
             AuthRole::Recipient => token.transfer(from, zero).from(to).call().await.is_ok(),
-            AuthRole::MintRecipient => token.mint(from, zero).to(to).call().await.is_ok(),
+            AuthRole::MintRecipient => token.mint(from, zero).from(to).call().await.is_ok(),
         }
     }
 }
