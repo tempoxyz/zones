@@ -65,7 +65,12 @@ pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Address;
-use tempo_precompiles::{Precompile as _, tip20::TIP20Token, tip403_registry::TIP403Registry};
+use alloy_sol_types::SolError;
+use tempo_precompiles::{
+    Precompile as _,
+    tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
+    tip403_registry::TIP403Registry,
+};
 
 /// Creates the zone-native fee manager precompile.
 pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
@@ -114,11 +119,23 @@ pub fn create_tip20_precompile<P>(
 where
     P: L1StorageReader,
 {
+    // Redacts TIP20 transfer from reverts that reveal user balances to the spender.
+    let redact = |mut res: revm::precompile::PrecompileOutput| {
+        if res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
+            res.bytes = crate::ztip20::InsufficientBalance {}.abi_encode().into();
+        }
+        res
+    };
+
     execution::create_precompile(
         "TIP20Token",
         env,
         ztip20::TIP20Rules::new(l1),
-        move |data, caller| TIP20Token::from_address_unchecked(address).call(data, caller),
+        move |data, caller| {
+            TIP20Token::from_address_unchecked(address)
+                .call(data, caller)
+                .map(redact)
+        },
     )
 }
 
