@@ -481,11 +481,18 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     fn allows_public_simulation_methods(&self) -> bool {
-        #[cfg(any(test, feature = "test-utils"))]
-        {
-            return self.allow_public_simulation_methods;
-        }
-        self.sequencer_config.is_none()
+        let allow_public_sims = {
+            #[cfg(any(test, feature = "test-utils"))]
+            {
+                self.allow_public_simulation_methods
+            }
+            #[cfg(not(any(test, feature = "test-utils")))]
+            {
+                false
+            }
+        };
+
+        self.sequencer_config.is_none() || allow_public_sims
     }
 }
 
