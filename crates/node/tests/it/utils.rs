@@ -639,6 +639,13 @@ impl ZoneTestNode {
         &self.http_url
     }
 
+    /// Stop this node's task runtime while retaining its storage handles for the test lifetime.
+    pub(crate) fn crash(&self) {
+        let _ = self
+            ._tasks
+            .graceful_shutdown_with_timeout(Duration::from_secs(5));
+    }
+
     async fn spawn_sequencer(
         &self,
         config: zone_sequencer::ZoneSequencerConfig,
