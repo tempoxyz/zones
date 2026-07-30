@@ -15,7 +15,7 @@ pub(crate) const BLOCK_CHANNEL: u64 = 0;
 pub(crate) const BACKFILL_REQUEST_CHANNEL: u64 = 1;
 /// Ordered block and completion frames returned for a catch-up request.
 pub(crate) const BACKFILL_RESPONSE_CHANNEL: u64 = 2;
-/// Raw transaction propagation channel between Zone nodes.
+/// Raw transaction propagation channel into the sequencer quorum.
 pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
 /// Leader-to-follower proposed settlement statement channel.
 pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;

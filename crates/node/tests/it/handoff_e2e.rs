@@ -70,7 +70,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         )
         .await?;
 
-    // Submit a transfer to follower C. C admits it locally and forwards it to every peer,
+    // Submit a transfer to follower C. C admits it locally and forwards it to every quorum peer,
     // including active leader A and incoming leader B. Nobody includes it before the handoff
     // because no further anchor is injected under A's authorization.
     let recipient = address!("0x00000000000000000000000000000000000ffff1");
@@ -332,7 +332,7 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
     let handoff_anchor = next_anchor + 3;
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // A transfer submitted to follower C during the window is forwarded to every peer,
+    // A transfer submitted to follower C during the window is forwarded to every quorum peer,
     // including both still-active leader A and not-yet-active leader B.
     let recipient = address!("0x00000000000000000000000000000000000ffff2");
     cluster.fixture.seed_no_receive_policy(recipient)?;

@@ -345,7 +345,7 @@ pub enum P2pCommand {
         request_id: u64,
         tip: PeerTip,
     },
-    /// Forward one canonical EIP-2718 transaction to every other Zone node.
+    /// Forward one canonical EIP-2718 transaction to every other quorum member.
     ForwardTransaction {
         transaction_hash: B256,
         transaction: Vec<u8>,
@@ -385,7 +385,7 @@ pub enum P2pEvent {
     BackfillBlockReceived { peer: PublicKey, block: Vec<u8> },
     /// The responder sent all blocks available in this response page.
     BackfillCompleted { peer: PublicKey, tip: PeerTip },
-    /// A node received a raw transaction from an authenticated follower.
+    /// A quorum member received a raw transaction from an authenticated follower.
     TransactionReceived {
         follower_ed25519_public_key: PublicKey,
         transaction: Vec<u8>,
@@ -840,8 +840,9 @@ async fn run_commands(
                 transaction,
             } => {
                 // Only followers run the transaction-forwarding task. Keep the outbound role
-                // fence, but send to every other manifest member so every possible successor
-                // retains the transaction before a leadership handoff.
+                // fence, but send to every other quorum member so every possible successor
+                // retains the transaction before a leadership handoff. RPC-only standbys can
+                // originate transactions but never need to retain transactions from other nodes.
                 let Some(record) = leadership.next_anchor_record() else {
                     metrics::counter!("zone_p2p_uninitialized_leadership_commands_dropped_total")
                         .increment(1);
@@ -854,28 +855,28 @@ async fn run_commands(
                     warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on the next-anchor leader");
                     continue;
                 }
-                let recipients = others();
+                let recipients = leadership.quorum_peers(&others());
                 let configured = recipients.len();
                 let transaction_size = transaction.len();
                 let sent = match senders
                     .transactions
-                    .send(Recipients::Some(recipients), transaction, true)
+                    .send(Recipients::Some(recipients), transaction, false)
                     .await
                 {
                     Ok(sent) => sent,
                     Err(err) => {
                         metrics::counter!("zone_p2p_transaction_sends_without_peers_total")
                             .increment(1);
-                        warn!(target: "zone::p2p", ?transaction_hash, transaction_size_bytes = transaction_size, %err, "Failed to forward transaction to peers; dropping this send attempt");
+                        warn!(target: "zone::p2p", ?transaction_hash, transaction_size_bytes = transaction_size, %err, "Failed to forward transaction to quorum peers; dropping this send attempt");
                         continue;
                     }
                 };
                 if sent.is_empty() {
                     metrics::counter!("zone_p2p_transaction_sends_without_peers_total")
                         .increment(1);
-                    warn!(target: "zone::p2p", ?transaction_hash, configured, transaction_size_bytes = transaction_size, "Forwarded transaction reached no peer (peers disconnected, sender throttled, or outbound queue full); dropping this send attempt");
+                    warn!(target: "zone::p2p", ?transaction_hash, configured, transaction_size_bytes = transaction_size, "Forwarded transaction reached no quorum peer (peers disconnected, sender throttled, or outbound queue full); dropping this send attempt");
                 } else {
-                    debug!(target: "zone::p2p", ?transaction_hash, connected = sent.len(), configured, transaction_size_bytes = transaction_size, "Forwarded transaction to peers");
+                    debug!(target: "zone::p2p", ?transaction_hash, connected = sent.len(), configured, transaction_size_bytes = transaction_size, "Forwarded transaction to quorum peers");
                 }
             }
         }
@@ -1016,12 +1017,13 @@ async fn run_receivers(
                 }
             }
 
-            // Got a transaction forwarded by an authenticated manifest peer. Every node admits
-            // these into its pool so a future leader does not start its generation empty.
+            // Got a transaction forwarded by an authenticated manifest peer. Only quorum members
+            // admit these into their pools; RPC-only standbys can never become leader.
             result = transactions.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("transaction channel receive failed: {err}"))?;
                 if peer == local_ed25519_public_key
                     || !manifest.contains_ed25519_public_key(&peer)
+                    || !leadership.is_quorum_member(&local_ed25519_public_key)
                 {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %peer, "Ignoring transaction from role-invalid peer");
@@ -1900,8 +1902,8 @@ mod tests {
         }
     }
 
-    /// An RPC-only member replicates and forwards like any follower, but stays outside the
-    /// settlement quorum in both directions.
+    /// An RPC-only member replicates blocks and forwards its own transactions into the quorum,
+    /// but receives neither settlement traffic nor transactions submitted to other nodes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rpc_only_follower_replicates_but_never_settles() {
         const LEADER: usize = 0;
@@ -1944,6 +1946,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let leader_commands = handles[LEADER].parts.as_ref().unwrap().commands.clone();
+        let quorum_follower_commands = handles[QUORUM_FOLLOWER]
+            .parts
+            .as_ref()
+            .unwrap()
+            .commands
+            .clone();
         let rpc_commands = handles[RPC_FOLLOWER]
             .parts
             .as_ref()
@@ -2016,7 +2024,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Public RPC submissions reach every other replica, not just the active leader.
+        // Public RPC submissions reach every quorum member, not just the active leader.
         let transaction_hash = B256::with_last_byte(7);
         let transaction = vec![0x76, 0x07];
         let forwarder = repeat(
@@ -2046,6 +2054,24 @@ mod tests {
             });
         }
         forwarder.abort();
+
+        // Transactions submitted to a quorum follower stay within the quorum. The RPC-only
+        // standby continues replicating blocks but does not retain unrelated pending bodies.
+        let quorum_forwarder = repeat(
+            quorum_follower_commands,
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(8),
+                transaction: vec![0x76, 0x08],
+            },
+        );
+        assert_no_event_matching(
+            handles[RPC_FOLLOWER].events_mut(),
+            Duration::from_secs(2),
+            "RPC-only follower received another node's transaction",
+            |event| matches!(event, P2pEvent::TransactionReceived { .. }),
+        )
+        .await;
+        quorum_forwarder.abort();
 
         for handle in handles {
             tokio::time::timeout(Duration::from_secs(10), handle.shutdown())

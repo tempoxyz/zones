@@ -834,8 +834,9 @@ where
                 }
             });
 
-            // Followers retain transactions received from other nodes in case it
-            // gets promoted to leader in the future.
+            // Quorum followers retain transactions received from originating peers so a future
+            // promotion cannot lose traffic submitted immediately before the handoff. RPC-only
+            // followers receive no transaction events from the P2P transport.
             let pool = context.pool.clone();
             let import_token = token.clone();
             tasks.spawn(async move {
