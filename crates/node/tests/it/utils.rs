@@ -999,6 +999,7 @@ impl ZoneTestNode {
             8,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1021,6 +1022,7 @@ impl ZoneTestNode {
             withdrawal_batch_interval_blocks,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1089,6 +1091,7 @@ impl ZoneTestNode {
             8,
             Some(p2p_config),
             true,
+            false,
         )
         .await
     }
@@ -1110,6 +1113,7 @@ impl ZoneTestNode {
             8,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1130,6 +1134,7 @@ impl ZoneTestNode {
             8,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1144,6 +1149,7 @@ impl ZoneTestNode {
         withdrawal_batch_interval_blocks: u64,
         p2p_config: Option<P2pConfig>,
         spawn_engine: bool,
+        allow_public_simulations: bool,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -1171,6 +1177,9 @@ impl ZoneTestNode {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
                 .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
+        }
+        if allow_public_simulations {
+            zone_node = zone_node.allow_public_simulation_methods();
         }
         let p2p_enabled = p2p_config.is_some();
         if p2p_enabled && !is_local_dummy_l1 {
@@ -3434,6 +3443,16 @@ impl P2pCluster {
 /// Start a three-node multi-sequencer cluster with identical genesis state and authenticated
 /// P2P identities. Node 0 bootstraps as the leader.
 pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2pCluster> {
+    start_local_p2p_cluster_with_public_simulations(seed_blocks, true).await
+}
+
+/// Start a P2P cluster, optionally retaining public simulation RPC methods.
+///
+/// Passing `false` exercises the production sequencer RPC policy.
+pub(crate) async fn start_local_p2p_cluster_with_public_simulations(
+    seed_blocks: u64,
+    allow_public_simulations: bool,
+) -> eyre::Result<P2pCluster> {
     fn available_address() -> eyre::Result<SocketAddr> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?)
@@ -3523,6 +3542,7 @@ pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2
                 8,
                 Some(config),
                 false,
+                allow_public_simulations,
             )
             .await?,
         );

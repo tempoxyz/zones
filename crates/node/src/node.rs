@@ -230,6 +230,9 @@ pub struct ZoneNode {
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
+    /// Test-only override allowing simulations on a sequencer's public RPC.
+    #[cfg(any(test, feature = "test-utils"))]
+    allow_public_simulation_methods: bool,
 }
 
 impl ZoneNode {
@@ -278,6 +281,8 @@ impl ZoneNode {
             sequencer_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
+            #[cfg(any(test, feature = "test-utils"))]
+            allow_public_simulation_methods: false,
         }
     }
 
@@ -296,6 +301,13 @@ impl ZoneNode {
             config.zone_id,
         )));
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Keep simulation methods available on a sequencer's public RPC in test builds.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn allow_public_simulation_methods(mut self) -> Self {
+        self.allow_public_simulation_methods = true;
         self
     }
 
@@ -448,6 +460,9 @@ where
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
+    /// Test-only override allowing simulations on a sequencer's public RPC.
+    #[cfg(any(test, feature = "test-utils"))]
+    allow_public_simulation_methods: bool,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -457,6 +472,20 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoneAddOns").finish_non_exhaustive()
+    }
+}
+
+impl<N> ZoneAddOns<N>
+where
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
+{
+    fn allows_public_simulation_methods(&self) -> bool {
+        #[cfg(any(test, feature = "test-utils"))]
+        {
+            return self.allow_public_simulation_methods;
+        }
+        self.sequencer_config.is_none()
     }
 }
 
@@ -473,6 +502,7 @@ where
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
+        #[cfg(any(test, feature = "test-utils"))] allow_public_simulation_methods: bool,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -490,6 +520,8 @@ where
             sequencer_config,
             p2p_config,
             external_deposit_consumer,
+            #[cfg(any(test, feature = "test-utils"))]
+            allow_public_simulation_methods,
         }
     }
 }
@@ -649,11 +681,11 @@ where
             provider.clone(),
         );
         let portal_address = self.portal_address;
-        let is_sequencer = self.sequencer_config.is_some();
+        let disable_public_simulations = !self.allows_public_simulation_methods();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
-                if is_sequencer {
+                if disable_public_simulations {
                     disable_simulation_methods(container.modules);
                 }
                 container
@@ -1275,6 +1307,7 @@ where
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
+            self.allow_public_simulation_methods,
         )
     }
 }

@@ -13552,6 +13552,7 @@ dependencies = [
  "zone-chainspec",
  "zone-evm",
  "zone-l1",
+ "zone-node",
  "zone-p2p",
  "zone-payload",
  "zone-precompiles",

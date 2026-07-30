@@ -84,6 +84,8 @@ url = { version = "2", optional = true }
 zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
+zone-node = { path = ".", features = ["test-utils"] }
+
 alloy = { workspace = true, features = [
   "full",
   "genesis",
