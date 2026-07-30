@@ -1314,6 +1314,7 @@ where
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
+            #[cfg(any(test, feature = "test-utils"))]
             self.allow_public_simulation_methods,
         )
     }
