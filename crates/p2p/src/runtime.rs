@@ -345,7 +345,7 @@ pub enum P2pCommand {
         request_id: u64,
         tip: PeerTip,
     },
-    /// Forward one canonical EIP-2718 transaction from a follower to the leader.
+    /// Forward one canonical EIP-2718 transaction to every other quorum member.
     ForwardTransaction {
         transaction_hash: B256,
         transaction: Vec<u8>,
@@ -385,7 +385,7 @@ pub enum P2pEvent {
     BackfillBlockReceived { peer: PublicKey, block: Vec<u8> },
     /// The responder sent all blocks available in this response page.
     BackfillCompleted { peer: PublicKey, tip: PeerTip },
-    /// The leader received a raw transaction from an authenticated follower.
+    /// A quorum member received a raw transaction from an authenticated follower.
     TransactionReceived {
         follower_ed25519_public_key: PublicKey,
         transaction: Vec<u8>,
@@ -639,8 +639,7 @@ async fn run_commands(
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
     while let Some(command) = commands.recv().await {
-        // Built only in arms that actually address a peer set — forwarding a transaction must
-        // not allocate one.
+        // Built only in arms that actually address a peer set.
         let others = || {
             peers
                 .iter()
@@ -840,9 +839,10 @@ async fn run_commands(
                 transaction_hash,
                 transaction,
             } => {
-                // A forwarded transaction is for the producer of the *next* anchor — the
-                // most recently observed record may only activate in the future, and its
-                // leader runs a follower generation that holds no transaction sink yet.
+                // Only followers run the transaction-forwarding task. Keep the outbound role
+                // fence, but send to every other quorum member so every possible successor
+                // retains the transaction before a leadership handoff. RPC-only standbys can
+                // originate transactions but never need to retain transactions from other nodes.
                 let Some(record) = leadership.next_anchor_record() else {
                     metrics::counter!("zone_p2p_uninitialized_leadership_commands_dropped_total")
                         .increment(1);
@@ -855,29 +855,28 @@ async fn run_commands(
                     warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on the next-anchor leader");
                     continue;
                 }
+                let recipients = leadership.quorum_peers(&others());
+                let configured = recipients.len();
+                let transaction_size = transaction.len();
                 let sent = match senders
                     .transactions
-                    .send(
-                        Recipients::Some(vec![leader.clone()]),
-                        transaction.clone(),
-                        true,
-                    )
+                    .send(Recipients::Some(recipients), transaction, false)
                     .await
                 {
                     Ok(sent) => sent,
                     Err(err) => {
-                        metrics::counter!("zone_p2p_transaction_sends_without_leader_total")
+                        metrics::counter!("zone_p2p_transaction_sends_without_peers_total")
                             .increment(1);
-                        warn!(target: "zone::p2p", ?transaction_hash, leader = %leader, transaction_size_bytes = transaction.len(), %err, "Failed to send forwarded transaction; dropping this send attempt");
+                        warn!(target: "zone::p2p", ?transaction_hash, transaction_size_bytes = transaction_size, %err, "Failed to forward transaction to quorum peers; dropping this send attempt");
                         continue;
                     }
                 };
                 if sent.is_empty() {
-                    metrics::counter!("zone_p2p_transaction_sends_without_leader_total")
+                    metrics::counter!("zone_p2p_transaction_sends_without_peers_total")
                         .increment(1);
-                    warn!(target: "zone::p2p", ?transaction_hash, leader = %leader, transaction_size_bytes = transaction.len(), "Forwarded transaction was not sent (leader disconnected, sender throttled, or outbound queue full); dropping this send attempt");
+                    warn!(target: "zone::p2p", ?transaction_hash, configured, transaction_size_bytes = transaction_size, "Forwarded transaction reached no quorum peer (peers disconnected, sender throttled, or outbound queue full); dropping this send attempt");
                 } else {
-                    debug!(target: "zone::p2p", ?transaction_hash, leader = %leader, transaction_size_bytes = transaction.len(), "Forwarded transaction to leader");
+                    debug!(target: "zone::p2p", ?transaction_hash, connected = sent.len(), configured, transaction_size_bytes = transaction_size, "Forwarded transaction to quorum peers");
                 }
             }
         }
@@ -1018,12 +1017,13 @@ async fn run_receivers(
                 }
             }
 
-            // Got a transaction forwarded by an authenticated follower.
+            // Got a transaction forwarded by an authenticated manifest peer. Only quorum members
+            // admit these into their pools; RPC-only standbys can never become leader.
             result = transactions.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("transaction channel receive failed: {err}"))?;
                 if peer == local_ed25519_public_key
                     || !manifest.contains_ed25519_public_key(&peer)
-                    || !leadership.is_scheduled_leader(&local_ed25519_public_key)
+                    || !leadership.is_quorum_member(&local_ed25519_public_key)
                 {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %peer, "Ignoring transaction from role-invalid peer");
@@ -1385,41 +1385,31 @@ mod tests {
 
         let transaction_hash = B256::with_last_byte(2);
         let transaction = vec![0x76, 0x01, 0x02, 0x03];
-        follower_commands
-            .send(P2pCommand::ForwardTransaction {
+        let forwarder = repeat(
+            follower_commands.clone(),
+            P2pCommand::ForwardTransaction {
                 transaction_hash,
                 transaction: transaction.clone(),
+            },
+        );
+        for index in [0, 2] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::TransactionReceived {
+                        follower_ed25519_public_key,
+                        transaction: received,
+                    }) = handles[index].events_mut().recv().await
+                    {
+                        assert_eq!(follower_ed25519_public_key, first_follower_peer);
+                        assert_eq!(received, transaction);
+                        return;
+                    }
+                }
             })
             .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::TransactionReceived {
-                    follower_ed25519_public_key,
-                    transaction: received,
-                }) = handles[0].events_mut().recv().await
-                {
-                    assert_eq!(follower_ed25519_public_key, first_follower_peer);
-                    assert_eq!(received, transaction);
-                    return;
-                }
-            }
-        })
-        .await
-        .expect("leader did not receive forwarded transaction");
-
-        // Forwarding is point-to-point: the other follower receives neither the transaction nor
-        // the role-invalid block command above.
-        let other_follower = tokio::time::timeout(Duration::from_millis(300), async {
-            while let Some(event) = handles[2].events_mut().recv().await {
-                assert!(
-                    !matches!(event, P2pEvent::TransactionReceived { .. }),
-                    "forwarded transaction reached another follower"
-                );
-            }
-        })
-        .await;
-        assert!(other_follower.is_err(), "other follower runtime stopped");
+            .unwrap_or_else(|_| panic!("node-{index} did not receive forwarded transaction"));
+        }
+        forwarder.abort();
 
         let proposal = vec![0x10, 0x20];
         leader_commands
@@ -1697,7 +1687,7 @@ mod tests {
     /// traffic early: while the local applied anchor is still governed by the outgoing
     /// leader, its block broadcasts and settlement proposals keep flowing (including to the
     /// incoming leader), signatures return to the proposer, and forwarded transactions
-    /// target the next-anchor leader — never the most recently observed record.
+    /// reach every replica before the transition activates.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn advance_scheduled_transition_keeps_anchor_relevant_routing() {
         let addresses = [
@@ -1839,26 +1829,26 @@ mod tests {
         .await
         .expect("outgoing leader did not receive the settlement signature");
 
-        // Forwarded transactions go to the producer of the next anchor (A), never to the
-        // observed-latest leader (B) whose production only starts at the boundary. B's own
-        // forwards reach A as well.
+        // Forwarded transactions reach every other replica. In particular, B retains C's
+        // transaction before its leadership activates, while B's own forward reaches A and C.
         let transaction = vec![0x76, 0x01, 0x02, 0x03];
-        follower_commands
-            .send(P2pCommand::ForwardTransaction {
+        let follower_forwarder = repeat(
+            follower_commands.clone(),
+            P2pCommand::ForwardTransaction {
                 transaction_hash: B256::with_last_byte(1),
                 transaction: transaction.clone(),
-            })
-            .await
-            .unwrap();
-        incoming_commands
-            .send(P2pCommand::ForwardTransaction {
+            },
+        );
+        let incoming_forwarder = repeat(
+            incoming_commands.clone(),
+            P2pCommand::ForwardTransaction {
                 transaction_hash: B256::with_last_byte(2),
                 transaction: transaction.clone(),
-            })
-            .await
-            .unwrap();
+            },
+        );
         tokio::time::timeout(Duration::from_secs(15), async {
-            let mut senders = Vec::new();
+            let mut received_from_incoming = false;
+            let mut received_from_follower = false;
             loop {
                 if let Some(P2pEvent::TransactionReceived {
                     follower_ed25519_public_key,
@@ -1866,8 +1856,12 @@ mod tests {
                 }) = handles[0].events_mut().recv().await
                 {
                     assert_eq!(received, transaction);
-                    senders.push(follower_ed25519_public_key);
-                    if senders.len() == 2 {
+                    if follower_ed25519_public_key == incoming_leader {
+                        received_from_incoming = true;
+                    } else if follower_ed25519_public_key == follower_peer {
+                        received_from_follower = true;
+                    }
+                    if received_from_incoming && received_from_follower {
                         return;
                     }
                 }
@@ -1875,21 +1869,30 @@ mod tests {
         })
         .await
         .expect("outgoing leader did not receive both forwarded transactions");
-        let incoming_got_transaction = tokio::time::timeout(Duration::from_millis(300), async {
-            loop {
-                if matches!(
-                    handles[1].events_mut().recv().await,
-                    Some(P2pEvent::TransactionReceived { .. }) | None
-                ) {
-                    return;
+
+        for (recipient, expected_sender) in
+            [(1, follower_peer.clone()), (2, incoming_leader.clone())]
+        {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::TransactionReceived {
+                        follower_ed25519_public_key,
+                        transaction: received,
+                    }) = handles[recipient].events_mut().recv().await
+                    {
+                        assert_eq!(follower_ed25519_public_key, expected_sender);
+                        assert_eq!(received, transaction);
+                        return;
+                    }
                 }
-            }
-        })
-        .await;
-        assert!(
-            incoming_got_transaction.is_err(),
-            "a forwarded transaction was misrouted to the not-yet-active incoming leader"
-        );
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("node-{recipient} did not receive the peer's forwarded transaction")
+            });
+        }
+        follower_forwarder.abort();
+        incoming_forwarder.abort();
 
         for handle in handles {
             tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
@@ -1899,8 +1902,8 @@ mod tests {
         }
     }
 
-    /// An RPC-only member replicates and forwards like any follower, but stays outside the
-    /// settlement quorum in both directions.
+    /// An RPC-only member replicates blocks and forwards its own transactions into the quorum,
+    /// but receives neither settlement traffic nor transactions submitted to other nodes.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rpc_only_follower_replicates_but_never_settles() {
         const LEADER: usize = 0;
@@ -1943,6 +1946,12 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let leader_commands = handles[LEADER].parts.as_ref().unwrap().commands.clone();
+        let quorum_follower_commands = handles[QUORUM_FOLLOWER]
+            .parts
+            .as_ref()
+            .unwrap()
+            .commands
+            .clone();
         let rpc_commands = handles[RPC_FOLLOWER]
             .parts
             .as_ref()
@@ -2015,7 +2024,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Transaction forwarding still works: public RPC submissions must reach the leader.
+        // Public RPC submissions reach every quorum member, not just the active leader.
         let transaction_hash = B256::with_last_byte(7);
         let transaction = vec![0x76, 0x07];
         let forwarder = repeat(
@@ -2025,28 +2034,44 @@ mod tests {
                 transaction: transaction.clone(),
             },
         );
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                match handles[LEADER].events_mut().recv().await {
-                    Some(P2pEvent::SettlementSignatureReceived { follower, .. }) => {
-                        panic!("leader accepted a settlement signature from {follower}")
-                    }
-                    Some(P2pEvent::TransactionReceived {
+        for index in [LEADER, QUORUM_FOLLOWER, QUORUM_FOLLOWER_B] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::TransactionReceived {
                         follower_ed25519_public_key,
                         transaction: received,
-                    }) => {
+                    }) = handles[index].events_mut().recv().await
+                    {
                         assert_eq!(follower_ed25519_public_key, rpc_follower_peer);
                         assert_eq!(received, transaction);
                         return;
                     }
-                    Some(_) => {}
-                    None => panic!("leader event channel closed"),
                 }
-            }
-        })
-        .await
-        .expect("leader did not receive the RPC-only follower's forwarded transaction");
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("node-{index} did not receive the RPC-only follower's transaction")
+            });
+        }
         forwarder.abort();
+
+        // Transactions submitted to a quorum follower stay within the quorum. The RPC-only
+        // standby continues replicating blocks but does not retain unrelated pending bodies.
+        let quorum_forwarder = repeat(
+            quorum_follower_commands,
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(8),
+                transaction: vec![0x76, 0x08],
+            },
+        );
+        assert_no_event_matching(
+            handles[RPC_FOLLOWER].events_mut(),
+            Duration::from_secs(2),
+            "RPC-only follower received another node's transaction",
+            |event| matches!(event, P2pEvent::TransactionReceived { .. }),
+        )
+        .await;
+        quorum_forwarder.abort();
 
         for handle in handles {
             tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
@@ -2130,7 +2155,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn unavailable_leader_drops_transaction_without_stopping_follower() {
+    async fn followers_exchange_transactions_while_leader_is_offline() {
         let addresses = [
             available_address(),
             available_address(),
@@ -2154,65 +2179,78 @@ mod tests {
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
-        let identity = ed25519_identity(12);
-        let secp256k1_identity = secp256k1_identity(12);
-        let role = manifest
-            .validate_node(
-                9,
-                &identity.ed25519_public_key(),
-                Some(secp256k1_identity.address()),
-                None,
-            )
-            .unwrap();
-        assert_eq!(role, crate::Role::Follower);
-        let mut handle = spawn_p2p(
-            P2pConfig {
-                manifest: manifest.clone(),
-                ed25519_identity: identity,
-                secp256k1_identity: Some(secp256k1_identity),
-                listen: addresses[1],
-                bypass_ip_check: false,
-                leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
-            },
-            P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
-        )
-        .unwrap();
+        let sender_peer = identities[1].ed25519_public_key();
+        let mut handles = identities
+            .into_iter()
+            .zip(addresses)
+            .enumerate()
+            .skip(1)
+            .map(|(index, (identity, listen))| {
+                let secp256k1_identity = secp256k1_identity(index as u64 + 11);
+                let role = manifest
+                    .validate_node(
+                        9,
+                        &identity.ed25519_public_key(),
+                        Some(secp256k1_identity.address()),
+                        None,
+                    )
+                    .unwrap();
+                assert_eq!(role, crate::Role::Follower);
+                spawn_p2p(
+                    P2pConfig {
+                        manifest: manifest.clone(),
+                        ed25519_identity: identity,
+                        secp256k1_identity: Some(secp256k1_identity),
+                        listen,
+                        bypass_ip_check: false,
+                        leadership: crate::LeadershipSchedule::seeded(
+                            manifest.bootstrap_leadership(),
+                        ),
+                    },
+                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
 
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !matches!(
-                handle.events_mut().recv().await,
-                Some(P2pEvent::Started { .. })
-            ) {}
+        for handle in &mut handles {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    handle.events_mut().recv().await,
+                    Some(P2pEvent::Started { .. })
+                ) {}
+            })
+            .await
+            .expect("follower P2P runtime did not start");
+        }
+        let commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        let transaction = vec![0x76, 0x01];
+        let forwarder = repeat(
+            commands,
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(1),
+                transaction: transaction.clone(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key,
+                    transaction: received,
+                }) = handles[1].events_mut().recv().await
+                {
+                    assert_eq!(follower_ed25519_public_key, sender_peer);
+                    assert_eq!(received, transaction);
+                    return;
+                }
+            }
         })
         .await
-        .expect("follower P2P runtime did not start");
-        let commands = handle.parts.as_ref().unwrap().commands.clone();
-        commands
-            .send(P2pCommand::ForwardTransaction {
-                transaction_hash: B256::with_last_byte(1),
-                transaction: vec![0x76, 0x01],
-            })
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        commands
-            .send(P2pCommand::ForwardTransaction {
-                transaction_hash: B256::with_last_byte(2),
-                transaction: vec![0x76, 0x02],
-            })
-            .await
-            .expect("a dropped send must not stop the command loop");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(
-            tokio::time::timeout(
-                Duration::from_millis(100),
-                &mut handle.parts.as_mut().unwrap().stopped,
-            )
-            .await
-            .is_err(),
-            "follower runtime stopped after an unavailable-leader send"
-        );
+        .expect("reachable follower did not receive transaction while leader was offline");
+        forwarder.abort();
 
-        handle.shutdown().await.unwrap();
+        for handle in handles {
+            handle.shutdown().await.unwrap();
+        }
     }
 }

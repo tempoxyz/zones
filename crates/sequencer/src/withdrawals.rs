@@ -1028,6 +1028,23 @@ mod tests {
     }
 
     #[test]
+    fn maximum_batch_fits_portal_bounceback_reserve() {
+        const PORTAL_BOUNCEBACK_RESERVE: usize = 20;
+
+        let withdrawals = simple_withdrawals(PORTAL_BOUNCEBACK_RESERVE);
+        let batches = build_withdrawal_batches(&withdrawals, MAX_WITHDRAWAL_BATCH_GAS);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 19);
+        assert_eq!(batches[1].len(), 1);
+        assert!(
+            batches
+                .iter()
+                .all(|batch| batch.len() <= PORTAL_BOUNCEBACK_RESERVE)
+        );
+    }
+
+    #[test]
     fn oversized_withdrawal_is_a_singleton() {
         let mut withdrawals = simple_withdrawals(2);
         withdrawals[0].gasLimit = MAX_WITHDRAWAL_GAS_LIMIT;

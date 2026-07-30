@@ -46,6 +46,7 @@ pub mod dispatch {
 mod execution;
 pub use execution::ZonePrecompileEnv;
 pub mod inbox;
+pub mod receive_policy_guard;
 pub mod storage;
 pub mod tempo_state;
 pub mod tip403_proxy;
@@ -57,7 +58,7 @@ pub mod ztip20;
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use inbox::{ADVANCE_TEMPO_SELECTOR, ZoneInbox};
-pub use outbox::ZoneOutbox;
+pub use outbox::{ZoneOutbox, is_finalize_withdrawal_batch_calldata};
 pub use storage::{L1State, L1StateError, L1StorageReader};
 pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
@@ -68,6 +69,7 @@ use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 use tempo_precompiles::{
     Precompile as _,
+    receive_policy_guard::ReceivePolicyGuard as TempoReceivePolicyGuard,
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
     tip403_registry::TIP403Registry,
 };
@@ -107,6 +109,16 @@ pub fn create_tip403_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
         env,
         tip403_proxy::Tip403Rules,
         |data, caller| TIP403Registry::new().call(data, caller),
+    )
+}
+
+/// Creates upstream receive-policy guard execution with Zone receipt-read privacy rules.
+pub fn create_receive_policy_guard_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
+    execution::create_precompile(
+        "ReceivePolicyGuard",
+        env,
+        receive_policy_guard::ReceivePolicyGuardRules,
+        |data, caller| TempoReceivePolicyGuard::new().call(data, caller),
     )
 }
 

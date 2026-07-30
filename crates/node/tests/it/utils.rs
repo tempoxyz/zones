@@ -53,8 +53,8 @@ use tempo_precompiles::{
         Handler, PrecompileStorageProvider, StorageCtx, StorageKey, hashmap::HashMapStorageProvider,
     },
     tip403_registry::{
-        ALLOW_ALL_POLICY_ID, CompoundPolicyData as RawCompoundPolicyData, PolicyData, PolicyType,
-        TIP403Registry, tip403_registry_slots,
+        ALLOW_ALL_POLICY_ID, AuthRole, CompoundPolicyData as RawCompoundPolicyData, PolicyData,
+        PolicyType, TIP403Registry, tip403_registry_slots,
     },
 };
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
@@ -410,6 +410,26 @@ async fn handle_test_l1_rpc_request(
     let _ = stream.write_all(response.as_bytes()).await;
 }
 
+/// Helper to check TIP-403 authorization via TIP-20 operations.
+///
+/// Direct zone calls to TIP-403 registry are forbidden, so tests trigger checks using a TIP20 call.
+pub(crate) struct Check403Registry {
+    pub(crate) provider: DynProvider,
+    pub(crate) token: Address,
+}
+
+impl Check403Registry {
+    pub(crate) async fn is_auth_as(&self, from: Address, to: Address, role: AuthRole) -> bool {
+        let (token, zero) = (ITIP20::new(self.token, &self.provider), U256::ZERO);
+        match role {
+            AuthRole::Transfer => token.transfer(from, zero).from(from).call().await.is_ok(),
+            AuthRole::Sender => token.transfer(to, zero).from(from).call().await.is_ok(),
+            AuthRole::Recipient => token.transfer(from, zero).from(to).call().await.is_ok(),
+            AuthRole::MintRecipient => token.mint(from, zero).from(to).call().await.is_ok(),
+        }
+    }
+}
+
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
 pub(crate) fn seed_raw_tip403_token_policy(
     cache: &mut zone_l1::state::L1StateCacheInner,
@@ -617,6 +637,13 @@ impl ZoneTestNode {
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
+    }
+
+    /// Stop this node's task runtime while retaining its storage handles for the test lifetime.
+    pub(crate) fn crash(&self) {
+        let _ = self
+            ._tasks
+            .graceful_shutdown_with_timeout(Duration::from_secs(5));
     }
 
     async fn spawn_sequencer(
@@ -979,6 +1006,7 @@ impl ZoneTestNode {
             8,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1001,6 +1029,7 @@ impl ZoneTestNode {
             withdrawal_batch_interval_blocks,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1069,6 +1098,7 @@ impl ZoneTestNode {
             8,
             Some(p2p_config),
             true,
+            false,
         )
         .await
     }
@@ -1090,6 +1120,7 @@ impl ZoneTestNode {
             8,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1110,6 +1141,7 @@ impl ZoneTestNode {
             8,
             None,
             true,
+            false,
         )
         .await
     }
@@ -1124,6 +1156,7 @@ impl ZoneTestNode {
         withdrawal_batch_interval_blocks: u64,
         p2p_config: Option<P2pConfig>,
         spawn_engine: bool,
+        allow_public_simulations: bool,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -1151,6 +1184,9 @@ impl ZoneTestNode {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
                 .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
+        }
+        if allow_public_simulations {
+            zone_node = zone_node.allow_public_simulation_methods();
         }
         let p2p_enabled = p2p_config.is_some();
         if p2p_enabled && !is_local_dummy_l1 {
@@ -3414,6 +3450,16 @@ impl P2pCluster {
 /// Start a three-node multi-sequencer cluster with identical genesis state and authenticated
 /// P2P identities. Node 0 bootstraps as the leader.
 pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2pCluster> {
+    start_local_p2p_cluster_with_public_simulations(seed_blocks, true).await
+}
+
+/// Start a P2P cluster, optionally retaining public simulation RPC methods.
+///
+/// Passing `false` exercises the production sequencer RPC policy.
+pub(crate) async fn start_local_p2p_cluster_with_public_simulations(
+    seed_blocks: u64,
+    allow_public_simulations: bool,
+) -> eyre::Result<P2pCluster> {
     fn available_address() -> eyre::Result<SocketAddr> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
         Ok(listener.local_addr()?)
@@ -3503,6 +3549,7 @@ pub(crate) async fn start_local_p2p_cluster(seed_blocks: u64) -> eyre::Result<P2
                 8,
                 Some(config),
                 false,
+                allow_public_simulations,
             )
             .await?,
         );
@@ -4319,6 +4366,30 @@ impl L1Fixture {
             .lock()
             .unwrap()
             .push(enabled_tokens.clone());
+    }
+
+    /// Build a TIP-403 checker and seed the token and account policy state it consumes.
+    pub(crate) fn tip403_registry_check(
+        &self,
+        zone: &ZoneTestNode,
+        token: Address,
+        no_receive_policy_accounts: &[Address],
+        block_number: u64,
+        policy_id: u64,
+    ) -> eyre::Result<Check403Registry> {
+        for &account in no_receive_policy_accounts {
+            self.seed_no_receive_policy_at(block_number, account)?;
+        }
+        seed_raw_tip403_token_policy(
+            &mut zone.l1_state_cache().lock(),
+            block_number,
+            token,
+            policy_id,
+        );
+        Ok(Check403Registry {
+            provider: zone.provider(),
+            token,
+        })
     }
 
     /// Seed the absence of an address-level TIP-403 receive policy at the current Zone anchor.

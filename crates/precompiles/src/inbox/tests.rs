@@ -5,14 +5,16 @@ use alloy_primitives::{Bytes, address, keccak256};
 use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
-use tempo_contracts::precompiles::{IAddressRegistry, ITIP403Registry};
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_contracts::precompiles::IAddressRegistry;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     address_registry::{AddressRegistry, TempoAddressExt, UserTag},
+    receive_policy_guard::ReceivePolicyGuard,
     storage::{ContractStorage, Handler, StorageCtx},
     test_util::{TIP20Setup, VIRTUAL_MASTER, VIRTUAL_SALT},
     tip20::{ITIP20, TIP20Token},
-    tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID},
+    tip403_registry::{ALLOW_ALL_POLICY_ID, ITIP403Registry, REJECT_ALL_POLICY_ID, TIP403Registry},
     zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
@@ -51,6 +53,7 @@ impl Harness {
 
     fn with_l1(l1: MockL1Reader) -> eyre::Result<Self> {
         let mut ctx = test_context();
+        ctx.cfg.spec = TempoHardfork::T9;
         let genesis_rlp = encode_header(&TempoHeader::default());
         let genesis_hash = keccak256(&genesis_rlp);
         {
@@ -59,6 +62,7 @@ impl Harness {
                 TempoState::new().initialize(&genesis_rlp)?;
                 ZoneInbox::new().initialize()?;
                 ZoneOutbox::new().initialize()?;
+                ReceivePolicyGuard::new().initialize()?;
                 TIP20Setup::path_usd(ALICE)
                     .with_issuer(ALICE)
                     .with_issuer(ZONE_INBOX_ADDRESS)
@@ -118,12 +122,21 @@ impl Harness {
     }
 
     fn call(&mut self, caller: Address, calldata: impl AsRef<[u8]>) -> PrecompileResult {
+        self.call_with_gas(caller, calldata, GAS)
+    }
+
+    fn call_with_gas(
+        &mut self,
+        caller: Address,
+        calldata: impl AsRef<[u8]>,
+        gas: u64,
+    ) -> PrecompileResult {
         call_precompile(
             &mut self.ctx,
             &self.precompile,
             caller,
             calldata.as_ref(),
-            GAS,
+            gas,
             false,
             ZONE_INBOX_ADDRESS,
             ZONE_INBOX_ADDRESS,
@@ -196,6 +209,99 @@ impl Harness {
         assert_eq!(pending[0].to, recipient);
         Ok(())
     }
+}
+
+fn worst_case_encrypted_deposit_block_gas() -> eyre::Result<u64> {
+    const SYSTEM_GAS: u64 = 250_000_000;
+    const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 640;
+
+    let mut harness = Harness::new()?;
+    {
+        let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+        StorageCtx::enter(&mut storage, || {
+            TIP403Registry::new().set_receive_policy(
+                BOB,
+                ITIP403Registry::setReceivePolicyCall {
+                    senderPolicyId: REJECT_ALL_POLICY_ID,
+                    tokenFilterId: ALLOW_ALL_POLICY_ID,
+                    recoveryAuthority: Address::ZERO,
+                },
+            )
+        })?;
+    }
+
+    let fixture = EncryptedDepositFixture::new();
+    let decrypted = fixture.decrypt().expect("fixture decrypts");
+    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x);
+    let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
+    let plaintext = build_plaintext(&BOB, &fixture.memo);
+    let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
+    let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
+    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
+    let slot_x = base + fixture.key_index * U256::from(2);
+    harness
+        .l1
+        .insert(PORTAL, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(
+        PORTAL,
+        slot_x + U256::ONE,
+        1,
+        U256::from(sequencer_y_parity),
+    );
+
+    let deposit = EncryptedDeposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        amount: 1,
+        tempoRefundRecipient: ALICE,
+        keyIndex: fixture.key_index,
+        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+            ephemeralPubkeyX: fixture.eph_pub_x,
+            ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
+            ciphertext: ciphertext.into(),
+            nonce: nonce.into(),
+            tag: tag.into(),
+        },
+    };
+    let decryption = DecryptionData {
+        sharedSecret: decrypted.proof.shared_secret,
+        sharedSecretYParity: decrypted.proof.shared_secret_y_parity,
+        cpProof: tempo_zone_contracts::ChaumPedersenProof {
+            s: decrypted.proof.cp_proof_s,
+            c: decrypted.proof.cp_proof_c,
+        },
+    };
+
+    let mut deposits = Vec::with_capacity(MAX_DEPOSITS_PER_TEMPO_BLOCK);
+    let mut decryptions = Vec::with_capacity(MAX_DEPOSITS_PER_TEMPO_BLOCK);
+    let mut head = B256::ZERO;
+    for _ in 0..MAX_DEPOSITS_PER_TEMPO_BLOCK {
+        head = keccak256((DepositType::Encrypted, deposit.clone(), head).abi_encode_params());
+        deposits.push(QueuedDeposit {
+            depositType: DepositType::Encrypted,
+            depositData: deposit.abi_encode().into(),
+        });
+        decryptions.push(decryption.clone());
+    }
+
+    harness.set_queue_hash(head);
+    let calldata = harness.advance_call(deposits, decryptions).abi_encode();
+    let output = harness.call_with_gas(Address::ZERO, calldata, SYSTEM_GAS)?;
+    assert!(output.is_success());
+    Ok(output.gas_used)
+}
+
+#[test]
+fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
+    const BUFFERED_GAS_LIMIT: u64 = 200_000_000;
+
+    let gas_used = worst_case_encrypted_deposit_block_gas()?;
+    eprintln!("max portal deposit block: {gas_used} gas");
+    assert!(
+        gas_used <= BUFFERED_GAS_LIMIT,
+        "max deposit block used {gas_used} gas"
+    );
+    Ok(())
 }
 
 #[test]

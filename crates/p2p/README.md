@@ -5,11 +5,17 @@ multi-sequencer Tempo Zone. A manifest defines the static peer topology (names, 
 Ed25519 identities, individual secp256k1 addresses). Each node loads its own Commonware
 Ed25519 identity and validates that it appears in the manifest.
 
-Which member *leads* (produces blocks) is not decided by the manifest: it is derived
-exclusively from finalized Tempo L1 state — the `ZonePortal`'s `leader`, `leaderEpoch`, and
+Which member *leads* (produces blocks) is not decided by the manifest: normally it is derived
+from finalized Tempo L1 state — the `ZonePortal`'s `leader`, `leaderEpoch`, and
 `leaderActivationTempoBlock` fields and its `LeaderUpdated` event. Every observed transition
-is retained in an activation-indexed `LeadershipSchedule`; production and import authority
-for a given Tempo anchor is answered by `leader_for(anchor)` over that retained timeline.
+is retained in an activation-indexed `LeadershipSchedule`.
+
+For manual crashed-leader recovery, an operator may install the same force request on
+the surviving nodes. The request fences the next anchor at the exact operator-selected tip until
+the matching `LeaderUpdated` transition is finalized, then assigns the replacement leader from
+that anchor until the portal activation. The portal schedule is authoritative from its activation
+onward. Operational consumers use `leader_for(anchor)`, which incorporates the recovery without
+mutating the retained portal transition timeline.
 
 If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
 behavior.

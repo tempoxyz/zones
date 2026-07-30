@@ -24,7 +24,7 @@ use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
-use reth_provider::CanonStateSubscriptions;
+use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
@@ -51,14 +51,14 @@ use zone_l1::TempoStateExt as _;
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
-use zone_p2p::{LeadershipSchedule, ZoneManifest};
+use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
         LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
-        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneInfoResponse, internal,
-        raw_null, raw_zero, to_raw,
+        SequencerProgress, SequencerReadiness, SetLeaderOptions, SetLeaderParams,
+        SetLeaderResponse, ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
     },
 };
 
@@ -189,17 +189,25 @@ pub(crate) fn public_zone_rpc_module<P>(
     provider: P,
 ) -> Result<RpcModule<()>, jsonrpsee::core::RegisterMethodError>
 where
-    P: BlockNumReader + StateProviderFactory + Clone + Send + Sync + 'static,
+    P: BlockNumReader + HeaderProvider + StateProviderFactory + Clone + Send + Sync + 'static,
 {
     let mut module = RpcModule::new(());
     let set_leader_sequencer = sequencer.clone();
+    let set_leader_provider = provider.clone();
     module.register_async_method("zone_setLeader", move |params, _, _| {
         let sequencer = set_leader_sequencer.clone();
+        let provider = set_leader_provider.clone();
         async move {
-            let (target,) = params.parse::<(Address,)>()?;
-            set_leader(portal_address, sequencer.as_ref(), target)
-                .await
-                .map_err(public_rpc_error)
+            let (target, options) = params.parse::<SetLeaderParams>()?.into_parts();
+            set_leader(
+                portal_address,
+                sequencer.as_ref(),
+                &provider,
+                target,
+                options,
+            )
+            .await
+            .map_err(public_rpc_error)
         }
     })?;
     module.register_async_method("zone_getSequencerInfo", move |_, _, _| {
@@ -313,7 +321,7 @@ fn get_sequencer_info<P>(
     provider: &P,
 ) -> Result<SequencerInfoResponse, JsonRpcError>
 where
-    P: BlockNumReader + StateProviderFactory,
+    P: BlockNumReader + HeaderProvider + StateProviderFactory,
 {
     let Some(context) = sequencer.get() else {
         // Single-sequencer (or not yet initialized) node: report the minimal view.
@@ -322,6 +330,7 @@ where
             portal: portal_address,
             local: None,
             active_leader: None,
+            local_tip: None,
             peers: Vec::new(),
             progress: None,
             readiness: None,
@@ -365,12 +374,7 @@ where
         })
         .collect();
 
-    let zone_height = provider.best_block_number().map_err(internal)?;
-    let tempo_block_number = provider
-        .latest()
-        .map_err(internal)?
-        .tempo_block_number()
-        .map_err(internal)?;
+    let local_tip = local_recovery_tip(provider)?;
 
     let local_node = context
         .manifest
@@ -387,10 +391,16 @@ where
             role: status.role.to_owned(),
         }),
         active_leader,
+        local_tip: Some(PeerTipInfo {
+            zone_height: U64::from(local_tip.zone_height),
+            zone_hash: local_tip.zone_hash,
+            tempo_block_number: U64::from(local_tip.tempo_block_number),
+            tempo_block_hash: local_tip.tempo_block_hash,
+        }),
         peers,
         progress: Some(SequencerProgress {
-            zone_height: U64::from(zone_height),
-            tempo_block_number: U64::from(tempo_block_number),
+            zone_height: U64::from(local_tip.zone_height),
+            tempo_block_number: U64::from(local_tip.tempo_block_number),
             latest_observed_leadership_epoch: context
                 .schedule
                 .latest_observed_epoch()
@@ -1138,11 +1148,57 @@ where
     }
 }
 
-async fn set_leader(
+fn local_recovery_tip<P>(provider: &P) -> Result<PeerTip, JsonRpcError>
+where
+    P: BlockNumReader + HeaderProvider + StateProviderFactory,
+{
+    let zone_height = provider.best_block_number().map_err(internal)?;
+    let zone_header = provider
+        .sealed_header(zone_height)
+        .map_err(internal)?
+        .ok_or_else(|| JsonRpcError::internal("local canonical zone header is missing"))?;
+    let tempo_tip = provider
+        .state_by_block_hash(zone_header.hash())
+        .map_err(internal)?
+        .tempo_num_hash()
+        .map_err(internal)?;
+    Ok(PeerTip {
+        zone_height,
+        zone_hash: zone_header.hash(),
+        tempo_block_number: tempo_tip.number,
+        tempo_block_hash: tempo_tip.hash,
+    })
+}
+
+fn parse_forced_recovery(options: SetLeaderOptions) -> Result<Option<(u64, B256)>, JsonRpcError> {
+    if !options.force {
+        if options.expected_epoch.is_some() || options.recovery_block_hash.is_some() {
+            return Err(JsonRpcError::invalid_params(
+                "expectedEpoch and recoveryBlockHash require force=true",
+            ));
+        }
+        return Ok(None);
+    }
+    let expected_epoch = options
+        .expected_epoch
+        .ok_or_else(|| JsonRpcError::invalid_params("force=true requires expectedEpoch"))?
+        .to::<u64>();
+    let recovery_block_hash = options
+        .recovery_block_hash
+        .ok_or_else(|| JsonRpcError::invalid_params("force=true requires recoveryBlockHash"))?;
+    Ok(Some((expected_epoch, recovery_block_hash)))
+}
+
+async fn set_leader<P>(
     portal_address: Address,
     sequencer: &std::sync::OnceLock<SequencerRpcContext>,
+    provider: &P,
     target: Address,
-) -> Result<SetLeaderResponse, JsonRpcError> {
+    options: SetLeaderOptions,
+) -> Result<SetLeaderResponse, JsonRpcError>
+where
+    P: BlockNumReader + HeaderProvider + StateProviderFactory,
+{
     let Some(context) = sequencer.get() else {
         return Err(JsonRpcError::invalid_params(
             "zone_setLeader requires multi-sequencer mode",
@@ -1166,13 +1222,13 @@ async fn set_leader(
         ));
     };
     let portal = ZonePortal::new(portal_address, relayer);
+    let forced = parse_forced_recovery(options)?;
 
     // The target must be a manifest member and a registered portal sequencer.
-    if context.manifest.node_by_secp256k1_address(target).is_none() {
-        return Err(JsonRpcError::invalid_params(
-            "target is not a manifest member",
-        ));
-    }
+    let target_node = context
+        .manifest
+        .node_by_secp256k1_address(target)
+        .ok_or_else(|| JsonRpcError::invalid_params("target is not a manifest member"))?;
     let is_sequencer = portal
         .isSequencer(target)
         .block(BlockId::finalized())
@@ -1193,6 +1249,55 @@ async fn set_leader(
     let epoch_call = portal.leaderEpoch().block(BlockId::finalized());
     let (leader, expected_epoch) =
         tokio::try_join!(leader_call.call(), epoch_call.call()).map_err(internal)?;
+
+    if let Some((requested_epoch, recovery_block_hash)) = forced {
+        let recovery_epoch = requested_epoch
+            .checked_add(1)
+            .ok_or_else(|| JsonRpcError::invalid_params("forced recovery epoch overflow"))?;
+        if leader == target {
+            if expected_epoch != recovery_epoch {
+                return Err(JsonRpcError::invalid_params(format!(
+                    "finalized target epoch is {expected_epoch}, expected forced recovery epoch \
+                     {recovery_epoch}"
+                )));
+            }
+        } else if expected_epoch != requested_epoch {
+            return Err(JsonRpcError::invalid_params(format!(
+                "finalized leadership epoch is {expected_epoch}, expected {requested_epoch}"
+            )));
+        }
+
+        let local_tip = local_recovery_tip(provider)?;
+        if local_tip.zone_hash != recovery_block_hash {
+            return Err(JsonRpcError::invalid_params(format!(
+                "forced recovery block hash {recovery_block_hash} does not equal local canonical \
+                 head {} at height {}",
+                local_tip.zone_hash, local_tip.zone_height,
+            )));
+        }
+
+        let prepared = context
+            .schedule
+            .prepare_forced_recovery(
+                recovery_epoch,
+                target_node.ed25519_public_key().clone(),
+                recovery_block_hash,
+                local_tip.tempo_block_number.saturating_add(1),
+            )
+            .map_err(|err| JsonRpcError::invalid_params(err.to_string()))?;
+        tracing::info!(
+            target: "zone::rpc",
+            %target,
+            requested_epoch,
+            recovery_zone_height = local_tip.zone_height,
+            recovery_zone_hash = %recovery_block_hash,
+            recovery_tempo_block = local_tip.tempo_block_number,
+            recovery_tempo_hash = %local_tip.tempo_block_hash,
+            prepared,
+            "Prepared forced leader recovery"
+        );
+    }
+
     if leader == target {
         return Ok(SetLeaderResponse {
             status: "alreadyActive".to_owned(),

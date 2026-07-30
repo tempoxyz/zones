@@ -81,6 +81,44 @@ impl LeadershipState {
     }
 }
 
+/// Forced-recovery authority attached to the finalized leadership schedule.
+///
+/// Before the matching portal transition is finalized, the record fences the selected recovery
+/// boundary so the old leader cannot move the local tip. The transition activates the replacement
+/// leader from `recovery_start_tempo_block` until ordinary portal authority takes over.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedRecoveryState {
+    /// Epoch assigned by the matching portal transition.
+    pub epoch: u64,
+    /// Ed25519 identity selected as the replacement leader.
+    pub leader: PublicKey,
+    /// Exact canonical zone block hash selected by the force RPC.
+    pub recovery_block_hash: B256,
+    /// First Tempo anchor governed by the recovery override.
+    pub recovery_start_tempo_block: u64,
+    /// Activation anchor from the matching finalized portal transition.
+    pub portal_activation_tempo_block: Option<u64>,
+}
+
+impl ForcedRecoveryState {
+    /// Whether finalized L1 has activated this recovery.
+    pub const fn is_active(&self) -> bool {
+        self.portal_activation_tempo_block.is_some()
+    }
+
+    fn leadership_record_for(&self, tempo_anchor: u64) -> Option<LeadershipState> {
+        let portal_activation = self.portal_activation_tempo_block?;
+        if !(self.recovery_start_tempo_block..portal_activation).contains(&tempo_anchor) {
+            return None;
+        }
+        Some(LeadershipState::new(
+            self.epoch,
+            self.leader.clone(),
+            self.recovery_start_tempo_block,
+        ))
+    }
+}
+
 #[derive(Debug, Default)]
 struct LeadershipScheduleState {
     /// Retained transitions indexed by activation Tempo block.
@@ -89,17 +127,62 @@ struct LeadershipScheduleState {
     latest_observed_epoch: Option<u64>,
     /// Highest Tempo anchor embedded in a locally canonical zone block.
     applied_anchor: Option<u64>,
+    /// Optional operator-requested forced recovery.
+    forced_recovery: Option<ForcedRecoveryState>,
 }
 
 impl LeadershipScheduleState {
-    fn next_anchor_record(&self) -> Option<&LeadershipState> {
+    fn leader_for(&self, tempo_anchor: u64) -> Option<LeadershipState> {
+        if self.forced_recovery.as_ref().is_some_and(|recovery| {
+            !recovery.is_active() && tempo_anchor >= recovery.recovery_start_tempo_block
+        }) {
+            // If there's a forced recovery pending for this anchor, return None because `setLeader` call must finalize first.
+            return None;
+        }
+        let scheduled = self
+            .transitions
+            .range(..=tempo_anchor)
+            .next_back()
+            .map(|(_, record)| record.clone());
+        let recovery = self
+            .forced_recovery
+            .as_ref()
+            .and_then(|recovery| recovery.leadership_record_for(tempo_anchor));
+        recovery.or(scheduled)
+    }
+
+    fn next_anchor_record(&self) -> Option<LeadershipState> {
         let next_anchor = self
             .applied_anchor
             .map_or(u64::MAX, |applied| applied.saturating_add(1));
-        self.transitions
-            .range(..=next_anchor)
-            .next_back()
-            .map(|(_, record)| record)
+        self.leader_for(next_anchor)
+    }
+
+    fn maybe_activate_forced_recovery(&mut self) {
+        let Some(recovery) = self.forced_recovery.as_mut() else {
+            return;
+        };
+        if recovery.is_active() {
+            return;
+        }
+        let Some(record) = self
+            .transitions
+            .last_key_value()
+            .map(|(_, record)| record.clone())
+        else {
+            return;
+        };
+        if record.epoch != recovery.epoch || record.leader != recovery.leader {
+            // Once finalized L1 has reached or passed the expected recovery epoch with a
+            // different authority, this request can never become valid.
+            if record.epoch >= recovery.epoch {
+                self.forced_recovery = None;
+            }
+            return;
+        }
+        recovery.portal_activation_tempo_block = Some(record.activation_tempo_block);
+        metrics::counter!("zone_forced_recovery_transitions_total", "state" => "active")
+            .increment(1);
     }
 }
 
@@ -233,22 +316,22 @@ impl LeadershipSchedule {
         state
             .transitions
             .insert(record.activation_tempo_block, record);
+        state.maybe_activate_forced_recovery();
         drop(state);
         self.changed.send_replace(());
         Ok(true)
     }
 
-    /// Returns the record governing `tempo_anchor`: the greatest activation `<= tempo_anchor`
-    /// over every retained transition. `None` while uninitialized or for anchors before the
-    /// first retained activation — both fence production and import for that anchor.
+    /// Returns the operational authority for `tempo_anchor`.
+    ///
+    /// A pending forced recovery fences its recovery boundary. Once finalized, it overrides the
+    /// earlier portal schedule from that boundary until the matching portal activation. Returns
+    /// `None` while fenced, uninitialized, or for an anchor no retained transition governs.
     pub fn leader_for(&self, tempo_anchor: u64) -> Option<LeadershipState> {
         self.inner
             .read()
             .expect("poisoned")
-            .transitions
-            .range(..=tempo_anchor)
-            .next_back()
-            .map(|(_, record)| record.clone())
+            .leader_for(tempo_anchor)
     }
 
     /// Returns the most recently observed record (status only, never a production permit).
@@ -270,11 +353,56 @@ impl LeadershipSchedule {
     /// outgoing leader — not the most recently observed one — still produces. Routing only,
     /// never a production permit.
     pub fn next_anchor_record(&self) -> Option<LeadershipState> {
-        self.inner
-            .read()
-            .expect("poisoned")
-            .next_anchor_record()
-            .cloned()
+        self.inner.read().expect("poisoned").next_anchor_record()
+    }
+
+    /// Install a forced-recovery request.
+    ///
+    /// Repeating the identical request is an idempotent no-op. A different outstanding request
+    /// is rejected. The caller must validate the exact local canonical recovery tip first. Until
+    /// the matching portal transition is finalized, the request fences the next anchor.
+    pub fn prepare_forced_recovery(
+        &self,
+        recovery_epoch: u64,
+        leader: PublicKey,
+        recovery_block_hash: B256,
+        recovery_start_tempo_block: u64,
+    ) -> eyre::Result<bool> {
+        let requested = ForcedRecoveryState {
+            epoch: recovery_epoch,
+            leader,
+            recovery_block_hash,
+            recovery_start_tempo_block,
+            portal_activation_tempo_block: None,
+        };
+
+        let mut state = self.inner.write().expect("poisoned");
+        if let Some(existing) = &state.forced_recovery {
+            eyre::ensure!(
+                existing.epoch == requested.epoch
+                    && existing.leader == requested.leader
+                    && existing.recovery_block_hash == requested.recovery_block_hash
+                    && existing.recovery_start_tempo_block == requested.recovery_start_tempo_block,
+                "conflicting forced recovery request is already installed"
+            );
+            return Ok(false);
+        }
+        state.forced_recovery = Some(requested);
+        state.maybe_activate_forced_recovery();
+        eyre::ensure!(
+            state.forced_recovery.is_some(),
+            "latest finalized leadership transition conflicts with forced recovery request"
+        );
+        drop(state);
+        self.changed.send_replace(());
+        metrics::counter!("zone_forced_recovery_requests_total", "result" => "prepared")
+            .increment(1);
+        Ok(true)
+    }
+
+    /// Return the current forced-recovery request, if any.
+    pub fn forced_recovery(&self) -> Option<ForcedRecoveryState> {
+        self.inner.read().expect("poisoned").forced_recovery.clone()
     }
 
     /// Highest epoch finalized L1 has shown us.
@@ -310,7 +438,7 @@ impl LeadershipSchedule {
     /// recovery by asking who governed the previous anchor.
     pub fn record_applied_anchor(&self, tempo_anchor: u64) {
         let mut state = self.inner.write().expect("poisoned");
-        let previous_next_anchor_record = state.next_anchor_record().cloned();
+        let previous_next_anchor_record = state.next_anchor_record();
         state.applied_anchor = Some(
             state
                 .applied_anchor
@@ -332,11 +460,22 @@ impl LeadershipSchedule {
                 .transitions
                 .retain(|&activation, _| activation >= keep_from);
         }
-        let governing_record_changed =
-            state.next_anchor_record() != previous_next_anchor_record.as_ref();
+        let recovery_completed = state.forced_recovery.as_ref().is_some_and(|recovery| {
+            recovery
+                .portal_activation_tempo_block
+                .is_some_and(|activation| applied >= activation)
+        });
+        if recovery_completed {
+            state.forced_recovery = None;
+        }
+        let governing_record_changed = state.next_anchor_record() != previous_next_anchor_record;
         drop(state);
-        if governing_record_changed {
+        if governing_record_changed || recovery_completed {
             self.changed.send_replace(());
+        }
+        if recovery_completed {
+            metrics::counter!("zone_forced_recovery_transitions_total", "state" => "complete")
+                .increment(1);
         }
     }
 
@@ -954,6 +1093,7 @@ pub enum ManifestError {
 
 #[cfg(test)]
 mod tests {
+    use alloy_primitives::B256;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
@@ -962,6 +1102,10 @@ mod tests {
 
     fn public_key(seed: u64) -> commonware_cryptography::ed25519::PublicKey {
         PrivateKey::from_seed(seed).public_key()
+    }
+
+    fn recovery_block_hash() -> B256 {
+        B256::repeat_byte(0x11)
     }
 
     #[test]
@@ -1000,6 +1144,123 @@ mod tests {
         assert_eq!(schedule.leader_for(u64::MAX).unwrap().leader, public_key(3));
         assert_eq!(schedule.latest_observed_epoch(), Some(3));
         assert_eq!(schedule.pending_transitions(), 2);
+    }
+
+    #[test]
+    fn forced_recovery_fences_until_matching_transition_then_is_bounded() {
+        let outgoing = public_key(1);
+        let incoming = public_key(2);
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, outgoing.clone(), 0));
+        schedule.record_applied_anchor(50);
+
+        assert!(
+            schedule
+                .prepare_forced_recovery(8, incoming.clone(), recovery_block_hash(), 51)
+                .unwrap()
+        );
+        assert!(
+            schedule.leader_for(51).is_none(),
+            "pending recovery must fence the selected boundary"
+        );
+
+        schedule
+            .publish(LeadershipState::new(8, incoming.clone(), 60))
+            .unwrap();
+        assert_eq!(schedule.leader_for(50).unwrap().leader, outgoing);
+        assert_eq!(schedule.leader_for(51).unwrap().leader, incoming);
+        assert_eq!(schedule.leader_for(59).unwrap().leader, incoming);
+        assert_eq!(
+            schedule.leader_for(60).unwrap().leader,
+            incoming,
+            "recovery agrees with portal authority at the activation boundary"
+        );
+        schedule
+            .publish(LeadershipState::new(9, public_key(3), 70))
+            .unwrap();
+        assert_eq!(schedule.leader_for(69).unwrap().leader, incoming);
+        assert_eq!(schedule.leader_for(70).unwrap().leader, public_key(3));
+    }
+
+    #[test]
+    fn forced_recovery_atomically_reconciles_a_transition_published_first() {
+        let incoming = public_key(2);
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, public_key(1), 0));
+        schedule
+            .publish(LeadershipState::new(8, incoming.clone(), 60))
+            .unwrap();
+
+        schedule
+            .prepare_forced_recovery(8, incoming.clone(), recovery_block_hash(), 51)
+            .unwrap();
+
+        assert!(schedule.forced_recovery().unwrap().is_active());
+        assert_eq!(schedule.leader_for(51).unwrap().leader, incoming);
+    }
+
+    #[test]
+    fn forced_recovery_rejects_a_conflicting_transition_published_first() {
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, public_key(1), 0));
+        schedule
+            .publish(LeadershipState::new(8, public_key(3), 60))
+            .unwrap();
+
+        assert!(
+            schedule
+                .prepare_forced_recovery(8, public_key(2), recovery_block_hash(), 51)
+                .is_err()
+        );
+        assert!(schedule.forced_recovery().is_none());
+    }
+
+    #[test]
+    fn forced_recovery_clears_after_portal_activation_is_applied() {
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, public_key(1), 0));
+        schedule.record_applied_anchor(50);
+        schedule
+            .prepare_forced_recovery(8, public_key(2), recovery_block_hash(), 51)
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(8, public_key(2), 60))
+            .unwrap();
+
+        schedule.record_applied_anchor(59);
+        assert!(schedule.forced_recovery().is_some());
+        schedule.record_applied_anchor(60);
+        assert!(schedule.forced_recovery().is_none());
+    }
+
+    #[test]
+    fn empty_recovery_window_still_activates_recovery() {
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, public_key(1), 0));
+        schedule
+            .prepare_forced_recovery(8, public_key(2), recovery_block_hash(), 60)
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(8, public_key(2), 60))
+            .unwrap();
+
+        assert!(schedule.forced_recovery().unwrap().is_active());
+        assert_eq!(schedule.leader_for(60).unwrap().leader, public_key(2));
+    }
+
+    #[test]
+    fn forced_recovery_request_is_idempotent_and_rejects_conflict() {
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, public_key(1), 0));
+        assert!(
+            schedule
+                .prepare_forced_recovery(8, public_key(2), recovery_block_hash(), 51)
+                .unwrap()
+        );
+        assert!(
+            !schedule
+                .prepare_forced_recovery(8, public_key(2), recovery_block_hash(), 51)
+                .unwrap()
+        );
+        assert!(
+            schedule
+                .prepare_forced_recovery(8, public_key(3), recovery_block_hash(), 51)
+                .is_err()
+        );
     }
 
     #[test]

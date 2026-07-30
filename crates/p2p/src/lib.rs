@@ -7,8 +7,8 @@ mod network;
 mod runtime;
 
 pub use manifest::{
-    LeadershipSchedule, LeadershipState, ManifestAddress, ManifestError, ManifestNode, Role,
-    ZoneManifest,
+    ForcedRecoveryState, LeadershipSchedule, LeadershipState, ManifestAddress, ManifestError,
+    ManifestNode, Role, ZoneManifest,
 };
 pub use network::P2pNetworkId;
 pub use runtime::{

@@ -331,22 +331,10 @@ pub(crate) struct PendingPeerBlock {
 
 /// Latest tip evidence advertised by each peer, with observation time.
 ///
-/// Fed by backfill completions on the follower sync loop, consumed by the role controller's
-/// promotion gate and the status RPC.
-#[derive(Debug, Clone)]
+/// Fed by backfill completions on the follower sync loop and consumed by the status RPC.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PeerTipRegistry {
     inner: std::sync::Arc<std::sync::Mutex<HashMap<P2pPeerId, (PeerTip, std::time::Instant)>>>,
-    changed: tokio::sync::watch::Sender<()>,
-}
-
-impl Default for PeerTipRegistry {
-    fn default() -> Self {
-        let (changed, _) = tokio::sync::watch::channel(());
-        Self {
-            inner: Default::default(),
-            changed,
-        }
-    }
 }
 
 impl PeerTipRegistry {
@@ -355,7 +343,6 @@ impl PeerTipRegistry {
             .lock()
             .expect("poisoned")
             .insert(peer, (tip, std::time::Instant::now()));
-        self.changed.send_replace(());
     }
 
     pub(crate) fn snapshot(&self) -> Vec<(P2pPeerId, PeerTip, std::time::Instant)> {
@@ -365,10 +352,6 @@ impl PeerTipRegistry {
             .iter()
             .map(|(peer, (tip, at))| (peer.clone(), *tip, *at))
             .collect()
-    }
-
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
-        self.changed.subscribe()
     }
 }
 
@@ -1494,6 +1477,26 @@ mod tests {
         assert!(message.contains("schedule assigns that anchor"));
     }
 
+    #[test]
+    fn forced_recovery_reassigns_live_sender_for_missing_anchors() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+        let outgoing = PrivateKey::from_seed(1).public_key();
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, outgoing.clone(), 0));
+        schedule
+            .prepare_forced_recovery(8, incoming.clone(), B256::repeat_byte(0x11), 51)
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(8, incoming.clone(), 60))
+            .unwrap();
+
+        validate_live_block_sender(&schedule, Some(&incoming), 51, 11).unwrap();
+        let error = validate_live_block_sender(&schedule, Some(&outgoing), 51, 11)
+            .expect_err("the crashed leader must not remain authoritative in the recovery window");
+        assert!(error.to_string().contains(&incoming.to_string()));
+    }
+
     #[tokio::test]
     async fn broadcasts_block_persisted_during_startup_reconciliation_once() {
         let source = StartupRaceSource {
@@ -1568,13 +1571,11 @@ mod tests {
     }
 
     #[test]
-    fn peer_tip_registry_announces_fresh_evidence() {
+    fn peer_tip_registry_records_latest_tip() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use zone_p2p::PeerTip;
 
         let registry = super::PeerTipRegistry::default();
-        let mut changes = registry.subscribe();
-        assert!(!changes.has_changed().unwrap());
 
         let peer = PrivateKey::from_seed(1).public_key();
         let tip = PeerTip {
@@ -1584,12 +1585,9 @@ mod tests {
             tempo_block_hash: B256::repeat_byte(0x11),
         };
         registry.record(peer.clone(), tip);
-        assert!(changes.has_changed().unwrap());
-        changes.borrow_and_update();
 
-        // Re-advertising the same tip refreshes its evidence timestamp and must wake waiters.
+        // Re-advertising the same tip refreshes its observation timestamp.
         registry.record(peer.clone(), tip);
-        assert!(changes.has_changed().unwrap());
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].0, peer);
