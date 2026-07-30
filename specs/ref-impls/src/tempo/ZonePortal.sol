@@ -1034,6 +1034,7 @@ contract ZonePortal is IZonePortal {
 
         bytes32 depositQueueHashBefore = currentDepositQueueHash;
 
+        // We copy whatever the messenger reverts with, so keep its errors small.
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
 

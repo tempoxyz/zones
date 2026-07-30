@@ -79,6 +79,13 @@ struct OutstandingBackfill {
     sent_at: Instant,
 }
 
+impl OutstandingBackfill {
+    /// Whether the response window has closed, freeing the peer to be asked again.
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.sent_at) >= BACKFILL_RESPONSE_TIMEOUT
+    }
+}
+
 #[derive(Debug, Default)]
 struct BackfillJob {
     next_request_id: u64,
@@ -94,9 +101,9 @@ impl BackfillJob {
         let request_peers = peers
             .iter()
             .filter(|peer| {
-                self.outstanding.get(*peer).is_none_or(|request| {
-                    now.duration_since(request.sent_at) >= BACKFILL_RESPONSE_TIMEOUT
-                })
+                self.outstanding
+                    .get(*peer)
+                    .is_none_or(|request| request.expired(now))
             })
             .cloned()
             .collect::<Vec<_>>();
@@ -129,10 +136,19 @@ impl BackfillJob {
     }
 
     fn accepts(&self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
-        self.outstanding.get(peer).is_some_and(|request| {
-            request.request_id == request_id
-                && now.duration_since(request.sent_at) < BACKFILL_RESPONSE_TIMEOUT
-        })
+        self.outstanding
+            .get(peer)
+            .is_some_and(|request| request.request_id == request_id && !request.expired(now))
+    }
+
+    /// Whether `peer` has left a request unanswered past the response timeout.
+    ///
+    /// Separates "still serving" from "stopped answering", so a page in flight does not widen
+    /// the source set.
+    fn is_unresponsive(&self, peer: &PublicKey, now: Instant) -> bool {
+        self.outstanding
+            .get(peer)
+            .is_some_and(|request| request.expired(now))
     }
 
     fn complete(&mut self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
@@ -168,7 +184,9 @@ pub struct P2pConfig {
     manifest: Arc<ZoneManifest>,
     ed25519_identity: Ed25519Identity,
     // This individual node key will be used to sign zone blocks for the on-chain quorum.
-    secp256k1_identity: Secp256k1Identity,
+    // `None` on an `rpc_only` node: it never signs, so it is not provisioned with quorum key
+    // material at all.
+    secp256k1_identity: Option<Secp256k1Identity>,
     listen: SocketAddr,
     bypass_ip_check: bool,
     leadership: LeadershipSchedule,
@@ -177,28 +195,34 @@ pub struct P2pConfig {
 impl P2pConfig {
     /// Loads the Commonware Ed25519 key and manifest, then validates this node's
     /// membership, zone ID, and optional role assertion.
+    ///
+    /// `secp256k1_key_path` is required for a quorum member and rejected for an `rpc_only`
+    /// node; [`ZoneManifest::validate_node`] enforces the correspondence.
     pub fn load(
         manifest_path: impl AsRef<Path>,
         ed25519_key_path: impl AsRef<Path>,
-        secp256k1_key_path: impl AsRef<Path>,
+        secp256k1_key_path: Option<impl AsRef<Path>>,
         listen: SocketAddr,
         bypass_ip_check: bool,
         expected_zone_id: u32,
         asserted_role: Option<Role>,
     ) -> eyre::Result<Self> {
         let ed25519_identity = Ed25519Identity::read_from_file(ed25519_key_path)?;
-        let secp256k1_identity = Secp256k1Identity::read_from_file(secp256k1_key_path)?;
+        let secp256k1_identity = secp256k1_key_path
+            .map(Secp256k1Identity::read_from_file)
+            .transpose()?;
         let manifest = ZoneManifest::read_from_file(manifest_path)?;
         validate_ip_check_configuration(&manifest, bypass_ip_check)?;
         manifest.validate_node(
             expected_zone_id,
             &ed25519_identity.ed25519_public_key(),
-            secp256k1_identity.address(),
+            secp256k1_identity.as_ref().map(Secp256k1Identity::address),
             asserted_role,
         )?;
-        // The schedule starts uninitialized. The node seeds it from the finalized
-        // portal snapshot at the local Tempo checkpoint before any role-dependent task starts.
-        let leadership = LeadershipSchedule::uninitialized();
+        // The schedule starts uninitialized but already carries the manifest's static quorum
+        // membership. The node seeds the transitions from the finalized portal snapshot at the
+        // local Tempo checkpoint before any role-dependent task starts.
+        let leadership = manifest.leadership_schedule();
         Ok(Self {
             manifest: Arc::new(manifest),
             ed25519_identity,
@@ -224,22 +248,33 @@ impl P2pConfig {
         self.ed25519_identity.ed25519_public_key()
     }
 
-    /// This node's address derived from its individual secp256k1 key.
-    pub fn secp256k1_address(&self) -> EthereumAddress {
-        self.secp256k1_identity.address()
+    /// Whether this node replicates without joining the on-chain settlement quorum.
+    pub fn is_rpc_only(&self) -> bool {
+        self.leadership.is_rpc_only(&self.ed25519_public_key())
     }
 
-    /// Signer used for EIP-712 zone-block attestations.
-    pub fn block_attestation_signer(&self) -> alloy_signer_local::PrivateKeySigner {
-        self.secp256k1_identity.signer()
+    /// This node's address derived from its individual secp256k1 key, when it holds one.
+    pub fn secp256k1_address(&self) -> Option<EthereumAddress> {
+        self.secp256k1_identity
+            .as_ref()
+            .map(Secp256k1Identity::address)
     }
 
-    /// Expected attestation address for every peer.
+    /// Signer used for EIP-712 zone-block attestations, when this node is a quorum member.
+    pub fn block_attestation_signer(&self) -> Option<alloy_signer_local::PrivateKeySigner> {
+        self.secp256k1_identity
+            .as_ref()
+            .map(Secp256k1Identity::signer)
+    }
+
+    /// Expected attestation address for every quorum peer.
+    ///
+    /// RPC-only members are deliberately absent: they never sign, so a signature claiming to
+    /// come from one has no registered address to match and is rejected.
     pub fn block_attestation_addresses(&self) -> HashMap<PublicKey, EthereumAddress> {
         self.manifest
-            .nodes()
-            .iter()
-            .map(|node| (node.ed25519_public_key().clone(), node.secp256k1_address()))
+            .quorum_nodes()
+            .map(|(node, address)| (node.ed25519_public_key().clone(), address))
             .collect()
     }
 
@@ -604,42 +639,6 @@ async fn run_commands(
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
     while let Some(command) = commands.recv().await {
-        if let P2pCommand::RequestBackfill { start } = command {
-            let backfill_peers = peers
-                .iter()
-                .filter(|peer| *peer != &local_ed25519_public_key)
-                .cloned()
-                .collect::<Vec<_>>();
-            let now = Instant::now();
-            let request = {
-                backfill_job
-                    .lock()
-                    .await
-                    .begin_request(&backfill_peers, now)
-            };
-            let Some((request_id, request_peers)) = request else {
-                debug!(target: "zone::p2p", start, configured = backfill_peers.len(), "Skipping block backfill request because all eligible peers already have outstanding responses");
-                continue;
-            };
-            let mut request_frame = Vec::with_capacity(16);
-            request_frame.extend_from_slice(&request_id.to_be_bytes());
-            request_frame.extend_from_slice(&start.to_be_bytes());
-            let sent = match senders
-                .backfill_requests
-                .send(Recipients::Some(request_peers.clone()), request_frame, true)
-                .await
-            {
-                Ok(sent) => sent,
-                Err(err) => {
-                    backfill_job.lock().await.cancel_request(request_id);
-                    return Err(eyre::eyre!("failed requesting block backfill: {err}"));
-                }
-            };
-            backfill_job.lock().await.finish_send(request_id, &sent);
-            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), configured = backfill_peers.len(), "Sent block backfill request");
-            continue;
-        }
-
         // Built only in arms that actually address a peer set — forwarding a transaction must
         // not allocate one.
         let others = || {
@@ -649,6 +648,71 @@ async fn run_commands(
                 .cloned()
                 .collect::<Vec<_>>()
         };
+        if let P2pCommand::RequestBackfill { start } = command {
+            // Chain data always comes from a quorum member: standbys hold the same chain but are
+            // the internet-facing members, and keeping them out of every node's catch-up source
+            // set is the point of the role.
+            let candidates = leadership.quorum_peers(&others());
+            let now = Instant::now();
+            // Ask the leader alone first: backfilled blocks carry no producer claim, so a page
+            // from any other member could be a valid alternative chain rather than the leader's.
+            //
+            // Two different failures have to widen the source set. A leader that received the
+            // request and went quiet is caught by `is_unresponsive` on a later tick. A leader
+            // that is not connected never receives one — the send reaches nobody and
+            // `finish_send` drops its outstanding entry, so `is_unresponsive` would stay false
+            // forever and every retry would re-pick it. Attempting the wider set in the same
+            // pass is what keeps a leader outage from wedging catch-up entirely.
+            let leader = leadership.next_anchor_record().map(|record| record.leader);
+            let leader_first = match &leader {
+                Some(leader) => {
+                    candidates.contains(leader)
+                        && !backfill_job.lock().await.is_unresponsive(leader, now)
+                }
+                None => false,
+            };
+            let mut attempts = Vec::with_capacity(2);
+            if let Some(leader) = leader.filter(|_| leader_first) {
+                attempts.push(vec![leader]);
+            }
+            attempts.push(candidates);
+
+            for (attempt, sources) in attempts.into_iter().enumerate() {
+                let leader_only = leader_first && attempt == 0;
+                let request = backfill_job.lock().await.begin_request(&sources, now);
+                let Some((request_id, request_peers)) = request else {
+                    debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
+                    continue;
+                };
+                let mut request_frame = Vec::with_capacity(16);
+                request_frame.extend_from_slice(&request_id.to_be_bytes());
+                request_frame.extend_from_slice(&start.to_be_bytes());
+                let sent = match senders
+                    .backfill_requests
+                    .send(Recipients::Some(request_peers.clone()), request_frame, true)
+                    .await
+                {
+                    Ok(sent) => sent,
+                    Err(err) => {
+                        backfill_job.lock().await.cancel_request(request_id);
+                        return Err(eyre::eyre!("failed requesting block backfill: {err}"));
+                    }
+                };
+                backfill_job.lock().await.finish_send(request_id, &sent);
+                if sent.is_empty() {
+                    debug!(target: "zone::p2p", request_id, start, requested = request_peers.len(), leader_only, "Block backfill request reached no peer");
+                    continue;
+                }
+                if !leader_only {
+                    metrics::counter!("zone_p2p_backfill_requests_without_leader_total")
+                        .increment(1);
+                }
+                debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), sources = sources.len(), leader_only, "Sent block backfill request");
+                break;
+            }
+            continue;
+        }
+
         match command {
             P2pCommand::BroadcastBlock(block) => {
                 // Mirror of the inbound transport check: the sender must lead somewhere in
@@ -699,14 +763,25 @@ async fn run_commands(
                     warn!(target: "zone::p2p", "Ignoring settlement proposal command without retained scheduled leadership");
                     continue;
                 }
+                // Only quorum members sign, so only they are asked. An RPC-only standby that
+                // received a proposal would have nothing to answer it with.
                 senders
                     .settlement_proposals
-                    .send(Recipients::Some(others()), proposal, true)
+                    .send(
+                        Recipients::Some(leadership.quorum_peers(&others())),
+                        proposal,
+                        true,
+                    )
                     .await
                     .wrap_err("failed broadcasting settlement proposal")?;
             }
 
             P2pCommand::SendSettlementSignature { leader, signature } => {
+                if !leadership.is_quorum_member(&local_ed25519_public_key) {
+                    metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
+                    warn!(target: "zone::p2p", "Ignoring settlement signature command from a node outside the on-chain quorum");
+                    continue;
+                }
                 // The signature answers a specific proposal, so it returns to that
                 // proposal's sender (not to the most recent leader. Important during handoff)
                 if leader == local_ed25519_public_key || !leadership.is_scheduled_leader(&leader) {
@@ -850,8 +925,12 @@ async fn run_receivers(
                 let (peer, bytes) = result.wrap_err("settlement proposal channel receive failed")?;
                 // The proposer must lead somewhere in the retained schedule — during a scheduled handoff the
                 // outgoing leader still settles pre-boundary batches. The follower rebuilds
-                // the proposal from its own state before signing.
-                if peer == local_ed25519_public_key || !leadership.is_scheduled_leader(&peer) {
+                // the proposal from its own state before signing. An RPC-only member drops the
+                // proposal here: only the on-chain quorum signs.
+                if peer == local_ed25519_public_key
+                    || !leadership.is_scheduled_leader(&peer)
+                    || !leadership.is_quorum_member(&local_ed25519_public_key)
+                {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement proposal from ineligible peer");
                     continue;
                 }
@@ -861,7 +940,11 @@ async fn run_receivers(
             // Got a response from a follower to the settlement proposal
             result = settlement_signatures.recv() => {
                 let (peer, bytes) = result.wrap_err("settlement signature channel receive failed")?;
+                // An RPC-only member has no address registered with `ZonePortal`, so its
+                // signature could never be counted; reject it at the transport instead of
+                // relying on the attestation-address lookup further in.
                 if peer == local_ed25519_public_key
+                    || !leadership.is_quorum_member(&peer)
                     || !leadership.is_scheduled_leader(&local_ed25519_public_key)
                 {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement signature from ineligible peer");
@@ -885,8 +968,12 @@ async fn run_receivers(
             // Got backfill response (for an existing request)
             result = backfill_responses.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill response receive failed: {err}"))?;
-                // Backfill responses are accepted from any node
-                if peer == local_ed25519_public_key || !manifest.contains_ed25519_public_key(&peer) {
+                // Backfill responses are accepted from any quorum member — the request side
+                // only ever asks them, so a page from an internet-facing standby is unsolicited.
+                if peer == local_ed25519_public_key
+                    || !manifest.contains_ed25519_public_key(&peer)
+                    || !leadership.is_quorum_member(&peer)
+                {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill response from ineligible peer");
                     continue;
                 }
@@ -1002,6 +1089,31 @@ mod tests {
     }
 
     #[test]
+    fn leader_counts_as_unresponsive_only_after_the_response_timeout() {
+        // Drives the leader-only-until-it-stops-answering choice in the backfill request arm:
+        // a served request must not widen the source set, an abandoned one must.
+        let leader = ed25519_identity(1).ed25519_public_key();
+        let now = Instant::now();
+        let mut lifecycle = BackfillJob::default();
+
+        // Nothing outstanding: the leader is the sole source.
+        assert!(!lifecycle.is_unresponsive(&leader, now));
+
+        let (request_id, peers) = lifecycle
+            .begin_request(std::slice::from_ref(&leader), now)
+            .unwrap();
+        lifecycle.finish_send(request_id, &peers);
+        // Still within the window, so it is being served, not stalling.
+        assert!(!lifecycle.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
+        // Past the window the node must be free to ask the rest of the quorum.
+        assert!(lifecycle.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
+
+        // A completed page clears the state, returning to leader-only.
+        assert!(lifecycle.complete(&leader, request_id, now));
+        assert!(!lifecycle.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
+    }
+
+    #[test]
     fn stale_response_cannot_complete_replacement_request() {
         let peer = ed25519_identity(1).ed25519_public_key();
         let now = Instant::now();
@@ -1035,30 +1147,115 @@ mod tests {
         assert!(lifecycle.complete(&peer, replacement_id, expired_at));
     }
 
+    /// Resend `command` until the test drops the returned handle.
+    ///
+    /// Commonware drops messages for peers that have not handshaked yet, so a phase that must be
+    /// observed repeats its command until the expected peer sees it.
+    fn repeat(
+        commands: tokio::sync::mpsc::Sender<P2pCommand>,
+        command: P2pCommand,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                commands.send(command.clone()).await.unwrap();
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+    }
+
+    /// Drain events for `duration`, failing if any of them satisfies `forbidden`.
+    async fn assert_no_event_matching(
+        events: &mut tokio::sync::mpsc::Receiver<P2pEvent>,
+        duration: Duration,
+        context: &str,
+        forbidden: impl Fn(&P2pEvent) -> bool,
+    ) {
+        let result = tokio::time::timeout(duration, async {
+            while let Some(event) = events.recv().await {
+                assert!(!forbidden(&event), "{context}");
+            }
+        })
+        .await;
+        assert!(result.is_err(), "{context}: event channel closed");
+    }
+
     async fn assert_no_backfill_response_events(
         events: &mut tokio::sync::mpsc::Receiver<P2pEvent>,
         duration: Duration,
         context: &str,
     ) {
-        let result = tokio::time::timeout(duration, async {
-            loop {
-                match events.recv().await {
-                    Some(P2pEvent::BackfillBlockReceived { .. }) => {
-                        panic!("{context}: accepted unsolicited backfill block")
-                    }
-                    Some(P2pEvent::BackfillCompleted { .. }) => {
-                        panic!("{context}: accepted unsolicited backfill completion")
-                    }
-                    Some(_) => {}
-                    None => return,
-                }
-            }
+        assert_no_event_matching(events, duration, context, |event| {
+            matches!(
+                event,
+                P2pEvent::BackfillBlockReceived { .. } | P2pEvent::BackfillCompleted { .. }
+            )
         })
         .await;
-        assert!(
-            result.is_err(),
-            "{context}: event channel closed while checking for unsolicited backfill response"
+    }
+
+    /// Manifest TOML for a topology with one `rpc_only` standby.
+    ///
+    /// Node `index` gets `secp256k1_identity(seed_base + index)`, except the standby, which
+    /// declares no address at all — the shape the loader requires.
+    fn manifest_with_standby(
+        identities: &[Ed25519Identity],
+        addresses: &[SocketAddr],
+        seed_base: u64,
+        standby: usize,
+    ) -> String {
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
         );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let rpc_only = index == standby;
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\naddress = \"{address}\"\nrpc_only = {rpc_only}\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+            ));
+            if !rpc_only {
+                input.push_str(&format!(
+                    "secp256k1_address = \"{}\"\n",
+                    secp256k1_identity(seed_base + index as u64).address(),
+                ));
+            }
+        }
+        input
+    }
+
+    #[test]
+    fn attestation_addresses_and_peer_sets_exclude_rpc_only_members() {
+        let identities = [41_u64, 42, 43, 44].map(ed25519_identity);
+        let addresses: Vec<SocketAddr> = (0..4)
+            .map(|index| format!("127.0.0.1:{}", 9200 + index).parse().unwrap())
+            .collect();
+        let input = manifest_with_standby(&identities, &addresses, 41, 3);
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let config = P2pConfig {
+            manifest: manifest.clone(),
+            ed25519_identity: ed25519_identity(41),
+            secp256k1_identity: Some(secp256k1_identity(41)),
+            listen: available_address(),
+            bypass_ip_check: false,
+            leadership: manifest.leadership_schedule(),
+        };
+
+        // The standby has no registered address, so a signature claiming to be its has nothing
+        // to match against and the leader cannot count it.
+        let addresses = config.block_attestation_addresses();
+        assert_eq!(addresses.len(), 3);
+        assert!(!addresses.contains_key(&identities[3].ed25519_public_key()));
+
+        let peers = identities
+            .iter()
+            .map(|identity| identity.ed25519_public_key())
+            .collect::<Vec<_>>();
+        let [leader, follower_a, follower_b, rpc] = peers.clone().try_into().unwrap();
+        assert_eq!(
+            config.leadership().quorum_peers(&peers),
+            vec![leader, follower_a, follower_b]
+        );
+        assert!(config.leadership().is_rpc_only(&rpc));
     }
 
     #[test]
@@ -1124,7 +1321,7 @@ mod tests {
                     .validate_node(
                         9,
                         &identity.ed25519_public_key(),
-                        secp256k1_identity.address(),
+                        Some(secp256k1_identity.address()),
                         None,
                     )
                     .unwrap();
@@ -1132,7 +1329,7 @@ mod tests {
                     P2pConfig {
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
-                        secp256k1_identity,
+                        secp256k1_identity: Some(secp256k1_identity),
                         listen,
                         bypass_ip_check: false,
                         leadership: crate::LeadershipSchedule::seeded(
@@ -1152,16 +1349,7 @@ mod tests {
             .send(P2pCommand::BroadcastBlock(oversized_block))
             .await
             .expect("P2P command channel should remain open");
-        let broadcast_block = block.clone();
-        let broadcaster = tokio::spawn(async move {
-            loop {
-                commands
-                    .send(P2pCommand::BroadcastBlock(broadcast_block.clone()))
-                    .await
-                    .unwrap();
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        });
+        let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(block.clone()));
 
         for handle in handles.iter_mut().skip(1) {
             tokio::time::timeout(Duration::from_secs(15), async {
@@ -1556,7 +1744,7 @@ mod tests {
                     P2pConfig {
                         manifest: manifest.clone(),
                         ed25519_identity: identity,
-                        secp256k1_identity: secp256k1_identity(index as u64 + 21),
+                        secp256k1_identity: Some(secp256k1_identity(index as u64 + 21)),
                         listen,
                         bypass_ip_check: false,
                         leadership,
@@ -1711,6 +1899,236 @@ mod tests {
         }
     }
 
+    /// An RPC-only member replicates and forwards like any follower, but stays outside the
+    /// settlement quorum in both directions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rpc_only_follower_replicates_but_never_settles() {
+        const LEADER: usize = 0;
+        const QUORUM_FOLLOWER: usize = 1;
+        const QUORUM_FOLLOWER_B: usize = 2;
+        const RPC_FOLLOWER: usize = 3;
+
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [31_u64, 32, 33, 34].map(ed25519_identity);
+        let input = manifest_with_standby(&identities, &addresses, 31, RPC_FOLLOWER);
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let leader_peer = identities[LEADER].ed25519_public_key();
+        let rpc_follower_peer = identities[RPC_FOLLOWER].ed25519_public_key();
+        let mut handles = identities
+            .into_iter()
+            .zip(addresses)
+            .enumerate()
+            .map(|(index, (identity, listen))| {
+                let leadership = manifest.leadership_schedule();
+                leadership.publish(manifest.bootstrap_leadership()).unwrap();
+                spawn_p2p(
+                    P2pConfig {
+                        manifest: manifest.clone(),
+                        ed25519_identity: identity,
+                        // The standby is provisioned without quorum key material at all.
+                        secp256k1_identity: (index != RPC_FOLLOWER)
+                            .then(|| secp256k1_identity(index as u64 + 31)),
+                        listen,
+                        bypass_ip_check: false,
+                        leadership,
+                    },
+                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let leader_commands = handles[LEADER].parts.as_ref().unwrap().commands.clone();
+        let rpc_commands = handles[RPC_FOLLOWER]
+            .parts
+            .as_ref()
+            .unwrap()
+            .commands
+            .clone();
+
+        // Replication reaches every replica, including the RPC standby: it serves reads from its
+        // own imported chain. Waiting for all three also establishes the full mesh.
+        let block = vec![0xf8, 0x01, 0x80];
+        let broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(block.clone()),
+        );
+        for index in [QUORUM_FOLLOWER, QUORUM_FOLLOWER_B, RPC_FOLLOWER] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        leader_ed25519_public_key,
+                        block: received,
+                    }) = handles[index].events_mut().recv().await
+                    {
+                        assert_eq!(leader_ed25519_public_key, leader_peer);
+                        assert_eq!(received, block);
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("node-{index} did not receive the leader's block"));
+        }
+        broadcaster.abort();
+
+        // Settlement proposals go only to the quorum.
+        let proposal = vec![0x10, 0x20];
+        let proposer = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastSettlementProposal(proposal.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::SettlementProposalReceived {
+                    proposal: received, ..
+                }) = handles[QUORUM_FOLLOWER].events_mut().recv().await
+                {
+                    assert_eq!(received, proposal);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("quorum follower did not receive the settlement proposal");
+        // Proposals keep flowing through this window, so the standby has every chance to leak one.
+        assert_no_event_matching(
+            handles[RPC_FOLLOWER].events_mut(),
+            Duration::from_secs(2),
+            "RPC-only follower was asked to sign a settlement",
+            |event| matches!(event, P2pEvent::SettlementProposalReceived { .. }),
+        )
+        .await;
+        proposer.abort();
+
+        // ...and a signature from outside the quorum never reaches the leader: the command is
+        // dropped before it is sent, and the leader's receive guard would reject it anyway.
+        rpc_commands
+            .send(P2pCommand::SendSettlementSignature {
+                leader: leader_peer.clone(),
+                signature: vec![0x30, 0x40],
+            })
+            .await
+            .unwrap();
+
+        // Transaction forwarding still works: public RPC submissions must reach the leader.
+        let transaction_hash = B256::with_last_byte(7);
+        let transaction = vec![0x76, 0x07];
+        let forwarder = repeat(
+            rpc_commands.clone(),
+            P2pCommand::ForwardTransaction {
+                transaction_hash,
+                transaction: transaction.clone(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                match handles[LEADER].events_mut().recv().await {
+                    Some(P2pEvent::SettlementSignatureReceived { follower, .. }) => {
+                        panic!("leader accepted a settlement signature from {follower}")
+                    }
+                    Some(P2pEvent::TransactionReceived {
+                        follower_ed25519_public_key,
+                        transaction: received,
+                    }) => {
+                        assert_eq!(follower_ed25519_public_key, rpc_follower_peer);
+                        assert_eq!(received, transaction);
+                        return;
+                    }
+                    Some(_) => {}
+                    None => panic!("leader event channel closed"),
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive the RPC-only follower's forwarded transaction");
+        forwarder.abort();
+
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
+        }
+    }
+
+    /// Catch-up must reach a reachable quorum follower while the leader is offline.
+    ///
+    /// The leader is preferred as the sole source, but a leader that is not connected never
+    /// receives a request, so its outstanding entry is cleared on every attempt and
+    /// `is_unresponsive` never fires. Without widening in the same pass the node would re-pick
+    /// the unreachable leader forever and stay stuck for the whole outage.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn backfill_reaches_a_quorum_follower_while_the_leader_is_offline() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [51_u64, 52, 53].map(ed25519_identity);
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity(index as u64 + 51).address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+
+        // The leader (node 0) is never spawned, so it is a configured peer that never connects.
+        let mut handles = [1_usize, 2]
+            .map(|index| {
+                spawn_p2p(
+                    P2pConfig {
+                        manifest: manifest.clone(),
+                        ed25519_identity: ed25519_identity(index as u64 + 51),
+                        secp256k1_identity: Some(secp256k1_identity(index as u64 + 51)),
+                        listen: addresses[index],
+                        bypass_ip_check: false,
+                        leadership: crate::LeadershipSchedule::seeded(
+                            manifest.bootstrap_leadership(),
+                        ),
+                    },
+                    P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111")),
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        let requester_commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        let requester = repeat(requester_commands, P2pCommand::RequestBackfill { start: 1 });
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(P2pEvent::BackfillRequested { peer, start, .. }) =
+                    handles[1].events_mut().recv().await
+                {
+                    assert_eq!(peer, identities[1].ed25519_public_key());
+                    assert_eq!(start, 1);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("catch-up never widened past the offline leader to a reachable quorum follower");
+        requester.abort();
+
+        for handle in handles {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unavailable_leader_drops_transaction_without_stopping_follower() {
         let addresses = [
@@ -1742,7 +2160,7 @@ mod tests {
             .validate_node(
                 9,
                 &identity.ed25519_public_key(),
-                secp256k1_identity.address(),
+                Some(secp256k1_identity.address()),
                 None,
             )
             .unwrap();
@@ -1751,7 +2169,7 @@ mod tests {
             P2pConfig {
                 manifest: manifest.clone(),
                 ed25519_identity: identity,
-                secp256k1_identity,
+                secp256k1_identity: Some(secp256k1_identity),
                 listen: addresses[1],
                 bypass_ip_check: false,
                 leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),

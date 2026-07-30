@@ -22,6 +22,11 @@ use crate::{
     storage::{L1State, L1StorageReader},
 };
 
+alloy_sol_types::sol! {
+    /// Returned instead of the upstream balance error that reveal the user balance to the spender.
+    error InsufficientBalance();
+}
+
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
 ///
 /// A constant charge hides storage-dependent execution costs that could reveal whether a recipient
@@ -134,7 +139,7 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
-    use alloy_sol_types::{SolCall, SolInterface};
+    use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
@@ -528,6 +533,44 @@ mod tests {
         )?;
         assert!(outbox_burn.is_success());
         assert_eq!(harness.balance_of(ZONE_OUTBOX_ADDRESS)?, U256::ZERO);
+
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new()?;
+        harness.call(
+            harness.alice,
+            ITIP20::approveCall {
+                spender: harness.spender,
+                amount: U256::from(1_000_001u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+
+        let result = harness.call(
+            harness.spender,
+            ITIP20::transferFromCall {
+                from: harness.alice,
+                to: harness.bob,
+                amount: U256::from(1_000_001u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+
+        assert!(result.is_revert());
+        assert_eq!(
+            result.bytes,
+            Bytes::from(InsufficientBalance {}.abi_encode())
+        );
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(1_000_000u64));
 
         Ok(())
     }

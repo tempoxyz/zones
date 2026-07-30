@@ -387,13 +387,13 @@ enum Readiness {
 /// Quorum depends on the mode: a **planned handoff** (the outgoing leader is alive and authoritative)
 /// requires the outgoing leader's fresh evidence to match our head;
 /// **same-identity recovery** (we already governed the previous anchor, or nothing did) requires fresh
-/// evidence from every other manifest peer, because an unreachable follower may hold replicated blocks
+/// evidence from every other quorum peer, because an unreachable follower may hold replicated blocks
 /// the others lack.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
     local: &P2pPeerId,
-    manifest_peers: &[P2pPeerId],
+    quorum_peers: &[P2pPeerId],
     registry: &PeerTipRegistry,
     next_anchor: u64,
 ) -> Readiness
@@ -457,7 +457,7 @@ where
             }
         }
         None => {
-            for peer in manifest_peers {
+            for peer in quorum_peers {
                 if peer != local && !fresh.contains_key(peer) {
                     reasons.push(format!(
                         "no fresh tip evidence from peer {peer} (required for same-identity \
@@ -506,10 +506,20 @@ pub(crate) async fn run_role_controller<P, Pool>(
 
     let mut generation_id: u64 = 0;
     let mut current: Option<RunningGeneration> = None;
+    // Standbys are excluded: one is never a catch-up source for a quorum node, so it never
+    // returns the backfill completion that carries tip evidence, and requiring evidence from one
+    // would block same-identity recovery forever.
     let manifest_peers: Vec<P2pPeerId> = context.attestation.addresses.keys().cloned().collect();
+    let quorum_peers = context.schedule.quorum_peers(&manifest_peers);
 
     loop {
-        let can_lead = context.sequencer.is_some();
+        // An rpc-only member is not registered with `ZonePortal`, so it can never be named
+        // leader by a finalized transition. Fencing it explicitly means a corrupt or wrongly
+        // provisioned record cannot start a producer whose blocks nobody could settle.
+        let can_lead = context.sequencer.is_some()
+            && context
+                .schedule
+                .is_quorum_member(&context.local_ed25519_public_key);
         let mut retry_decision = false;
         let mut desired = match desired_role(
             &context.provider,
@@ -537,7 +547,7 @@ pub(crate) async fn run_role_controller<P, Pool>(
                 &context.provider,
                 &context.schedule,
                 &context.local_ed25519_public_key,
-                &manifest_peers,
+                &quorum_peers,
                 &context.peer_tips,
                 next_anchor,
             ) {

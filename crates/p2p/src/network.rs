@@ -97,6 +97,10 @@ pub(crate) fn instantiate(
     network_id: P2pNetworkId,
 ) -> eyre::Result<(Network, Oracle, Map<PublicKey, Address>)> {
     let namespace = namespace(manifest.zone_id(), network_id);
+    // Logged, not bound into the namespace: a mismatch between nodes stalls settlement loudly at
+    // the next batch boundary, and making it a handshake failure would turn every membership edit
+    // into a coordinated fleet restart. Compare this across nodes to diagnose one.
+    tracing::info!(target: "zone::p2p", membership_digest = %manifest.membership_digest(), "Zone P2P membership");
     let config = setup_commonware_config(ed25519_private_key, &namespace, listen, bypass_ip_check);
 
     let peers = manifest
@@ -115,9 +119,9 @@ pub(crate) fn instantiate(
 }
 
 fn namespace(zone_id: u32, network_id: P2pNetworkId) -> Vec<u8> {
-    // Include both the protocol version and immutable L1 deployment identity so keys or
-    // endpoints accidentally reused across local, test, and production environments cannot
-    // authenticate into one another's P2P network.
+    // The protocol version and immutable L1 deployment identity keep keys or endpoints
+    // accidentally reused across local, test, and production environments from authenticating
+    // into one another's network.
     let mut namespace = Vec::with_capacity(
         NETWORK_NAMESPACE_PREFIX.len() + 1 + 8 + EthereumAddress::len_bytes() + 4,
     );
