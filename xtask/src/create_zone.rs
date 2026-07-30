@@ -134,10 +134,6 @@ impl CreateZone {
             ));
         }
 
-        let mut allowed_accounts = self.allowed_accounts.clone();
-        allowed_accounts.sort_unstable();
-        allowed_accounts.dedup();
-
         let key_str = self
             .private_key
             .strip_prefix("0x")
@@ -234,7 +230,7 @@ impl CreateZone {
                 initialToken: self.initial_token,
                 accessMode: self.access_mode,
                 gatewayMode: self.gateway_mode,
-                allowedAccounts: allowed_accounts.clone(),
+                allowedAccounts: self.allowed_accounts.clone(),
                 zoneGateways: self.zone_gateways.clone(),
                 admin: self.admin,
                 sequencers: vec![leader],
@@ -320,7 +316,7 @@ impl CreateZone {
             "accessMode": self.access_mode,
             "gatewayMode": self.gateway_mode,
             "zoneGateways": self.zone_gateways.iter().map(ToString::to_string).collect::<Vec<_>>(),
-            "allowedAccounts": allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            "allowedAccounts": self.allowed_accounts.iter().map(ToString::to_string).collect::<Vec<_>>(),
             "admin": format!("{}", self.admin),
             "sequencer": format!("{leader}"),
             "sequencers": self.sequencers.iter().map(ToString::to_string).collect::<Vec<_>>(),

@@ -29,7 +29,7 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - name: Check out current Earn contracts
+      - name: Check out Earn contracts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
@@ -55,7 +55,7 @@ jobs:
           {
             echo "forge-sha=$(forge --version | sed -n 's/^Commit SHA: //p')"
             echo "specs-tree=$(git rev-parse HEAD:specs/ref-impls)"
-            echo "current-earn-sha=$(git -C earn rev-parse HEAD)"
+            echo "earn-sha=$(git -C earn rev-parse HEAD)"
           } >> "$GITHUB_OUTPUT"
 
       - name: Restore Solidity artifacts
@@ -65,11 +65,10 @@ jobs:
             earn/cache
             specs/ref-impls/cache
             specs/ref-impls/out
-          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ steps.solidity-key.outputs.current-earn-sha }}
+          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}-${{ steps.solidity-key.outputs.earn-sha }}
 
       - name: Build Solidity artifacts
         run: |
-          set -euo pipefail
           forge build --root specs/ref-impls --no-lint
           forge build \
             --root earn \

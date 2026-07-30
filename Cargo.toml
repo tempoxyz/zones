@@ -230,7 +230,6 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 tokio-tungstenite = "0.28"
 tracing = "0.1.41"
-url = "2.5.4"
 zeroize = "1.9.0"
 
 # Keep Commonware aligned with the revision used by upstream Tempo. Cargo does

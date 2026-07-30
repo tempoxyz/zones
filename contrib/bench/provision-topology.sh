@@ -701,7 +701,7 @@ provision_up() {
     local max_concurrent="${ZONES_BENCH_MAX_CONCURRENT:-12}"
     local withdrawal_amount="${ZONES_BENCH_WITHDRAWAL_AMOUNT:-1000000}"
     local callback_gas_limit="${ZONES_BENCH_CALLBACK_GAS_LIMIT:-10000000}"
-    local withdrawal_max_batch_gas="${ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS:-30000000}"
+    local withdrawal_max_batch_gas="${ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS:-20000000}"
     local withdrawal_max_in_flight_batches="${ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES:-12}"
     local zone_batch_interval_blocks="${ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS:-120}"
     local withdrawal_poll_interval_secs="${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS:-5}"
@@ -846,8 +846,8 @@ provision_up() {
     fi
     (( callback_gas_limit > 0 && callback_gas_limit <= 10000000 )) \
         || die "ZONES_BENCH_CALLBACK_GAS_LIMIT must be between 1 and 10000000"
-    (( withdrawal_max_batch_gas > 0 && withdrawal_max_batch_gas <= 30000000 )) \
-        || die "ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS must be between 1 and 30000000"
+    (( withdrawal_max_batch_gas > 0 && withdrawal_max_batch_gas <= 20000000 )) \
+        || die "ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS must be between 1 and 20000000"
     (( withdrawal_max_batch_gas <= l1_general_gas_limit )) \
         || die "ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS cannot exceed ZONES_BENCH_L1_GENERAL_GAS_LIMIT"
     local planned_singleton_withdrawal_gas=0

@@ -114,10 +114,10 @@ on:
         required: true
         default: "30000000"
       withdrawal-max-batch-gas:
-        description: Benchmark override for L1 withdrawal batch gas (node default 10000000; maximum 30000000).
+        description: Benchmark override for L1 withdrawal batch gas (node default 10000000; maximum 20000000).
         type: string
         required: true
-        default: "30000000"
+        default: "20000000"
       withdrawal-max-in-flight-batches:
         description: Benchmark override for ordered L1 withdrawal batches in flight (node default 8).
         type: string
@@ -273,7 +273,7 @@ jobs:
           INPUT_SWAP_LIQUIDITY: ${{ inputs.swap-liquidity || '10000000000' }}
           INPUT_L1_GAS_LIMIT: ${{ inputs.l1-gas-limit || '30000000' }}
           INPUT_L1_GENERAL_GAS_LIMIT: ${{ inputs.l1-general-gas-limit || '30000000' }}
-          INPUT_WITHDRAWAL_MAX_BATCH_GAS: ${{ inputs.withdrawal-max-batch-gas || '30000000' }}
+          INPUT_WITHDRAWAL_MAX_BATCH_GAS: ${{ inputs.withdrawal-max-batch-gas || '20000000' }}
           INPUT_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES: ${{ inputs.withdrawal-max-in-flight-batches || '12' }}
           INPUT_ZONE_BATCH_INTERVAL_BLOCKS: ${{ inputs.zone-batch-interval-blocks || '120' }}
           INPUT_WITHDRAWAL_POLL_INTERVAL_SECS: ${{ inputs.withdrawal-poll-interval-secs || '5' }}
@@ -386,8 +386,8 @@ jobs:
             || { echo "::error::l1-general-gas-limit cannot exceed 30000000"; exit 1; }
           (( 10#$INPUT_L1_GENERAL_GAS_LIMIT <= 10#$INPUT_L1_GAS_LIMIT )) \
             || { echo "::error::l1-general-gas-limit cannot exceed l1-gas-limit"; exit 1; }
-          (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 30000000 )) \
-            || { echo "::error::withdrawal-max-batch-gas cannot exceed 30000000"; exit 1; }
+          (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 20000000 )) \
+            || { echo "::error::withdrawal-max-batch-gas cannot exceed 20000000"; exit 1; }
           (( 10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS <= 10#$INPUT_L1_GENERAL_GAS_LIMIT )) \
             || { echo "::error::withdrawal-max-batch-gas cannot exceed l1-general-gas-limit"; exit 1; }
           planned_singleton_withdrawal_gas=0
