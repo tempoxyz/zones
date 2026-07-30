@@ -1,4 +1,4 @@
-//! Follower-to-leader raw transaction forwarding and leader pool admission.
+//! Raw transaction propagation and replica pool admission.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -31,8 +31,8 @@ enum QueueOutcome {
     Closed,
 }
 
-/// Immediately queue new follower transactions, then periodically reconcile the pool
-/// to recover from intermittent connection issues / restarts.
+/// Immediately queue new follower transactions for every peer, then periodically reconcile the
+/// pool to recover from intermittent connection issues / restarts.
 pub(crate) async fn forward_new_transactions<P>(
     pool: P,
     mut transactions: mpsc::Receiver<NewTransactionEvent<TempoPooledTransaction>>,
@@ -90,7 +90,7 @@ fn try_queue_transaction(
     }) {
         Ok(()) => {
             metrics::counter!("zone_node_transactions_queued_for_forwarding_total").increment(1);
-            debug!(target: "zone::p2p", ?hash, transaction_size_bytes = encoded_len, "Queued follower transaction for leader");
+            debug!(target: "zone::p2p", ?hash, transaction_size_bytes = encoded_len, "Queued follower transaction for peers");
             QueueOutcome::Queued
         }
         Err(mpsc::error::TrySendError::Full(_)) => {
@@ -149,8 +149,7 @@ where
     true
 }
 
-/// Recover forwarded bytes and admit valid transactions to the leader's pool as external traffic.
-/// Note that only leader node will run this, followers don't need to keep track of mempool.
+/// Recover forwarded bytes and admit valid transactions to this replica's pool as external traffic.
 pub(crate) async fn insert_forwarded_transactions<P>(pool: P, mut events: mpsc::Receiver<P2pEvent>)
 where
     P: TransactionPool<Transaction = TempoPooledTransaction>,
@@ -179,7 +178,7 @@ where
         match pool.add_external_transaction(transaction).await {
             Ok(outcome) => {
                 metrics::counter!("zone_node_forwarded_transaction_admissions_total").increment(1);
-                debug!(target: "zone::p2p", %peer, ?hash, ?outcome, "Admitted forwarded transaction to leader pool");
+                debug!(target: "zone::p2p", %peer, ?hash, ?outcome, "Admitted forwarded transaction to local pool");
             }
             Err(err) if matches!(err.kind, PoolErrorKind::AlreadyImported) => {
                 metrics::counter!("zone_node_forwarded_transaction_duplicates_total").increment(1);
@@ -187,11 +186,11 @@ where
             }
             Err(err) => {
                 metrics::counter!("zone_node_forwarded_transaction_rejections_total").increment(1);
-                warn!(target: "zone::p2p", %peer, ?hash, %err, "Leader pool rejected forwarded transaction");
+                warn!(target: "zone::p2p", %peer, ?hash, %err, "Local pool rejected forwarded transaction");
             }
         }
     }
-    tracing::error!(target: "zone::p2p", "Leader P2P event channel closed");
+    debug!(target: "zone::p2p", "Transaction P2P event channel closed");
 }
 
 #[cfg(test)]
@@ -396,7 +395,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn leader_consumer_survives_malformed_and_duplicate_transactions() {
+    async fn replica_consumer_survives_malformed_and_duplicate_transactions() {
         let pool = test_pool();
         let (events, event_rx) = tokio::sync::mpsc::channel(8);
         let task = tokio::spawn(insert_forwarded_transactions(pool.clone(), event_rx));

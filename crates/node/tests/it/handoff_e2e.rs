@@ -52,7 +52,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     cluster.wait_all_at(3, HANDOFF_TIMEOUT).await?;
 
     // --- Block 4 funds a sender so a pending transaction can ride through the handoff. ---
-    let (sender_wallet, sender) = local_dev_zone_account(&cluster.nodes[1])?;
+    let (sender_wallet, sender) = local_dev_zone_account(&cluster.nodes[2])?;
     let amount = 1_000_000_u128;
     cluster.inject_block(vec![L1Fixture::make_deposit_for_block(
         PATH_USD_ADDRESS,
@@ -61,7 +61,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         amount,
     )])?;
     cluster.wait_all_at(4, DEFAULT_TIMEOUT).await?;
-    cluster.nodes[1]
+    cluster.nodes[2]
         .wait_for_balance(
             PATH_USD_ADDRESS,
             sender,
@@ -70,9 +70,9 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         )
         .await?;
 
-    // Submit a transfer to follower B. B admits it locally and forwards it to the active
-    // leader A; nobody includes it before the handoff because no further anchor is injected
-    // under A's authorization.
+    // Submit a transfer to follower C. C admits it locally and forwards it to every peer,
+    // including active leader A and incoming leader B. Nobody includes it before the handoff
+    // because no further anchor is injected under A's authorization.
     let recipient = address!("0x00000000000000000000000000000000000ffff1");
     cluster.fixture.seed_no_receive_policy(recipient)?;
     let transfer_amount = 123_456_u128;
@@ -98,6 +98,21 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         },
     )
     .await?;
+    let incoming_leader_provider = cluster.nodes[1].provider();
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "forwarded transaction in the incoming leader's pool",
+        || {
+            let incoming_leader_provider = &incoming_leader_provider;
+            async move {
+                Ok(incoming_leader_provider
+                    .get_transaction_by_hash(transaction_hash)
+                    .await?)
+            }
+        },
+    )
+    .await?;
 
     // --- The handoff: leadership of every anchor >= H moves to B. ---
     let handoff_anchor = cluster.next_anchor_number();
@@ -107,8 +122,8 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     );
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // Produce blocks under B until the pending transfer is included. B's own pool already
-    // holds the transaction, and A's post-demotion reconciliation re-forwards its pool to B.
+    // Produce blocks under B until the pending transfer is included. B already retained the
+    // transaction before the handoff, independently of A's post-demotion reconciliation.
     let receipt = tokio::time::timeout(HANDOFF_TIMEOUT, async {
         loop {
             cluster.inject_block(vec![])?;
@@ -317,9 +332,8 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
     let handoff_anchor = next_anchor + 3;
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // A transfer submitted to follower C during the window must be forwarded to the
-    // still-active leader A — not to the not-yet-active B, whose follower generation
-    // holds no transaction sink.
+    // A transfer submitted to follower C during the window is forwarded to every peer,
+    // including both still-active leader A and not-yet-active leader B.
     let recipient = address!("0x00000000000000000000000000000000000ffff2");
     cluster.fixture.seed_no_receive_policy(recipient)?;
     let transfer_amount = 123_456_u128;

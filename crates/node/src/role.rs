@@ -786,7 +786,8 @@ where
         }
         DesiredRole::Follower { epoch } => {
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, None);
+            let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            sinks.install(sync_tx, Some(transactions_tx));
 
             let follower_token = token.clone();
             let provider = context.provider.clone();
@@ -829,6 +830,19 @@ where
                     () = forward_token.cancelled() => TaskEnd::Ended("transaction-forwarding (cancelled)"),
                     () = forward_new_transactions(pool, listener, commands) => {
                         TaskEnd::Ended("transaction-forwarding")
+                    }
+                }
+            });
+
+            // Followers retain transactions received from other nodes in case it
+            // gets promoted to leader in the future.
+            let pool = context.pool.clone();
+            let import_token = token.clone();
+            tasks.spawn(async move {
+                tokio::select! {
+                    () = import_token.cancelled() => TaskEnd::Ended("transaction-import (cancelled)"),
+                    () = insert_forwarded_transactions(pool, transactions_rx) => {
+                        TaskEnd::Ended("transaction-import")
                     }
                 }
             });
