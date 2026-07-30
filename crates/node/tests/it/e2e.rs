@@ -25,8 +25,7 @@ use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
     approve_outbox, leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
-    start_chain_id_rpc, start_local_p2p_cluster, start_local_p2p_cluster_with_public_simulations,
-    start_local_zone_with_fixture,
+    start_chain_id_rpc, start_local_p2p_cluster, start_local_zone_with_fixture,
 };
 
 const CONTRACT_CREATION_TX_GAS: u64 = 1_000_000;
@@ -34,10 +33,10 @@ const LEADER_INCLUSION_TIMEOUT: Duration = Duration::from_secs(30);
 const P2P_RECOVERY_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn test_sequencer_blocks_simulation_endpoints() -> eyre::Result<()> {
+async fn test_sequencer_exposes_simulation_endpoints() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let cluster = start_local_p2p_cluster_with_public_simulations(10, false).await?;
+    let cluster = start_local_p2p_cluster(10).await?;
 
     for method in ["eth_call", "eth_estimateGas"] {
         let response = reqwest::Client::new()
@@ -52,7 +51,7 @@ async fn test_sequencer_blocks_simulation_endpoints() -> eyre::Result<()> {
             .await?
             .json::<serde_json::Value>()
             .await?;
-        assert_eq!(response["error"]["code"], -32601, "{method}: {response}");
+        assert_ne!(response["error"]["code"], -32601, "{method}: {response}");
     }
 
     Ok(())
