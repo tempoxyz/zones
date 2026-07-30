@@ -48,7 +48,7 @@ use crate::{
 const MAX_RETRIES: u32 = 3;
 
 /// Initial delay between retries (doubles on each attempt).
-const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
+const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(200);
 
 /// Backoff before rebuilding the monitor after a start or run failure.
 const RESTART_BACKOFF: Duration = Duration::from_secs(5);
