@@ -562,6 +562,20 @@ contract ZonePortalTest is BaseTest {
         signers[2] = vm.addr(SIGNER_C_KEY);
     }
 
+    function test_initializeInstallsFullQuorumAtVersionZero() public {
+        address[] memory signers = _sequencerSet();
+        ZonePortal quorumPortal =
+            _createZonePortal(2, address(pathUSD), admin, signers, 2, "https://quorum.example");
+
+        assertEq(quorumPortal.sequencerSetVersion(), 0);
+        assertEq(quorumPortal.sequencerThreshold(), 2);
+        assertEq(quorumPortal.sequencerCount(), 3);
+        assertEq(quorumPortal.leader(), signers[0]);
+        for (uint256 i; i < signers.length; ++i) {
+            assertTrue(quorumPortal.isSequencer(signers[i]));
+        }
+    }
+
     function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
         signers = _sequencerSet();
         // The portal rejects a set that drops the active leader, so rotation is three steps:

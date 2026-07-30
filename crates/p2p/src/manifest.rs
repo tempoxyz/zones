@@ -672,9 +672,6 @@ impl ZoneManifest {
     /// Parses and validates a TOML manifest.
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
         let raw: RawManifest = toml::from_str(input).map_err(ManifestError::Toml)?;
-        if raw.sequencer_set_version == 0 {
-            return Err(ManifestError::InvalidSequencerSetVersion);
-        }
 
         let leader_ed25519_public_key =
             parse_ed25519_public_key("leader_ed25519_public_key", &raw.leader_ed25519_public_key)?;
@@ -1001,9 +998,6 @@ fn parse_ed25519_public_key(field: &str, encoded: &str) -> Result<PublicKey, Man
 /// Manifest parsing and validation errors.
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
-    #[error("sequencer_set_version must be non-zero")]
-    InvalidSequencerSetVersion,
-
     #[error("failed reading sequencer manifest `{path}`")]
     Read {
         path: std::path::PathBuf,
@@ -1493,6 +1487,24 @@ mod tests {
                 .unwrap(),
             Role::Follower
         );
+    }
+
+    #[test]
+    fn accepts_factory_installed_sequencer_set_version_zero() {
+        let input = format!(
+            "sequencer_set_version = 0\n{}",
+            manifest(
+                1,
+                &[
+                    (1, "leader", "127.0.0.1:9200"),
+                    (2, "follower-a", "127.0.0.1:9201"),
+                    (3, "follower-b", "127.0.0.1:9202"),
+                ],
+            )
+        );
+
+        let manifest = ZoneManifest::parse(&input).unwrap();
+        assert_eq!(manifest.sequencer_set_version(), 0);
     }
 
     #[test]

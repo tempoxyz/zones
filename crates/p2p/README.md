@@ -73,7 +73,7 @@ the configuration shape:
 
 ```toml
 zone_id = 7
-sequencer_set_version = 1
+sequencer_set_version = 0
 leader_ed25519_public_key = "0xleader..."
 
 [[nodes]]
@@ -102,6 +102,11 @@ rpc_only = true
 ```
 
 `rpc_only` defaults to `false`, so existing manifests keep their current meaning.
+
+`sequencer_set_version` must exactly match the value reported by `ZonePortal`. Version `0` is
+valid for the initial sequencer set installed atomically by `ZoneFactory`; later
+`setSequencerSet` calls increment it. The field defaults to `1` for compatibility with existing
+manifests that omitted it.
 
 An `rpc_only` entry declares no `secp256k1_address` and the node is started without
 `--secp256k1.key`. It never signs a settlement attestation, so the key would be dead weight —
