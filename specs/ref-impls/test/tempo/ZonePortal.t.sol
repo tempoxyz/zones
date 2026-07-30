@@ -499,6 +499,8 @@ contract ZonePortalTest is BaseTest {
     uint256 internal constant SIGNER_A_KEY = 2;
     uint256 internal constant SIGNER_B_KEY = 3;
     uint256 internal constant SIGNER_C_KEY = 1;
+    uint64 internal constant REJECT_ALL_POLICY_ID = 0;
+    uint64 internal constant ALLOW_ALL_POLICY_ID = 1;
 
     ZonePortal public portal;
     ZoneMessenger public messenger;
@@ -3286,6 +3288,36 @@ contract ZonePortalTest is BaseTest {
         assertEq(successfulReceiver.callCount(), callCountBefore);
     }
 
+    function test_withdrawal_receivePolicyBlocked_enqueuesBounceBack() public {
+        uint128 amount = 500e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+        portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""), alice);
+        vm.stopPrank();
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, amount, bytes32(0), 0, alice, "");
+        _enqueueWithdrawal(withdrawal);
+
+        vm.prank(bob);
+        registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        uint256 guardBalanceBefore = pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
+        uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+        uint64 depositCountBefore = portal.depositCount();
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore);
+        assertEq(portal.depositCount(), depositCountBefore + 1);
+        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+    }
+
     function test_withdrawal_nonZeroGasLimit_callbackExecuted() public {
         _openPortalModes();
 
@@ -4584,6 +4616,44 @@ contract ZonePortalTest is BaseTest {
         assertEq(claimed, w.amount);
         assertEq(portal.refunds(address(pathUSD), bob), 0);
         assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + w.amount);
+    }
+
+    function test_depositBounceBack_receivePolicyBlocked_parksAndPreservesRefund() public {
+        vm.fee(0);
+        uint128 amount = 250e6;
+        _fundCallbackWithdrawal(amount);
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, amount, bytes32(0), 0, address(0), "");
+        _enqueueWithdrawal(withdrawal);
+
+        vm.prank(bob);
+        registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        uint256 guardBalanceBefore = pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore);
+        assertEq(portal.refunds(address(pathUSD), bob), amount);
+
+        vm.prank(bob);
+        vm.expectRevert(IZonePortal.CallbackRejected.selector);
+        portal.claimRefund(address(pathUSD));
+
+        assertEq(portal.refunds(address(pathUSD), bob), amount);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore);
+
+        vm.prank(bob);
+        registry.setReceivePolicy(ALLOW_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+        vm.prank(bob);
+        assertEq(portal.claimRefund(address(pathUSD)), amount);
+
+        assertEq(portal.refunds(address(pathUSD), bob), 0);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + amount);
     }
 
     /// @notice Submitting a batch reverts once the withdrawal queue is full.
