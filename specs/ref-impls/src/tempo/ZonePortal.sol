@@ -1105,7 +1105,9 @@ contract ZonePortal is IZonePortal {
             return false;
         }
 
-        try TIP403_REGISTRY.validateReceivePolicy(token, address(this), effectiveRecipient) returns (
+        try TIP403_REGISTRY.validateReceivePolicy(
+            token, address(this), effectiveRecipient
+        ) returns (
             bool authorized, ITIP403Registry.BlockedReason
         ) {
             if (!authorized) return false;
