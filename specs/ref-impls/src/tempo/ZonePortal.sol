@@ -1098,7 +1098,14 @@ contract ZonePortal is IZonePortal {
         internal
         returns (bool success)
     {
-        try TIP403_REGISTRY.validateReceivePolicy(token, address(this), to) returns (
+        address effectiveRecipient;
+        try StdPrecompiles.ADDRESS_REGISTRY.resolveRecipient(to) returns (address resolved) {
+            effectiveRecipient = resolved;
+        } catch {
+            return false;
+        }
+
+        try TIP403_REGISTRY.validateReceivePolicy(token, address(this), effectiveRecipient) returns (
             bool authorized, ITIP403Registry.BlockedReason
         ) {
             if (!authorized) return false;

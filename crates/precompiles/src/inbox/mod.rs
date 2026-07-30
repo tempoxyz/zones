@@ -23,6 +23,7 @@ use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
+    address_registry::AddressRegistry,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
     tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
@@ -292,8 +293,11 @@ impl ZoneInbox {
             }
         };
 
-        let can_receive = TIP403Registry::new()
-            .validate_receive_policy(token, ZONE_INBOX_ADDRESS, to)
+        let can_receive = AddressRegistry::new()
+            .resolve_recipient(to)
+            .and_then(|recipient| {
+                TIP403Registry::new().validate_receive_policy(token, ZONE_INBOX_ADDRESS, recipient)
+            })
             .map(|reason| reason.is_none())
             .or_else(ensure_logic_err)?;
 

@@ -3359,32 +3359,48 @@ contract ZonePortalTest is BaseTest {
 
     function test_withdrawal_receivePolicyBlocked_enqueuesBounceBack() public {
         uint128 amount = 500e6;
+        address master = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
+        bytes32 salt = bytes32(uint256(0xabf52baf));
+
+        vm.prank(master);
+        bytes4 masterId = StdPrecompiles.ADDRESS_REGISTRY.registerVirtualMaster(salt);
+        address virtualRecipient = address(
+            bytes20(abi.encodePacked(masterId, bytes10(type(uint80).max), bytes6(uint48(1))))
+        );
+
         vm.startPrank(alice);
-        pathUSD.approve(address(portal), 1000e6);
-        portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""), alice);
+        pathUSD.approve(address(portal), amount * 2);
+        portal.deposit(address(pathUSD), alice, amount * 2, bytes32(""), alice);
         vm.stopPrank();
 
-        Withdrawal memory withdrawal =
-            _withdrawal(address(pathUSD), alice, bob, amount, bytes32(0), 0, alice, "");
-        _enqueueWithdrawal(withdrawal);
-
-        vm.prank(bob);
+        vm.prank(master);
         registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
 
-        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
-        uint256 guardBalanceBefore = pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
-        uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
-        bytes32 depositHashBefore = portal.currentDepositQueueHash();
-        uint64 depositCountBefore = portal.depositCount();
+        address[2] memory recipients = [master, virtualRecipient];
+        for (uint256 i; i < recipients.length; ++i) {
+            Withdrawal memory withdrawal = _withdrawal(
+                address(pathUSD), alice, recipients[i], amount, bytes32(0), 0, alice, ""
+            );
+            _enqueueWithdrawal(withdrawal);
 
-        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+            uint256 masterBalanceBefore = pathUSD.balanceOf(master);
+            uint256 guardBalanceBefore =
+                pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
+            uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
+            bytes32 depositHashBefore = portal.currentDepositQueueHash();
+            uint64 depositCountBefore = portal.depositCount();
 
-        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
-        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore);
-        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore);
-        assertEq(portal.depositCount(), depositCountBefore + 1);
-        assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
-        assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+            portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+            assertEq(pathUSD.balanceOf(master), masterBalanceBefore);
+            assertEq(
+                pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore
+            );
+            assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore);
+            assertEq(portal.depositCount(), depositCountBefore + 1);
+            assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+            assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        }
     }
 
     function test_withdrawal_nonZeroGasLimit_callbackExecuted() public {
