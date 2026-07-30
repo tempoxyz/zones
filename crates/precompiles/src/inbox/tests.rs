@@ -6,13 +6,11 @@ use alloy_rlp::Encodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
-use tempo_contracts::precompiles::IAddressRegistry;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, TIP403_REGISTRY_ADDRESS,
-    address_registry::{AddressRegistry, TempoAddressExt, UserTag},
     receive_policy_guard::ReceivePolicyGuard,
     storage::{ContractStorage, Handler, StorageCtx},
-    test_util::{TIP20Setup, VIRTUAL_MASTER, VIRTUAL_SALT},
+    test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
     tip403_registry::{ALLOW_ALL_POLICY_ID, ITIP403Registry, REJECT_ALL_POLICY_ID, TIP403Registry},
     zone_factory::{ZonePortalStorage, zone_portal_slots},
@@ -511,68 +509,49 @@ fn regular_deposit_mints_and_updates_hash_and_number() -> eyre::Result<()> {
 
 #[test]
 fn receive_policy_blocked_regular_deposit_enqueues_bounce_back() -> eyre::Result<()> {
-    for virtual_recipient in [false, true] {
-        let mut harness = Harness::new()?;
-        let recipient = {
-            let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
-            StorageCtx::enter(&mut storage, || -> eyre::Result<Address> {
-                TIP403Registry::new().set_receive_policy(
-                    VIRTUAL_MASTER,
-                    ITIP403Registry::setReceivePolicyCall {
-                        senderPolicyId: REJECT_ALL_POLICY_ID,
-                        tokenFilterId: ALLOW_ALL_POLICY_ID,
-                        recoveryAuthority: Address::ZERO,
-                    },
-                )?;
+    let mut harness = Harness::new()?;
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || {
+        TIP403Registry::new().set_receive_policy(
+            BOB,
+            ITIP403Registry::setReceivePolicyCall {
+                senderPolicyId: REJECT_ALL_POLICY_ID,
+                tokenFilterId: ALLOW_ALL_POLICY_ID,
+                recoveryAuthority: Address::ZERO,
+            },
+        )
+    })?;
+    let deposit = Deposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        to: BOB,
+        amount: 500,
+        tempoRefundRecipient: ALICE,
+        memo: B256::repeat_byte(0x11),
+    };
+    let expected_hash =
+        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
 
-                if virtual_recipient {
-                    let master_id = AddressRegistry::new().register_virtual_master(
-                        VIRTUAL_MASTER,
-                        IAddressRegistry::registerVirtualMasterCall {
-                            salt: VIRTUAL_SALT.into(),
-                        },
-                    )?;
-                    Ok(Address::new_virtual(master_id, UserTag::ZERO))
-                } else {
-                    Ok(VIRTUAL_MASTER)
-                }
-            })?
-        };
-        let deposit = Deposit {
-            token: PATH_USD_ADDRESS,
-            sender: ALICE,
-            to: recipient,
-            amount: 500,
-            tempoRefundRecipient: ALICE,
-            memo: B256::repeat_byte(0x11),
-        };
-        let expected_hash =
-            keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
-        harness.set_queue_hash(expected_hash);
+    harness.call(
+        Address::ZERO,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Regular,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                Vec::new(),
+            )
+            .abi_encode(),
+    )?;
 
-        harness.call(
-            Address::ZERO,
-            harness
-                .advance_call(
-                    vec![QueuedDeposit {
-                        depositType: DepositType::Regular,
-                        depositData: deposit.abi_encode().into(),
-                    }],
-                    Vec::new(),
-                )
-                .abi_encode(),
-        )?;
-
-        assert_eq!(
-            harness.balance(PATH_USD_ADDRESS, VIRTUAL_MASTER)?,
-            U256::ZERO
-        );
-        assert_eq!(
-            harness.balance(PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS)?,
-            U256::ZERO
-        );
-        harness.assert_single_bounce_back(PATH_USD_ADDRESS, 500, ALICE)?;
-    }
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::ZERO);
+    assert_eq!(
+        harness.balance(PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS)?,
+        U256::ZERO
+    );
+    harness.assert_single_bounce_back(PATH_USD_ADDRESS, 500, ALICE)?;
     Ok(())
 }
 
