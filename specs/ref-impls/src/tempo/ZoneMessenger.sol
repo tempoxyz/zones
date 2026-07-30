@@ -10,6 +10,7 @@ import {
     ZONE_FACTORY_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 /// @title ZoneMessenger
@@ -54,6 +55,12 @@ contract ZoneMessenger is IZoneMessenger {
         ) {
             revert InvalidCallbackTarget();
         }
+
+        address effectiveRecipient = StdPrecompiles.ADDRESS_REGISTRY.resolveRecipient(target);
+        (bool authorized,) = StdPrecompiles.TIP403_REGISTRY.validateReceivePolicy(
+            token, address(this), effectiveRecipient
+        );
+        if (!authorized) revert TransferFailed();
 
         // Raw call is fine: `enableToken` only accepts native TIP-20s, which revert small.
         if (!ITIP20(token).transfer(target, amount)) {

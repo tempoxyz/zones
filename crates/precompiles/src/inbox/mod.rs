@@ -292,8 +292,7 @@ impl ZoneInbox {
             }
         };
 
-        // TODO: Resolve virtual addresses through AddressRegistry once its precompile is activated
-        // on Tempo.
+        // TODO: Resolve virtual addresses through `AddressRegistry`precompile once it activates.
         let can_receive = TIP403Registry::new()
             .validate_receive_policy(token, ZONE_INBOX_ADDRESS, to)
             .map(|reason| reason.is_none())
