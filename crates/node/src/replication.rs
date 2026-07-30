@@ -47,7 +47,7 @@ pub(crate) struct AttestationContext {
     /// `None` on an rpc-only member: it holds no individual key and never signs.
     pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-    pub(crate) store: Option<AttestationStore>,
+    pub(crate) store: AttestationStore,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) anchor_config: BatchAnchorConfig,
 }
@@ -57,7 +57,7 @@ impl AttestationContext {
         domain: AttestationDomain,
         signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-        store: Option<AttestationStore>,
+        store: AttestationStore,
         l1_provider: DynProvider<TempoNetwork>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
@@ -546,8 +546,7 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                                 Some((signed.attestation.anchorBlockNumber, signed.attestation.anchorBlockHash)),
                             ).await?.ok_or_eyre("signed block is not a batch boundary")?;
                             eyre::ensure!(signed.attestation == expected, "settlement signature does not match leader state");
-                            let (_, signatures) = attestation.store.as_ref()
-                                .expect("leader must have an attestation store")
+                            let (_, signatures) = attestation.store
                                 .insert_settlement(attestation.domain, signer, signed);
                             Ok::<_, eyre::Report>((height, signer, signatures))
                         }.await;

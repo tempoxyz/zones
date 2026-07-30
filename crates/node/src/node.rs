@@ -570,7 +570,7 @@ where
                 attestation_domain,
                 config.block_attestation_signer(),
                 config.block_attestation_addresses(),
-                Some(AttestationStore::default()),
+                AttestationStore::default(),
                 l1_provider.clone(),
                 anchor_config,
             );
@@ -944,7 +944,7 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        attestation_store: Option<AttestationStore>,
+        attestation_store: AttestationStore,
     ) -> eyre::Result<LeaderSequencerDeps> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -956,7 +956,7 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store,
+            attestation_store: Some(attestation_store),
         };
         Ok(LeaderSequencerDeps {
             config,
