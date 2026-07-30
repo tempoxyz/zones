@@ -16,7 +16,7 @@ use tempo_contracts::precompiles::{IRolesAuth, IStablecoinDEX, ITIP20, ITIP20Fac
 use tempo_precompiles::{STABLECOIN_DEX_ADDRESS, TIP20_FACTORY_ADDRESS};
 use tempo_zone_contracts::{ZonePortal, ZonePortal::Role as PortalRole};
 
-use crate::{create_zone::read_private_address_file, zone_utils::check};
+use crate::zone_utils::check;
 
 alloy::sol! {
     #[sol(rpc)]
@@ -1539,4 +1539,44 @@ fn load_bytecode(artifacts: &std::path::Path, contract: &str) -> eyre::Result<Ve
 
 fn artifact_path(artifacts: &std::path::Path, contract: &str) -> PathBuf {
     artifacts.join(format!("{contract}.json"))
+}
+
+fn read_private_address_file(path: &std::path::Path) -> eyre::Result<Vec<Address>> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = fs::symlink_metadata(path).wrap_err_with(|| {
+        format!(
+            "failed reading allowed-accounts metadata from {}",
+            path.display()
+        )
+    })?;
+    ensure!(
+        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+        "allowed-accounts file must be a regular, non-symlink file: {}",
+        path.display()
+    );
+    ensure!(
+        metadata.permissions().mode() & 0o077 == 0,
+        "allowed-accounts file must not be accessible by group or other users: {}",
+        path.display()
+    );
+
+    let contents = fs::read_to_string(path)
+        .wrap_err_with(|| format!("failed reading allowed accounts from {}", path.display()))?;
+    contents
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let value = line.trim();
+            (!value.is_empty() && !value.starts_with('#')).then_some((index + 1, value))
+        })
+        .map(|(line, value)| {
+            value.parse::<Address>().wrap_err_with(|| {
+                format!(
+                    "invalid allowed account in {} at line {line}",
+                    path.display()
+                )
+            })
+        })
+        .collect()
 }

@@ -10,7 +10,7 @@ use alloy::{
     sol_types::SolEvent,
 };
 use alloy_rlp::Encodable;
-use eyre::{WrapErr as _, ensure, eyre};
+use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
@@ -159,44 +159,37 @@ impl CreateZone {
         println!("Verifier: {ZONE_VERIFIER_ADDRESS}");
         println!("Messenger: {ZONE_MESSENGER_ADDRESS}");
 
-        let factory_code = provider
-            .get_code_at(self.zone_factory)
-            .await
-            .wrap_err("failed reading ZoneFactory code")?;
-        if factory_code.as_ref() == [0xef] {
-            let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
-            let mut policy = registry
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let mut policy = registry
+            .tokenTransferPolicyId(self.initial_token)
+            .call()
+            .await?;
+        if !policy.isSet {
+            println!(
+                "Migrating legacy transfer policy for initial token {}...",
+                self.initial_token
+            );
+            let receipt = registry
+                .migrateTransferPolicyIds(vec![self.initial_token])
+                .send_sync()
+                .await?;
+            if !receipt.status() {
+                return Err(eyre!(
+                    "transfer policy migration reverted (tx: {:?})",
+                    receipt.transaction_hash
+                ));
+            }
+
+            policy = registry
                 .tokenTransferPolicyId(self.initial_token)
                 .call()
-                .await
-                .wrap_err("failed querying the initial token transfer policy")?;
-            if !policy.isSet {
-                println!("Migrating the initial token's legacy transfer policy into TIP-403...");
-                let receipt = registry
-                    .migrateTransferPolicyIds(vec![self.initial_token])
-                    .send_sync()
-                    .await
-                    .wrap_err("failed migrating the initial token transfer policy")?;
-                ensure!(
-                    receipt.status(),
-                    "initial token transfer-policy migration reverted (tx: {:?})",
-                    receipt.transaction_hash
-                );
-                policy = registry
-                    .tokenTransferPolicyId(self.initial_token)
-                    .call()
-                    .await
-                    .wrap_err("failed verifying the migrated initial token transfer policy")?;
-                ensure!(
-                    policy.isSet,
-                    "TIP-403 did not register the initial token transfer policy"
-                );
-                println!(
-                    "Initial token transfer policy migrated in block {:?}",
-                    receipt.block_number
-                );
-            }
-            println!("Initial token transfer policy: {}", policy.policyId);
+                .await?;
+        }
+        if !policy.isSet {
+            return Err(eyre!(
+                "transfer policy is not set for initial token {} after migration",
+                self.initial_token
+            ));
         }
 
         // Anchor before createZone so the zone replays the creation block and its
@@ -358,44 +351,4 @@ impl CreateZone {
 
         Ok(())
     }
-}
-
-pub(crate) fn read_private_address_file(path: &std::path::Path) -> eyre::Result<Vec<Address>> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let metadata = std::fs::symlink_metadata(path).wrap_err_with(|| {
-        format!(
-            "failed reading allowed-accounts metadata from {}",
-            path.display()
-        )
-    })?;
-    ensure!(
-        metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
-        "allowed-accounts file must be a regular, non-symlink file: {}",
-        path.display()
-    );
-    ensure!(
-        metadata.permissions().mode() & 0o077 == 0,
-        "allowed-accounts file must not be accessible by group or other users: {}",
-        path.display()
-    );
-
-    let contents = std::fs::read_to_string(path)
-        .wrap_err_with(|| format!("failed reading allowed accounts from {}", path.display()))?;
-    contents
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let value = line.trim();
-            (!value.is_empty() && !value.starts_with('#')).then_some((index + 1, value))
-        })
-        .map(|(line, value)| {
-            value.parse::<Address>().wrap_err_with(|| {
-                format!(
-                    "invalid allowed account in {} at line {line}",
-                    path.display()
-                )
-            })
-        })
-        .collect()
 }
