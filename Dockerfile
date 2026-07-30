@@ -25,7 +25,9 @@ FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl git \
     && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSL https://foundry.paradigm.xyz | bash \
+ARG FOUNDRY_CACHE_BUST=2026-07-30
+RUN echo "Foundry cache bust: ${FOUNDRY_CACHE_BUST}" \
+    && curl -fsSL https://foundry.paradigm.xyz | bash \
     && /root/.foundry/bin/foundryup
 ENV PATH="/root/.foundry/bin:${PATH}"
 WORKDIR /app/specs/ref-impls
