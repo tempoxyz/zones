@@ -22,8 +22,9 @@ use crate::{
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_FEE_MANAGER_ADDRESS,
-        ZoneInbox, ZonePrecompileEnv, create_tip20_precompile, create_tip403_precompile,
-        create_zone_fee_manager_precompile, tx_context::ZoneTxContext,
+        ZoneInbox, ZonePrecompileEnv, create_receive_policy_guard_precompile,
+        create_tip20_precompile, create_tip403_precompile, create_zone_fee_manager_precompile,
+        tx_context::ZoneTxContext,
     },
 };
 use alloy_evm::{
@@ -55,8 +56,7 @@ use tempo_precompiles::{
     RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS,
     TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain, error::Result as TempoResult, nonce::NonceManager,
-    receive_policy_guard::ReceivePolicyGuard, storage::actions::StorageActions,
-    storage_credits::StorageCredits, tip20::is_tip20_prefix,
+    storage::actions::StorageActions, storage_credits::StorageCredits, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -145,7 +145,7 @@ where
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
                 Some(AccountKeychain::create_precompile(&tempo_env))
             } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
-                Some(ReceivePolicyGuard::create_precompile(&tempo_env))
+                Some(create_receive_policy_guard_precompile(&env))
             } else if *address == STORAGE_CREDITS_ADDRESS {
                 Some(StorageCredits::create_precompile(&tempo_env))
             } else {

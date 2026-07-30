@@ -43,7 +43,7 @@ use eyre::{OptionExt as _, Result};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use schnellru::{ByLength, LruMap};
-use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
+use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 
@@ -489,12 +489,24 @@ impl BatchSubmitter {
             )?]
         };
 
+        // Refetch the committed lane nonce for every submission attempt. The provider's
+        // process-local nonce cache advances before a send is known to have succeeded, so
+        // relying on it after a failed send can create an unfillable 2D-nonce gap.
+        let submission_address = signer
+            .ok_or_eyre("batch submission requires the local sequencer signer")?
+            .address();
+        let nonce = self
+            .l1_provider
+            .get_transaction_count_with_nonce_key(submission_address, SUBMIT_BATCH_NONCE_KEY)
+            .await?;
+
         info!(
             anchor_mode = %anchor_mode,
             recent_tempo_block_number,
             current_l1_block,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
+            nonce,
             "Submitting batch to ZonePortal on L1"
         );
 
@@ -513,6 +525,7 @@ impl BatchSubmitter {
                     signatures,
                 )
                 .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                .nonce(nonce)
                 .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
                 .max_priority_fee_per_gas(0)
                 .send_sync(),
