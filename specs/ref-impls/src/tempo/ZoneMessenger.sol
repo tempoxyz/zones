@@ -57,9 +57,8 @@ contract ZoneMessenger is IZoneMessenger {
         }
 
         address effectiveRecipient = StdPrecompiles.ADDRESS_REGISTRY.resolveRecipient(target);
-        (bool authorized,) = StdPrecompiles.TIP403_REGISTRY.validateReceivePolicy(
-            token, address(this), effectiveRecipient
-        );
+        (bool authorized,) = StdPrecompiles.TIP403_REGISTRY
+            .validateReceivePolicy(token, address(this), effectiveRecipient);
         if (!authorized) revert TransferFailed();
 
         // Raw call is fine: `enableToken` only accepts native TIP-20s, which revert small.
