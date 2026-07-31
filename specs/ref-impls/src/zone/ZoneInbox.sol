@@ -29,7 +29,7 @@ import { TempoState } from "../tempo/TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
-/// @dev Called by sequencer. Combines Tempo header advancement
+/// @dev Called by the block executor as a system transaction. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
 
@@ -210,6 +210,8 @@ contract ZoneInbox is IZoneInbox {
     )
         external
     {
+        if (msg.sender != address(0)) revert OnlySequencer();
+
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
 

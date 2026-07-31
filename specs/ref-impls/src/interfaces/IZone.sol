@@ -1143,13 +1143,13 @@ interface IZoneInbox {
 
     function claimRefund(address token) external returns (uint128 amount);
 
-    /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
-    /// @dev This is the main entry point for the sequencer at block start.
+    /// @notice Advance Tempo state and process deposits in a single system-only call.
+    /// @dev This is the main entry point for the block executor at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the unified queue (regular and encrypted)
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///
-    ///      The sequencer may process a bounded subset of pending deposits.
+    ///      The system transaction may process a bounded subset of pending deposits.
     ///      The proof validates contiguity: processedDepositQueueHash
     ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
     ///

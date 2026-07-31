@@ -64,7 +64,7 @@ contract ZoneInboxTest is Test {
     MockZoneToken public zoneToken;
     MockTempoState public tempoState;
 
-    address public sequencer = address(0x1);
+    address public sequencer = address(0);
     address public alice = address(0x200);
     address public bob = address(0x300);
     address public mockPortal = address(0x400);
@@ -116,6 +116,14 @@ contract ZoneInboxTest is Test {
                           EMPTY DEPOSITS TESTS
     //////////////////////////////////////////////////////////////*/
 
+    function test_advanceTempo_revertsForNonSystemCaller() public {
+        vm.prank(alice);
+        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
+        inbox.advanceTempo(
+            "", new QueuedDeposit[](0), new DecryptionData[](0), new EnabledToken[](0)
+        );
+    }
+
     function test_advanceTempo_emptyDepositsArray() public {
         // Set mock to return bytes32(0) for currentDepositQueueHash (empty queue)
         tempoState.setMockStorageValue(
@@ -125,13 +133,6 @@ contract ZoneInboxTest is Test {
         Deposit[] memory deposits = new Deposit[](0);
 
         vm.prank(sequencer);
-        _advanceTempo(deposits);
-
-        // Any additional active member has the same authority.
-        tempoState.setMockStorageValue(
-            mockPortal, keccak256(abi.encode(alice, PORTAL_IS_SEQUENCER_SLOT)), bytes32(uint256(1))
-        );
-        vm.prank(alice);
         _advanceTempo(deposits);
 
         // State should remain at bytes32(0)

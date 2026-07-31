@@ -218,6 +218,7 @@ contract ZoneIntegrationTest is BaseTest {
     }
 
     function _advanceTempo(Deposit[] memory deposits) internal {
+        vm.prank(address(0));
         l2Inbox.advanceTempo(
             "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );

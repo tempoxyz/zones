@@ -354,9 +354,9 @@ contract ZoneBridgeTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, newProcessedHash
         );
 
-        // Process on zone via advanceTempo (sequencer-only call)
+        // Process on zone via the advanceTempo system call.
         // Empty header since MockTempoState just advances block number
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo(
             "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
@@ -788,7 +788,7 @@ contract ZoneBridgeTest is BaseTest {
         deposits[0] = pendingDeposits[0].deposit;
 
         // Should succeed — proof validates ancestor contiguity, not exact match
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo(
             "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
@@ -1049,7 +1049,7 @@ contract ZoneBridgeTest is BaseTest {
         }
 
         // Process on zone via advanceTempo
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // Clear pending
@@ -1297,7 +1297,7 @@ contract ZoneBridgeTest is BaseTest {
         _setupEncryptionKeyMockOnZone(0, encKeyX, encKeyYParity);
         _setupPrecompileMocksSuccess(decryptedTo, decryptedMemo);
 
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify all balances ===
@@ -1441,7 +1441,7 @@ contract ZoneBridgeTest is BaseTest {
             abi.encode(plaintext, true)
         );
 
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify ===
