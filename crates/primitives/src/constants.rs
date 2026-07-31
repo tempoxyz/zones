@@ -115,14 +115,13 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
     U256::from_le_bytes(le)
 };
 
+/// Tempo mainnet parent chain ID.
+pub const TEMPO_MAINNET_CHAIN_ID: u64 = 4_217;
+
+/// Tempo Moderato parent chain ID.
+pub const TEMPO_MODERATO_CHAIN_ID: u64 = 42_431;
+
 /// Base offset for deriving **mainnet** zone chain IDs.
-///
-/// Each zone gets a unique EIP-155 chain ID derived from its on-chain zone ID
-/// assigned by the `ZoneFactory` contract:
-///
-/// ```text
-/// chain_id = ZONE_CHAIN_ID_BASE + (zone_id % ZONE_CHAIN_ID_RANGE)
-/// ```
 ///
 /// # Range safety
 ///
@@ -139,15 +138,9 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
 /// | Mainnet  | `421_700_000`   | `1_002_610_000`   | `421_700_000 ..  1_424_310_000`       |
 /// | Testnet  | `1_424_310_000` | `723_173_648`     | `1_424_310_000 .. 2_147_483_648`      |
 ///
-/// Zone IDs wrap around via modular arithmetic so that chain IDs never leave
-/// their designated range, even with arbitrarily large zone IDs. Because
-/// wrapping can reuse a chain ID that was previously assigned to a different
-/// zone, it is the responsibility of the sequencer to ensure — after deploying
-/// a zone — that the derived chain ID does not correspond to any active chain,
-/// including any zone that has previously used that chain ID.
 pub const ZONE_CHAIN_ID_BASE: u64 = 421_700_000;
 
-/// Number of distinct mainnet zone chain IDs before wrapping.
+/// Number of distinct mainnet zone chain IDs.
 ///
 /// Equal to `ZONE_CHAIN_ID_BASE_TESTNET - ZONE_CHAIN_ID_BASE`, keeping the
 /// mainnet range strictly below the testnet range.
@@ -158,24 +151,112 @@ pub const ZONE_CHAIN_ID_RANGE: u64 = 1_002_610_000;
 /// See [`ZONE_CHAIN_ID_BASE`] for range-safety rationale.
 pub const ZONE_CHAIN_ID_BASE_TESTNET: u64 = 1_424_310_000;
 
-/// Number of distinct testnet zone chain IDs before wrapping.
+/// Number of distinct Moderato zone chain IDs.
 ///
 /// Equal to `2^31 - ZONE_CHAIN_ID_BASE_TESTNET`, keeping the testnet range
 /// strictly below the EIP-2294 safe ceiling.
 pub const ZONE_CHAIN_ID_RANGE_TESTNET: u64 = 723_173_648;
 
-/// Derives the EIP-155 chain ID for a **mainnet** zone from its on-chain zone ID.
-///
-/// Wraps via modulo so the result always falls in
-/// `[ZONE_CHAIN_ID_BASE, ZONE_CHAIN_ID_BASE + ZONE_CHAIN_ID_RANGE)`.
-pub const fn zone_chain_id(zone_id: u32) -> u64 {
-    ZONE_CHAIN_ID_BASE + (zone_id as u64 % ZONE_CHAIN_ID_RANGE)
+/// Failure to derive a unique zone chain ID.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ZoneChainIdError {
+    /// Production zone IDs must fit in the reserved range.
+    ZoneIdOutOfRange { parent_chain_id: u64, zone_id: u32 },
+    /// Generic parent chain IDs must be nonzero and fit in 32 bits.
+    InvalidParentChainId(u64),
 }
 
-/// Derives the EIP-155 chain ID for a **testnet** zone from its on-chain zone ID.
+impl core::fmt::Display for ZoneChainIdError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::ZoneIdOutOfRange {
+                parent_chain_id,
+                zone_id,
+            } => write!(
+                f,
+                "zone ID {zone_id} exhausts the reserved range for parent chain {parent_chain_id}"
+            ),
+            Self::InvalidParentChainId(id) => write!(
+                f,
+                "generic parent chain ID must be in 1..=u32::MAX, got {id}"
+            ),
+        }
+    }
+}
+
+#[cfg(feature = "std")]
+impl std::error::Error for ZoneChainIdError {}
+
+/// Derives a zone EIP-155 chain ID from its parent Tempo chain and ZoneFactory ID.
 ///
-/// Wraps via modulo so the result always falls in
-/// `[ZONE_CHAIN_ID_BASE_TESTNET, ZONE_CHAIN_ID_BASE_TESTNET + ZONE_CHAIN_ID_RANGE_TESTNET)`.
-pub const fn zone_chain_id_testnet(zone_id: u32) -> u64 {
-    ZONE_CHAIN_ID_BASE_TESTNET + (zone_id as u64 % ZONE_CHAIN_ID_RANGE_TESTNET)
+/// The production branches remain below 2^31 for ecosystem compatibility. Other
+/// parents use the high 32 bits, making the mapping injective for accepted inputs.
+pub const fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChainIdError> {
+    if parent_chain_id == 0 || parent_chain_id > u32::MAX as u64 {
+        return Err(ZoneChainIdError::InvalidParentChainId(parent_chain_id));
+    }
+    match parent_chain_id {
+        TEMPO_MAINNET_CHAIN_ID => {
+            if (zone_id as u64) < ZONE_CHAIN_ID_RANGE {
+                Ok(ZONE_CHAIN_ID_BASE + zone_id as u64)
+            } else {
+                Err(ZoneChainIdError::ZoneIdOutOfRange {
+                    parent_chain_id,
+                    zone_id,
+                })
+            }
+        }
+        TEMPO_MODERATO_CHAIN_ID => {
+            if (zone_id as u64) < ZONE_CHAIN_ID_RANGE_TESTNET {
+                Ok(ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64)
+            } else {
+                Err(ZoneChainIdError::ZoneIdOutOfRange {
+                    parent_chain_id,
+                    zone_id,
+                })
+            }
+        }
+        _ => Ok((parent_chain_id << 32) | zone_id as u64),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn derives_domain_separated_chain_ids() {
+        assert_eq!(zone_chain_id(TEMPO_MAINNET_CHAIN_ID, 7), Ok(421_700_007));
+        assert_eq!(zone_chain_id(TEMPO_MODERATO_CHAIN_ID, 7), Ok(1_424_310_007));
+        assert_ne!(zone_chain_id(1_337, 7), zone_chain_id(1_338, 7));
+
+        let production = [
+            zone_chain_id(TEMPO_MAINNET_CHAIN_ID, 42).unwrap(),
+            zone_chain_id(TEMPO_MODERATO_CHAIN_ID, 42).unwrap(),
+        ];
+        let generic = zone_chain_id(1, 42).unwrap();
+        assert!(production.into_iter().all(|id| id < 1 << 31));
+        assert!(generic >= 1 << 32);
+        assert!(!production.contains(&generic));
+    }
+
+    #[test]
+    fn rejects_exhausted_ranges_and_invalid_generic_parents() {
+        assert!(matches!(
+            zone_chain_id(TEMPO_MAINNET_CHAIN_ID, ZONE_CHAIN_ID_RANGE as u32),
+            Err(ZoneChainIdError::ZoneIdOutOfRange { .. })
+        ));
+        assert!(matches!(
+            zone_chain_id(TEMPO_MODERATO_CHAIN_ID, ZONE_CHAIN_ID_RANGE_TESTNET as u32),
+            Err(ZoneChainIdError::ZoneIdOutOfRange { .. })
+        ));
+        assert_eq!(
+            zone_chain_id(0, 1),
+            Err(ZoneChainIdError::InvalidParentChainId(0))
+        );
+        assert!(matches!(
+            zone_chain_id(u32::MAX as u64 + 1, 1),
+            Err(ZoneChainIdError::InvalidParentChainId(_))
+        ));
+    }
 }

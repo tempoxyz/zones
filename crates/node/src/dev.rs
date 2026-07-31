@@ -46,7 +46,9 @@ pub struct ProvisionConfig {
 pub struct ProvisionedZone {
     /// Zone ID assigned by the factory.
     pub zone_id: u32,
-    /// Zone chain ID derived from the zone ID.
+    /// Parent Tempo chain ID.
+    pub parent_chain_id: u64,
+    /// Zone chain ID derived from the parent and zone IDs.
     pub chain_id: u64,
     /// `ZoneFactory` address on L1.
     pub factory: Address,
@@ -113,6 +115,9 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("anchor header {anchor_block_number} not found"))?
         .inner
         .inner;
+    let parent_chain_id = provider.get_chain_id().await?;
+    let expected_zone_id = factory.nextZoneId().call().await?;
+    let chain_id = zone_chain_id(parent_chain_id, expected_zone_id)?;
 
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
@@ -140,7 +145,10 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("ZoneCreated event not found"))?;
     let zone_id = zone_created.zoneId;
     let portal = zone_created.portal;
-    let chain_id = zone_chain_id(zone_id);
+    eyre::ensure!(
+        zone_id == expected_zone_id,
+        "ZoneFactory nextZoneId changed during creation: expected {expected_zone_id}, created {zone_id}"
+    );
 
     register_encryption_key(&provider, portal, &dev_key).await?;
 
@@ -150,6 +158,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
 
     Ok(ProvisionedZone {
         zone_id,
+        parent_chain_id,
         chain_id,
         factory: factory_address,
         portal,
@@ -371,6 +380,7 @@ mod command {
             // `sequencerKey` is a well-known dev key; `just zone-up` reads it.
             let zone_json = serde_json::json!({
                 "zoneId": provisioned.zone_id,
+                "parentChainId": provisioned.parent_chain_id,
                 "chainId": provisioned.chain_id,
                 "portal": format!("{}", provisioned.portal),
                 "initialToken": format!("{}", self.initial_token),
@@ -392,6 +402,7 @@ mod command {
 
             println!("Zone provisioned!");
             println!("  Zone ID:      {}", provisioned.zone_id);
+            println!("  Parent chain ID: {}", provisioned.parent_chain_id);
             println!("  Chain ID:     {}", provisioned.chain_id);
             println!("  ZoneFactory:  {}", provisioned.factory);
             println!("  Portal:       {}", provisioned.portal);

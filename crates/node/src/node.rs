@@ -87,6 +87,7 @@ use zone_payload::{
     ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_rpc::ZoneDebugApiRpcServer;
+use zone_primitives::constants::zone_chain_id;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
     ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
@@ -108,6 +109,18 @@ fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
             .any(|id| id.trim().parse() == Ok(chain_id))
             .then(|| DEV.clone()),
     })
+}
+
+fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
+    if zone_id == 0 {
+        return Ok(());
+    }
+    let expected = zone_chain_id(parent_chain_id, zone_id)?;
+    eyre::ensure!(
+        chain_id == expected,
+        "chain ID mismatch: zone.id={zone_id} on parent chain {parent_chain_id} requires chain_id={expected}, but genesis has {chain_id}"
+    );
+    Ok(())
 }
 
 /// Network primitives for Zone Nodes
@@ -545,6 +558,23 @@ where
             )
             .await?
             .erased();
+        let l1_chain_id = l1_provider.get_chain_id().await?;
+        let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        if self.redacted_rpc_config.zone_id != 0 {
+            let portal_zone_id = ZonePortal::new(self.portal_address, &l1_provider)
+                .zoneId()
+                .call()
+                .await?;
+            eyre::ensure!(
+                portal_zone_id == self.redacted_rpc_config.zone_id,
+                "zone ID mismatch: portal {} reports zone.id={}, but the node is configured with zone.id={}",
+                self.portal_address,
+                portal_zone_id,
+                self.redacted_rpc_config.zone_id,
+            );
+        }
+        validate_zone_chain_id(l1_chain_id, self.redacted_rpc_config.zone_id, chain_id)?;
+
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
         if let Some(keys) = self.l1_config.encryption_keys.clone() {
@@ -595,7 +625,6 @@ where
         let sequencer_rpc_slot = Arc::new(std::sync::OnceLock::new());
         let mut p2p_runtime = None;
         if let Some(config) = self.p2p_config.take() {
-            let l1_chain_id = l1_provider.get_chain_id().await?;
             let network_id = P2pNetworkId::new(l1_chain_id, self.portal_address);
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
@@ -698,6 +727,11 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
+        let prover_settings = self
+            .sequencer_config
+            .as_ref()
+            .filter(|config| config.enable_prover)
+            .map(|config| (config.zone_id, ctx.node.evm_config().clone()));
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -1738,6 +1772,15 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
+    }
+
+    #[test]
+    fn validates_genesis_chain_id_against_parent_and_zone() {
+        let expected = zone_chain_id(42_431, 7).unwrap();
+        assert!(validate_zone_chain_id(42_431, 7, expected).is_ok());
+        assert!(validate_zone_chain_id(4_217, 7, expected).is_err());
+        assert!(validate_zone_chain_id(42_431, 7, expected + 1).is_err());
+        assert!(validate_zone_chain_id(42_431, 0, 123).is_ok());
     }
 
     #[test]

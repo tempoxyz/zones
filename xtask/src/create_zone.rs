@@ -223,6 +223,10 @@ impl CreateZone {
         println!("Sequencers: {:?}", self.sequencers);
         println!("Threshold: {}", self.threshold);
 
+        let parent_chain_id = provider.get_chain_id().await?;
+        let expected_zone_id = factory.nextZoneId().call().await?;
+        let chain_id = zone_chain_id(parent_chain_id, expected_zone_id)?;
+
         println!(
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
@@ -260,7 +264,10 @@ impl CreateZone {
 
         let zone_id = event.zoneId;
         let portal = event.portal;
-        let chain_id = zone_chain_id(zone_id);
+        eyre::ensure!(
+            zone_id == expected_zone_id,
+            "ZoneFactory nextZoneId changed during creation: expected {expected_zone_id}, created {zone_id}"
+        );
 
         let portal_contract = ZonePortal::new(portal, &provider);
         let creation_block_id = BlockId::number(creation_block);
@@ -324,6 +331,7 @@ impl CreateZone {
         // Write zone.json with deployment metadata for downstream tooling (e.g. `just zone-up`).
         let zone_json = serde_json::json!({
             "zoneId": zone_id,
+            "parentChainId": parent_chain_id,
             "chainId": chain_id,
             "portal": format!("{portal}"),
             "messenger": format!("{ZONE_MESSENGER_ADDRESS}"),
@@ -350,6 +358,7 @@ impl CreateZone {
 
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
+        println!("  Parent chain ID: {parent_chain_id}");
         println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
         println!("  Messenger: {ZONE_MESSENGER_ADDRESS}");

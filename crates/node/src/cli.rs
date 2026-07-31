@@ -5,7 +5,6 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
 use clap::{Args, CommandFactory, FromArgMatches};
-use reth_chainspec::EthChainSpec;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
@@ -107,7 +106,6 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
 
         validate_l1_rpc_url(&args.l1_rpc_url)?;
         validate_portal_address(args.portal_address)?;
-        args.validate_zone_id(builder.config().chain.genesis().config.chain_id)?;
 
         let p2p_config = args
             .sequencer_manifest
@@ -475,7 +473,11 @@ pub struct ZoneArgs {
     pub l1_retry_connection_interval_ms: u64,
 
     /// Zone ID used for chain identity and redacted RPC authentication.
-    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
+    #[arg(
+        long = "zone.id",
+        env = "ZONE_ID",
+        value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..)
+    )]
     pub zone_id: u32,
 
     /// Port for the redacted zone RPC server (0 for OS-assigned).
@@ -507,26 +509,6 @@ pub struct ZoneArgs {
     /// Validate finalized batch candidates with the SPF without changing settlement.
     #[arg(long = "sequencer.enable-prover", env = "SEQUENCER_ENABLE_PROVER")]
     pub enable_prover: bool,
-}
-
-impl ZoneArgs {
-    /// Assert the genesis chain ID is the one `zone.id` requires.
-    ///
-    /// `zone_id == 0` means "unset", which imposes no constraint.
-    fn validate_zone_id(&self, chain_id: u64) -> eyre::Result<()> {
-        if self.zone_id == 0 {
-            return Ok(());
-        }
-        let expected = zone_primitives::constants::zone_chain_id(self.zone_id);
-        eyre::ensure!(
-            chain_id == expected,
-            "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-            self.zone_id,
-            expected,
-            chain_id,
-        );
-        Ok(())
-    }
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -617,22 +599,24 @@ mod tests {
     }
 
     #[test]
-    fn zone_id_must_match_genesis_chain_id() {
-        let args = ZoneArgsParser::try_parse_from([
+    fn zone_id_is_required_and_nonzero() {
+        let common = [
             "tempo-zone",
             "--l1.rpc-url",
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "7",
-        ])
-        .unwrap()
-        .zone;
-        let expected = zone_primitives::constants::zone_chain_id(args.zone_id);
+        ];
 
-        assert!(args.validate_zone_id(expected).is_ok());
-        assert!(args.validate_zone_id(expected + 1).is_err());
+        let missing = ZoneArgsParser::try_parse_from(common).unwrap_err();
+        assert_eq!(
+            missing.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
+
+        let zero = ZoneArgsParser::try_parse_from(common.into_iter().chain(["--zone.id", "0"]))
+            .unwrap_err();
+        assert_eq!(zero.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
@@ -663,6 +647,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
         ];
 
         let parsed = ZoneArgsParser::try_parse_from(
@@ -789,6 +775,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
             "--sequencer-key",
             "0x01",
         ];
@@ -837,6 +825,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
             "--sequencer-key",
             "0x01",
             "--sequencer",
@@ -854,6 +844,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
             "--sequencer-key",
             "0x01",
         ];
@@ -876,6 +868,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
         ];
 
         let redacted = ZoneArgsParser::try_parse_from(
@@ -917,6 +911,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
             "--sequencer-key",
             "0x01",
         ];
@@ -962,6 +958,8 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
+            "--zone.id",
+            "1",
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
