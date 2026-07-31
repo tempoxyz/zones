@@ -173,32 +173,34 @@ pub enum ZoneChainIdError {
 /// The production branches remain below 2^31 for ecosystem compatibility. Other
 /// parents use the high 32 bits, making the mapping injective for accepted inputs.
 pub const fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChainIdError> {
+    match validate_chain_id(parent_chain_id, zone_id) {
+        Ok(()) => {}
+        Err(err) => return Err(err),
+    }
+
+    Ok(match parent_chain_id {
+        TEMPO_MAINNET_CHAIN_ID => ZONE_CHAIN_ID_BASE + zone_id as u64,
+        TEMPO_MODERATO_CHAIN_ID => ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64,
+        _ => (parent_chain_id << 32) | zone_id as u64,
+    })
+}
+
+const fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
     if parent_chain_id == 0 || parent_chain_id > u32::MAX as u64 {
         return Err(ZoneChainIdError::InvalidParentChainId(parent_chain_id));
     }
-    match parent_chain_id {
-        TEMPO_MAINNET_CHAIN_ID => {
-            if (zone_id as u64) < ZONE_CHAIN_ID_RANGE {
-                Ok(ZONE_CHAIN_ID_BASE + zone_id as u64)
-            } else {
-                Err(ZoneChainIdError::ZoneIdOutOfRange {
-                    parent_chain_id,
-                    zone_id,
-                })
-            }
-        }
-        TEMPO_MODERATO_CHAIN_ID => {
-            if (zone_id as u64) < ZONE_CHAIN_ID_RANGE_TESTNET {
-                Ok(ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64)
-            } else {
-                Err(ZoneChainIdError::ZoneIdOutOfRange {
-                    parent_chain_id,
-                    zone_id,
-                })
-            }
-        }
-        _ => Ok((parent_chain_id << 32) | zone_id as u64),
+
+    if (parent_chain_id == TEMPO_MAINNET_CHAIN_ID && zone_id as u64 >= ZONE_CHAIN_ID_RANGE)
+        || (parent_chain_id == TEMPO_MODERATO_CHAIN_ID
+            && zone_id as u64 >= ZONE_CHAIN_ID_RANGE_TESTNET)
+    {
+        return Err(ZoneChainIdError::ZoneIdOutOfRange {
+            parent_chain_id,
+            zone_id,
+        });
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
