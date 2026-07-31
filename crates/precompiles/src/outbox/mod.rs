@@ -283,11 +283,13 @@ impl ZoneOutbox {
 
     fn finalize_withdrawal_batch<P: L1StorageReader>(
         &mut self,
-        l1: &L1State<P>,
+        _l1: &L1State<P>,
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        self.ensure_sequencer(l1, caller)?;
+        if caller != Address::ZERO {
+            return Err(ZoneOutboxError::only_sequencer().into());
+        }
         if call.blockNumber != self.storage.block_number() {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }
