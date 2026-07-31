@@ -172,11 +172,8 @@ pub enum ZoneChainIdError {
 ///
 /// The production branches remain below 2^31 for ecosystem compatibility. Other
 /// parents use the high 32 bits, making the mapping injective for accepted inputs.
-pub const fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChainIdError> {
-    match validate_chain_id(parent_chain_id, zone_id) {
-        Ok(()) => {}
-        Err(err) => return Err(err),
-    }
+pub fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChainIdError> {
+    validate_chain_id(parent_chain_id, zone_id)?;
 
     Ok(match parent_chain_id {
         TEMPO_MAINNET_CHAIN_ID => ZONE_CHAIN_ID_BASE + zone_id as u64,
@@ -185,7 +182,7 @@ pub const fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, Zo
     })
 }
 
-const fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
+fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
     if parent_chain_id == 0 || parent_chain_id > u32::MAX as u64 {
         return Err(ZoneChainIdError::InvalidParentChainId(parent_chain_id));
     }
