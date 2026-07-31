@@ -529,6 +529,12 @@ where
             // Seed the applied anchor from the persisted checkpoint so it targets the leader
             // of the next anchor from the very start (and not after the first post-restart block)
             schedule.record_applied_anchor(snapshot_anchor);
+            install_manifest_forced_recovery(
+                ctx.node.provider(),
+                snapshot_anchor,
+                p2p.manifest(),
+                &schedule,
+            )?;
             self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
                 schedule,
                 manifest: p2p.manifest().clone(),
@@ -793,6 +799,64 @@ impl LeadershipSink for ScheduleLeadershipSink {
         );
         Ok(())
     }
+}
+
+/// Install the manifest's temporary runtime authority before any role-dependent task starts.
+///
+/// The selected block must be the persisted canonical head. The schedule was seeded from the
+/// portal at that block's Tempo anchor immediately before this call, so its latest epoch is the
+/// portal state being overridden.
+fn install_manifest_forced_recovery<P>(
+    provider: &P,
+    snapshot_anchor: u64,
+    manifest: &ZoneManifest,
+    schedule: &LeadershipSchedule,
+) -> eyre::Result<()>
+where
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+{
+    let Some(recovery) = manifest.forced_recovery() else {
+        return Ok(());
+    };
+    let portal_epoch = schedule.latest().map(|record| record.epoch).ok_or_else(|| {
+        eyre::eyre!(
+            "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint"
+        )
+    })?;
+    let zone_height = provider.best_block_number()?;
+    let zone_header = provider
+        .sealed_header(zone_height)?
+        .ok_or_else(|| eyre::eyre!("local canonical zone header {zone_height} is missing"))?;
+    eyre::ensure!(
+        zone_header.hash() == recovery.recovery_block_hash(),
+        "forced recovery block hash {} does not equal local canonical head {} at height {}",
+        recovery.recovery_block_hash(),
+        zone_header.hash(),
+        zone_height,
+    );
+
+    let recovery_start_tempo_block = snapshot_anchor
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
+    let recovery_epoch = portal_epoch
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
+    schedule.install_forced_recovery(
+        recovery_epoch,
+        recovery.leader().clone(),
+        recovery.recovery_block_hash(),
+        recovery_start_tempo_block,
+    )?;
+    info!(
+        target: "reth::cli",
+        leader = %recovery.leader(),
+        portal_epoch,
+        recovery_zone_height = zone_height,
+        recovery_zone_hash = %recovery.recovery_block_hash(),
+        recovery_start_tempo_block,
+        "Installed manifest forced recovery"
+    );
+    Ok(())
 }
 
 /// Seed the leadership schedule from the portal snapshot at the local Tempo anchor.

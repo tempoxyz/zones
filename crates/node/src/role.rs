@@ -415,9 +415,11 @@ where
     P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
 {
     if let Some(recovery) = schedule.forced_recovery().filter(|recovery| {
-        recovery.is_active()
-            && &recovery.leader == local
+        &recovery.leader == local
             && next_anchor >= recovery.recovery_start_tempo_block
+            && recovery
+                .portal_activation_tempo_block
+                .is_none_or(|activation| next_anchor < activation)
     }) {
         let local_height = match provider.best_block_number() {
             Ok(height) => height,

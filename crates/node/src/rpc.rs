@@ -57,8 +57,8 @@ use zone_rpc::{
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
         LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
-        SequencerProgress, SequencerReadiness, SetLeaderOptions, SetLeaderParams,
-        SetLeaderResponse, ZoneInfoResponse, internal, raw_null, raw_zero, to_raw,
+        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneInfoResponse, internal,
+        raw_null, raw_zero, to_raw,
     },
 };
 
@@ -193,21 +193,13 @@ where
 {
     let mut module = RpcModule::new(());
     let set_leader_sequencer = sequencer.clone();
-    let set_leader_provider = provider.clone();
     module.register_async_method("zone_setLeader", move |params, _, _| {
         let sequencer = set_leader_sequencer.clone();
-        let provider = set_leader_provider.clone();
         async move {
-            let (target, options) = params.parse::<SetLeaderParams>()?.into_parts();
-            set_leader(
-                portal_address,
-                sequencer.as_ref(),
-                &provider,
-                target,
-                options,
-            )
-            .await
-            .map_err(operator_rpc_error)
+            let (target,) = params.parse::<(Address,)>()?;
+            set_leader(portal_address, sequencer.as_ref(), target)
+                .await
+                .map_err(operator_rpc_error)
         }
     })?;
     module.register_async_method("zone_getSequencerInfo", move |_, _, _| {
@@ -1163,35 +1155,11 @@ where
     })
 }
 
-fn parse_forced_recovery(options: SetLeaderOptions) -> Result<Option<(u64, B256)>, JsonRpcError> {
-    if !options.force {
-        if options.expected_epoch.is_some() || options.recovery_block_hash.is_some() {
-            return Err(JsonRpcError::invalid_params(
-                "expectedEpoch and recoveryBlockHash require force=true",
-            ));
-        }
-        return Ok(None);
-    }
-    let expected_epoch = options
-        .expected_epoch
-        .ok_or_else(|| JsonRpcError::invalid_params("force=true requires expectedEpoch"))?
-        .to::<u64>();
-    let recovery_block_hash = options
-        .recovery_block_hash
-        .ok_or_else(|| JsonRpcError::invalid_params("force=true requires recoveryBlockHash"))?;
-    Ok(Some((expected_epoch, recovery_block_hash)))
-}
-
-async fn set_leader<P>(
+async fn set_leader(
     portal_address: Address,
     sequencer: &std::sync::OnceLock<SequencerRpcContext>,
-    provider: &P,
     target: Address,
-    options: SetLeaderOptions,
-) -> Result<SetLeaderResponse, JsonRpcError>
-where
-    P: BlockNumReader + HeaderProvider + StateProviderFactory,
-{
+) -> Result<SetLeaderResponse, JsonRpcError> {
     let Some(context) = sequencer.get() else {
         return Err(JsonRpcError::invalid_params(
             "zone_setLeader requires multi-sequencer mode",
@@ -1203,10 +1171,9 @@ where
         ));
     }
 
-    // The public endpoint is intentionally unauthenticated. The transaction itself is still
-    // signed by this node's individual sequencer key, and the portal enforces relayer authority.
-    // An rpc-only node holds no such key, so it cannot relay: operators call this on a quorum
-    // member instead.
+    // The transaction is signed by this node's individual sequencer key, and the portal enforces
+    // relayer authority. An rpc-only node holds no such key, so it cannot relay: operators call
+    // this on a quorum member instead.
     let (Some(relayer), Some(relayer_address)) =
         (context.relayer.as_ref(), context.local_secp256k1_address)
     else {
@@ -1215,13 +1182,13 @@ where
         ));
     };
     let portal = ZonePortal::new(portal_address, relayer);
-    let forced = parse_forced_recovery(options)?;
 
     // The target must be a manifest member and a registered portal sequencer.
-    let target_node = context
-        .manifest
-        .node_by_secp256k1_address(target)
-        .ok_or_else(|| JsonRpcError::invalid_params("target is not a manifest member"))?;
+    if context.manifest.node_by_secp256k1_address(target).is_none() {
+        return Err(JsonRpcError::invalid_params(
+            "target is not a manifest member",
+        ));
+    }
     let is_sequencer = portal
         .isSequencer(target)
         .block(BlockId::finalized())
@@ -1243,54 +1210,6 @@ where
     let (leader, expected_epoch) =
         tokio::try_join!(leader_call.call(), epoch_call.call()).map_err(internal)?;
 
-    if let Some((requested_epoch, recovery_block_hash)) = forced {
-        let recovery_epoch = requested_epoch
-            .checked_add(1)
-            .ok_or_else(|| JsonRpcError::invalid_params("forced recovery epoch overflow"))?;
-        if leader == target {
-            if expected_epoch != recovery_epoch {
-                return Err(JsonRpcError::invalid_params(format!(
-                    "finalized target epoch is {expected_epoch}, expected forced recovery epoch \
-                     {recovery_epoch}"
-                )));
-            }
-        } else if expected_epoch != requested_epoch {
-            return Err(JsonRpcError::invalid_params(format!(
-                "finalized leadership epoch is {expected_epoch}, expected {requested_epoch}"
-            )));
-        }
-
-        let local_tip = local_recovery_tip(provider)?;
-        if local_tip.zone_hash != recovery_block_hash {
-            return Err(JsonRpcError::invalid_params(format!(
-                "forced recovery block hash {recovery_block_hash} does not equal local canonical \
-                 head {} at height {}",
-                local_tip.zone_hash, local_tip.zone_height,
-            )));
-        }
-
-        let prepared = context
-            .schedule
-            .prepare_forced_recovery(
-                recovery_epoch,
-                target_node.ed25519_public_key().clone(),
-                recovery_block_hash,
-                local_tip.tempo_block_number.saturating_add(1),
-            )
-            .map_err(|err| JsonRpcError::invalid_params(err.to_string()))?;
-        tracing::info!(
-            target: "zone::rpc",
-            %target,
-            requested_epoch,
-            recovery_zone_height = local_tip.zone_height,
-            recovery_zone_hash = %recovery_block_hash,
-            recovery_tempo_block = local_tip.tempo_block_number,
-            recovery_tempo_hash = %local_tip.tempo_block_hash,
-            prepared,
-            "Prepared forced leader recovery"
-        );
-    }
-
     if leader == target {
         return Ok(SetLeaderResponse {
             status: "alreadyActive".to_owned(),
@@ -1300,9 +1219,9 @@ where
         });
     }
 
-    // Relay with the individual key on the reserved admin-operations nonce lane and
-    // return immediately: the node's role changes only when its finalized L1
-    // subscriber observes the resulting transition (I6).
+    // Relay with the individual key on the reserved admin-operations nonce lane and return
+    // immediately. Runtime recovery is configured separately in the manifest; this method only
+    // changes the ordinary on-chain leadership schedule when the operator invokes it.
     let pending = portal
         .setLeader(target, expected_epoch)
         .nonce_key(zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY)
@@ -1436,6 +1355,22 @@ mod tests {
                 .to_string()
                 .contains("zone_setLeader requires multi-sequencer mode")
         );
+
+        let error = module
+            .call::<_, SetLeaderResponse>(
+                "zone_setLeader",
+                (
+                    Address::repeat_byte(0x22),
+                    serde_json::json!({
+                        "force": true,
+                        "expectedEpoch": "0x7",
+                        "recoveryBlockHash": B256::repeat_byte(0x33),
+                    }),
+                ),
+            )
+            .await
+            .expect_err("zone_setLeader no longer accepts runtime recovery options");
+        assert!(error.to_string().contains("Invalid params"));
     }
 
     #[test]

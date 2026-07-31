@@ -58,8 +58,9 @@ use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or an
-/// active bounded forced-recovery override assigns `N` to this node.
+/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
+/// forced-recovery override assigns `N` to this node. An optimistic override is open-ended until
+/// the next finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -587,7 +588,7 @@ mod tests {
 
         let recovery_schedule = LeadershipSchedule::seeded(LeadershipState::new(7, me, 0));
         recovery_schedule
-            .prepare_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
+            .install_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
             .unwrap();
         recovery_schedule
             .publish(LeadershipState::new(8, other.clone(), 60))
