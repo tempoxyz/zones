@@ -281,7 +281,7 @@ else:
     # 0 < parent_chain_id <= 2^32 - 1
 ```
 
-The production ranges reject exhaustion rather than wrapping. This preserves all existing mainnet zone chain IDs. Moderato and devnet zones migrate to parent-aware IDs; generic IDs are at least `2^32` and cannot collide with the sub-`2^31` production ranges. Distinct devnets MUST use distinct parent chain IDs. This prevents replay between zones and between mainnet, Moderato, and devnets. The chain ID is set in genesis and validated against the connected parent by the zone node at startup.
+The production ranges reject exhaustion rather than wrapping. Generic IDs are at least `2^32` and cannot collide with the sub-`2^31` production ranges. Distinct devnets MUST use distinct parent chain IDs. This prevents replay between zones and between mainnet, Moderato, and devnets. The chain ID is set in genesis and validated against the connected parent by the zone node at startup.
 
 ### Tempo Contracts
 

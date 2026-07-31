@@ -97,12 +97,10 @@ All zone commands need an L1 RPC URL.
 The zone chain ID is domain-separated by that L1's chain ID. For parent chain ID
 `4217` (Tempo mainnet), it is `421700000 + zone_id`; for `42431` (Moderato), it is
 `1424310000 + zone_id`. Zone IDs outside each reserved production range are rejected
-rather than wrapped. Mainnet IDs are therefore unchanged, while existing Moderato
-and devnet zones must migrate their genesis chain IDs. For any other nonzero parent
-that fits in `u32`, the chain ID is `(parent_chain_id << 32) | zone_id`. These generic
-IDs are intentionally high and cannot collide with the production ranges. Every
-devnet must use a unique parent chain ID to prevent transaction replay between it and
-other devnets.
+rather than wrapped. For any other nonzero parent that fits in `u32`, the chain ID is
+`(parent_chain_id << 32) | zone_id`. These generic IDs are intentionally high and
+cannot collide with the production ranges. Every devnet must use a unique parent
+chain ID to prevent transaction replay between it and other devnets.
 
 **Moderato testnet:**
 ```bash
