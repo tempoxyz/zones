@@ -521,6 +521,7 @@ fn receive_policy_blocked_regular_deposit_enqueues_bounce_back() -> eyre::Result
             },
         )
     })?;
+    drop(storage);
     let deposit = Deposit {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
