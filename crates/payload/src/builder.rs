@@ -252,10 +252,6 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
-        let pending_withdrawals_at_block_start =
-            read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
-        let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
-
         // Execute advanceTempo system transaction — exactly one per zone block.
         builder
             .execute_transaction(build_advance_tempo_tx(prepared))
@@ -292,7 +288,6 @@ where
             &mut builder,
             block_number,
             self.withdrawal_batch_interval_blocks,
-            has_prior_withdrawals,
             self.withdrawal_reveal_encryptor.as_deref(),
         )?;
 
@@ -539,23 +534,22 @@ fn is_l1_storage_unavailable(error: &(dyn Error + 'static)) -> bool {
     false
 }
 
-/// Finalize withdrawals when the block started with pending requests or reaches a batch boundary.
+/// Finalize withdrawals when the current pending list is non-empty or at a batch boundary.
 fn finalize_withdrawal_batch_if_needed<B>(
     builder: &mut B,
     block_number: u64,
     interval_blocks: u64,
-    has_prior_withdrawals: bool,
     encryptor: Option<&dyn WithdrawalRevealEncryptor>,
 ) -> Result<(), PayloadBuilderError>
 where
     B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
 {
-    if !has_prior_withdrawals && !block_number.is_multiple_of(interval_blocks) {
+    let pending_withdrawals =
+        read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
+    if pending_withdrawals.is_empty() && !block_number.is_multiple_of(interval_blocks) {
         return Ok(());
     }
 
-    let pending_withdrawals =
-        read_pending_withdrawals_from_outbox(builder.evm_mut(), block_number)?;
     let encrypted_senders = pending_withdrawals
         .iter()
         .map(|request| {

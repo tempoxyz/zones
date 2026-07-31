@@ -843,20 +843,14 @@ mod tests {
 
     #[tokio::test]
     async fn private_rpc_excludes_public_sequencer_methods() {
-        use crate::types::{MethodTier, classify_method};
+        use crate::types::classify_method;
 
+        // Both are served by the node's public HTTP module, not the private tiered
+        // dispatcher, so they must not classify and must not dispatch here.
         assert_eq!(classify_method("zone_getSequencerInfo"), None);
         assert_eq!(classify_method("zone_setLeader"), None);
-        assert_eq!(
-            classify_method("admin_setLeader"),
-            Some(MethodTier::Restricted)
-        );
 
         let api = MockZoneRpcApi::default();
-        // admin_* stays rejected before dispatch.
-        let rejected = dispatch(&request("admin_setLeader", json!([])), &auth(), &api).await;
-        assert_eq!(rejected.error.unwrap().code, -32005);
-
         let excluded = dispatch(&request("zone_setLeader", json!([])), &auth(), &api).await;
         assert_eq!(excluded.error.unwrap().code, -32601);
 

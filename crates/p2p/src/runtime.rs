@@ -638,20 +638,18 @@ async fn run_commands(
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
+    let others: Vec<PublicKey> = peers
+        .iter()
+        .filter(|peer| *peer != &local_ed25519_public_key)
+        .cloned()
+        .collect();
+
     while let Some(command) = commands.recv().await {
-        // Built only in arms that actually address a peer set.
-        let others = || {
-            peers
-                .iter()
-                .filter(|peer| *peer != &local_ed25519_public_key)
-                .cloned()
-                .collect::<Vec<_>>()
-        };
         if let P2pCommand::RequestBackfill { start } = command {
             // Chain data always comes from a quorum member: standbys hold the same chain but are
             // the internet-facing members, and keeping them out of every node's catch-up source
             // set is the point of the role.
-            let candidates = leadership.quorum_peers(&others());
+            let candidates = leadership.quorum_peers(&others);
             let now = Instant::now();
             // Ask the leader alone first: backfilled blocks carry no producer claim, so a page
             // from any other member could be a valid alternative chain rather than the leader's.
@@ -711,7 +709,6 @@ async fn run_commands(
             }
             continue;
         }
-
         match command {
             P2pCommand::BroadcastBlock(block) => {
                 // Mirror of the inbound transport check: the sender must lead somewhere in
@@ -730,7 +727,7 @@ async fn run_commands(
                     continue;
                 }
 
-                let recipients = others();
+                let recipients = &others;
                 let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
                         let sent = senders.blocks
@@ -767,7 +764,7 @@ async fn run_commands(
                 senders
                     .settlement_proposals
                     .send(
-                        Recipients::Some(leadership.quorum_peers(&others())),
+                        Recipients::Some(leadership.quorum_peers(&others)),
                         proposal,
                         true,
                     )
@@ -855,7 +852,7 @@ async fn run_commands(
                     warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on the next-anchor leader");
                     continue;
                 }
-                let recipients = leadership.quorum_peers(&others());
+                let recipients = leadership.quorum_peers(&others);
                 let configured = recipients.len();
                 let transaction_size = transaction.len();
                 let sent = match senders

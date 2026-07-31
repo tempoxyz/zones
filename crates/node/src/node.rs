@@ -41,7 +41,7 @@ use reth_node_builder::{
 };
 use reth_primitives_traits::SealedHeader;
 use reth_provider::ChainSpecProvider;
-use reth_rpc_builder::{Identity, TransportRpcModules};
+use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{
     BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProvider, StateProviderFactory,
@@ -88,19 +88,6 @@ use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
     attestation::AttestationDomain, spawn_zone_sequencer,
 };
-
-const PUBLIC_SIMULATION_METHODS: [&str; 2] = ["eth_call", "eth_estimateGas"];
-
-/// Remove simulation methods from a sequencer's unauthenticated RPC transports.
-///
-/// Simulations can execute TIP-20 policy checks backed by finalized L1 state. Keeping them on the
-/// authenticated private RPC prevents arbitrary public callers from forcing sequencer L1 reads,
-/// while non-sequencer RPC nodes can continue serving simulations.
-fn disable_simulation_methods(modules: &mut TransportRpcModules) {
-    modules.remove_http_methods(PUBLIC_SIMULATION_METHODS);
-    modules.remove_ws_methods(PUBLIC_SIMULATION_METHODS);
-    modules.remove_ipc_methods(PUBLIC_SIMULATION_METHODS);
-}
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
 ///
@@ -177,7 +164,7 @@ pub struct ZoneSequencerAddOnsConfig {
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
     pub l1_transaction_signer: Option<PrivateKeySigner>,
-    /// Zone ID for chain ID validation.
+    /// Zone ID used by sequencer encryption.
     pub zone_id: u32,
     /// Fallback interval for reconciling the canonical Zone head.
     pub zone_poll_interval: Duration,
@@ -194,7 +181,7 @@ pub struct ZoneSequencerAddOnsConfig {
 pub struct ZonePrivateRpcConfig {
     /// Port for RPC traffic.
     pub private_rpc_port: u16,
-    /// Zone ID for chain ID validation and private RPC auth.
+    /// Zone ID used by private RPC authentication.
     pub zone_id: u32,
     /// Max duration for private RPC auth.
     pub max_auth_token_validity: Duration,
@@ -230,9 +217,6 @@ pub struct ZoneNode {
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
-    /// Test-only override allowing simulations on a sequencer's public RPC.
-    #[cfg(any(test, feature = "test-utils"))]
-    allow_public_simulation_methods: bool,
 }
 
 impl ZoneNode {
@@ -281,8 +265,6 @@ impl ZoneNode {
             sequencer_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
-            #[cfg(any(test, feature = "test-utils"))]
-            allow_public_simulation_methods: false,
         }
     }
 
@@ -301,13 +283,6 @@ impl ZoneNode {
             config.zone_id,
         )));
         self.sequencer_config = Some(config);
-        self
-    }
-
-    /// Keep simulation methods available on a sequencer's public RPC in test builds.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn allow_public_simulation_methods(mut self) -> Self {
-        self.allow_public_simulation_methods = true;
         self
     }
 
@@ -460,9 +435,6 @@ where
     p2p_config: Option<P2pConfig>,
     /// Whether a consumer outside this builder drains the deposit queue.
     external_deposit_consumer: bool,
-    /// Test-only override allowing simulations on a sequencer's public RPC.
-    #[cfg(any(test, feature = "test-utils"))]
-    allow_public_simulation_methods: bool,
 }
 
 impl<N> std::fmt::Debug for ZoneAddOns<N>
@@ -472,27 +444,6 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoneAddOns").finish_non_exhaustive()
-    }
-}
-
-impl<N> ZoneAddOns<N>
-where
-    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-    N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
-{
-    fn allows_public_simulation_methods(&self) -> bool {
-        let allow_public_sims = {
-            #[cfg(any(test, feature = "test-utils"))]
-            {
-                self.allow_public_simulation_methods
-            }
-            #[cfg(not(any(test, feature = "test-utils")))]
-            {
-                false
-            }
-        };
-
-        self.sequencer_config.is_none() || allow_public_sims
     }
 }
 
@@ -509,7 +460,6 @@ where
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
-        #[cfg(any(test, feature = "test-utils"))] allow_public_simulation_methods: bool,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -527,8 +477,6 @@ where
             sequencer_config,
             p2p_config,
             external_deposit_consumer,
-            #[cfg(any(test, feature = "test-utils"))]
-            allow_public_simulation_methods,
         }
     }
 }
@@ -622,7 +570,7 @@ where
                 attestation_domain,
                 config.block_attestation_signer(),
                 config.block_attestation_addresses(),
-                Some(AttestationStore::default()),
+                AttestationStore::default(),
                 l1_provider.clone(),
                 anchor_config,
             );
@@ -704,13 +652,9 @@ where
             provider.clone(),
         );
         let portal_address = self.portal_address;
-        let disable_public_simulations = !self.allows_public_simulation_methods();
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
-                if disable_public_simulations {
-                    disable_simulation_methods(container.modules);
-                }
                 container
                     .modules
                     .merge_configured(public_zone_api.into_rpc())?;
@@ -757,7 +701,6 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
-                    chain_id,
                     attestation.store.clone(),
                 )?),
                 None => None,
@@ -806,7 +749,6 @@ where
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
-                chain_id,
                 None,
             )
             .await?;
@@ -889,18 +831,21 @@ async fn seed_leadership_schedule(
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    let leader = portal.leader().block(block_id).call().await?;
+    // All three describe the same transition at the same block and have no data dependency
+    // on each other, so they go out as one batch rather than three serial round trips on the
+    // startup path.
+    let leader_call = portal.leader().block(block_id);
+    let epoch_call = portal.leaderEpoch().block(block_id);
+    let activation_call = portal.leaderActivationTempoBlock().block(block_id);
+    let (leader, epoch, activation) = tokio::try_join!(
+        leader_call.call(),
+        epoch_call.call(),
+        activation_call.call(),
+    )?;
     eyre::ensure!(
         !leader.is_zero(),
         "portal {portal_address} has no leader at finalized L1 snapshot block {snapshot_anchor}"
     );
-
-    let epoch = portal.leaderEpoch().block(block_id).call().await?;
-    let activation = portal
-        .leaderActivationTempoBlock()
-        .block(block_id)
-        .call()
-        .await?;
     let node = manifest.node_by_secp256k1_address(leader).ok_or_else(|| {
         eyre::eyre!(
             "finalized portal leader {leader} (epoch {epoch}) does not map to any manifest \
@@ -999,20 +944,8 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        chain_id: u64,
-        attestation_store: Option<AttestationStore>,
+        attestation_store: AttestationStore,
     ) -> eyre::Result<LeaderSequencerDeps> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
@@ -1023,7 +956,7 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store,
+            attestation_store: Some(attestation_store),
         };
         Ok(LeaderSequencerDeps {
             config,
@@ -1146,18 +1079,6 @@ where
         portal_address: Address,
         chain_id: u64,
     ) -> eyre::Result<()> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
-
         let eth_handlers = handle.eth_handlers().clone();
         let zone_rpc_url = handle
             .rpc_server_handles
@@ -1193,21 +1114,8 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         sequencer_addr: Address,
-        chain_id: u64,
         attestation_store: Option<AttestationStore>,
     ) -> eyre::Result<()> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
-
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1330,8 +1238,6 @@ where
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,
-            #[cfg(any(test, feature = "test-utils"))]
-            self.allow_public_simulation_methods,
         )
     }
 }
@@ -1597,37 +1503,6 @@ mod tests {
     use tempo_primitives::transaction::{
         AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction,
     };
-
-    #[test]
-    fn public_rpc_disables_simulation_methods_on_all_transports() {
-        fn module() -> jsonrpsee::RpcModule<()> {
-            let mut module = jsonrpsee::RpcModule::new(());
-            for method in ["eth_call", "eth_estimateGas", "eth_chainId"] {
-                module
-                    .register_method(method, |_, _, _| "ok")
-                    .expect("test method should register");
-            }
-            module
-        }
-
-        let mut modules = TransportRpcModules::default()
-            .with_http(module())
-            .with_ws(module())
-            .with_ipc(module());
-        disable_simulation_methods(&mut modules);
-
-        for methods in [
-            modules.http_methods(|_| true),
-            modules.ws_methods(|_| true),
-            modules.ipc_methods(|_| true),
-        ] {
-            let names = methods
-                .expect("transport should be configured")
-                .method_names()
-                .collect::<Vec<_>>();
-            assert_eq!(names, ["eth_chainId"]);
-        }
-    }
 
     fn pooled_transaction(envelope: TempoTxEnvelope, sender: Address) -> TempoPooledTransaction {
         TempoPooledTransaction::new(Recovered::new_unchecked(envelope, sender))

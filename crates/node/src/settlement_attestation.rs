@@ -354,10 +354,7 @@ pub(crate) async fn collect_leader_settlements<P>(
     // persisted-block stream is latest-value based, so notifications are wake-ups rather than a
     // lossless sequence of every persisted block.
     let mut persisted = provider.persisted_block_stream();
-    let store = context
-        .store
-        .as_ref()
-        .expect("leader must have an attestation store");
+    let store = &context.store;
     let mut submitted_heights = store.subscribe_submitted_height();
     let head = match provider.last_block_number() {
         Ok(head) => head,
@@ -534,8 +531,6 @@ where
     let signer = signed.recover_signer(context.domain)?;
     let (_, signatures) = context
         .store
-        .as_ref()
-        .expect("leader must have an attestation store")
         .insert_settlement(context.domain, signer, signed);
     commands
         .send(P2pCommand::BroadcastSettlementProposal(
