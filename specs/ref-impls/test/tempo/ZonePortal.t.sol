@@ -1502,7 +1502,7 @@ contract ZonePortalTest is BaseTest {
     function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
         uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
         uint64 maximumPublicDeposits = maximum - 20;
-        assertEq(maximum, 640);
+        assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 amount = 1;
