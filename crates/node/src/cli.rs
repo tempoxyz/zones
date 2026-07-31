@@ -473,11 +473,7 @@ pub struct ZoneArgs {
     pub l1_retry_connection_interval_ms: u64,
 
     /// Zone ID used for chain identity and redacted RPC authentication.
-    #[arg(
-        long = "zone.id",
-        env = "ZONE_ID",
-        value_parser = clap::builder::RangedU64ValueParser::<u32>::new().range(1..)
-    )]
+    #[arg(long = "zone.id", env = "ZONE_ID")]
     pub zone_id: u32,
 
     /// Port for the redacted zone RPC server (0 for OS-assigned).
@@ -599,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn zone_id_is_required_and_nonzero() {
+    fn zone_id_is_required() {
         let common = [
             "tempo-zone",
             "--l1.rpc-url",
@@ -613,10 +609,6 @@ mod tests {
             missing.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
-
-        let zero = ZoneArgsParser::try_parse_from(common.into_iter().chain(["--zone.id", "0"]))
-            .unwrap_err();
-        assert_eq!(zero.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
