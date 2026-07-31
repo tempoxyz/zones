@@ -100,7 +100,7 @@ where
         let actions = StorageActions::disabled();
         let non_creditable_slots = evm.non_creditable_slots();
         let (_, _, precompiles) = evm.components_mut();
-        let env = ZonePrecompileEnv::new(&cfg, actions.clone(), non_creditable_slots.clone());
+        let env = ZonePrecompileEnv::new(&cfg, actions, non_creditable_slots);
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
             Some(TempoState::create(l1.clone(), &env))
         });
