@@ -158,34 +158,15 @@ pub const ZONE_CHAIN_ID_BASE_TESTNET: u64 = 1_424_310_000;
 pub const ZONE_CHAIN_ID_RANGE_TESTNET: u64 = 723_173_648;
 
 /// Failure to derive a unique zone chain ID.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ZoneChainIdError {
     /// Production zone IDs must fit in the reserved range.
+    #[error("zone ID {zone_id} exhausts the reserved range for parent chain {parent_chain_id}")]
     ZoneIdOutOfRange { parent_chain_id: u64, zone_id: u32 },
     /// Generic parent chain IDs must be nonzero and fit in 32 bits.
+    #[error("generic parent chain ID must be in 1..=u32::MAX, got {0}")]
     InvalidParentChainId(u64),
 }
-
-impl core::fmt::Display for ZoneChainIdError {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::ZoneIdOutOfRange {
-                parent_chain_id,
-                zone_id,
-            } => write!(
-                f,
-                "zone ID {zone_id} exhausts the reserved range for parent chain {parent_chain_id}"
-            ),
-            Self::InvalidParentChainId(id) => write!(
-                f,
-                "generic parent chain ID must be in 1..=u32::MAX, got {id}"
-            ),
-        }
-    }
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for ZoneChainIdError {}
 
 /// Derives a zone EIP-155 chain ID from its parent Tempo chain and ZoneFactory ID.
 ///
