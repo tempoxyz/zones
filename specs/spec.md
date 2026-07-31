@@ -51,7 +51,7 @@
   - [TIP-403 Policies](#tip-403-policies)
     - [Policy Enforcement on Zones](#policy-enforcement-on-zones)
     - [Policy Inheritance](#policy-inheritance)
-  - [Private RPC](#private-rpc)
+  - [Redacted RPC](#redacted-rpc)
     - [Authorization Tokens](#authorization-tokens)
     - [Signature Types](#signature-types)
     - [Method Access Control](#method-access-control)
@@ -100,7 +100,7 @@ A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone
 
 Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Each portal has two independent, admin-mutable boolean flags: `accessMode` controls account allowlist enforcement for deposits, refunds, and plain withdrawals, while `gatewayMode` controls callback target registration. Disabling either flag disables only its corresponding checks without deleting the stored mapping.
 
-This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the private RPC interface, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
+This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the operator and redacted RPC interfaces, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
 
 # Specification
 
@@ -245,7 +245,7 @@ A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following 
 | `admin` | The nonzero address that holds the admin role for the zone. |
 | `sequencers` | One to eight unique, nonzero equal sequencer addresses. Creation-time order is not significant. |
 | `threshold` | The number of distinct active-sequencer signatures required for settlement. MUST be nonzero and no greater than `sequencers.length`. |
-| `rpcUrl` | The public RPC endpoint advertised for the zone. |
+| `rpcUrl` | The operator RPC endpoint advertised for the zone. |
 
 The native factory assigns a unique `zoneId`, etches the TIP-1091 proxy runtime at its reserved vanity address, initializes the portal storage with the fixed messenger and verifier, sets `blockHash` and the initial sequencer-set configuration nonce to zero, and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits the zone deployment parameters.
 
@@ -876,7 +876,7 @@ If a TIP-403 policy causes a withdrawal transfer to fail, it bounces back to the
 
 <br>
 
-## Private RPC
+## Redacted RPC
 
 Zones expose a modified Ethereum JSON-RPC where every request is authenticated and every response is scoped to the caller's account. The RPC is the primary user interface and the main attack surface for privacy leaks.
 
@@ -988,13 +988,13 @@ The connection is terminated when the authorization token expires. For keychain-
 ### Zone-Specific Methods
 
 The authentication-independent Zone metadata methods are available on both the
-standard node RPC transports and the authenticated private RPC.
+operator RPC transports and the authenticated redacted RPC.
 
 | Method | Access | Description |
 |--------|--------|-------------|
-| `zone_getAuthorizationTokenInfo` | Authenticated private RPC only | Returns the authenticated account address and token expiry |
-| `zone_getZoneInfo` | Standard node RPC and authenticated private RPC | Returns `zoneId`, `isAccessEnforced`, `isGatewayOpen`, `zoneTokens`, `sequencers`, `chainId`, and `tempoBlockNumber` |
-| `zone_getEncryptionKey` | Standard node RPC and authenticated private RPC | Returns the active sequencer encryption key at the current Tempo L1 head |
+| `zone_getAuthorizationTokenInfo` | Authenticated redacted RPC only | Returns the authenticated account address and token expiry |
+| `zone_getZoneInfo` | Operator RPC and authenticated redacted RPC | Returns `zoneId`, `isAccessEnforced`, `isGatewayOpen`, `zoneTokens`, `sequencers`, `chainId`, and `tempoBlockNumber` |
+| `zone_getEncryptionKey` | Operator RPC and authenticated redacted RPC | Returns the active sequencer encryption key at the current Tempo L1 head |
 
 `zone_getEncryptionKey` reads the active key directly from the portal at the current Tempo L1 head.
 Its response is:

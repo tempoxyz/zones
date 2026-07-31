@@ -1110,7 +1110,7 @@ provision_up() {
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
         --ws.api eth,net,web3,txpool \
         --metrics 127.0.0.1:9201 \
-        --private-rpc.port 8544 \
+        --redacted-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
         --withdrawal-poll-interval-secs "$withdrawal_poll_interval_secs" \
         --withdrawal-max-batch-gas "$withdrawal_max_batch_gas" \
@@ -1122,7 +1122,7 @@ provision_up() {
     unset SEQUENCER_KEY sequencer_key owner_key admin_key
 
     local zone_rpc="http://127.0.0.1:8546"
-    local zone_private_rpc="http://127.0.0.1:8544"
+    local zone_redacted_rpc="http://127.0.0.1:8544"
     wait_for_rpc "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_token" "$zone_timeout"
@@ -1145,7 +1145,7 @@ provision_up() {
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
         ZONE_WS_RPC_URL "ws://127.0.0.1:8546" \
-        ZONE_PRIVATE_RPC_URL "$zone_private_rpc" \
+        ZONE_REDACTED_RPC_URL "$zone_redacted_rpc" \
         ZONES_BENCH_TOKEN "$zone_token" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \

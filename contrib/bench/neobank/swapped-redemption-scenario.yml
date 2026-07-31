@@ -17,7 +17,7 @@ chains:
 
   zone:
     network: tempo
-    rpc_url: "${ZONE_PRIVATE_RPC_URL}"
+    rpc_url: "${ZONE_REDACTED_RPC_URL}"
     query_rpc_url: "${ZONE_RPC_URL}"
     observation:
       mode: auto

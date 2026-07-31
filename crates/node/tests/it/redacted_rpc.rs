@@ -1,4 +1,4 @@
-//! Tests for the private zone RPC module.
+//! Tests for the redacted zone RPC module.
 
 use crate::utils::{
     build_signed_token_blob, now_secs, sign_keychain_signature, sign_p256_signature,

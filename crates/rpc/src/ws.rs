@@ -1,4 +1,4 @@
-//! WebSocket transport for the private zone RPC server.
+//! WebSocket transport for the redacted zone RPC server.
 //!
 //! Clients authenticate via the `X-Authorization-Token` header (preferred) or
 //! a `?token=0x<hex>` query parameter (for browser clients that cannot set

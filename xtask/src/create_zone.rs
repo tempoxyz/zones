@@ -79,7 +79,7 @@ pub(crate) struct CreateZone {
     #[arg(long)]
     admin: Address,
 
-    /// Public RPC endpoint for the zone, published on-chain in the portal.
+    /// Operator RPC endpoint for the zone, published on-chain in the portal.
     /// Can be left empty and set later via `ZonePortal.setRpcUrl`.
     #[arg(long, default_value = "")]
     rpc_url: String,

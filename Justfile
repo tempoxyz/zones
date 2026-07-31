@@ -689,7 +689,7 @@ check-balance account token="0x20C0000000000000000000000000000000000000" rpc=zon
     @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --from "{{account}}" --rpc-url "{{rpc}}"
 
 [group('zone')]
-[doc('Generates a signed auth token for the private zone RPC. Requires PRIVATE_KEY env var. Reads zone metadata from generated/<name>/zone.json.')]
+[doc('Generates a signed auth token for the redacted zone RPC. Requires PRIVATE_KEY env var. Reads zone metadata from generated/<name>/zone.json.')]
 zone-auth-token name:
     #!/bin/bash
     set -euo pipefail
@@ -717,8 +717,8 @@ zone-auth-token name:
     echo "${SIG_HEX}${FIELDS}"
 
 [group('zone')]
-[doc('Checks TIP-20 token balance via the private RPC (with auth token). Requires PRIVATE_KEY env var.')]
-check-balance-private name token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8544":
+[doc('Checks TIP-20 token balance via the redacted RPC (with auth token). Requires PRIVATE_KEY env var.')]
+check-balance-redacted name token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8544":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -729,13 +729,13 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
         -H "Content-Type: application/json" \
         -H "x-authorization-token: ${TOKEN}" \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}") || {
-            echo "Failed to reach private RPC at {{rpc}}"
+            echo "Failed to reach redacted RPC at {{rpc}}"
             exit 1
         }
     HTTP_STATUS=$(printf '%s' "$RESPONSE" | tail -n1)
     RESULT=$(printf '%s' "$RESPONSE" | sed '$d')
     if [[ "$HTTP_STATUS" != "200" ]]; then
-        echo "Private RPC HTTP $HTTP_STATUS"
+        echo "Redacted RPC HTTP $HTTP_STATUS"
         echo "${RESULT:-<empty response>}"
         exit 1
     fi

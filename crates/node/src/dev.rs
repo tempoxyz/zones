@@ -37,7 +37,7 @@ pub struct ProvisionConfig {
     pub zone_gateways: Vec<Address>,
     /// Initial portal membership (required for closed mode, retained but unenforced in open mode).
     pub allowed_accounts: Vec<Address>,
-    /// Public zone RPC URL registered on the portal.
+    /// Operator zone RPC URL registered on the portal.
     pub rpc_url: String,
 }
 
@@ -306,9 +306,9 @@ mod command {
         #[arg(long = "http.port", default_value_t = 9545)]
         http_port: u16,
 
-        /// Zone private RPC port.
-        #[arg(long = "private-rpc.port", default_value_t = 8544)]
-        private_rpc_port: u16,
+        /// Zone redacted RPC port.
+        #[arg(long = "redacted-rpc.port", default_value_t = 8544)]
+        redacted_rpc_port: u16,
 
         /// Extra arguments forwarded to `tempo-zone node`.
         #[arg(last = true)]
@@ -399,8 +399,8 @@ mod command {
             );
             println!("  WS RPC:       ws://{}:{ws_port}", self.http_addr);
             println!(
-                "  Private RPC:  http://{}:{}",
-                self.http_addr, self.private_rpc_port
+                "  Redacted RPC: http://{}:{}",
+                self.http_addr, self.redacted_rpc_port
             );
             println!("  Datadir:      {}", self.datadir.display());
 
@@ -431,8 +431,8 @@ mod command {
                 "all",
                 "--port",
                 &p2p_port.to_string(),
-                "--private-rpc.port",
-                &self.private_rpc_port.to_string(),
+                "--redacted-rpc.port",
+                &self.redacted_rpc_port.to_string(),
                 "--datadir",
                 &self.datadir.join("node").display().to_string(),
                 "--log.file.directory",

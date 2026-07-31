@@ -16,7 +16,7 @@ use zone_p2p::{P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
-    ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
+    ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig, dev::DevCommand,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_sequencer::{
@@ -180,11 +180,11 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             Duration::from_millis(args.l1_retry_connection_interval_ms),
         )
         .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
-        .with_private_rpc(ZonePrivateRpcConfig {
-            private_rpc_port: args.private_rpc_port,
+        .with_redacted_rpc(ZoneRedactedRpcConfig {
+            redacted_rpc_port: args.redacted_rpc_port,
             zone_id: args.zone_id,
             max_auth_token_validity: Duration::from_secs(
-                args.private_rpc_max_auth_token_validity_secs,
+                args.redacted_rpc_max_auth_token_validity_secs,
             ),
         });
 
@@ -418,25 +418,25 @@ pub struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    /// Zone ID used for chain identity and private RPC authentication.
+    /// Zone ID used for chain identity and redacted RPC authentication.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
     pub zone_id: u32,
 
-    /// Port for the private zone RPC server (0 for OS-assigned).
+    /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
-        long = "private-rpc.port",
-        env = "PRIVATE_RPC_PORT",
+        long = "redacted-rpc.port",
+        env = "REDACTED_RPC_PORT",
         default_value_t = 8544
     )]
-    pub private_rpc_port: u16,
+    pub redacted_rpc_port: u16,
 
-    /// Maximum auth token validity window the private RPC accepts, in seconds.
+    /// Maximum auth token validity window the redacted RPC accepts, in seconds.
     #[arg(
-        long = "private-rpc.max-auth-token-validity-secs",
-        env = "PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS",
+        long = "redacted-rpc.max-auth-token-validity-secs",
+        env = "REDACTED_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS",
         default_value_t = DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS
     )]
-    pub private_rpc_max_auth_token_validity_secs: u64,
+    pub redacted_rpc_max_auth_token_validity_secs: u64,
 
     /// Enable the Zone node in sequencer mode. This advances block production and submits
     /// withdrawal batches.

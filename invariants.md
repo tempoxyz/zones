@@ -126,7 +126,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-FIXED-TOKEN-GAS` | TIP-20 transfer and approve operations charge fixed gas independent of account storage layout | 🟢 | Gas timing leaks whether addresses have prior token activity |
 | `TEMPO-ZONE-BLOCK-TIMESTAMP-MONOTONIC` | Zone block timestamps are non-decreasing and block numbers increment by one | 🟢 | Time-dependent application logic and proof replay assumptions can break |
 
-### Private RPC
+### Redacted RPC
 
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|

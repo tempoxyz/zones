@@ -1,4 +1,4 @@
-//! Private RPC method handlers.
+//! Redacted RPC method handlers.
 //!
 //! Each handler calls the underlying EthApi via the [`ZoneRpcApi`] trait,
 //! which performs typed privacy redactions internally before serialization.
@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-/// Interface to the underlying reth EthApi for the private zone RPC.
+/// Interface to the underlying reth EthApi for the redacted zone RPC.
 ///
 /// Implementations are responsible for:
 /// - **Access control**: restricting responses based on the [`AuthContext`]
@@ -246,7 +246,7 @@ fn api_result(
     }
 }
 
-/// Dispatch a single JSON-RPC request through the private zone RPC pipeline.
+/// Dispatch a single JSON-RPC request through the redacted zone RPC pipeline.
 ///
 /// Enforces a strict whitelist of allowed methods (see [`classify_method`]) and
 /// rejects anything unknown or disabled. Individual handlers may apply
@@ -347,7 +347,7 @@ pub async fn dispatch(
             // Method is whitelisted but not yet implemented via direct API
             JsonRpcResponse::error(
                 id,
-                JsonRpcError::internal("method not yet implemented in private RPC"),
+                JsonRpcError::internal("method not yet implemented in redacted RPC"),
             )
         }
     }
@@ -842,7 +842,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn private_rpc_excludes_public_sequencer_methods() {
+    async fn redacted_rpc_excludes_operator_sequencer_methods() {
         use crate::types::classify_method;
 
         // Both are served by the node's public HTTP module, not the private tiered

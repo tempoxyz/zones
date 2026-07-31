@@ -140,7 +140,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
-    /// @notice Public RPC endpoint for the zone
+    /// @notice Operator RPC endpoint for the zone
     string public rpcUrl;
 
     /// @notice Pending admin for two-step admin transfer
@@ -572,7 +572,7 @@ contract ZonePortal is IZonePortal {
         emit TokenEnabled(_token, name, symbol, currency);
     }
 
-    /// @notice Update the zone's public RPC endpoint.
+    /// @notice Update the zone's operator RPC endpoint.
     /// @param _rpcUrl The new RPC url
     function setRpcUrl(string calldata _rpcUrl) external onlySequencer {
         rpcUrl = _rpcUrl;
