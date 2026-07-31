@@ -27,10 +27,13 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
-    ITIP20 as ContractTip20,
+    IAccountKeychain, INonce, ITIP20 as ContractTip20,
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
 };
-use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
+use tempo_precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS,
+    tip20::ITIP20 as PrecompileTip20,
+};
 use tempo_primitives::{
     TempoTxEnvelope,
     transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
@@ -825,6 +828,80 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     Ok(())
 }
 
+/// TIP-20 permit nonce reads are owner-scoped at the precompile boundary, including calls forwarded
+/// through Multicall3.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tip20_nonce_eth_call_privacy() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_redacted_rpc_l1().await?;
+    let owner_signer = PrivateKeySigner::random();
+    let owner = owner_signer.address();
+    let outsider_signer = PrivateKeySigner::random();
+    let nonce_call = PrecompileTip20::noncesCall { owner };
+    let calldata = nonce_call.abi_encode();
+
+    let outsider = ctx
+        .call_as_user(
+            "eth_call",
+            json!([{
+                "to": format!("{PATH_USD_ADDRESS:#x}"),
+                "data": format!("0x{}", hex::encode(&calldata)),
+            }, "latest"]),
+            &outsider_signer,
+        )
+        .await?;
+    let outsider_error = outsider["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        outsider_error.contains(&format!("0x{}", hex::encode(Unauthorized::SELECTOR))),
+        "non-owner nonces(owner) should revert with Unauthorized(): {outsider}"
+    );
+
+    let owner_response = ctx
+        .call_as_user(
+            "eth_call",
+            json!([{
+                "to": format!("{PATH_USD_ADDRESS:#x}"),
+                "data": format!("0x{}", hex::encode(&calldata)),
+            }, "latest"]),
+            &owner_signer,
+        )
+        .await?;
+    let owner_bytes = hex::decode(
+        owner_response["result"]
+            .as_str()
+            .expect("owner nonce read should return hex")
+            .trim_start_matches("0x"),
+    )?;
+    assert_eq!(
+        PrecompileTip20::noncesCall::abi_decode_returns(&owner_bytes)?,
+        U256::ZERO
+    );
+
+    let multicall = IMulticall3::aggregateCall {
+        calls: vec![IMulticall3::Call {
+            target: PATH_USD_ADDRESS,
+            callData: calldata.into(),
+        }],
+    };
+    let forwarded = ctx
+        .call_as_user(
+            "eth_call",
+            json!([{
+                "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
+                "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+            }, "latest"]),
+            &outsider_signer,
+        )
+        .await?;
+    assert!(
+        forwarded.get("result").is_none() && forwarded.get("error").is_some(),
+        "Multicall3 must not expose another owner's TIP-20 nonce: {forwarded}"
+    );
+
+    Ok(())
+}
+
 /// `eth_call` against ZoneInbox refund balances is scoped to the authenticated
 /// owner, preventing arbitrary `refunds(token, owner)` reads.
 #[tokio::test(flavor = "multi_thread")]
@@ -913,6 +990,105 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
         forwarded_refunds.get("result").is_none() && forwarded_refunds.get("error").is_some(),
         "Multicall3 must not expose another owner's refund balance: {forwarded_refunds}"
     );
+
+    Ok(())
+}
+
+/// Account-indexed native getters enforce privacy inside the EVM so direct and helper-forwarded
+/// calls cannot read another account's NonceManager or AccountKeychain state.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_redacted_rpc_l1().await?;
+    let owner_signer = PrivateKeySigner::random();
+    let owner = owner_signer.address();
+    let outsider_signer = PrivateKeySigner::random();
+    let key_id = Address::repeat_byte(0x55);
+
+    let calls = [
+        (
+            NONCE_PRECOMPILE_ADDRESS,
+            INonce::getNonceCall {
+                account: owner,
+                nonceKey: U256::from(1),
+            }
+            .abi_encode(),
+            "NonceManager.getNonce",
+        ),
+        (
+            ACCOUNT_KEYCHAIN_ADDRESS,
+            IAccountKeychain::getKeyCall {
+                account: owner,
+                keyId: key_id,
+            }
+            .abi_encode(),
+            "AccountKeychain.getKey",
+        ),
+    ];
+
+    for (target, calldata, label) in calls {
+        let direct = ctx
+            .call_as_user(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("{target:#x}"),
+                        "data": format!("0x{}", hex::encode(&calldata)),
+                    },
+                    "latest"
+                ]),
+                &outsider_signer,
+            )
+            .await?;
+        let direct_error = direct["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            direct_error.contains(&format!("0x{}", hex::encode(Unauthorized::SELECTOR))),
+            "outsider direct {label} should revert with Unauthorized(): {direct}"
+        );
+
+        let own = ctx
+            .call_as_user(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("{target:#x}"),
+                        "data": format!("0x{}", hex::encode(&calldata)),
+                    },
+                    "latest"
+                ]),
+                &owner_signer,
+            )
+            .await?;
+        assert!(
+            own["result"].as_str().is_some(),
+            "owner direct {label} should retain normal eth_call behavior: {own}"
+        );
+
+        let multicall = IMulticall3::aggregateCall {
+            calls: vec![IMulticall3::Call {
+                target,
+                callData: calldata.into(),
+            }],
+        };
+        let forwarded = ctx
+            .call_as_user(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
+                        "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+                    },
+                    "latest"
+                ]),
+                &outsider_signer,
+            )
+            .await?;
+        assert!(
+            forwarded.get("result").is_none() && forwarded.get("error").is_some(),
+            "Multicall3 must not expose another account through {label}: {forwarded}"
+        );
+    }
 
     Ok(())
 }
