@@ -1,6 +1,7 @@
 use super::*;
 use crate::{
     abi::DepositType,
+    state::Unverified,
     subscriber::{DepositSink, is_fenced_ingestion_error},
 };
 use alloy_consensus::{Header, ReceiptWithBloom};
@@ -360,7 +361,7 @@ fn l1_block_tracker_rejects_first_observation_above_persisted_successor() {
 }
 
 #[test]
-fn subscriber_applies_state_and_records_observation() {
+fn subscriber_applies_state_and_records_observation() -> eyre::Result<()> {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let header = make_test_header(10);
     let sealed = seal(header);
@@ -379,7 +380,7 @@ fn subscriber_applies_state_and_records_observation() {
                 (TIP403_REGISTRY_ADDRESS, None),
             ],
         );
-        cache.set(cached_address, cached_slot, 9, cached_value);
+        _ = cache.set::<Unverified>(cached_address, cached_slot, 9, cached_value)?;
     }
     subscriber.update_l1_state_anchor(
         10,
@@ -388,20 +389,21 @@ fn subscriber_applies_state_and_records_observation() {
             (TIP403_REGISTRY_ADDRESS, None),
         ],
     );
-    subscriber.config.block_tracker.record(anchor).unwrap();
+    subscriber.config.block_tracker.record(anchor)?;
 
     assert_eq!(
         subscriber
             .config
             .l1_state_cache
             .lock()
-            .get(cached_address, cached_slot, 10),
+            .get::<Unverified>(cached_address, cached_slot, 10),
         Some(cached_value)
     );
     assert_eq!(
         subscriber.config.block_tracker.observed_hash(10),
         Some(anchor.hash)
     );
+    Ok(())
 }
 
 fn make_test_header(number: u64) -> TempoHeader {
@@ -674,7 +676,8 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
-fn update_l1_state_anchor_applies_storage_root_changes_before_publishing_coverage() {
+fn update_l1_state_anchor_applies_storage_root_changes_before_publishing_coverage()
+-> eyre::Result<()> {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
@@ -694,16 +697,18 @@ fn update_l1_state_anchor_applies_storage_root_changes_before_publishing_coverag
                 (stable_account, Some(stable_root)),
             ],
         );
-    subscriber
-        .config
-        .l1_state_cache
-        .lock()
-        .set(TIP403_REGISTRY_ADDRESS, slot, 10, value);
-    subscriber
-        .config
-        .l1_state_cache
-        .lock()
-        .set(stable_account, stable_slot, 10, stable_value);
+    _ = subscriber.config.l1_state_cache.lock().set::<Unverified>(
+        TIP403_REGISTRY_ADDRESS,
+        slot,
+        10,
+        value,
+    )?;
+    _ = subscriber.config.l1_state_cache.lock().set::<Unverified>(
+        stable_account,
+        stable_slot,
+        10,
+        stable_value,
+    )?;
 
     subscriber.update_l1_state_anchor(
         10,
@@ -713,11 +718,11 @@ fn update_l1_state_anchor_applies_storage_root_changes_before_publishing_coverag
         ],
     );
     assert_eq!(
-        subscriber
-            .config
-            .l1_state_cache
-            .lock()
-            .get(TIP403_REGISTRY_ADDRESS, slot, 10),
+        subscriber.config.l1_state_cache.lock().get::<Unverified>(
+            TIP403_REGISTRY_ADDRESS,
+            slot,
+            10
+        ),
         Some(value)
     );
 
@@ -730,10 +735,14 @@ fn update_l1_state_anchor_applies_storage_root_changes_before_publishing_coverag
     );
     let mut cache = subscriber.config.l1_state_cache.lock();
     assert_eq!(
-        cache.get(stable_account, stable_slot, 11),
+        cache.get::<Unverified>(stable_account, stable_slot, 11),
         Some(stable_value)
     );
-    assert_eq!(cache.get(TIP403_REGISTRY_ADDRESS, slot, 11), None);
+    assert_eq!(
+        cache.get::<Unverified>(TIP403_REGISTRY_ADDRESS, slot, 11),
+        None
+    );
+    Ok(())
 }
 
 /// Confirm the front of a shared `DepositQueue`, panicking if it fails.
@@ -823,7 +832,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
 }
 
 #[tokio::test]
-async fn observer_advances_caches_without_retaining_deposit_blocks() {
+async fn observer_advances_caches_without_retaining_deposit_blocks() -> eyre::Result<()> {
     let subscriber = test_observer(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let cached_address = address!("0x0000000000000000000000000000000000000ABC");
     let cached_slot = B256::with_last_byte(1);
@@ -837,7 +846,7 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
                 Some(alloy_consensus::constants::EMPTY_ROOT_HASH),
             )],
         );
-        cache.set(cached_address, cached_slot, 9, cached_value);
+        cache.set::<Unverified>(cached_address, cached_slot, 9, cached_value)?;
     }
 
     let asserter = Asserter::new();
@@ -868,7 +877,7 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
             .config
             .l1_state_cache
             .lock()
-            .get(cached_address, cached_slot, 12),
+            .get::<Unverified>(cached_address, cached_slot, 12),
         Some(cached_value),
         "receipt coverage must keep advancing on an observer"
     );
@@ -883,6 +892,7 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
         "an observer must not accumulate finalized blocks in a deposit queue"
     );
     assert!(asserter.read_q().is_empty());
+    Ok(())
 }
 
 #[tokio::test]

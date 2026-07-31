@@ -66,7 +66,7 @@ use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
 };
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
+use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, ProofVerified};
 use zone_precompiles::create_outbox_precompile;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -319,6 +319,15 @@ where
 }
 
 impl ZoneEvmConfig {
+    /// Returns a proof-verifying configuration exclusively for sequencer payload construction.
+    pub fn new_with_l1_proofs(&self) -> ZoneEvmConfig<L1StateProvider<ProofVerified>> {
+        ZoneEvmConfig::from_chain_spec(
+            self.chain_spec.clone(),
+            self.zone_factory.l1_reader.clone().proved(),
+            self.zone_factory.portal_address,
+        )
+    }
+
     /// Creates a Zone EVM config without a usable L1 provider.
     ///
     /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible

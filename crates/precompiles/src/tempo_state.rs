@@ -7,7 +7,7 @@ use alloc::{format, vec::Vec};
 
 use crate::{
     ZoneResult,
-    storage::{L1State, L1StorageReader},
+    storage::{L1State, L1StorageReader, TempoAnchor},
 };
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
@@ -35,10 +35,13 @@ alloy_sol_types::sol! {
 pub struct TempoState {
     tempo_block_hash: B256,
     pub(crate) tempo_block_number: u64,
+    pub(crate) tempo_state_root: B256,
 }
 
 /// Storage slot containing the finalized Tempo block number in Zone state.
 pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_NUMBER;
+/// Storage slot containing the finalized Tempo state root.
+pub const TEMPO_STATE_ROOT_SLOT: alloy_primitives::U256 = slots::TEMPO_STATE_ROOT;
 
 impl TempoState {
     /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
@@ -68,7 +71,7 @@ impl TempoState {
                 "invalid Tempo genesis header RLP: trailing bytes after header".into(),
             ));
         }
-        self.write_checkpoint(header_rlp, header.number())?;
+        self.write_checkpoint(header_rlp, header.number(), header.state_root())?;
         Ok(())
     }
 
@@ -76,11 +79,20 @@ impl TempoState {
         &mut self,
         header_rlp: &[u8],
         block_number: u64,
+        state_root: B256,
     ) -> tempo_precompiles::Result<B256> {
         let block_hash = keccak256(header_rlp);
         self.tempo_block_hash.write(block_hash)?;
         self.tempo_block_number.write(block_number)?;
+        self.tempo_state_root.write(state_root)?;
         Ok(block_hash)
+    }
+
+    pub(crate) fn anchor(&self) -> tempo_precompiles::Result<TempoAnchor> {
+        Ok(TempoAnchor::new(
+            self.tempo_block_number.read()?,
+            self.tempo_state_root.read()?,
+        ))
     }
 
     fn is_system_caller(caller: Address) -> bool {
@@ -131,8 +143,12 @@ impl TempoState {
             return Err(TempoStateError::invalid_block_number().into());
         }
 
-        l1.advance_anchor(prev_block_number, header.number())?;
-        let tempo_block_hash = self.write_checkpoint(&header_rlp, header.number())?;
+        l1.advance_anchor(
+            TempoAnchor::new(prev_block_number, self.tempo_state_root.read()?),
+            TempoAnchor::new(header.number(), header.state_root()),
+        )?;
+        let tempo_block_hash =
+            self.write_checkpoint(&header_rlp, header.number(), header.state_root())?;
         self.emit_event(TempoStateAbi::TempoBlockFinalized {
             blockHash: tempo_block_hash,
             blockNumber: header.number(),
@@ -179,11 +195,11 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
+        let anchor = match self.anchor() {
+            Ok(anchor) => anchor,
             Err(err) => return self.storage.error_result(err),
         };
-        let value = l1.read_l1_storage(call.account, call.slot, block_number)?;
+        let value = l1.read_l1_storage(call.account, call.slot, anchor)?;
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
         ))
@@ -200,13 +216,13 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number.read() {
-            Ok(number) => number,
+        let anchor = match self.anchor() {
+            Ok(anchor) => anchor,
             Err(err) => return self.storage.error_result(err),
         };
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
-            values.push(l1.read_l1_storage(call.account, slot, block_number)?);
+            values.push(l1.read_l1_storage(call.account, slot, anchor)?);
         }
         Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotsCall::abi_encode_returns(&values).into(),
@@ -230,6 +246,7 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
+                    tempoStateRoot(call) => view(call, |_| self.tempo_state_root.read()),
                     finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
                     readTempoStorageSlot(call) => {
                         self.read_tempo_storage_slot(l1, msg_sender, call)
@@ -426,7 +443,7 @@ mod tests {
         )?;
 
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(harness.l1.get_anchor(), Some(10));
+        assert_eq!(harness.l1.get_anchor().map(|a| a.block_number()), Some(10));
 
         let child = child_header(genesis_hash, 11);
         assert!(harness.finalize(ZONE_INBOX_ADDRESS, &child, false).is_err());
@@ -443,7 +460,7 @@ mod tests {
         let child = child_header(genesis_hash, 11);
         harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
         harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
-        assert_eq!(harness.l1.get_anchor(), Some(11));
+        assert_eq!(harness.l1.get_anchor().map(|a| a.block_number()), Some(11));
         assert!(
             reader
                 .storage_requests()

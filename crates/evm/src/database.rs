@@ -17,8 +17,8 @@ use revm::{
 use thiserror::Error;
 use zone_precompiles::{
     TIP403_REGISTRY_ADDRESS,
-    storage::{L1State, L1StateError, L1StorageReader},
-    tempo_state::TEMPO_BLOCK_NUMBER_SLOT,
+    storage::{L1State, L1StateError, L1StorageReader, TempoAnchor},
+    tempo_state::{TEMPO_BLOCK_NUMBER_SLOT, TEMPO_STATE_ROOT_SLOT},
 };
 use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
@@ -74,7 +74,7 @@ impl<DB: fmt::Debug, L1> fmt::Debug for L1OverlayDB<DB, L1> {
 }
 
 impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
-    fn anchor(&mut self) -> Result<u64, ZoneDbError<DB::Error>> {
+    fn anchor(&mut self) -> Result<TempoAnchor, ZoneDbError<DB::Error>> {
         if let Some(anchor) = self.l1.get_anchor() {
             return Ok(anchor);
         }
@@ -83,15 +83,20 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             .inner
             .storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT)
             .map_err(ZoneDbError::Inner)?;
-        let anchor = u64::try_from(value).map_err(|_| ZoneDbError::AnchorOverflow(value))?;
-        Ok(anchor)
+        let block_number = u64::try_from(value).map_err(|_| ZoneDbError::AnchorOverflow(value))?;
+        let state_root = self
+            .inner
+            .storage(TEMPO_STATE_ADDRESS, TEMPO_STATE_ROOT_SLOT)
+            .map_err(ZoneDbError::Inner)?
+            .into();
+        Ok(TempoAnchor::new(block_number, state_root))
     }
 
     fn l1_storage(
         &self,
         address: Address,
         slot: U256,
-        anchor: u64,
+        anchor: TempoAnchor,
     ) -> Result<U256, ZoneDbError<DB::Error>> {
         self.l1
             .read_l1_storage(address, B256::from(slot), anchor)
@@ -219,7 +224,10 @@ mod tests {
         let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
 
         assert_eq!(db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(), expected);
-        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
+        assert_eq!(
+            db.l1_state().get_anchor().map(|a| a.block_number()),
+            Some(anchor)
+        );
     }
 
     #[test]
@@ -244,7 +252,10 @@ mod tests {
             db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap(),
             U256::ONE
         );
-        assert!(l1.advance_anchor(anchor, anchor + 1).is_err());
+        assert!(
+            l1.advance_anchor(TempoAnchor::dummy(anchor), TempoAnchor::dummy(anchor + 1))
+                .is_err()
+        );
         assert_eq!(reader.storage_requests().len(), 1);
     }
 
@@ -290,7 +301,10 @@ mod tests {
         let mut db = L1OverlayDB::new(test_db(anchor), l1, Address::ZERO);
 
         db.storage(TIP403_REGISTRY_ADDRESS, slot).unwrap();
-        assert_eq!(db.l1_state().get_anchor(), Some(anchor));
+        assert_eq!(
+            db.l1_state().get_anchor().map(|a| a.block_number()),
+            Some(anchor)
+        );
 
         db.reset_transaction_state();
 

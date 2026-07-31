@@ -19,6 +19,7 @@
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
 
+use super::provider::L1ReadMode;
 use alloy_primitives::{Address, B256};
 use derive_more::Deref;
 use parking_lot::Mutex;
@@ -38,6 +39,9 @@ const MAX_VERSIONS_PER_SLOT: usize = 1_000;
 
 /// Maximum number of mutation barriers retained before conservatively resetting the cache.
 const DEFAULT_INVALIDATION_CAPACITY: usize = 100_000;
+
+/// Block-indexed values and proof provenance retained for one L1 storage slot.
+type SlotHistory = BTreeMap<u64, (B256, bool)>;
 
 /// Thread-safe L1 state cache backed by an `Arc<RwLock<L1StateCacheInner>>`.
 #[derive(Debug, Clone, Deref, Default)]
@@ -114,7 +118,7 @@ impl RootHistory {
 #[derive(Debug)]
 pub struct L1StateCacheInner {
     /// Bounded per-slot value histories, promoted as a unit on access.
-    slots: LruMap<(Address, B256), BTreeMap<u64, B256>, ByVersionCount>,
+    slots: LruMap<(Address, B256), SlotHistory, ByVersionCount>,
     /// Per-address storage roots and block heights that prevent reuse across possible mutations.
     account_roots: HashMap<Address, RootHistory>,
     /// Total number of retained root changes.
@@ -147,13 +151,24 @@ impl L1StateCacheInner {
         }
     }
 
-    /// Returns the cached value for a storage slot at the given block number.
+    /// Returns the latest usable cached value when its provenance satisfies mode `M`.
     ///
     /// An exact-height value is always valid. A value inherited from an earlier height is returned
     /// only when the owning account has continuous authenticated storage-root coverage through
     /// `block_number` and no root-change barrier exists after the value was populated.
-    pub fn get(&mut self, address: Address, slot: B256, block_number: u64) -> Option<B256> {
-        let (&cached_block, &value) = self
+    ///
+    /// The block/root binding for proved values is trusted input established by the finalized-header
+    /// pipeline. The cache records only that a value was verified before insertion and deliberately
+    /// keeps no duplicate global-root history.
+    pub fn get<M: L1ReadMode>(
+        &mut self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Option<B256> {
+        let proof_check = |(value, is_proved)| (!M::NEEDS_PROOF || is_proved).then_some(value);
+
+        let (&cached_block, &(value, is_proved)) = self
             .slots
             .get(&(address, slot))?
             .range(..=block_number)
@@ -161,7 +176,7 @@ impl L1StateCacheInner {
 
         // On exact match, just return the value
         if cached_block == block_number {
-            return Some(value);
+            return proof_check((value, is_proved));
         }
 
         // If we didn't yet process the requested block, we can't use the cached value
@@ -172,21 +187,48 @@ impl L1StateCacheInner {
         self.account_roots
             .get(&address)?
             .allows_inheritance(cached_block, block_number)
-            .then_some(value)
+            .then_some((value, is_proved))
+            .and_then(proof_check)
     }
 
-    /// Sets a storage slot value in the forward cache at the given block number.
+    /// Sets a storage slot value in the forward cache at the given block number, with provenance
+    /// determined by mode `M`.
     ///
-    /// Values below the current coverage floor are deliberately not admitted, so historical
-    /// reads cannot later be inherited by canonical execution.
-    pub fn set(&mut self, address: Address, slot: B256, block_number: u64, value: B256) {
-        if block_number < *self.coverage.start() {
-            return;
+    /// Values below the current coverage floor are deliberately not admitted, so historical reads
+    /// cannot later be inherited by canonical execution.
+    ///
+    /// At existing exact versions, proved observations take precedence over ordinary ones: an
+    /// unverified value can be replaced or upgraded by a proved one, while a proved value is never
+    /// overwritten by an ordinary one. The effective value retained by the cache is returned.
+    pub fn set<M: L1ReadMode>(
+        &mut self,
+        address: Address,
+        slot: B256,
+        block_num: u64,
+        value: B256,
+    ) -> eyre::Result<B256> {
+        if block_num < *self.coverage.start() {
+            return Ok(value);
         }
 
         let key = (address, slot);
         let mut history = self.slots.remove(&key).unwrap_or_default();
-        history.insert(block_number, value);
+        let persisted_value = if let Some((cached, prev_proved)) = history.get_mut(&block_num) {
+            if *prev_proved && M::NEEDS_PROOF && *cached != value {
+                let cached = *cached;
+                self.slots.insert(key, history);
+                eyre::bail!(
+                    "conflicting proved L1 slot values: block={block_num}, address={address}, slot={slot}, cached={cached}, fetched={value}"
+                );
+            } else if !*prev_proved {
+                *cached = value;
+                *prev_proved |= M::NEEDS_PROOF;
+            }
+            *cached
+        } else {
+            history.insert(block_num, (value, M::NEEDS_PROOF));
+            value
+        };
 
         // Bound eviction granularity and prevent one hot slot from monopolizing the cache.
         let max_history = MAX_VERSIONS_PER_SLOT.min(self.slots.limiter().max_versions());
@@ -196,6 +238,7 @@ impl L1StateCacheInner {
 
         let inserted = self.slots.insert(key, history);
         debug_assert!(inserted, "trimmed slot history must fit cache capacity");
+        Ok(persisted_value)
     }
 
     /// Clears cached state and establishes a new proof-coverage baseline.
@@ -292,7 +335,7 @@ impl ByVersionCount {
     }
 }
 
-impl<K> Limiter<K, BTreeMap<u64, B256>> for ByVersionCount {
+impl<K> Limiter<K, SlotHistory> for ByVersionCount {
     type KeyToInsert<'a> = K;
     type LinkType = u32;
 
@@ -304,8 +347,8 @@ impl<K> Limiter<K, BTreeMap<u64, B256>> for ByVersionCount {
         &mut self,
         _length: usize,
         key: Self::KeyToInsert<'_>,
-        value: BTreeMap<u64, B256>,
-    ) -> Option<(K, BTreeMap<u64, B256>)> {
+        value: SlotHistory,
+    ) -> Option<(K, SlotHistory)> {
         if value.len() > self.max_versions {
             return None;
         }
@@ -318,8 +361,8 @@ impl<K> Limiter<K, BTreeMap<u64, B256>> for ByVersionCount {
         _length: usize,
         _old_key: &mut K,
         _new_key: Self::KeyToInsert<'_>,
-        old_value: &mut BTreeMap<u64, B256>,
-        new_value: &mut BTreeMap<u64, B256>,
+        old_value: &mut SlotHistory,
+        new_value: &mut SlotHistory,
     ) -> bool {
         if new_value.len() > self.max_versions {
             return false;
@@ -328,7 +371,7 @@ impl<K> Limiter<K, BTreeMap<u64, B256>> for ByVersionCount {
         true
     }
 
-    fn on_removed(&mut self, _key: &mut K, value: &mut BTreeMap<u64, B256>) {
+    fn on_removed(&mut self, _key: &mut K, value: &mut SlotHistory) {
         self.versions -= value.len();
     }
 
@@ -343,7 +386,10 @@ impl<K> Limiter<K, BTreeMap<u64, B256>> for ByVersionCount {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{
+        super::provider::{ProofVerified, Unverified},
+        *,
+    };
     use alloy_primitives::address;
 
     const PORTAL: Address = address!("0x0000000000000000000000000000000000004242");
@@ -351,6 +397,46 @@ mod tests {
 
     fn roots(root: B256) -> [(Address, Option<B256>); 2] {
         [(PORTAL, Some(root)), (Address::ZERO, None)]
+    }
+
+    #[test]
+    fn proved_values_are_unified_preferred_and_inheritable() -> eyre::Result<()> {
+        let mut cache = L1StateCacheInner::new();
+        let slot = B256::with_last_byte(3);
+        let ordinary = B256::with_last_byte(4);
+        let proved = B256::with_last_byte(5);
+
+        _ = cache.set::<Unverified>(PORTAL, slot, 7, ordinary)?;
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 7), None);
+        assert_eq!(cache.set::<ProofVerified>(PORTAL, slot, 7, proved)?, proved);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 7), Some(proved));
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 7), Some(proved));
+
+        // Neither a late ordinary value nor a conflicting proof replaces the first proved value.
+        assert_eq!(
+            cache.set::<Unverified>(PORTAL, slot, 7, B256::with_last_byte(6))?,
+            proved
+        );
+        assert!(matches!(
+            cache.set::<ProofVerified>(PORTAL, slot, 7, B256::with_last_byte(7)),
+            Err(error) if error.to_string().contains("conflicting proved L1 slot values")
+        ));
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 7), Some(proved));
+
+        _ = cache.set::<ProofVerified>(PORTAL, slot, 10, proved)?;
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 10), Some(proved));
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 11), None);
+        cover_through(&mut cache, 12);
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 12), Some(proved));
+
+        // The latest version controls provenance; proved lookup does not scan backward.
+        _ = cache.set::<Unverified>(PORTAL, slot, 11, proved)?;
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 12), None);
+
+        _ = cache.set::<ProofVerified>(PORTAL, slot, 12, proved)?;
+        cache.set_anchor_with_storage_roots(13, roots(B256::with_last_byte(0x43)));
+        assert_eq!(cache.get::<ProofVerified>(PORTAL, slot, 13), None);
+        Ok(())
     }
 
     fn cover_through(cache: &mut L1StateCacheInner, block_number: u64) {
@@ -362,134 +448,142 @@ mod tests {
     #[test]
     fn get_returns_none_for_missing_slot() {
         let mut cache = L1StateCacheInner::new();
-        assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, B256::ZERO, 100), None);
     }
 
     #[test]
-    fn set_and_get_at_same_block() {
+    fn set_and_get_at_same_block() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0xff);
 
-        cache.set(PORTAL, slot, 10, value);
-        assert_eq!(cache.get(PORTAL, slot, 10), Some(value));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, value)?;
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 10), Some(value));
+        Ok(())
     }
 
     #[test]
-    fn get_returns_latest_value_at_or_before_requested_block() {
+    fn get_returns_latest_value_at_or_before_requested_block() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
 
-        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
-        cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, B256::with_last_byte(0x0a))?;
+        _ = cache.set::<Unverified>(PORTAL, slot, 20, B256::with_last_byte(0x14))?;
         cover_through(&mut cache, 25);
 
         assert_eq!(
-            cache.get(PORTAL, slot, 10),
+            cache.get::<Unverified>(PORTAL, slot, 10),
             Some(B256::with_last_byte(0x0a))
         );
         assert_eq!(
-            cache.get(PORTAL, slot, 15),
+            cache.get::<Unverified>(PORTAL, slot, 15),
             Some(B256::with_last_byte(0x0a))
         );
         assert_eq!(
-            cache.get(PORTAL, slot, 20),
+            cache.get::<Unverified>(PORTAL, slot, 20),
             Some(B256::with_last_byte(0x14))
         );
         assert_eq!(
-            cache.get(PORTAL, slot, 25),
+            cache.get::<Unverified>(PORTAL, slot, 25),
             Some(B256::with_last_byte(0x14))
         );
+        Ok(())
     }
 
     #[test]
-    fn get_returns_none_before_earliest_entry() {
+    fn get_returns_none_before_earliest_entry() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
 
-        cache.set(PORTAL, slot, 10, B256::with_last_byte(0xff));
-        assert_eq!(cache.get(PORTAL, slot, 9), None);
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, B256::with_last_byte(0xff))?;
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 9), None);
+        Ok(())
     }
 
     #[test]
-    fn inherited_value_requires_verified_root_coverage() {
+    fn inherited_value_requires_verified_root_coverage() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0x0a);
-        cache.set(PORTAL, slot, 10, value);
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, value)?;
 
-        assert_eq!(cache.get(PORTAL, slot, 11), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), None);
         cover_through(&mut cache, 11);
-        assert_eq!(cache.get(PORTAL, slot, 11), Some(value));
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), Some(value));
+        Ok(())
     }
 
     #[test]
-    fn untracked_accounts_are_exact_height_only() {
+    fn untracked_accounts_are_exact_height_only() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let untracked = address!("0x0000000000000000000000000000000000004343");
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0x0a);
-        cache.set(untracked, slot, 10, value);
+        _ = cache.set::<Unverified>(untracked, slot, 10, value)?;
         cover_through(&mut cache, 11);
 
-        assert_eq!(cache.get(untracked, slot, 10), Some(value));
-        assert_eq!(cache.get(untracked, slot, 11), None);
+        assert_eq!(cache.get::<Unverified>(untracked, slot, 10), Some(value));
+        assert_eq!(cache.get::<Unverified>(untracked, slot, 11), None);
+        Ok(())
     }
 
     #[test]
-    fn unavailable_root_breaks_inheritance_until_a_fresh_value_is_cached() {
+    fn unavailable_root_breaks_inheritance_until_a_fresh_value_is_cached() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0x0a);
         cover_through(&mut cache, 10);
-        cache.set(PORTAL, slot, 10, value);
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, value)?;
 
         cache.set_anchor_with_storage_roots(11, [(PORTAL, None), (Address::ZERO, None)]);
         cache.set_anchor_with_storage_roots(12, roots(PORTAL_ROOT));
 
-        assert_eq!(cache.get(PORTAL, slot, 11), None);
-        assert_eq!(cache.get(PORTAL, slot, 12), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 12), None);
 
-        cache.set(PORTAL, slot, 12, value);
+        _ = cache.set::<Unverified>(PORTAL, slot, 12, value)?;
         cache.set_anchor_with_storage_roots(13, roots(PORTAL_ROOT));
-        assert_eq!(cache.get(PORTAL, slot, 13), Some(value));
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 13), Some(value));
+        Ok(())
     }
 
     #[test]
-    fn invalidation_blocks_inheritance_until_refetched() {
+    fn invalidation_blocks_inheritance_until_refetched() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         let old = B256::with_last_byte(0x0a);
         let new = B256::with_last_byte(0x0b);
-        cache.set(PORTAL, slot, 10, old);
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, old)?;
         cover_through(&mut cache, 10);
         let changed_root = B256::with_last_byte(0x43);
         cache.set_anchor_with_storage_roots(11, roots(changed_root));
         cache.set_anchor_with_storage_roots(12, roots(changed_root));
 
-        assert_eq!(cache.get(PORTAL, slot, 11), None);
-        assert_eq!(cache.get(PORTAL, slot, 12), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 12), None);
 
-        cache.set(PORTAL, slot, 11, new);
-        assert_eq!(cache.get(PORTAL, slot, 11), Some(new));
-        assert_eq!(cache.get(PORTAL, slot, 12), Some(new));
+        _ = cache.set::<Unverified>(PORTAL, slot, 11, new)?;
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), Some(new));
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 12), Some(new));
+        Ok(())
     }
 
     #[test]
-    fn floor_rejects_historical_cache_admission() {
+    fn floor_rejects_historical_cache_admission() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         cache.reset(10);
         cache.set_anchor_with_storage_roots(10, roots(PORTAL_ROOT));
-        cache.set(PORTAL, slot, 9, B256::with_last_byte(9));
+        _ = cache.set::<Unverified>(PORTAL, slot, 9, B256::with_last_byte(9))?;
         cover_through(&mut cache, 11);
 
-        assert_eq!(cache.get(PORTAL, slot, 9), None);
-        assert_eq!(cache.get(PORTAL, slot, 11), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 9), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), None);
 
         let current = B256::with_last_byte(10);
-        cache.set(PORTAL, slot, 10, current);
-        assert_eq!(cache.get(PORTAL, slot, 11), Some(current));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, current)?;
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), Some(current));
+        Ok(())
     }
 
     #[test]
@@ -506,10 +600,10 @@ mod tests {
     }
 
     #[test]
-    fn non_contiguous_update_resets_cache_at_new_floor() {
+    fn non_contiguous_update_resets_cache_at_new_floor() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
-        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, B256::with_last_byte(0x0a))?;
 
         cache.set_anchor_with_storage_roots(10, roots(PORTAL_ROOT));
 
@@ -521,114 +615,122 @@ mod tests {
                 .values()
                 .all(|account| account.changes.is_empty())
         );
-        assert_eq!(cache.get(PORTAL, slot, 10), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 10), None);
+        Ok(())
     }
 
     #[test]
-    fn different_addresses_same_slot_are_independent() {
+    fn different_addresses_same_slot_are_independent() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::new();
         let addr_b = address!("0x0000000000000000000000000000000000004343");
         let slot = B256::with_last_byte(1);
 
-        cache.set(PORTAL, slot, 10, B256::with_last_byte(0xaa));
-        cache.set(addr_b, slot, 10, B256::with_last_byte(0xbb));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, B256::with_last_byte(0xaa))?;
+        _ = cache.set::<Unverified>(addr_b, slot, 10, B256::with_last_byte(0xbb))?;
 
         assert_eq!(
-            cache.get(PORTAL, slot, 10),
+            cache.get::<Unverified>(PORTAL, slot, 10),
             Some(B256::with_last_byte(0xaa))
         );
         assert_eq!(
-            cache.get(addr_b, slot, 10),
+            cache.get::<Unverified>(addr_b, slot, 10),
             Some(B256::with_last_byte(0xbb))
         );
+        Ok(())
     }
 
     #[test]
-    fn lru_evicts_the_least_recently_used_slot_history_by_version_weight() {
+    fn lru_evicts_the_least_recently_used_slot_history_by_version_weight() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::with_limits(3, 10);
         let slot_a = B256::with_last_byte(1);
         let slot_b = B256::with_last_byte(2);
         let slot_c = B256::with_last_byte(3);
 
-        cache.set(PORTAL, slot_a, 10, B256::with_last_byte(0x0a));
-        cache.set(PORTAL, slot_b, 10, B256::with_last_byte(0x0b));
+        _ = cache.set::<Unverified>(PORTAL, slot_a, 10, B256::with_last_byte(0x0a))?;
+        _ = cache.set::<Unverified>(PORTAL, slot_b, 10, B256::with_last_byte(0x0b))?;
         cover_through(&mut cache, 20);
 
         // Keep A hot, then insert a two-version history for C. B is the oldest history and is
         // evicted to keep the total version count at three.
         assert_eq!(
-            cache.get(PORTAL, slot_a, 20),
+            cache.get::<Unverified>(PORTAL, slot_a, 20),
             Some(B256::with_last_byte(0x0a))
         );
-        cache.set(PORTAL, slot_c, 10, B256::with_last_byte(0x0c));
-        cache.set(PORTAL, slot_c, 20, B256::with_last_byte(0x1c));
+        _ = cache.set::<Unverified>(PORTAL, slot_c, 10, B256::with_last_byte(0x0c))?;
+        _ = cache.set::<Unverified>(PORTAL, slot_c, 20, B256::with_last_byte(0x1c))?;
 
         assert_eq!(cache.slots.limiter().versions(), 3);
-        assert_eq!(cache.get(PORTAL, slot_b, 20), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot_b, 20), None);
         assert_eq!(
-            cache.get(PORTAL, slot_a, 20),
+            cache.get::<Unverified>(PORTAL, slot_a, 20),
             Some(B256::with_last_byte(0x0a))
         );
         assert_eq!(
-            cache.get(PORTAL, slot_c, 20),
+            cache.get::<Unverified>(PORTAL, slot_c, 20),
             Some(B256::with_last_byte(0x1c))
         );
+        Ok(())
     }
 
     #[test]
-    fn a_single_slot_history_cannot_exceed_the_version_capacity() {
+    fn a_single_slot_history_cannot_exceed_the_version_capacity() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::with_limits(2, 10);
         let slot = B256::with_last_byte(1);
 
-        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
-        cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
-        cache.set(PORTAL, slot, 30, B256::with_last_byte(0x1e));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, B256::with_last_byte(0x0a))?;
+        _ = cache.set::<Unverified>(PORTAL, slot, 20, B256::with_last_byte(0x14))?;
+        _ = cache.set::<Unverified>(PORTAL, slot, 30, B256::with_last_byte(0x1e))?;
         cover_through(&mut cache, 30);
 
         assert_eq!(cache.slots.limiter().versions(), 2);
-        assert_eq!(cache.get(PORTAL, slot, 10), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 10), None);
         assert_eq!(
-            cache.get(PORTAL, slot, 20),
+            cache.get::<Unverified>(PORTAL, slot, 20),
             Some(B256::with_last_byte(0x14))
         );
         assert_eq!(
-            cache.get(PORTAL, slot, 30),
+            cache.get::<Unverified>(PORTAL, slot, 30),
             Some(B256::with_last_byte(0x1e))
         );
+        Ok(())
     }
 
     #[test]
-    fn slot_history_retains_only_the_newest_versions() {
+    fn slot_history_retains_only_the_newest_versions() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::with_limits(MAX_VERSIONS_PER_SLOT + 1, 10);
         let slot = B256::with_last_byte(1);
 
         for block_number in 0..=MAX_VERSIONS_PER_SLOT as u64 {
-            cache.set(
+            _ = cache.set::<Unverified>(
                 PORTAL,
                 slot,
                 block_number,
                 B256::with_last_byte((block_number % 256) as u8),
-            );
+            )?;
         }
         cover_through(&mut cache, MAX_VERSIONS_PER_SLOT as u64);
 
         assert_eq!(cache.slots.limiter().versions(), MAX_VERSIONS_PER_SLOT);
-        assert_eq!(cache.get(PORTAL, slot, 0), None);
-        assert_eq!(cache.get(PORTAL, slot, 1), Some(B256::with_last_byte(1)));
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 0), None);
         assert_eq!(
-            cache.get(PORTAL, slot, MAX_VERSIONS_PER_SLOT as u64),
+            cache.get::<Unverified>(PORTAL, slot, 1),
+            Some(B256::with_last_byte(1))
+        );
+        assert_eq!(
+            cache.get::<Unverified>(PORTAL, slot, MAX_VERSIONS_PER_SLOT as u64),
             Some(B256::with_last_byte((MAX_VERSIONS_PER_SLOT % 256) as u8))
         );
+        Ok(())
     }
 
     #[test]
-    fn invalidation_capacity_resets_cache_at_the_new_coverage_floor() {
+    fn invalidation_capacity_resets_cache_at_the_new_coverage_floor() -> eyre::Result<()> {
         let mut cache = L1StateCacheInner::with_limits(10, 1);
         let slot = B256::with_last_byte(1);
 
         cache.reset(10);
         cache.set_anchor_with_storage_roots(10, roots(PORTAL_ROOT));
-        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
+        _ = cache.set::<Unverified>(PORTAL, slot, 10, B256::with_last_byte(0x0a))?;
         cache.set_anchor_with_storage_roots(11, roots(B256::with_last_byte(0x43)));
         cache.set_anchor_with_storage_roots(12, roots(B256::with_last_byte(0x44)));
 
@@ -640,14 +742,15 @@ mod tests {
                 .values()
                 .all(|account| account.changes.is_empty())
         );
-        assert_eq!(cache.get(PORTAL, slot, 10), None);
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 10), None);
 
-        cache.set(PORTAL, slot, 11, B256::with_last_byte(0x0b));
-        assert_eq!(cache.get(PORTAL, slot, 11), None);
+        _ = cache.set::<Unverified>(PORTAL, slot, 11, B256::with_last_byte(0x0b))?;
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 11), None);
 
         let current = B256::with_last_byte(0x0c);
-        cache.set(PORTAL, slot, 12, current);
+        _ = cache.set::<Unverified>(PORTAL, slot, 12, current)?;
         cache.set_anchor_with_storage_roots(13, roots(B256::with_last_byte(0x44)));
-        assert_eq!(cache.get(PORTAL, slot, 13), Some(current));
+        assert_eq!(cache.get::<Unverified>(PORTAL, slot, 13), Some(current));
+        Ok(())
     }
 }

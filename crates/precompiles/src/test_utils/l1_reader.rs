@@ -1,5 +1,5 @@
 //! Shared L1 reader fixtures for precompile and EVM integration tests.
-use crate::{L1StateError, L1StorageReader};
+use crate::{L1StateError, L1StorageReader, TempoAnchor};
 use alloy_primitives::{Address, B256, U256};
 use std::{
     collections::HashMap,
@@ -173,10 +173,11 @@ impl MockL1Reader {
 impl L1StorageReader for MockL1Reader {
     fn read_l1_storage(
         &self,
+        anchor: TempoAnchor,
         account: Address,
         slot: B256,
-        block_number: u64,
     ) -> Result<B256, L1StateError> {
+        let block_number = anchor.block_number();
         self.storage_requests
             .lock()
             .unwrap()

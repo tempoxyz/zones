@@ -66,6 +66,7 @@ contract TempoStateTest is Test {
     function test_constructor_initializesState() public view {
         assertEq(tempoState.tempoBlockHash(), genesisBlockHash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER);
+        assertEq(tempoState.tempoStateRoot(), GENESIS_STATE_ROOT);
     }
 
     function test_constructor_revertsOnTrailingBytesAfterOuterList() public {
@@ -119,6 +120,7 @@ contract TempoStateTest is Test {
         // Verify state was updated
         assertEq(tempoState.tempoBlockHash(), keccak256(header));
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 1);
+        assertEq(tempoState.tempoStateRoot(), newStateRoot);
     }
 
     function test_finalizeTempo_multipleBlocks() public {

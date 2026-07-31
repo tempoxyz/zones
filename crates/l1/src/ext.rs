@@ -15,6 +15,9 @@ pub trait TempoStateExt {
     /// Returns the current `tempoBlockHash` (the hash of the latest L1 block processed).
     fn tempo_block_hash(&self) -> ProviderResult<B256>;
 
+    /// Returns the state root committed by the latest processed Tempo header.
+    fn tempo_state_root(&self) -> ProviderResult<B256>;
+
     /// Returns the current L1 block as a [`NumHash`] (number + hash).
     fn tempo_num_hash(&self) -> ProviderResult<NumHash> {
         Ok(NumHash {
@@ -27,20 +30,21 @@ pub trait TempoStateExt {
 impl<T: StateProvider + ?Sized> TempoStateExt for T {
     fn tempo_block_number(&self) -> ProviderResult<u64> {
         let block_number = self
-            .storage(
-                TEMPO_STATE_ADDRESS,
-                B256::from(slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
-            )?
+            .storage(TEMPO_STATE_ADDRESS, slots::TEMPO_BLOCK_NUMBER.into())?
             .unwrap_or_default();
         Ok(block_number.to::<u64>())
     }
 
     fn tempo_block_hash(&self) -> ProviderResult<B256> {
         Ok(self
-            .storage(
-                TEMPO_STATE_ADDRESS,
-                B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes()),
-            )?
+            .storage(TEMPO_STATE_ADDRESS, slots::TEMPO_BLOCK_HASH.into())?
+            .map(|v| B256::from(v.to_be_bytes()))
+            .unwrap_or_default())
+    }
+
+    fn tempo_state_root(&self) -> ProviderResult<B256> {
+        Ok(self
+            .storage(TEMPO_STATE_ADDRESS, slots::TEMPO_STATE_ROOT.into())?
             .map(|v| B256::from(v.to_be_bytes()))
             .unwrap_or_default())
     }

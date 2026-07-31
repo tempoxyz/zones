@@ -68,7 +68,8 @@ use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS, state::EnabledTokenRegistry,
+    L1PortalEvents, L1StateCache, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS,
+    state::{EnabledTokenRegistry, L1StateCacheInner, ProofVerified, Unverified},
 };
 use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
@@ -412,14 +413,14 @@ async fn handle_test_l1_rpc_request(
 
 /// Seed a TIP-1092 token-policy binding in the TIP-403 registry's raw L1 storage.
 pub(crate) fn seed_raw_tip403_token_policy(
-    cache: &mut zone_l1::state::L1StateCacheInner,
+    cache: &mut L1StateCacheInner,
     block_number: u64,
     token: Address,
     policy_id: u64,
 ) {
     let slot = keccak256((token, tip403_registry_slots::TOKEN_TRANSFER_POLICIES).abi_encode());
     let packed: U256 = U256::from(policy_id) | (U256::ONE << 64);
-    cache.set(
+    _ = cache.set::<ProofVerified>(
         TIP403_REGISTRY_ADDRESS,
         slot,
         block_number,
@@ -467,7 +468,7 @@ pub(crate) fn seed_raw_tip403_policy(
     let counter_slot = registry.policy_id_counter.slot();
     let existing_next_policy_id = cache
         .lock()
-        .get(TIP403_REGISTRY_ADDRESS, counter_slot.into(), block_number)
+        .get::<Unverified>(TIP403_REGISTRY_ADDRESS, counter_slot.into(), block_number)
         .and_then(|value| U256::from_be_bytes(value.0).try_into().ok())
         .unwrap_or(2u64);
     let mut slots = vec![counter_slot];
@@ -517,12 +518,12 @@ pub(crate) fn seed_raw_tip403_policy(
     let mut cache = cache.lock();
     for slot in slots {
         let value = storage.sload(TIP403_REGISTRY_ADDRESS, slot)?;
-        cache.set(
+        _ = cache.set::<ProofVerified>(
             TIP403_REGISTRY_ADDRESS,
             slot.into(),
             block_number,
             value.into(),
-        );
+        )?;
     }
     Ok(())
 }
@@ -4278,7 +4279,7 @@ impl L1Fixture {
         for recipient in [ZONE_OUTBOX_ADDRESS, ZONE_FEE_MANAGER_ADDRESS] {
             let receive_policy_slot =
                 recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
-            cache.set(
+            _ = cache.set::<ProofVerified>(
                 TIP403_REGISTRY_ADDRESS,
                 B256::from(receive_policy_slot.to_be_bytes()),
                 0,
@@ -4287,7 +4288,7 @@ impl L1Fixture {
         }
 
         for block in 0..=num_blocks {
-            cache.set(
+            _ = cache.set::<ProofVerified>(
                 portal_address,
                 sequencer_membership_slot,
                 block,
@@ -4295,14 +4296,24 @@ impl L1Fixture {
             );
             // Deposit queue hash slot (3) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
-            cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
-            cache.set(portal_address, refunds_slot, block, B256::ZERO);
+            _ = cache.set::<ProofVerified>(
+                portal_address,
+                deposit_queue_hash_slot,
+                block,
+                B256::ZERO,
+            );
+            _ = cache.set::<ProofVerified>(portal_address, refunds_slot, block, B256::ZERO);
             // Synthetic fixtures use open account and gateway modes so their tests do not need
             // unrelated closed-loop membership setup or a reachable L1 RPC fallback.
-            cache.set(portal_address, PORTAL_ACCESS_MODE_SLOT, block, B256::ZERO);
+            _ = cache.set::<ProofVerified>(
+                portal_address,
+                PORTAL_ACCESS_MODE_SLOT,
+                block,
+                B256::ZERO,
+            );
             // Permit the protocol-wide maximum in synthetic fixtures. Production values are
             // imported from the finalized ZonePortal storage slot.
-            cache.set(
+            _ = cache.set::<ProofVerified>(
                 portal_address,
                 PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
                 block,
@@ -4312,7 +4323,7 @@ impl L1Fixture {
             // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
             // RPC fallback on self-contained tests.
-            cache.set(
+            _ = cache.set::<ProofVerified>(
                 portal_address,
                 path_usd_config_slot,
                 block,
@@ -4345,12 +4356,12 @@ impl L1Fixture {
         // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
         let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
         for (cache, _) in self.caches.lock().unwrap().iter() {
-            cache.lock().set(
+            _ = cache.lock().set::<ProofVerified>(
                 TIP403_REGISTRY_ADDRESS,
                 B256::from(receive_policy_slot.to_be_bytes()),
                 block_number,
                 B256::ZERO,
-            );
+            )?;
         }
         Ok(())
     }

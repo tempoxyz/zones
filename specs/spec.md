@@ -813,7 +813,7 @@ The zone reads all of its configuration from Tempo: the sequencer address, the t
 
 ### TempoState Predeploy
 
-`TempoState` is deployed at `0x1c00000000000000000000000000000000000000`. It stores the finalized Tempo checkpoint and provides storage read access to Tempo contracts.
+`TempoState` is deployed at `0x1c00000000000000000000000000000000000000`. It stores the finalized Tempo checkpoint—block number, block hash, and state root—and provides storage read access to Tempo contracts. The state root is the commitment used to authenticate sequencer payload-building reads; canonical replay uses ordinary exact-block reads because historical proofs are not assumed to remain available.
 
 The durable onchain checkpoint is `tempoBlockHash` and `tempoBlockNumber`. Before the first Tempo import both are zero. Once initialized, `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, committing to the complete header contents without persisting every decoded header field.
 
@@ -835,7 +835,7 @@ Every non-genesis zone block must call `advanceTempo` exactly once as its first 
 
 ### Storage Reads
 
-`TempoState` provides `readTempoStorageSlot(account, slot)` for reading storage from any Tempo contract. This function is restricted to zone system contracts (`ZoneInbox`, `ZoneOutbox`, `ZoneConfig`). User transactions cannot call it.
+`TempoState` provides `readTempoStorageSlot(account, slot)` for reading storage from any Tempo contract. This function is restricted to zone system contracts (`ZoneInbox`, `ZoneOutbox`, `ZoneConfig`). User transactions cannot call it. During sequencer payload construction each cache miss is fetched with `eth_getProof` and both account and storage proofs are verified against `tempoStateRoot`; verified and ordinary cache entries are kept in separate namespaces.
 
 The native precompile resolves the read through the zone node's Tempo L1 provider at the currently finalized `tempoBlockNumber`. The prover validates these reads against the Tempo state root from the corresponding finalized header witness. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
