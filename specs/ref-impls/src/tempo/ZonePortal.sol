@@ -174,7 +174,7 @@ contract ZonePortal is IZonePortal {
     uint240 private _enforcementModesPadding;
 
     /// @notice Maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
-    /// @dev Defaults to zero and is read from finalized Tempo state by ZoneConfig.
+    /// @dev Defaults to zero and is read from finalized Tempo state by zone system contracts.
     uint128 public maxTempoGasRate;
 
     /// @notice Individual sequencer address of the active block-producing leader.

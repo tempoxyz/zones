@@ -128,7 +128,7 @@ struct EncryptedDeposit {
 ///      slot 0: x (bytes32) — full slot
 ///      slot 1: yParity (uint8, lowest byte) | activationBlock (uint64, next 8 bytes)
 ///      WARNING: Do not reorder fields. ZoneInbox._readEncryptionKey() and
-///      ZoneConfig.sequencerEncryptionKey() read these via raw storage slot access.
+///      ZoneInbox._readEncryptionKey() reads these via raw storage slot access.
 struct EncryptionKeyEntry {
     bytes32 x; // X coordinate of the public key
     uint8 yParity; // Y coordinate parity (0x02 or 0x03)
@@ -314,9 +314,6 @@ address constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
 // ZoneOutbox system contract address (0x1c00...0002)
 address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
-// ZoneConfig system contract address (0x1c00...0003)
-address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
-
 // ZoneTxContext precompile address (0x1c00...0005)
 address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;
 
@@ -364,7 +361,7 @@ interface IZoneTxContext {
 //            + _depositsInCurrentBlock (uint64) [packed]
 //
 // These constants are the single source of truth for cross-domain reads.
-// ZoneConfig and ZoneInbox use them to read portal state via
+// ZoneInbox and ZoneOutbox use them to read portal state via
 // TempoState.readTempoStorageSlot(). If the portal layout changes,
 // update these constants and the vm.load regression tests will catch mismatches.
 bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(0));
@@ -1018,7 +1015,7 @@ struct LastBatch {
 /// @notice Interface for zone-side Tempo state verification predeploy
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
 ///      System-only contract. Only ZoneInbox can call finalizeTempo().
-///      Only ZoneInbox, ZoneOutbox, and ZoneConfig can call readTempoStorageSlot(s).
+///      Only ZoneInbox and ZoneOutbox can call readTempoStorageSlot(s).
 interface ITempoState {
 
     event TempoBlockFinalized(
@@ -1131,9 +1128,6 @@ interface IZoneInbox {
     error InvalidSharedSecretProof();
     error Unauthorized();
 
-    /// @notice Zone configuration (reads sequencer from L1)
-    function config() external view returns (IZoneConfig);
-
     /// @notice The Tempo portal address (for reading deposit queue hash)
     function tempoPortal() external view returns (address);
 
@@ -1210,9 +1204,6 @@ interface IZoneOutbox {
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
-
-    /// @notice Zone configuration (reads sequencer from L1)
-    function config() external view returns (IZoneConfig);
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
@@ -1295,48 +1286,5 @@ interface IZoneOutbox {
     )
         external
         returns (bytes32 withdrawalQueueHash);
-
-}
-
-/// @title IZoneConfig
-/// @notice Interface for zone configuration and L1 state access
-/// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
-///      Provides centralized access to zone metadata and reads the sequencer set from L1.
-interface IZoneConfig {
-
-    error NotSequencer();
-    error NoEncryptionKeySet();
-
-    /// @notice L1 ZonePortal address
-    function tempoPortal() external view returns (address);
-
-    /// @notice TempoState predeploy for L1 reads
-    function tempoState() external view returns (ITempoState);
-
-    /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
-    /// @dev Used for encrypted deposits (ECIES).
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
-
-    /// @notice Check if an address belongs to the active sequencer set.
-    function isSequencer(address account) external view returns (bool);
-
-    /// @notice Check if a token is enabled by reading from L1 ZonePortal
-    function isEnabledToken(address token) external view returns (bool);
-
-    /// @notice Read the maximum sequencer-configurable Tempo gas rate from L1 ZonePortal.
-    function maxTempoGasRate() external view returns (uint128);
-
-    /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
-    function isAccessEnforced() external view returns (bool);
-
-    /// @notice Read whether callback gateway registration enforcement is disabled on L1 ZonePortal.
-    function isGatewayOpen() external view returns (bool);
-
-    /// @notice Check whether an account is authorized under the zone's access policy.
-    /// @dev Returns true for every account when enforcement is disabled.
-    function isAllowedAccount(address account) external view returns (bool);
-
-    /// @notice Check whether an address is a registered callback-only ZoneGateway.
-    function isZoneGateway(address gateway) external view returns (bool);
 
 }

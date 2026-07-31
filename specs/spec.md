@@ -88,7 +88,6 @@
     - [ITempoState](#itempostate)
     - [IZoneInbox](#izoneinbox)
     - [IZoneOutbox](#izoneoutbox)
-    - [IZoneConfig](#izoneconfig)
     - [TIP-403 Registry](#tip-403-registry)
   - [Network Upgrades and Hard Fork Activation](#network-upgrades-and-hard-fork-activation)
 
@@ -300,10 +299,8 @@ Each zone has five system contracts deployed at genesis at fixed addresses:
 | [`TempoState`](#itempostate) | `0x1c00...0000` | Stores the finalized Tempo checkpoint and provides storage read access to Tempo contracts. |
 | [`ZoneInbox`](#izoneinbox) | `0x1c00...0001` | Advances the zone's view of Tempo and processes incoming deposits. Sole mint authority. |
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
-| [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
-`ZoneConfig` reads the sequencer address, token registry, both enforcement modes, and account roles from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
 ### Zone Token Model
 
@@ -839,14 +836,12 @@ Every non-genesis zone block must call `advanceTempo` exactly once as its first 
 
 ### Storage Reads
 
-`TempoState` provides `readTempoStorageSlot(account, slot)` for reading storage from any Tempo contract. This function is restricted to zone system contracts (`ZoneInbox`, `ZoneOutbox`, `ZoneConfig`). User transactions cannot call it.
 
 The native precompile resolves the read through the zone node's Tempo L1 provider at the currently finalized `tempoBlockNumber`. The prover validates these reads against the Tempo state root from the corresponding finalized header witness. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
 Current callers:
 
 - `ZoneInbox`: `currentDepositQueueHash` and encryption keys from the portal
-- `ZoneConfig`: sequencer address, token registry from the portal
 
 TIP-403 policy authorization on the zone executes Tempo's registry precompile at the canonical address over raw L1 registry storage pinned to the current finalized `tempoBlockNumber`.
 
@@ -2033,7 +2028,6 @@ interface IZoneOutbox {
     error GasLimitTooHigh();
     error OnlyZoneInbox();
 
-    function config() external view returns (IZoneConfig);
     function tempoGasRate() external view returns (uint128);
     function nextWithdrawalIndex() external view returns (uint64);
     function lastFallbackNonce() external view returns (uint64);
@@ -2070,24 +2064,7 @@ interface IZoneOutbox {
 }
 ```
 
-### IZoneConfig
 
-Address: `0x1c00000000000000000000000000000000000003`
-
-```solidity
-interface IZoneConfig {
-    function isSequencer(address account) external view returns (bool);
-    function isEnabledToken(address token) external view returns (bool);
-    function isAccessEnforced() external view returns (bool);
-    function isGatewayOpen() external view returns (bool);
-    function isAllowedAccount(address account) external view returns (bool);
-    function isZoneGateway(address gateway) external view returns (bool);
-    function maxTempoGasRate() external view returns (uint128);
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
-}
-```
-
-Reads sequencer membership, the token registry, enforcement modes, account membership, gateway membership, the withdrawal gas-rate ceiling, and the encryption key from the portal on Tempo via `TempoState` storage reads.
 
 ### TIP-403 Registry
 

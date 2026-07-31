@@ -34,7 +34,6 @@ import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -113,7 +112,6 @@ contract ZoneBridgeTest is BaseTest {
 
     MockZoneToken public l2ZoneToken;
     MockTempoState public l2TempoState;
-    ZoneConfig public l2Config;
     ZoneInbox public l2Inbox;
     ZoneOutbox public l2Outbox;
 
@@ -226,8 +224,6 @@ contract ZoneBridgeTest is BaseTest {
         l2TempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
 
-        // Zone config (reads sequencer membership from L1 portal via Tempo state)
-        l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
             address(l1Portal),
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
@@ -240,14 +236,13 @@ contract ZoneBridgeTest is BaseTest {
         l2TempoState.setMockZoneGateway(address(l1Portal), address(zoneGateway), true);
 
         // Zone inbox (advances Tempo state and processes deposits)
-        ZoneInbox inboxImpl =
-            new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
+        ZoneInbox inboxImpl = new ZoneInbox(address(l1Portal), address(l2TempoState));
         vm.etch(ZONE_INBOX, address(inboxImpl).code);
         l2Inbox = ZoneInbox(ZONE_INBOX);
         l2ZoneToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
-        ZoneOutbox outboxImpl = new ZoneOutbox(address(l2Config));
+        ZoneOutbox outboxImpl = new ZoneOutbox(address(l1Portal), address(l2TempoState));
         vm.etch(ZONE_OUTBOX, address(outboxImpl).code);
         l2Outbox = ZoneOutbox(ZONE_OUTBOX);
         l2ZoneToken.setBurner(address(l2Outbox), true);

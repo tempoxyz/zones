@@ -13,7 +13,6 @@ import {
     EncryptedDepositPayload,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
-    IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
     IZonePortal,
@@ -26,7 +25,6 @@ import {
     ZONE_OUTBOX
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
@@ -38,7 +36,7 @@ import { Test } from "forge-std/Test.sol";
 ///      addresses irrelevant); `_readEncryptionKey` reads portal storage via TempoState.
 contract ZoneInboxHarness is ZoneInbox {
 
-    constructor(address portal, address state) ZoneInbox(address(0), portal, state) { }
+    constructor(address portal, address state) ZoneInbox(portal, state) { }
 
     function hmacSha256(bytes memory key, bytes memory message) external view returns (bytes32) {
         return _hmacSha256(key, message);
@@ -62,7 +60,6 @@ contract RefundCallForwarder {
 /// @notice Tests for ZoneInbox covering edge cases
 contract ZoneInboxTest is Test {
 
-    ZoneConfig public config;
     ZoneInbox public inbox;
     MockZoneToken public zoneToken;
     MockTempoState public tempoState;
@@ -79,7 +76,6 @@ contract ZoneInboxTest is Test {
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
-        config = new ZoneConfig(mockPortal, address(tempoState));
         tempoState.setMockStorageValue(
             mockPortal,
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
@@ -89,7 +85,7 @@ contract ZoneInboxTest is Test {
         tempoState.setMockAccountAllowed(mockPortal, alice, true);
         tempoState.setMockAccountAllowed(mockPortal, bob, true);
         tempoState.setMockAccountAllowed(mockPortal, address(0x500), true);
-        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
+        inbox = new ZoneInbox(mockPortal, address(tempoState));
         vm.etch(ZONE_OUTBOX, hex"00");
 
         zoneToken.setMinter(address(inbox), true);
@@ -461,7 +457,6 @@ contract ZoneInboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_immutableGetters() public view {
-        assertEq(address(inbox.config()), address(config));
         assertEq(inbox.tempoPortal(), mockPortal);
         assertEq(address(inbox.tempoState()), address(tempoState));
     }
@@ -690,7 +685,6 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_regularDeposit_allowsUnlistedRecipient() public {
         address outsider = address(0x600);
-        assertFalse(config.isAllowedAccount(outsider));
 
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({
@@ -872,89 +866,6 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.ExtraDecryptionData.selector);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                    ZONE CONFIG ENCRYPTION KEY TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Verify ZoneConfig.sequencerEncryptionKey() reads from the correct storage slot.
-    /// @dev Regression test for the bug where ZoneConfig read the wrong slot
-    ///      instead of the _encryptionKeys dynamic array at slot 6.
-    function test_zoneConfig_sequencerEncryptionKey_readsCorrectSlot() public {
-        bytes32 keyX = keccak256("config-test-key");
-        uint8 keyYParity = 0x03;
-
-        // Simulate the _encryptionKeys array at slot 6:
-        // Set array length = 1
-        uint256 arraySlot = uint256(PORTAL_ENCRYPTION_KEYS_SLOT);
-        tempoState.setMockStorageValue(mockPortal, bytes32(arraySlot), bytes32(uint256(1)));
-
-        // Set the key entry data at the derived slots
-        uint256 base = uint256(keccak256(abi.encode(arraySlot)));
-        tempoState.setMockStorageValue(mockPortal, bytes32(base), keyX);
-        tempoState.setMockStorageValue(mockPortal, bytes32(base + 1), bytes32(uint256(keyYParity)));
-
-        // Read via ZoneConfig — this should use the _encryptionKeys array slot
-        (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
-        assertEq(readX, keyX, "ZoneConfig should read key x from encryption keys array");
-        assertEq(
-            readYParity, keyYParity, "ZoneConfig should read yParity from encryption keys array"
-        );
-    }
-
-    /// @notice Verify ZoneConfig.sequencerEncryptionKey() returns the LAST key when multiple exist.
-    function test_zoneConfig_sequencerEncryptionKey_returnsLatestKey() public {
-        bytes32 keyX1 = keccak256("old-key");
-        bytes32 keyX2 = keccak256("new-key");
-        uint8 yParity2 = 0x02;
-
-        // Simulate 2 entries in _encryptionKeys
-        uint256 arraySlot = uint256(PORTAL_ENCRYPTION_KEYS_SLOT);
-        tempoState.setMockStorageValue(mockPortal, bytes32(arraySlot), bytes32(uint256(2)));
-
-        uint256 base = uint256(keccak256(abi.encode(arraySlot)));
-
-        // Entry 0
-        tempoState.setMockStorageValue(mockPortal, bytes32(base), keyX1);
-        tempoState.setMockStorageValue(mockPortal, bytes32(base + 1), bytes32(uint256(0x03)));
-
-        // Entry 1 (latest)
-        tempoState.setMockStorageValue(mockPortal, bytes32(base + 2), keyX2);
-        tempoState.setMockStorageValue(mockPortal, bytes32(base + 3), bytes32(uint256(yParity2)));
-
-        (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
-        assertEq(readX, keyX2, "should return the latest key");
-        assertEq(readYParity, yParity2, "should return the latest yParity");
-    }
-
-    /// @notice Verify ZoneConfig.sequencerEncryptionKey() reverts when no keys exist.
-    function test_zoneConfig_sequencerEncryptionKey_revertsWhenEmpty() public {
-        // Array length = 0 (default)
-        tempoState.setMockStorageValue(mockPortal, PORTAL_ENCRYPTION_KEYS_SLOT, bytes32(uint256(0)));
-
-        vm.expectRevert(IZoneConfig.NoEncryptionKeySet.selector);
-        config.sequencerEncryptionKey();
-    }
-
-    /// @notice Verify ZoneConfig and ZoneInbox read from the same encryption key slot.
-    /// @dev Both contracts import PORTAL_ENCRYPTION_KEYS_SLOT from IZone.sol and must agree on derived slot computation.
-    function test_zoneConfig_and_zoneInbox_readSameEncryptionKey() public {
-        bytes32 keyX = keccak256("shared-key-test");
-        uint8 keyYParity = 0x02;
-
-        // Set up encryption key mock (same as _setupEncryptionKeyMock)
-        _setupEncryptionKeyMock(0, keyX, keyYParity);
-
-        // Also set the array length (ZoneConfig needs this, ZoneInbox._readEncryptionKey doesn't)
-        tempoState.setMockStorageValue(mockPortal, PORTAL_ENCRYPTION_KEYS_SLOT, bytes32(uint256(1)));
-
-        // Read via ZoneConfig
-        (bytes32 configX, uint8 configYParity) = config.sequencerEncryptionKey();
-
-        // The values read by ZoneConfig must match what ZoneInbox._readEncryptionKey would get
-        assertEq(configX, keyX, "ZoneConfig and ZoneInbox must agree on key X");
-        assertEq(configYParity, keyYParity, "ZoneConfig and ZoneInbox must agree on yParity");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1142,7 +1053,6 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_encryptedDeposit_allowsUnlistedRecipient() public {
         address outsider = address(0x600);
-        assertFalse(config.isAllowedAccount(outsider));
 
         bytes memory plaintext =
             EncryptedDepositLib.encodePlaintext(outsider, bytes32("secret memo"));

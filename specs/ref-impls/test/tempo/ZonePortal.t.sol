@@ -4323,12 +4323,12 @@ contract ZonePortalTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Verify that ZonePortal's storage layout matches the slot constants
-    ///         used by ZoneConfig and ZoneInbox for cross-domain reads.
+    ///         used by ZoneInbox for cross-domain reads.
     /// @dev This is a critical regression test. If the ZonePortal storage layout changes
     ///      (e.g. a variable is added/removed/reordered), this test will fail, preventing
     ///      silent slot mismatches that corrupt zone-side reads.
     ///
-    ///      The zone-side contracts (ZoneConfig, ZoneInbox) read ZonePortal storage via
+    ///      The zone-side contracts ZoneInbox read ZonePortal storage via
     ///      TempoState.readTempoStorageSlot() using hardcoded slot numbers. If those slot
     ///      numbers drift from the actual layout, the zone reads garbage data.
     ///
@@ -4481,7 +4481,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
-    /// @dev This ensures ZoneConfig and ZoneInbox both compute the correct storage slots
+    /// @dev This ensures ZoneInbox both compute the correct storage slots
     ///      when reading encryption keys via readTempoStorageSlot().
     ///
     ///      For a dynamic array at slot S:
@@ -4535,17 +4535,17 @@ contract ZonePortalTest is BaseTest {
         );
     }
 
-    /// @notice Verify that the slot constants used by ZoneInbox and ZoneConfig match
+    /// @notice Verify that the slot constants used by ZoneInbox match
     ///         the actual ZonePortal storage layout.
     /// @dev This is the cross-contract consistency check. The test replicates the exact
     ///      slot computation logic used by ZoneInbox._readEncryptionKey() and
-    ///      ZoneConfig.sequencerEncryptionKey() to ensure they both read the correct data.
+    ///      ZoneInbox encryption-key reads to ensure they both read the correct data.
     function test_storageLayout_crossContractConsistency() public {
         (bytes32 keyX, uint8 keyYParity) = _setEncKeyWithPoP(ENC_KEY_1);
 
         // Use the shared constants from IZone.sol (single source of truth)
 
-        // Verify sequencer membership slot (used by ZoneConfig)
+        // Verify sequencer membership slot (used by zone system contracts)
         bytes32 membershipSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
             uint256(vm.load(address(portal), membershipSlot)),

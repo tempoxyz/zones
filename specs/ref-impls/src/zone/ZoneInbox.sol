@@ -12,13 +12,13 @@ import {
     IAesGcmDecrypt,
     IChaumPedersenVerify,
     ITempoState,
-    IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
     IZoneToken,
     PATH_USD_ADDRESS,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
@@ -37,9 +37,6 @@ contract ZoneInbox is IZoneInbox {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Zone configuration (reads sequencer from L1)
-    IZoneConfig public immutable config;
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     address public immutable tempoPortal;
@@ -60,14 +57,13 @@ contract ZoneInbox is IZoneInbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _tempoPortalAddr, address _tempoStateAddr) {
-        config = IZoneConfig(_config);
+    constructor(address _tempoPortalAddr, address _tempoStateAddr) {
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
     }
 
     modifier onlyRefundOwnerOrSequencer(address owner) {
-        if (msg.sender != owner && !config.isSequencer(msg.sender)) {
+        if (msg.sender != owner && !_isSequencer(msg.sender)) {
             revert Unauthorized();
         }
         _;
@@ -215,7 +211,7 @@ contract ZoneInbox is IZoneInbox {
     )
         external
     {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) {
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) {
             revert OnlySequencer();
         }
 
@@ -381,6 +377,11 @@ contract ZoneInbox is IZoneInbox {
             currentHash,
             processedDepositNumber
         );
+    }
+
+    function _isSequencer(address account) internal view returns (bool) {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
+        return uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)) != 0;
     }
 
     function _rejectDeposit(

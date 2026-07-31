@@ -21,7 +21,6 @@ use zone_primitives::constants::{
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
-const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -186,28 +185,10 @@ fn setup_zone_evm_with_contracts_for_portal(
     );
     nonce += 1;
 
-    // 2. ZoneConfig(address tempoPortal, address tempoState)
-    let zone_config_bytecode = load_artifact("ZoneConfig");
-    let zone_config_args =
-        alloy_sol_types::SolValue::abi_encode_params(&(tempo_portal, TEMPO_STATE_ADDRESS));
-    deploy_contract(
-        &mut evm,
-        &zone_config_bytecode,
-        &zone_config_args,
-        ZONE_CONFIG_ADDRESS,
-        "ZoneConfig",
-        chain_id,
-        nonce,
-    );
-    nonce += 1;
-
-    // 3. ZoneInbox(address config, address tempoPortal, address tempoState)
+    // 2. ZoneInbox(address tempoPortal, address tempoState)
     let zone_inbox_bytecode = load_artifact("ZoneInbox");
-    let zone_inbox_args = alloy_sol_types::SolValue::abi_encode_params(&(
-        ZONE_CONFIG_ADDRESS,
-        tempo_portal,
-        TEMPO_STATE_ADDRESS,
-    ));
+    let zone_inbox_args =
+        alloy_sol_types::SolValue::abi_encode_params(&(tempo_portal, TEMPO_STATE_ADDRESS));
     deploy_contract(
         &mut evm,
         &zone_inbox_bytecode,
@@ -219,9 +200,10 @@ fn setup_zone_evm_with_contracts_for_portal(
     );
     nonce += 1;
 
-    // 4. ZoneOutbox(address config)
+    // 3. ZoneOutbox(address tempoPortal, address tempoState)
     let zone_outbox_bytecode = load_artifact("ZoneOutbox");
-    let zone_outbox_args = alloy_sol_types::SolValue::abi_encode_params(&(ZONE_CONFIG_ADDRESS,));
+    let zone_outbox_args =
+        alloy_sol_types::SolValue::abi_encode_params(&(tempo_portal, TEMPO_STATE_ADDRESS));
     deploy_contract(
         &mut evm,
         &zone_outbox_bytecode,
@@ -318,10 +300,7 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
     assert_eq!(genesis_predeploy_code(TEMPO_STATE_ADDRESS), [0xef]);
     assert_eq!(genesis_predeploy_code(ZONE_OUTBOX_ADDRESS), [0xef]);
 
-    for (name, addr) in [
-        ("ZoneConfig", ZONE_CONFIG_ADDRESS),
-        ("ZoneInbox", ZONE_INBOX_ADDRESS),
-    ] {
+    for (name, addr) in [("ZoneInbox", ZONE_INBOX_ADDRESS)] {
         let expected = evm
             .db_mut()
             .cache

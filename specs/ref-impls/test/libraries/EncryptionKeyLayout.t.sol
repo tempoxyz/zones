@@ -37,7 +37,7 @@ contract EncryptionKeyLayoutHarness {
 
 /// @title EncryptionKeyLayoutTest
 /// @notice Storage layout regression test for EncryptionKeyEntry.
-///         ZoneInbox._readEncryptionKey() and ZoneConfig.sequencerEncryptionKey()
+///         ZoneInbox._readEncryptionKey()
 ///         read raw storage slots and assume yParity is packed in the lowest byte
 ///         of the meta slot. If the struct field order ever changes, these tests fail.
 contract EncryptionKeyLayoutTest is Test {
@@ -76,7 +76,7 @@ contract EncryptionKeyLayoutTest is Test {
         bytes32 rawMeta = vm.load(address(harness), bytes32(slotMeta));
 
         // yParity must be extractable from the lowest byte — this is exactly what
-        // ZoneInbox._readEncryptionKey() and ZoneConfig.sequencerEncryptionKey() do
+        // ZoneInbox._readEncryptionKey() do
         uint8 extractedYParity = uint8(uint256(rawMeta) & 0xff);
         assertEq(extractedYParity, yParity, "yParity must be in lowest byte of meta slot");
 

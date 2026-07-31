@@ -23,7 +23,6 @@ import {
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -83,7 +82,6 @@ contract ZoneIntegrationTest is BaseTest {
     // L2 contracts
     MockZoneToken public l2ZoneToken;
     MockTempoState public l2TempoState;
-    ZoneConfig public l2Config;
     ZoneInbox public l2Inbox;
     ZoneOutbox public l2Outbox;
 
@@ -186,7 +184,6 @@ contract ZoneIntegrationTest is BaseTest {
         // L2 setup
         l2TempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
-        l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
             address(l1Portal),
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
@@ -198,8 +195,8 @@ contract ZoneIntegrationTest is BaseTest {
             l2TempoState.setMockAccountAllowed(address(l1Portal), accounts[i], true);
         }
         l2TempoState.setMockZoneGateway(address(l1Portal), address(zoneGateway), true);
-        l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
-        l2Outbox = new ZoneOutbox(address(l2Config));
+        l2Inbox = new ZoneInbox(address(l1Portal), address(l2TempoState));
+        l2Outbox = new ZoneOutbox(address(l1Portal), address(l2TempoState));
 
         l2ZoneToken.setMinter(address(l2Inbox), true);
         l2ZoneToken.setBurner(address(l2Outbox), true);
