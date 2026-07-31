@@ -307,7 +307,11 @@ mod command {
         http_port: u16,
 
         /// Zone redacted RPC port.
-        #[arg(long = "redacted-rpc.port", default_value_t = 8544)]
+        #[arg(
+            long = "redacted-rpc.port",
+            alias = "private-rpc.port",
+            default_value_t = 8544
+        )]
         redacted_rpc_port: u16,
 
         /// Extra arguments forwarded to `tempo-zone node`.
@@ -489,7 +493,20 @@ mod command {
 
     #[cfg(test)]
     mod tests {
-        use super::ensure_ws_url;
+        use clap::Parser as _;
+
+        use super::{DevCommand, ensure_ws_url};
+
+        #[test]
+        fn private_rpc_port_alias_is_accepted() {
+            let redacted =
+                DevCommand::try_parse_from(["dev", "--redacted-rpc.port", "9544"]).unwrap();
+            let private =
+                DevCommand::try_parse_from(["dev", "--private-rpc.port", "9544"]).unwrap();
+
+            assert_eq!(redacted.redacted_rpc_port, 9544);
+            assert_eq!(private.redacted_rpc_port, 9544);
+        }
 
         #[test]
         fn ensure_ws_url_accepts_websocket_schemes() {

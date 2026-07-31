@@ -425,6 +425,7 @@ pub struct ZoneArgs {
     /// Port for the redacted zone RPC server (0 for OS-assigned).
     #[arg(
         long = "redacted-rpc.port",
+        alias = "private-rpc.port",
         env = "REDACTED_RPC_PORT",
         default_value_t = 8544
     )]
@@ -744,6 +745,29 @@ mod tests {
         )
         .unwrap();
         assert_eq!(overridden.zone.zone_poll_interval_secs, 3);
+    }
+
+    #[test]
+    fn private_rpc_port_alias_is_accepted() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let redacted = ZoneArgsParser::try_parse_from(
+            common.into_iter().chain(["--redacted-rpc.port", "9544"]),
+        )
+        .unwrap();
+        let private = ZoneArgsParser::try_parse_from(
+            common.into_iter().chain(["--private-rpc.port", "9544"]),
+        )
+        .unwrap();
+
+        assert_eq!(redacted.zone.redacted_rpc_port, 9544);
+        assert_eq!(private.zone.redacted_rpc_port, 9544);
     }
 
     #[test]
