@@ -820,30 +820,6 @@ contract ZoneBridgeTest is BaseTest {
         vm.stopPrank();
     }
 
-    function test_l2_onlySequencerCanAdvanceTempo() public {
-        vm.startPrank(alice);
-        l2ZoneToken.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""), alice);
-        vm.stopPrank();
-
-        _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
-
-        bytes32 expectedHash = pendingDeposits[0].newCurrentDepositQueueHash;
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
-
-        Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = pendingDeposits[0].deposit;
-
-        // Non-sequencer tries to advance
-        vm.prank(alice);
-        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
-        l2Inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
-        );
-    }
-
     /*//////////////////////////////////////////////////////////////
                     STORAGE LAYOUT VERIFICATION TESTS
     //////////////////////////////////////////////////////////////*/

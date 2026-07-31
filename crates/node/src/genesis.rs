@@ -192,12 +192,11 @@ mod tests {
 
         let mut expected = [0u8; 32];
         expected[12..].copy_from_slice(portal.as_slice());
-        for addr in [ZONE_INBOX_ADDRESS] {
-            let code = genesis.alloc[&addr].code.as_ref().unwrap();
-            assert!(
-                code.windows(32).any(|window| window == expected),
-                "patched portal immutable missing in {addr}"
-            );
-        }
+        let addr = ZONE_INBOX_ADDRESS;
+        let code = genesis.alloc[&addr].code.as_ref().unwrap();
+        assert!(
+            code.windows(32).any(|window| window == expected),
+            "patched portal immutable missing in {addr}"
+        );
     }
 }
