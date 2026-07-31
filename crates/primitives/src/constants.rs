@@ -175,11 +175,13 @@ pub enum ZoneChainIdError {
 pub fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChainIdError> {
     validate_chain_id(parent_chain_id, zone_id)?;
 
-    Ok(match parent_chain_id {
+    let chain_id = match parent_chain_id {
         TEMPO_MAINNET_CHAIN_ID => ZONE_CHAIN_ID_BASE + zone_id as u64,
         TEMPO_MODERATO_CHAIN_ID => ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64,
         _ => (parent_chain_id << 32) | zone_id as u64,
-    })
+    };
+
+    Ok(chain_id)
 }
 
 fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
