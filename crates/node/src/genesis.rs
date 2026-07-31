@@ -19,7 +19,7 @@ const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 /// ZoneInbox predeploy address.
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 /// `tempoPortal` immutable occurrences in ZoneInbox deployed bytecode.
-const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 5;
+const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 4;
 
 /// Parses the bundled zone genesis template.
 pub fn genesis_template() -> eyre::Result<Genesis> {

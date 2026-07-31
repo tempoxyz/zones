@@ -287,27 +287,6 @@ contract ZoneInboxTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                         ACCESS CONTROL TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_advanceTempo_onlySequencer() public {
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32(0)
-        );
-
-        Deposit[] memory deposits = new Deposit[](0);
-
-        // Random user should fail
-        vm.prank(alice);
-        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
-        _advanceTempo(deposits);
-
-        // Sequencer should succeed
-        vm.prank(sequencer);
-        _advanceTempo(deposits);
-    }
-
-    /*//////////////////////////////////////////////////////////////
                         INCREMENTAL PROCESSING TESTS
     //////////////////////////////////////////////////////////////*/
 
@@ -1125,11 +1104,6 @@ contract ZoneInboxTest is Test {
 
     function test_refunds_ownerCanRead() public {
         vm.prank(bob);
-        assertEq(inbox.refunds(address(zoneToken), bob), 0);
-    }
-
-    function test_refunds_sequencerCanRead() public {
-        vm.prank(sequencer);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
     }
 
