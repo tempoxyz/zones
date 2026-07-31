@@ -560,19 +560,6 @@ where
             .erased();
         let l1_chain_id = l1_provider.get_chain_id().await?;
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
-        if self.redacted_rpc_config.zone_id != 0 {
-            let portal_zone_id = ZonePortal::new(self.portal_address, &l1_provider)
-                .zoneId()
-                .call()
-                .await?;
-            eyre::ensure!(
-                portal_zone_id == self.redacted_rpc_config.zone_id,
-                "zone ID mismatch: portal {} reports zone.id={}, but the node is configured with zone.id={}",
-                self.portal_address,
-                portal_zone_id,
-                self.redacted_rpc_config.zone_id,
-            );
-        }
         validate_zone_chain_id(l1_chain_id, self.redacted_rpc_config.zone_id, chain_id)?;
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)

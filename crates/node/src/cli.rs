@@ -473,7 +473,7 @@ pub struct ZoneArgs {
     pub l1_retry_connection_interval_ms: u64,
 
     /// Zone ID used for chain identity and redacted RPC authentication.
-    #[arg(long = "zone.id", env = "ZONE_ID")]
+    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
     pub zone_id: u32,
 
     /// Port for the redacted zone RPC server (0 for OS-assigned).
@@ -595,23 +595,6 @@ mod tests {
     }
 
     #[test]
-    fn zone_id_is_required() {
-        let common = [
-            "tempo-zone",
-            "--l1.rpc-url",
-            "ws://localhost:8546",
-            "--l1.portal-address",
-            "0x0000000000000000000000000000000000000001",
-        ];
-
-        let missing = ZoneArgsParser::try_parse_from(common).unwrap_err();
-        assert_eq!(
-            missing.kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
-        );
-    }
-
-    #[test]
     fn manifest_mode_rejects_a_txpool_limit_above_the_p2p_wire_limit() {
         assert!(
             validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE,)
@@ -639,8 +622,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
         ];
 
         let parsed = ZoneArgsParser::try_parse_from(
@@ -767,8 +748,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
             "--sequencer-key",
             "0x01",
         ];
@@ -817,8 +796,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
             "--sequencer-key",
             "0x01",
             "--sequencer",
@@ -836,8 +813,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
             "--sequencer-key",
             "0x01",
         ];
@@ -860,8 +835,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
         ];
 
         let redacted = ZoneArgsParser::try_parse_from(
@@ -903,8 +876,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
             "--sequencer-key",
             "0x01",
         ];
@@ -950,8 +921,6 @@ mod tests {
             "ws://localhost:8546",
             "--l1.portal-address",
             "0x0000000000000000000000000000000000000001",
-            "--zone.id",
-            "1",
             "--sequencer.manifest",
             "zone.toml",
             "--p2p.key",
