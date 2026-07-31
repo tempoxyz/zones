@@ -154,25 +154,11 @@ on:
         required: false
         default: ""
 
-  # Benchmark-harness changes exercise the default validation preset on PR updates.
-  # Once this workflow is on the default branch, workflow_dispatch selects targeted runs.
-  pull_request:
-    types: [opened, synchronize, reopened]
-    paths:
-      - ".github/workflows/zones-benchmark.yml"
-      - "contrib/bench/**"
-      - "crates/contracts/**"
-      - "crates/node/**"
-      - "crates/sequencer/**"
-      - "specs/ref-impls/**"
-      - "xtask/**"
-
 permissions:
   contents: read
-  pull-requests: read
 
 concurrency:
-  group: zones-benchmark-${{ github.event.pull_request.number || github.ref }}
+  group: zones-benchmark-${{ github.ref }}
   cancel-in-progress: false
 
 env:
@@ -186,12 +172,7 @@ env:
 
 jobs:
   authorize:
-    name: Resolve and authorize benchmark request
-    if: >-
-      github.event_name == 'schedule' ||
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'pull_request' &&
-       github.event.pull_request.head.repo.full_name == github.repository)
+    name: Resolve benchmark request
     runs-on: ubuntu-latest
     outputs:
       neobank-preset: ${{ steps.config.outputs.neobank-preset }}
@@ -223,39 +204,10 @@ jobs:
       tempo-ref: ${{ steps.config.outputs.tempo-ref }}
       txgen-ref: ${{ steps.config.outputs.txgen-ref }}
     steps:
-      - name: Require a trusted actor and PR author
-        if: github.event_name == 'pull_request'
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const accepted = new Set(['admin', 'maintain', 'write']);
-            const permission = async (username) => {
-              const response = await github.rest.repos.getCollaboratorPermissionLevel({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                username,
-              });
-              return response.data.permission;
-            };
-
-            const actor = context.actor;
-            const author = context.payload.pull_request.user.login;
-            const [actorPermission, authorPermission] = await Promise.all([
-              permission(actor),
-              permission(author),
-            ]);
-            if (!accepted.has(actorPermission)) {
-              core.setFailed(`@${actor} cannot authorize a bare-metal benchmark`);
-            }
-            if (!accepted.has(authorPermission)) {
-              core.setFailed(`PR author @${author} is not a repository member`);
-            }
-
       - name: Resolve configuration
         id: config
         env:
-          EVENT_NAME: ${{ github.event_name }}
-          EVENT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT_SHA: ${{ github.sha }}
           INPUT_PRESET: ${{ inputs.preset || 'full-journey' }}
           INPUT_ACCOUNTS: ${{ inputs.accounts || '100' }}
           INPUT_COUNT: ${{ inputs.count || '100' }}
@@ -289,10 +241,6 @@ jobs:
           set -euo pipefail
 
           neobank_preset="$INPUT_PRESET"
-          if [ "$EVENT_NAME" = pull_request ]; then
-            neobank_preset=full-journey
-            INPUT_COUNT=100
-          fi
           case "$neobank_preset" in
             encrypted-deposit|private-withdrawal|rewards-redemption|full-journey|\
             slippage-bounce|third-party-recipient|direct-lifecycle|\
@@ -546,12 +494,11 @@ jobs:
       ZONES_BENCH_TEMPO_REF: ${{ needs.authorize.outputs.tempo-ref }}
       ZONES_BENCH_TXGEN_REF: ${{ needs.authorize.outputs.txgen-ref }}
       ZONES_BENCH_ZONES_REF: ${{ needs.authorize.outputs.sha }}
-      ZONES_BENCH_GIT_REF: ${{ github.head_ref || github.ref_name }}
+      ZONES_BENCH_GIT_REF: ${{ github.ref_name }}
       ZONES_BENCH_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
       ZONES_BENCH_GITHUB_REPOSITORY: ${{ github.repository }}
       ZONES_BENCH_GITHUB_RUN_ID: ${{ github.run_id }}
       ZONES_BENCH_GITHUB_WORKFLOW: zones-benchmark.yml
-      ZONES_BENCH_GITHUB_PR_NUMBER: ${{ github.event.pull_request.number || '' }}
       ZONES_BENCH_BUILD_PROFILE: profiling
       ZONES_BENCH_L1_A_CPUS: 0-3,16-19
       ZONES_BENCH_L1_B_CPUS: 4-7,20-23
