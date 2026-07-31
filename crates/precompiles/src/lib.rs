@@ -21,6 +21,8 @@
 //! - **NonceManager** ([`nonce`]) — upstream 2D nonces with account-scoped read rules.
 //! - **AccountKeychain** ([`account_keychain`]) — upstream key management with account-scoped
 //!   read rules.
+//! - **StorageCredits** ([`storage_credits`]) — upstream storage-credit accounting with
+//!   account-scoped read rules.
 //! - **Zone Inbox** ([`inbox`]) — advances Tempo state and processes the deposit queue.
 //! - **TIP-403 Registry** ([`tip403_proxy`]) — upstream registry over finalized L1 state.
 //! - **Zone TIP-20** ([`ztip20`]) — upstream TIP-20 with zone call rules.
@@ -54,6 +56,7 @@ pub mod inbox;
 mod nonce;
 pub mod receive_policy_guard;
 pub mod storage;
+mod storage_credits;
 pub mod tempo_state;
 pub mod tip403_proxy;
 #[cfg(feature = "std")]
@@ -78,6 +81,7 @@ use tempo_precompiles::{
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard as TempoReceivePolicyGuard,
+    storage_credits::StorageCredits,
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
     tip403_registry::TIP403Registry,
 };
@@ -156,6 +160,22 @@ where
         env,
         account_keychain::AccountKeychainRules::new(l1),
         |data, caller| AccountKeychain::new().call(data, caller),
+    )
+}
+
+/// Creates upstream StorageCredits execution with Zone account-scoped read rules.
+pub fn create_storage_credits_precompile<P>(
+    env: &ZonePrecompileEnv,
+    l1: L1State<P>,
+) -> DynPrecompile
+where
+    P: L1StorageReader,
+{
+    execution::create_precompile(
+        "StorageCredits",
+        env,
+        storage_credits::StorageCreditsRules::new(l1),
+        |data, caller| StorageCredits::new().call(data, caller),
     )
 }
 

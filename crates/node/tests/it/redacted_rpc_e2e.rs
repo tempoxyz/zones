@@ -27,11 +27,11 @@ use serde_json::{Value, json};
 use std::{collections::HashSet, time::Duration};
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
-    IAccountKeychain, INonce, ITIP20 as ContractTip20,
+    IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20,
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
 };
 use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS, STORAGE_CREDITS_ADDRESS,
     tip20::ITIP20 as PrecompileTip20,
 };
 use tempo_primitives::{
@@ -995,7 +995,7 @@ async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
 }
 
 /// Account-indexed native getters enforce privacy inside the EVM so direct and helper-forwarded
-/// calls cannot read another account's NonceManager or AccountKeychain state.
+/// calls cannot read another account's NonceManager, AccountKeychain, or StorageCredits state.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1024,6 +1024,11 @@ async fn test_native_account_getter_eth_call_privacy() -> eyre::Result<()> {
             }
             .abi_encode(),
             "AccountKeychain.getKey",
+        ),
+        (
+            STORAGE_CREDITS_ADDRESS,
+            IStorageCredits::balanceOfCall { account: owner }.abi_encode(),
+            "StorageCredits.balanceOf",
         ),
     ];
 
