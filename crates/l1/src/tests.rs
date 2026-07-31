@@ -169,6 +169,8 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
     L1Subscriber {
         config: L1SubscriberConfig {
             l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
+            verify_certificates: false,
+            epoch_length: None,
             portal_address,
             enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(),
@@ -709,14 +711,23 @@ fn test_resolve_start_block_reads_live_local_state_each_time() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new(
         VecDeque::from([10, 11]),
     )));
-    assert_eq!(subscriber.resolve_start_block().unwrap(), 11);
-    assert_eq!(subscriber.resolve_start_block().unwrap(), 12);
+    assert_eq!(
+        subscriber.resolve_start_block().unwrap(),
+        NumHash::new(10, B256::with_last_byte(1))
+    );
+    assert_eq!(
+        subscriber.resolve_start_block().unwrap(),
+        NumHash::new(11, B256::with_last_byte(1))
+    );
 }
 
 #[test]
 fn test_resolve_start_block_accepts_block_zero_with_nonzero_hash() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
-    assert_eq!(subscriber.resolve_start_block().unwrap(), 1);
+    assert_eq!(
+        subscriber.resolve_start_block().unwrap(),
+        NumHash::new(0, B256::with_last_byte(1))
+    );
 }
 
 #[test]
@@ -732,34 +743,65 @@ fn test_resolve_start_block_rejects_unanchored_genesis() {
 }
 
 #[tokio::test]
-async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() {
+async fn certificate_verified_headers_feed_the_existing_receipt_pipeline() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    subscriber
+        .config
+        .block_tracker
+        .initialize_consumed_through(9);
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
+    let header = seal(make_test_header(10));
+    let expected = header.num_hash();
+    asserter.push_success(&Some(Vec::<TempoTransactionReceipt>::new()));
+
+    let err = subscriber
+        .follow_headers(
+            &l1_provider,
+            futures::stream::iter([Ok::<_, eyre::Report>(header)]),
+        )
+        .await
+        .expect_err("finite header stream should end the subscriber");
+
+    assert!(err.to_string().contains("finalized L1 header stream ended"));
+    let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
+        panic!("test subscriber must retain deposits");
+    };
+    assert_eq!(queue.last_enqueued(), Some(expected));
+    assert_eq!(subscriber.config.block_tracker.latest(), Some(expected));
+    assert!(asserter.read_q().is_empty());
+}
+
+#[tokio::test]
+async fn rpc_finalized_headers_feed_the_shared_ingestion_pipeline() {
+    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
+    subscriber
+        .config
+        .block_tracker
+        .initialize_consumed_through(9);
+    let asserter = Asserter::new();
+    let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_mocked_client(asserter.clone())
+        .erased();
 
     let header_10 = make_test_header(10);
     let header_11 = make_chained_header(11, header_hash(&header_10));
     let header_12 = make_chained_header(12, header_hash(&header_11));
-
-    // Initial sync through finalized block 10.
-    asserter.push_success(&Some(header_response(header_10.clone())));
-    push_header_and_empty_receipts(&asserter, header_10);
-
-    // One newHeads notification wakes the subscriber. The finalized tag has
-    // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
+    push_header_and_empty_receipts(&asserter, header_10.clone());
     push_header_and_empty_receipts(&asserter, header_11);
     push_header_and_empty_receipts(&asserter, header_12);
 
+    let start_after = NumHash::new(9, header_10.parent_hash());
+    let headers = subscriber
+        .rpc_finalized_headers(l1_provider.clone(), start_after, futures::stream::pending())
+        .take(3);
     let err = subscriber
-        .follow_finalized(
-            &l1_provider,
-            futures::stream::iter([Ok::<_, eyre::Report>(())]),
-        )
+        .follow_headers(&l1_provider, headers)
         .await
-        .expect_err("finite trigger stream should end the subscriber");
-    assert!(err.to_string().contains("head notification stream ended"));
+        .expect_err("finite header stream should end the subscriber");
+    assert!(err.to_string().contains("finalized L1 header stream ended"));
 
     let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
         panic!("test subscriber must retain deposits");
@@ -794,18 +836,23 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
     let header_11 = make_chained_header(11, header_hash(&header_10));
     let header_12 = make_chained_header(12, header_hash(&header_11));
 
-    asserter.push_success(&Some(header_response(header_12.clone())));
-    push_header_and_empty_receipts(&asserter, header_10);
-    push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
+    for _ in 0..3 {
+        asserter.push_success(&Some(Vec::<TempoTransactionReceipt>::new()));
+    }
+    subscriber
+        .config
+        .block_tracker
+        .initialize_consumed_through(9);
 
-    assert_eq!(
-        subscriber
-            .sync_finalized_once(&l1_provider, 10)
-            .await
-            .unwrap(),
-        13
-    );
+    let headers = [header_10, header_11, header_12]
+        .into_iter()
+        .map(seal)
+        .map(Ok::<_, eyre::Report>);
+    let err = subscriber
+        .follow_headers(&l1_provider, futures::stream::iter(headers))
+        .await
+        .expect_err("finite header stream should end the subscriber");
+    assert!(err.to_string().contains("finalized L1 header stream ended"));
 
     assert_eq!(
         subscriber
@@ -847,27 +894,6 @@ async fn test_head_triggers_falls_back_to_http_block_filter() {
         .expect("HTTP block filter stream should remain open");
 
     trigger.expect("HTTP block filter request should succeed");
-    assert!(asserter.read_q().is_empty());
-}
-
-#[tokio::test]
-async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([10])));
-    let asserter = Asserter::new();
-    let l1_provider =
-        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    asserter.push_success(&Some(header_response(make_test_header(10))));
-
-    let next = subscriber
-        .sync_finalized_once(&l1_provider, 11)
-        .await
-        .unwrap();
-
-    assert_eq!(next, 11);
-    let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
-        panic!("test subscriber must retain deposits");
-    };
-    assert!(queue.drain().is_empty());
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1582,12 +1608,13 @@ async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    asserter.push_success(&Some(header_response(header_10.clone())));
-    asserter.push_success(&Some(header_response(header_10)));
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .follow_headers(
+            &l1_provider,
+            futures::stream::iter([Ok::<_, eyre::Report>(seal(header_10))]),
+        )
         .await
         .unwrap_err();
     assert!(is_fenced_ingestion_error(&err));
@@ -1645,17 +1672,16 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    asserter.push_success(&Some(header_response(header_10.clone())));
-    asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
 
-    assert_eq!(
-        subscriber
-            .sync_finalized_once(&l1_provider, 10)
-            .await
-            .unwrap(),
-        11
-    );
+    let err = subscriber
+        .follow_headers(
+            &l1_provider,
+            futures::stream::iter([Ok::<_, eyre::Report>(seal(header_10))]),
+        )
+        .await
+        .expect_err("finite header stream should end the subscriber");
+    assert!(err.to_string().contains("finalized L1 header stream ended"));
 
     let seen = sink.seen.lock();
     assert_eq!(seen.len(), 1);
@@ -1693,12 +1719,13 @@ async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition()
     let asserter = Asserter::new();
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    asserter.push_success(&Some(header_response(header_10.clone())));
-    asserter.push_success(&Some(header_response(header_10.clone())));
     asserter.push_success(&Some(vec![receipt]));
 
     let err = subscriber
-        .sync_finalized_once(&l1_provider, 10)
+        .follow_headers(
+            &l1_provider,
+            futures::stream::iter([Ok::<_, eyre::Report>(seal(header_10))]),
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("leadership transition"));

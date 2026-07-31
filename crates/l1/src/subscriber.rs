@@ -1,6 +1,8 @@
 use super::*;
 use eyre::WrapErr as _;
 use std::collections::HashSet;
+use tempo_chainspec::spec::chainspec_from_chain_id;
+use tempo_consensus::finalized_block_stream::{FinalizedBlockStream, FinalizedBlockStreamConfig};
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::is_tip20_prefix;
 
@@ -259,6 +261,10 @@ pub trait LeadershipSink: Send + Sync + std::fmt::Debug {
 pub struct L1SubscriberConfig {
     /// RPC URL of the L1 node (HTTP or WebSocket).
     pub l1_rpc_url: String,
+    /// Whether finalized L1 headers must be verified using Tempo consensus certificates.
+    pub verify_certificates: bool,
+    /// Consensus epoch length override for L1 chains without a built-in Tempo chain spec.
+    pub epoch_length: Option<std::num::NonZeroU64>,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
     /// Shared registry of tokens enabled for this zone.
@@ -531,192 +537,164 @@ impl L1Subscriber {
         }
     }
 
-    /// Determine the starting block number for backfill.
-    ///
-    /// The zone's persisted Tempo checkpoint is the authoritative source for
-    /// where ingestion resumes. A non-zero hash distinguishes an L1-anchored
-    /// block-zero genesis from the unanchored template.
-    pub(crate) fn resolve_start_block(&self) -> eyre::Result<u64> {
+    /// Resolve the persisted L1 checkpoint.
+    pub(crate) fn resolve_start_block(&self) -> eyre::Result<NumHash> {
         let local_checkpoint = self.local_state.latest_tempo_checkpoint()?;
         eyre::ensure!(
             local_checkpoint.hash != B256::ZERO,
             "zone genesis is not anchored to an L1 block"
         );
-        let local_tempo_block_number = local_checkpoint.number;
-        info!(local_tempo_block_number, "Resuming from local zone state");
-        Ok(local_tempo_block_number + 1)
+        info!(
+            local_tempo_block_number = local_checkpoint.number,
+            "Resuming from local zone state"
+        );
+        Ok(local_checkpoint)
     }
 
-    /// Resolve the first L1 block that has not already been ingested.
-    pub(crate) fn next_block_to_sync(&self) -> eyre::Result<u64> {
+    /// Resolve the trusted block immediately before the next L1 block to ingest.
+    pub(crate) fn next_block_to_sync(&self) -> eyre::Result<NumHash> {
         let resolved = self.resolve_start_block()?;
-        let queued = self
-            .deposit_sink
-            .last_enqueued()
-            .map(|last| last.number.saturating_add(1));
-        let observed = self
-            .config
-            .block_tracker
-            .latest()
-            .map(|last| last.number.saturating_add(1));
+        let queued = self.deposit_sink.last_enqueued();
+        let observed = self.config.block_tracker.latest();
 
-        let next = [Some(resolved), queued, observed]
-            .into_iter()
-            .flatten()
-            .max()
-            .expect("resolved checkpoint is always present");
+        let mut start_after = resolved;
+        for candidate in [queued, observed].into_iter().flatten() {
+            if candidate.number == start_after.number {
+                eyre::ensure!(
+                    candidate.hash == start_after.hash,
+                    "conflicting trusted L1 hashes at block {}: {} and {}",
+                    start_after.number,
+                    start_after.hash,
+                    candidate.hash
+                );
+            }
+            if candidate.number > start_after.number {
+                start_after = candidate;
+            }
+        }
 
         // Only the persisted zone checkpoint proves consumption.
         // Queue and observation cursors are fetch high-water marks.
         self.config
             .block_tracker
-            .initialize_consumed_through(resolved.saturating_sub(1));
-        Ok(next)
-    }
-
-    /// Return the block number referenced by the L1 `finalized` tag.
-    async fn finalized_block_number(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-    ) -> eyre::Result<u64> {
-        l1_provider
-            .get_header_by_number(BlockNumberOrTag::Finalized)
-            .await
-            .inspect_err(|_| self.subscriber_metrics.fetch_failures.increment(1))?
-            .map(|header| header.number())
-            .ok_or_else(|| eyre::eyre!("L1 finalized block is not available"))
-    }
-
-    /// Synchronize all missing blocks through the current finalized L1 head.
-    ///
-    /// Callers provide the next block number and receive the next cursor after
-    /// a successful sync.
-    pub(crate) async fn sync_finalized_once(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-        next_block: u64,
-    ) -> eyre::Result<u64> {
-        let finalized = self.finalized_block_number(l1_provider).await?;
-        if next_block > finalized {
-            self.record_seen_block(finalized, 0);
-            return Ok(next_block);
-        }
-
-        let blocks = finalized - next_block + 1;
-        self.record_seen_block(finalized, blocks);
+            .initialize_consumed_through(resolved.number);
         info!(
-            from = next_block,
-            to = finalized,
-            blocks,
-            "Synchronizing finalized L1 blocks"
+            number = start_after.number,
+            hash = %start_after.hash,
+            "Resuming verified finalized L1 stream from trusted checkpoint"
         );
-
-        let start = std::time::Instant::now();
-        self.backfill(l1_provider, next_block, finalized).await?;
-        self.subscriber_metrics
-            .backfill_duration_seconds
-            .record(start.elapsed().as_secs_f64());
-        self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
-        Ok(finalized.saturating_add(1))
+        Ok(start_after)
     }
 
-    /// Follow finalized L1 using transport-specific head notifications as wakeups.
-    ///
-    /// Header contents are intentionally ignored. Canonical block selection is
-    /// always based on the `finalized` tag read by [`Self::sync_finalized_once`].
-    pub(crate) async fn follow_finalized<S>(
+    /// Follow the RPC's finalized tag without consensus-certificate verification.
+    pub(crate) fn rpc_finalized_headers<'a, S>(
+        &self,
+        provider: DynProvider<TempoNetwork>,
+        start_after: NumHash,
+        triggers: S,
+    ) -> Pin<Box<dyn Stream<Item = eyre::Result<SealedHeader<TempoHeader>>> + Send + 'a>>
+    where
+        S: Stream<Item = eyre::Result<()>> + Send + Unpin + 'a,
+    {
+        let subscriber_metrics = self.subscriber_metrics.clone();
+        let state = (provider, start_after, start_after.number, triggers, false);
+        Box::pin(futures::stream::try_unfold(
+            state,
+            move |(provider, cursor, mut latest_finalized, mut triggers, mut wait_for_trigger)| {
+                let subscriber_metrics = subscriber_metrics.clone();
+                async move {
+                    loop {
+                        if cursor.number >= latest_finalized {
+                            if wait_for_trigger && triggers.try_next().await?.is_none() {
+                                return Ok(None);
+                            }
+                            let response = provider
+                                .get_header_by_number(BlockNumberOrTag::Finalized)
+                                .await
+                                .inspect_err(|_| subscriber_metrics.fetch_failures.increment(1))?
+                                .ok_or_else(|| {
+                                    eyre::eyre!("L1 finalized block is not available")
+                                })?;
+                            let finalized = validate_header_response(response)?;
+                            wait_for_trigger = true;
+                            if finalized.number() <= cursor.number {
+                                continue;
+                            }
+                            latest_finalized = finalized.number();
+                        }
+
+                        let number = cursor
+                            .number
+                            .checked_add(1)
+                            .ok_or_else(|| eyre::eyre!("L1 block number overflow"))?;
+                        let response = provider
+                            .get_header_by_number(number.into())
+                            .await
+                            .inspect_err(|_| subscriber_metrics.fetch_failures.increment(1))?
+                            .ok_or_else(|| eyre::eyre!("L1 header not found for block {number}"))?;
+                        let header = validate_header_response(response)?;
+                        eyre::ensure!(
+                            header.number() == number,
+                            "L1 RPC returned block {} for requested block {number}",
+                            header.number()
+                        );
+                        eyre::ensure!(
+                            header.parent_hash() == cursor.hash,
+                            "L1 parent hash mismatch at block {number}: expected {}, got {}",
+                            cursor.hash,
+                            header.parent_hash()
+                        );
+                        let next = header.num_hash();
+                        return Ok(Some((
+                            header,
+                            (provider, next, latest_finalized, triggers, true),
+                        )));
+                    }
+                }
+            },
+        ))
+    }
+
+    /// Fetch receipt-authenticated data for finalized headers and apply it in order.
+    pub(crate) async fn follow_headers<S>(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
-        triggers: S,
+        headers: S,
     ) -> eyre::Result<()>
     where
-        S: Stream<Item = eyre::Result<()>> + Send,
+        S: Stream<Item = eyre::Result<SealedHeader<TempoHeader>>> + Send,
     {
-        let mut triggers = Box::pin(triggers);
-        let mut next_block = self.next_block_to_sync()?;
-
-        // Subscribe before the initial sync so a head published while catching
-        // up remains queued as another trigger.
-        next_block = self.sync_finalized_once(l1_provider, next_block).await?;
-
-        while let Some(trigger) = triggers.next().await {
-            trigger?;
-            next_block = self.sync_finalized_once(l1_provider, next_block).await?;
-        }
-
-        Err(eyre::eyre!("L1 head notification stream ended"))
-    }
-
-    /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
-    ///
-    /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
-    /// parallel, then processes them sequentially (event extraction and enqueue).
-    /// Receipts are fetched by the corresponding block
-    /// hash and validated against the header's receipts root before processing.
-    #[instrument(skip(self, l1_provider), fields(from, to))]
-    async fn backfill(
-        &self,
-        l1_provider: &impl Provider<TempoNetwork>,
-        from: u64,
-        to: u64,
-    ) -> eyre::Result<()> {
-        use futures::stream;
-
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
         let block_tracker = self.config.block_tracker.clone();
-
-        let mut fetched = stream::iter(from..=to)
-            .map(move |block_number| {
-                let provider = l1_provider;
+        let mut fetched = Box::pin(headers)
+            .map(move |header| {
                 let subscriber_metrics = subscriber_metrics.clone();
                 let block_tracker = block_tracker.clone();
                 async move {
-                    block_tracker.wait_for_capacity(block_number).await?;
+                    let header = header?;
+                    let block = header.num_hash();
+                    block_tracker.wait_for_capacity(block.number).await?;
                     let start = std::time::Instant::now();
-                    let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let header_resp = async {
-                        provider
-                            .get_header_by_number(block_number.into())
-                            .await?
-                            .ok_or_else(|| {
-                                eyre::eyre!("L1 header not found for block {block_number}")
-                            })
-                    }
-                    .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
-                    let block_hash = header_resp.hash();
-                    let block = NumHash::new(block_number, block_hash);
-                    let expected_receipts_root = header_resp.receipts_root();
-                    let expected_logs_bloom = header_resp.logs_bloom();
                     let receipts = fetch_and_verify_receipts_for_header(
-                        provider,
+                        l1_provider,
                         block,
-                        expected_receipts_root,
-                        expected_logs_bloom,
+                        header.receipts_root(),
+                        header.logs_bloom(),
                     )
                     .await
-                    .inspect_err(|_| {
-                        fetch_failures.increment(1);
-                    })?;
-                    let elapsed = start.elapsed();
+                    .inspect_err(|_| subscriber_metrics.fetch_failures.increment(1))?;
                     debug!(
-                        block_number,
-                        %block_hash,
-                        elapsed_ms = elapsed.as_millis() as u64,
+                        block_number = block.number,
+                        block_hash = %block.hash,
+                        elapsed_ms = start.elapsed().as_millis() as u64,
                         receipts = receipts.len(),
-                        "Fetched and validated L1 block data"
+                        "Fetched and validated receipts for finalized L1 header"
                     );
-                    let header = header_resp.inner.inner;
                     Ok::<_, eyre::Report>((header, receipts))
                 }
             })
             .buffered(concurrency);
-
-        let mut processed = 0u64;
-        let backfill_start = std::time::Instant::now();
 
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
@@ -729,10 +707,9 @@ impl L1Subscriber {
                         self.subscriber_metrics.decode_fence_failures.increment(1);
                         FencedIngestionError::new(block_number, "portal event decoding", err)
                     })?;
-            self.record_seen_block(block_number, to.saturating_sub(block_number));
+            self.record_seen_block(block_number, 0);
 
-            let sealed = SealedHeader::seal_slow(header);
-            let anchor = sealed.num_hash();
+            let anchor = header.num_hash();
             // Publish the leadership transition _before_ the activation block becomes
             // consumable.
             if let Some(sink) = &self.config.leadership_sink {
@@ -757,7 +734,7 @@ impl L1Subscriber {
             }
             let appended = self
                 .deposit_sink
-                .enqueue(sealed, events.clone())
+                .enqueue(header, events.clone())
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
@@ -774,49 +751,63 @@ impl L1Subscriber {
             if !self.config.retain_observations {
                 self.config.block_tracker.prune_through(anchor.number);
             }
-            processed += 1;
-
-            if processed.is_multiple_of(100) {
-                let elapsed = backfill_start.elapsed();
-                let blocks_per_sec = processed as f64 / elapsed.as_secs_f64().max(0.001);
-                info!(
-                    processed,
-                    current_block = block_number,
-                    target = to,
-                    remaining = to - block_number,
-                    blocks_per_sec = format!("{blocks_per_sec:.1}"),
-                    "Backfill progress"
-                );
-            }
         }
 
-        let elapsed = backfill_start.elapsed();
-        info!(
-            from,
-            to,
-            blocks = to - from + 1,
-            elapsed_ms = elapsed.as_millis() as u64,
-            "Backfill complete"
-        );
-        Ok(())
+        Err(eyre::eyre!("finalized L1 header stream ended"))
     }
 
     /// Run the L1 subscriber until an RPC operation fails.
     ///
-    /// The subscriber follows only the L1 `finalized` tag. WebSocket
-    /// `newHeads` or HTTP block-filter updates are used as wakeups; each
-    /// notification ingests the missing finalized range in order.
+    /// When configured, finalized headers are authenticated through Tempo consensus
+    /// certificates. Otherwise, the subscriber trusts the RPC's finalized tag.
     ///
     /// [`Self::spawn`] retries transient errors and treats deterministic finalized-block
     /// ingestion failures as fatal.
     pub async fn run(&self) -> eyre::Result<()> {
         let provider = self.connect().await?;
-        let triggers = self.head_triggers(&provider).await?;
-        info!(
-            portal = %self.config.portal_address,
-            "Following finalized L1 blocks"
-        );
-        self.follow_finalized(&provider, triggers).await
+        let start_after = self.next_block_to_sync()?;
+
+        let headers: Pin<
+            Box<dyn Stream<Item = eyre::Result<SealedHeader<TempoHeader>>> + Send + '_>,
+        > = if self.config.verify_certificates {
+            let chain_id = provider.get_chain_id().await?;
+            let chain_spec = chainspec_from_chain_id(chain_id);
+            let epoch_length = self
+                .config
+                .epoch_length
+                .or_else(|| chain_spec.as_ref()?.info.epoch_length())
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "cannot determine the consensus epoch length for Tempo chain {chain_id}; \
+                         provide --l1.epoch-length"
+                    )
+                })?;
+            let mut config = FinalizedBlockStreamConfig::new(
+                start_after.hash,
+                chain_spec.and_then(|spec| spec.network_identity.clone()),
+                epoch_length,
+            );
+            config.fetch_concurrency = self.config.l1_fetch_concurrency.max(1);
+            let headers = FinalizedBlockStream::new(provider.clone(), config)
+                .await?
+                .map(|result| result.map_err(eyre::Report::new));
+            info!(
+                portal = %self.config.portal_address,
+                start_after_number = start_after.number,
+                start_after_hash = %start_after.hash,
+                "Following certificate-authenticated finalized L1 blocks"
+            );
+            Box::pin(headers)
+        } else {
+            warn!(
+                "L1 consensus certificate verification is disabled; trusting the finalized RPC \
+                 tag"
+            );
+            let triggers = self.head_triggers(&provider).await?;
+            self.rpc_finalized_headers(provider.clone(), start_after, triggers)
+        };
+
+        self.follow_headers(&provider, headers).await
     }
 
     /// Extract portal events and raw-cache mutation barriers from fetched receipts.
@@ -927,6 +918,21 @@ impl L1Subscriber {
             .lock()
             .invalidate_and_set_anchor(number, invalidated_accounts.iter().copied());
     }
+}
+
+fn validate_header_response(
+    response: tempo_alloy::rpc::TempoHeaderResponse,
+) -> eyre::Result<SealedHeader<TempoHeader>> {
+    let reported_hash = response.hash();
+    let header = SealedHeader::seal_slow(response.inner.inner);
+    eyre::ensure!(
+        header.hash() == reported_hash,
+        "L1 header {} reports hash {}, computed {}",
+        header.number(),
+        reported_hash,
+        header.hash()
+    );
+    Ok(header)
 }
 
 /// Fetch receipts for the L1 header by block hash and verify they match the

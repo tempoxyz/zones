@@ -50,7 +50,11 @@ use reth_transaction_pool::{
     Pool, PoolTransaction, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
-use std::{num::NonZeroU32, sync::Arc, time::Duration};
+use std::{
+    num::{NonZeroU32, NonZeroU64},
+    sync::Arc,
+    time::Duration,
+};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{DEV, TempoChainSpec, chainspec_from_chain_id};
 use tempo_evm::TempoInvalidTransaction;
@@ -234,6 +238,8 @@ impl ZoneNode {
         let l1_block_tracker = L1BlockTracker::default();
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
+            verify_certificates: false,
+            epoch_length: None,
             portal_address,
             enabled_tokens: enabled_tokens.clone(),
             l1_state_cache: l1_state_cache.clone(),
@@ -293,6 +299,13 @@ impl ZoneNode {
     /// against the shared queue — such as test harnesses — must opt back into retention.
     pub fn with_external_deposit_consumer(mut self) -> Self {
         self.external_deposit_consumer = true;
+        self
+    }
+
+    /// Verify finalized L1 headers using Tempo consensus certificates.
+    pub fn with_l1_certificate_verification(mut self, epoch_length: Option<NonZeroU64>) -> Self {
+        self.l1_config.verify_certificates = true;
+        self.l1_config.epoch_length = epoch_length;
         self
     }
 

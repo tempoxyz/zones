@@ -1,9 +1,7 @@
 //! L1 chain subscription and deposit extraction.
 //!
-//! Uses L1 block notifications to follow the finalized chain and extracts
-//! deposit events from the ZonePortal contract for each finalized block.
-//! WebSocket connections use `newHeads`; HTTP connections use block-filter
-//! polling.
+//! Follows the finalized Tempo chain, optionally verifies consensus certificates,
+//! and extracts deposit events from the ZonePortal contract for each block.
 //!
 //! The module is split into:
 //! - [`subscriber`] — the [`L1Subscriber`] background task and its config.

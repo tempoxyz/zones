@@ -1,6 +1,6 @@
 //! Tempo Zone CLI.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, num::NonZeroU64, path::PathBuf, sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
@@ -144,7 +144,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             // Replicate only durable blocks. Persist every block immediately so followers can
             // acknowledge each block without waiting for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
-            builder.config_mut().engine.memory_block_buffer_target = 0;
+            builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
         // Every promotable node constructs all the sequencer resources: activation is gated at
         // runtime by the leadership schedule, so a quorum follower must be able to become a
@@ -187,6 +187,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 args.private_rpc_max_auth_token_validity_secs,
             ),
         });
+        if args.l1_verify_certificates {
+            node = node.with_l1_certificate_verification(args.l1_epoch_length);
+        }
 
         if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
@@ -261,6 +264,20 @@ pub struct ZoneArgs {
     /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
     pub l1_rpc_url: String,
+
+    /// Verify finalized L1 blocks using Tempo consensus certificates.
+    #[arg(long = "l1.verify-certificates", env = "L1_VERIFY_CERTIFICATES")]
+    pub l1_verify_certificates: bool,
+
+    /// Consensus epoch length for certificate verification.
+    ///
+    /// Required unless the L1 is Presto or Moderato, whose values are built in.
+    #[arg(
+        long = "l1.epoch-length",
+        env = "L1_EPOCH_LENGTH",
+        requires = "l1_verify_certificates"
+    )]
+    pub l1_epoch_length: Option<NonZeroU64>,
 
     /// ZonePortal contract address on L1.
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
@@ -843,5 +860,46 @@ mod tests {
     fn l1_rpc_url_rejects_non_websocket_schemes() {
         assert!(validate_l1_rpc_url("http://localhost:8545").is_err());
         assert!(validate_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
+    }
+
+    #[test]
+    fn l1_certificate_verification_is_opt_in() {
+        let common = [
+            "tempo-zone",
+            "--l1.rpc-url",
+            "ws://localhost:8546",
+            "--l1.portal-address",
+            "0x0000000000000000000000000000000000000001",
+        ];
+
+        let default = ZoneArgsParser::try_parse_from(common).unwrap();
+        assert!(!default.zone.l1_verify_certificates);
+        assert_eq!(default.zone.l1_epoch_length, None);
+
+        let enabled =
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--l1.verify-certificates"]))
+                .unwrap();
+        assert!(enabled.zone.l1_verify_certificates);
+        assert_eq!(enabled.zone.l1_epoch_length, None);
+
+        let overridden = ZoneArgsParser::try_parse_from(common.into_iter().chain([
+            "--l1.verify-certificates",
+            "--l1.epoch-length",
+            "100",
+        ]))
+        .unwrap();
+        assert!(overridden.zone.l1_verify_certificates);
+        assert_eq!(
+            overridden.zone.l1_epoch_length,
+            std::num::NonZeroU64::new(100)
+        );
+
+        let error =
+            ZoneArgsParser::try_parse_from(common.into_iter().chain(["--l1.epoch-length", "100"]))
+                .unwrap_err();
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 }

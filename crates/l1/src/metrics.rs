@@ -2,16 +2,13 @@
 
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge, Histogram},
+    metrics::{Counter, Gauge},
 };
 
 /// Metrics emitted by the L1 subscriber / deposit ingestion pipeline.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_l1_subscriber")]
 pub(crate) struct L1SubscriberMetrics {
-    /// Duration of a backfill run in seconds.
-    pub backfill_duration_seconds: Histogram,
-
     /// Most recent finalized L1 block number observed by the subscriber.
     pub latest_l1_block_seen: Gauge,
 
