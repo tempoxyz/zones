@@ -614,7 +614,7 @@ where
 /// - [`start()`](Self::start) — connected to an external L1 via WebSocket URL
 type RpcApiFuture =
     Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>;
-type RpcApiFactory = dyn Fn(zone_node::rpc::PrivateRpcConfig) -> RpcApiFuture + Send + Sync;
+type RpcApiFactory = dyn Fn(zone_node::rpc::RedactedRpcConfig) -> RpcApiFuture + Send + Sync;
 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
@@ -768,10 +768,10 @@ impl ZoneTestNode {
             .expect("this test node was not started in multi-sequencer mode")
     }
 
-    /// Builds the real private RPC API backed by the node's EthHandlers.
+    /// Builds the real redacted RPC API backed by the node's EthHandlers.
     pub(crate) async fn rpc_api(
         &self,
-        config: zone_node::rpc::PrivateRpcConfig,
+        config: zone_node::rpc::RedactedRpcConfig,
     ) -> eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>> {
         (self.rpc_api_factory)(config).await
     }
@@ -1289,10 +1289,10 @@ impl ZoneTestNode {
             .parse()
             .unwrap();
 
-        // Build the real private RPC API while the handle is still concrete,
+        // Build the real redacted RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
-        let rpc_api_factory = Arc::new(move |config: zone_node::rpc::PrivateRpcConfig| {
+        let rpc_api_factory = Arc::new(move |config: zone_node::rpc::RedactedRpcConfig| {
             let eth_handlers = eth_handlers.clone();
             Box::pin(async move {
                 Ok(
@@ -3630,9 +3630,9 @@ pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, se
     );
 }
 
-// ============ Private RPC Test Utilities ============
+// ============ Redacted RPC Test Utilities ============
 
-/// Build a hex-encoded authorization token for the private zone RPC.
+/// Build a hex-encoded authorization token for the redacted zone RPC.
 ///
 /// Signs the token with the given signer and returns the hex string (no `0x` prefix)
 /// suitable for the `X-Authorization-Token` header.
@@ -3720,10 +3720,10 @@ fn build_keychain_auth_token(
     )
 }
 
-/// Send a JSON-RPC request to the private zone RPC and return the parsed response.
+/// Send a JSON-RPC request to the redacted zone RPC and return the parsed response.
 ///
 /// Returns the full JSON response body (including `jsonrpc`, `id`, `result`/`error`).
-async fn private_rpc_call(
+async fn redacted_rpc_call(
     url: &url::Url,
     method: &str,
     params: serde_json::Value,
@@ -3753,10 +3753,10 @@ async fn private_rpc_call(
     Ok(serde_json::from_str(&text)?)
 }
 
-/// Send a JSON-RPC request to the private zone RPC and return the HTTP status + body.
+/// Send a JSON-RPC request to the redacted zone RPC and return the HTTP status + body.
 ///
 /// Useful for testing authentication failures (401/403).
-async fn private_rpc_call_raw(
+async fn redacted_rpc_call_raw(
     url: &url::Url,
     method: &str,
     params: serde_json::Value,
@@ -3782,7 +3782,7 @@ async fn private_rpc_call_raw(
 }
 
 /// Send a JSON-RPC request WITHOUT any auth header.
-async fn private_rpc_call_no_auth(
+async fn redacted_rpc_call_no_auth(
     url: &url::Url,
     method: &str,
     params: serde_json::Value,
@@ -3805,39 +3805,39 @@ async fn private_rpc_call_no_auth(
     Ok((status, text))
 }
 
-/// Context for private RPC e2e tests.
+/// Context for redacted RPC e2e tests.
 ///
-/// Wraps a zone node with a running private RPC server in front, providing
+/// Wraps a zone node with a running redacted RPC server in front, providing
 /// helpers for authenticated and unauthenticated request testing.
-pub(crate) struct PrivateRpcTestCtx {
+pub(crate) struct RedactedRpcTestCtx {
     /// The underlying zone test node.
     pub zone: ZoneTestNode,
-    /// URL of the private RPC server (not the zone's direct HTTP endpoint).
-    pub private_rpc_url: url::Url,
-    /// The sequencer signer (gets full access on the private RPC).
+    /// URL of the redacted RPC server (not the zone's direct HTTP endpoint).
+    pub redacted_rpc_url: url::Url,
+    /// The sequencer signer (gets full access on the redacted RPC).
     pub sequencer_signer: alloy_signer_local::PrivateKeySigner,
-    /// Private RPC server configuration.
-    pub config: zone_node::rpc::PrivateRpcConfig,
+    /// Redacted RPC server configuration.
+    pub config: zone_node::rpc::RedactedRpcConfig,
     /// L1 fixture for injecting deposits.
     pub fixture: L1Fixture,
 }
 
-/// Private RPC e2e context backed by a real L1 node and deployed ZonePortal.
-pub(crate) struct PrivateRpcL1TestCtx {
-    ctx: PrivateRpcTestCtx,
+/// Redacted RPC e2e context backed by a real L1 node and deployed ZonePortal.
+pub(crate) struct RedactedRpcL1TestCtx {
+    ctx: RedactedRpcTestCtx,
     l1: L1TestNode,
     portal_address: Address,
 }
 
-impl Deref for PrivateRpcL1TestCtx {
-    type Target = PrivateRpcTestCtx;
+impl Deref for RedactedRpcL1TestCtx {
+    type Target = RedactedRpcTestCtx;
 
     fn deref(&self) -> &Self::Target {
         &self.ctx
     }
 }
 
-impl PrivateRpcL1TestCtx {
+impl RedactedRpcL1TestCtx {
     /// Returns the real L1 node for tests that require one.
     pub(crate) fn l1(&self) -> &L1TestNode {
         &self.l1
@@ -3849,7 +3849,7 @@ impl PrivateRpcL1TestCtx {
     }
 }
 
-impl PrivateRpcTestCtx {
+impl RedactedRpcTestCtx {
     /// Build an auth token for the sequencer.
     pub(crate) fn sequencer_token(&self) -> String {
         build_auth_token(
@@ -3904,14 +3904,14 @@ impl PrivateRpcTestCtx {
         )
     }
 
-    /// Send an authenticated JSON-RPC call to the private RPC server.
+    /// Send an authenticated JSON-RPC call to the redacted RPC server.
     pub(crate) async fn call(
         &self,
         method: &str,
         params: serde_json::Value,
         auth_token: &str,
     ) -> eyre::Result<serde_json::Value> {
-        private_rpc_call(&self.private_rpc_url, method, params, auth_token).await
+        redacted_rpc_call(&self.redacted_rpc_url, method, params, auth_token).await
     }
 
     /// Send a JSON-RPC call authenticated as the sequencer.
@@ -3942,7 +3942,7 @@ impl PrivateRpcTestCtx {
         params: serde_json::Value,
         auth_token: &str,
     ) -> eyre::Result<(reqwest::StatusCode, String)> {
-        private_rpc_call_raw(&self.private_rpc_url, method, params, auth_token).await
+        redacted_rpc_call_raw(&self.redacted_rpc_url, method, params, auth_token).await
     }
 
     /// Send a JSON-RPC call with no auth header, returning HTTP status + body.
@@ -3951,7 +3951,7 @@ impl PrivateRpcTestCtx {
         method: &str,
         params: serde_json::Value,
     ) -> eyre::Result<(reqwest::StatusCode, String)> {
-        private_rpc_call_no_auth(&self.private_rpc_url, method, params).await
+        redacted_rpc_call_no_auth(&self.redacted_rpc_url, method, params).await
     }
 
     /// Build an auth token with custom zone_id and chain_id (for negative testing).
@@ -3993,7 +3993,7 @@ impl PrivateRpcTestCtx {
         Ok(())
     }
 
-    /// Query `eth_getBalance` via the private RPC as a specific user.
+    /// Query `eth_getBalance` via the redacted RPC as a specific user.
     pub(crate) async fn get_balance_as_user(
         &self,
         address: Address,
@@ -4007,7 +4007,7 @@ impl PrivateRpcTestCtx {
         .await
     }
 
-    /// Query `eth_getBalance` via the private RPC as the sequencer.
+    /// Query `eth_getBalance` via the redacted RPC as the sequencer.
     pub(crate) async fn get_balance_as_sequencer(
         &self,
         address: Address,
@@ -4019,7 +4019,7 @@ impl PrivateRpcTestCtx {
         .await
     }
 
-    /// Query `eth_getTransactionCount` via the private RPC as a specific user.
+    /// Query `eth_getTransactionCount` via the redacted RPC as a specific user.
     pub(crate) async fn get_tx_count_as_user(
         &self,
         address: Address,
@@ -4093,38 +4093,38 @@ async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {
     Ok(chain_id.to())
 }
 
-async fn start_private_rpc_url(
+async fn start_redacted_rpc_url(
     zone: &ZoneTestNode,
-    config: zone_node::rpc::PrivateRpcConfig,
+    config: zone_node::rpc::RedactedRpcConfig,
 ) -> eyre::Result<url::Url> {
     let local_addr =
-        zone_node::rpc::start_private_rpc(config.clone(), zone.rpc_api(config).await?).await?;
+        zone_node::rpc::start_redacted_rpc(config.clone(), zone.rpc_api(config).await?).await?;
     Ok(format!("http://{local_addr}").parse()?)
 }
 
-fn build_private_rpc_ctx(
+fn build_redacted_rpc_ctx(
     zone: ZoneTestNode,
-    private_rpc_url: url::Url,
+    redacted_rpc_url: url::Url,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
-    config: zone_node::rpc::PrivateRpcConfig,
+    config: zone_node::rpc::RedactedRpcConfig,
     fixture: L1Fixture,
-) -> PrivateRpcTestCtx {
-    PrivateRpcTestCtx {
+) -> RedactedRpcTestCtx {
+    RedactedRpcTestCtx {
         zone,
-        private_rpc_url,
+        redacted_rpc_url,
         sequencer_signer,
         config,
         fixture,
     }
 }
 
-/// Start a zone node with a private RPC server for testing.
+/// Start a zone node with a redacted RPC server for testing.
 ///
 /// Returns a context with:
 /// - A running zone node with L1 state cache seeded
-/// - A private RPC server on a random port
+/// - A redacted RPC server on a random port
 /// - Sequencer credentials for testing access control
-pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTestCtx> {
+pub(crate) async fn start_zone_with_redacted_rpc() -> eyre::Result<RedactedRpcTestCtx> {
     let sequencer_signer = alloy_signer_local::PrivateKeySigner::random();
     let sequencer_address = sequencer_signer.address();
 
@@ -4146,7 +4146,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
 
     let chain_id = zone_chain_id(&zone).await?;
 
-    let config = zone_node::rpc::PrivateRpcConfig {
+    let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
         l1_rpc_url: DUMMY_L1_URL.to_string(),
         zone_rpc_url: zone.http_url().to_string(),
@@ -4157,30 +4157,30 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         zone_portal: Address::ZERO,
     };
 
-    let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
+    let redacted_rpc_url = start_redacted_rpc_url(&zone, config.clone()).await?;
 
-    Ok(build_private_rpc_ctx(
+    Ok(build_redacted_rpc_ctx(
         zone,
-        private_rpc_url,
+        redacted_rpc_url,
         sequencer_signer,
         config,
         fixture,
     ))
 }
 
-/// Start a zone with a private RPC server backed by a real L1 + ZonePortal.
-pub(crate) async fn start_zone_with_private_rpc_l1() -> eyre::Result<PrivateRpcL1TestCtx> {
-    start_zone_with_private_rpc_l1_inner().await
+/// Start a zone with a redacted RPC server backed by a real L1 + ZonePortal.
+pub(crate) async fn start_zone_with_redacted_rpc_l1() -> eyre::Result<RedactedRpcL1TestCtx> {
+    start_zone_with_redacted_rpc_l1_inner().await
 }
 
-/// Start a zone with a private RPC server backed by a real L1 and a portal
+/// Start a zone with a redacted RPC server backed by a real L1 and a portal
 /// with a registered encryption key.
-pub(crate) async fn start_zone_with_private_rpc_l1_with_encryption()
--> eyre::Result<PrivateRpcL1TestCtx> {
-    start_zone_with_private_rpc_l1_inner().await
+pub(crate) async fn start_zone_with_redacted_rpc_l1_with_encryption()
+-> eyre::Result<RedactedRpcL1TestCtx> {
+    start_zone_with_redacted_rpc_l1_inner().await
 }
 
-async fn start_zone_with_private_rpc_l1_inner() -> eyre::Result<PrivateRpcL1TestCtx> {
+async fn start_zone_with_redacted_rpc_l1_inner() -> eyre::Result<RedactedRpcL1TestCtx> {
     let l1 = L1TestNode::start().await?;
     let portal_address = l1.deploy_zone().await?;
 
@@ -4194,7 +4194,7 @@ async fn start_zone_with_private_rpc_l1_inner() -> eyre::Result<PrivateRpcL1Test
 
     let chain_id = zone_chain_id(&zone).await?;
 
-    let config = zone_node::rpc::PrivateRpcConfig {
+    let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
         l1_rpc_url: l1.http_url().to_string(),
         zone_rpc_url: zone.http_url().to_string(),
@@ -4205,13 +4205,13 @@ async fn start_zone_with_private_rpc_l1_inner() -> eyre::Result<PrivateRpcL1Test
         zone_portal: portal_address,
     };
 
-    let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
+    let redacted_rpc_url = start_redacted_rpc_url(&zone, config.clone()).await?;
     let sequencer_signer = l1.dev_signer();
 
-    Ok(PrivateRpcL1TestCtx {
-        ctx: build_private_rpc_ctx(
+    Ok(RedactedRpcL1TestCtx {
+        ctx: build_redacted_rpc_ctx(
             zone,
-            private_rpc_url,
+            redacted_rpc_url,
             sequencer_signer,
             config,
             L1Fixture::new(),

@@ -14,8 +14,8 @@ use crate::{
         route_events_to_generations, run_role_controller,
     },
     rpc::{
-        PublicZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
-        public_zone_rpc_module, rpc_connection_config, start_private_rpc,
+        OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
+        operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
 use alloy_primitives::Address;
@@ -176,14 +176,14 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
 }
 
-/// Configuration for the Zone private RPC server extension.
+/// Configuration for the Zone redacted RPC server extension.
 #[derive(Debug, Clone, Default)]
-pub struct ZonePrivateRpcConfig {
+pub struct ZoneRedactedRpcConfig {
     /// Port for RPC traffic.
-    pub private_rpc_port: u16,
-    /// Zone ID used by private RPC authentication.
+    pub redacted_rpc_port: u16,
+    /// Zone ID used by redacted RPC authentication.
     pub zone_id: u32,
-    /// Max duration for private RPC auth.
+    /// Max duration for redacted RPC auth.
     pub max_auth_token_validity: Duration,
 }
 
@@ -209,8 +209,8 @@ pub struct ZoneNode {
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
-    /// Private RPC config.
-    private_rpc_config: ZonePrivateRpcConfig,
+    /// Redacted RPC config.
+    redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Optional static Zone P2P networking config.
@@ -261,16 +261,16 @@ impl ZoneNode {
             portal_address,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
-            private_rpc_config: ZonePrivateRpcConfig::default(),
+            redacted_rpc_config: ZoneRedactedRpcConfig::default(),
             sequencer_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
         }
     }
 
-    /// Set the private RPC configuration.
-    pub fn with_private_rpc(mut self, config: ZonePrivateRpcConfig) -> Self {
-        self.private_rpc_config = config;
+    /// Set the redacted RPC configuration.
+    pub fn with_redacted_rpc(mut self, config: ZoneRedactedRpcConfig) -> Self {
+        self.redacted_rpc_config = config;
         self
     }
 
@@ -427,8 +427,8 @@ where
     l1_config: L1SubscriberConfig,
     /// ZonePortal address on L1.
     portal_address: Address,
-    /// Private RPC configuration.
-    private_rpc_config: ZonePrivateRpcConfig,
+    /// Redacted RPC configuration.
+    redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Static Zone P2P networking configuration.
@@ -456,7 +456,7 @@ where
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
         portal_address: Address,
-        private_rpc_config: ZonePrivateRpcConfig,
+        redacted_rpc_config: ZoneRedactedRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
@@ -473,7 +473,7 @@ where
             deposit_queue,
             l1_config,
             portal_address,
-            private_rpc_config,
+            redacted_rpc_config,
             sequencer_config,
             p2p_config,
             external_deposit_consumer,
@@ -642,10 +642,10 @@ where
         let pool = ctx.node.pool().clone();
         let engine_handle = ctx.beacon_engine_handle.clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
-        let public_rpc_slot = sequencer_rpc_slot.clone();
-        let public_rpc_provider = provider.clone();
-        let public_zone_api = PublicZoneApi::new(
-            self.private_rpc_config.zone_id,
+        let operator_rpc_slot = sequencer_rpc_slot.clone();
+        let operator_rpc_provider = provider.clone();
+        let operator_zone_api = OperatorZoneApi::new(
+            self.redacted_rpc_config.zone_id,
             chain_id,
             self.portal_address,
             l1_provider.clone(),
@@ -657,18 +657,18 @@ where
             .launch_add_ons_with(ctx, move |container| {
                 container
                     .modules
-                    .merge_configured(public_zone_api.into_rpc())?;
-                container.modules.merge_http(public_zone_rpc_module(
+                    .merge_configured(operator_zone_api.into_rpc())?;
+                container.modules.merge_http(operator_zone_rpc_module(
                     portal_address,
-                    public_rpc_slot,
-                    public_rpc_provider,
+                    operator_rpc_slot,
+                    operator_rpc_provider,
                 )?)?;
                 Ok(())
             })
             .await?;
 
-        Self::launch_private_rpc(
-            self.private_rpc_config,
+        Self::launch_redacted_rpc(
+            self.redacted_rpc_config,
             &handle,
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
@@ -1070,9 +1070,9 @@ where
         Ok(())
     }
 
-    /// Launch the private RPC server.
-    async fn launch_private_rpc(
-        config: ZonePrivateRpcConfig,
+    /// Launch the redacted RPC server.
+    async fn launch_redacted_rpc(
+        config: ZoneRedactedRpcConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
         l1_rpc_url: String,
         retry_connection_interval: Duration,
@@ -1084,9 +1084,9 @@ where
             .rpc_server_handles
             .rpc
             .http_url()
-            .expect("HTTP RPC server must be enabled for private RPC");
-        let private_rpc_config = zone_rpc::PrivateRpcConfig {
-            listen_addr: ([0, 0, 0, 0], config.private_rpc_port).into(),
+            .expect("HTTP RPC server must be enabled for redacted RPC");
+        let redacted_rpc_config = zone_rpc::RedactedRpcConfig {
+            listen_addr: ([0, 0, 0, 0], config.redacted_rpc_port).into(),
             l1_rpc_url,
             zone_rpc_url,
             retry_connection_interval,
@@ -1096,9 +1096,9 @@ where
             zone_portal: portal_address,
         };
         let api: Arc<dyn ZoneRpcApi> =
-            Arc::new(ZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
-        let local_addr = start_private_rpc(private_rpc_config, api).await?;
-        info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
+            Arc::new(ZoneRpc::new(eth_handlers, redacted_rpc_config.clone()).await?);
+        let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
+        info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
 
         Ok(())
     }
@@ -1234,7 +1234,7 @@ where
             self.deposit_queue.clone(),
             self.l1_config.clone(),
             self.portal_address,
-            self.private_rpc_config.clone(),
+            self.redacted_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,

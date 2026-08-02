@@ -2021,7 +2021,7 @@ mod tests {
             .await
             .unwrap();
 
-        // Public RPC submissions reach every quorum member, not just the active leader.
+        // Operator RPC submissions reach every quorum member, not just the active leader.
         let transaction_hash = B256::with_last_byte(7);
         let transaction = vec![0x76, 0x07];
         let forwarder = repeat(

@@ -19,4 +19,4 @@ mod settlement_attestation;
 mod tx_forwarding;
 
 pub use engine::{EngineExit, ProductionPermit, ZoneEngine};
-pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};
+pub use node::{ZoneExecutorBuilder, ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};

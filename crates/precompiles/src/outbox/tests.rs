@@ -235,7 +235,7 @@ impl Harness {
 
     fn finalize(&mut self, count: usize) -> PrecompileResult {
         self.call(
-            SEQUENCER,
+            Address::ZERO,
             ZoneOutboxAbi::finalizeWithdrawalBatchCall {
                 count: U256::from(count),
                 blockNumber: 0,
@@ -517,7 +517,7 @@ fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre
 }
 
 #[test]
-fn finalize_rejects_wrong_count_and_non_sequencer() -> eyre::Result<()> {
+fn finalize_rejects_wrong_count_and_non_system_caller() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness.request(100, ALICE, B256::ZERO)?;
     assert_revert(
@@ -526,7 +526,7 @@ fn finalize_rejects_wrong_count_and_non_sequencer() -> eyre::Result<()> {
     );
 
     let result = harness.call(
-        ALICE,
+        SEQUENCER,
         ZoneOutboxAbi::finalizeWithdrawalBatchCall {
             count: U256::ONE,
             blockNumber: 0,
@@ -709,7 +709,7 @@ fn encrypted_sender_count_and_length_are_validated() -> eyre::Result<()> {
     harness.request(1, BOB, B256::ZERO)?;
     assert_revert(
         harness.call(
-            SEQUENCER,
+            Address::ZERO,
             ZoneOutboxAbi::finalizeWithdrawalBatchCall {
                 count: U256::ONE,
                 blockNumber: 0,
@@ -721,7 +721,7 @@ fn encrypted_sender_count_and_length_are_validated() -> eyre::Result<()> {
     );
     assert_revert(
         harness.call(
-            SEQUENCER,
+            Address::ZERO,
             ZoneOutboxAbi::finalizeWithdrawalBatchCall {
                 count: U256::ONE,
                 blockNumber: 0,

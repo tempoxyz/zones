@@ -1,4 +1,4 @@
-//! JSON-RPC types for the private zone RPC.
+//! JSON-RPC types for the redacted zone RPC.
 
 use std::{future::Future, pin::Pin};
 
@@ -367,7 +367,7 @@ pub enum MethodTier {
     Public,
     /// Only available to the sequencer.
     Restricted,
-    /// Disabled on the private RPC.
+    /// Disabled on the redacted RPC.
     Disabled,
 }
 

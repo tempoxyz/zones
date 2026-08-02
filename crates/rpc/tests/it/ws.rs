@@ -13,10 +13,10 @@ use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
 };
 use tokio_tungstenite::{connect_async, tungstenite};
 use zone_rpc::{
-    PrivateRpcConfig,
+    RedactedRpcConfig,
     auth::build_token_fields,
     handlers::ZoneRpcApi,
-    start_private_rpc,
+    start_redacted_rpc,
     subscription::{BoxWsSubscriptionFut, WsSubscriptionStream},
     types::{BoxEyreFut, BoxFut, JsonRpcError},
 };
@@ -252,7 +252,7 @@ impl TestContext {
 
     async fn start_shared(api: Arc<MockZoneRpcApi>) -> Self {
         let signer = PrivateKeySigner::random();
-        let config = PrivateRpcConfig {
+        let config = RedactedRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
             l1_rpc_url: "http://127.0.0.1:1".to_string(),
             zone_rpc_url: "http://127.0.0.1:1".to_string(),
@@ -262,7 +262,7 @@ impl TestContext {
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: Address::ZERO,
         };
-        let addr = start_private_rpc(config, api).await.unwrap();
+        let addr = start_redacted_rpc(config, api).await.unwrap();
         Self { addr, signer }
     }
 

@@ -95,9 +95,9 @@ secp256k1_address = "0x3333333333333333333333333333333333333333"
 address = "follower-b.zone.internal:9200"
 
 [[nodes]]
-name = "public-rpc"
+name = "operator-rpc"
 ed25519_public_key = "0xrpc..."
-address = "public-rpc.zone.internal:9200"
+address = "operator-rpc.zone.internal:9200"
 rpc_only = true
 ```
 
@@ -208,9 +208,9 @@ channels. A follower sends canonical EIP-2718 transaction bytes only to the lead
 Tempo anchor it will consume — during a scheduled handoff that remains the outgoing leader
 until the activation boundary — and a node accepts transaction messages only from manifest
 members while it holds leadership somewhere in the retained transition schedule. An rpc-follower
-forwards on exactly this path: public RPC submissions reach the leader without exposing it.
+forwards on exactly this path: operator RPC submissions reach the leader without exposing it.
 
-This permits public RPC to be exposed on followers while keeping the leader's RPC private. The
+This permits operator RPC to be exposed on followers while keeping the leader's RPC private. The
 leader decodes and validates every forwarded transaction again, and it alone selects and orders
 transactions for blocks; follower validation is not trusted. Followers periodically retry live
 pool transactions, recovering from listener overflow and temporary leader disconnections.

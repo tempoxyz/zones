@@ -599,7 +599,7 @@ interface IZonePortal {
     /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
 
-    /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
+    /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
@@ -810,11 +810,11 @@ interface IZonePortal {
     /// @notice Resume deposits for a token. Only callable by admin.
     function resumeDeposits(address token) external;
 
-    /// @notice The zone's public RPC endpoint
+    /// @notice The zone's operator RPC endpoint
     /// @return The stored RPC URL, or empty string if unset
     function rpcUrl() external view returns (string memory);
 
-    /// @notice Update the zone's public RPC endpoint. Only callable by sequencer.
+    /// @notice Update the zone's operator RPC endpoint. Only callable by sequencer.
     /// @param rpcUrl The new RPC URL (may be empty to clear it)
     function setRpcUrl(string calldata rpcUrl) external;
 
