@@ -36,7 +36,7 @@ use tempo_primitives::{
     transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
 };
 use tempo_zone_contracts::{
-    ITempoState, IZoneInbox, TEMPO_STATE_ADDRESS, Unauthorized, ZONE_INBOX_ADDRESS,
+    IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
     ZONE_TOKEN_ADDRESS,
 };
 use tokio::time::sleep;
@@ -1304,7 +1304,7 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         zone_info["result"]["chainId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.chain_id),
     );
-    let tempo_block_number = ITempoState::new(TEMPO_STATE_ADDRESS, ctx.zone.provider())
+    let tempo_block_number = TempoState::new(TEMPO_STATE_ADDRESS, ctx.zone.provider())
         .tempoBlockNumber()
         .call()
         .await?;

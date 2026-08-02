@@ -843,9 +843,9 @@ Every non-genesis zone block must call `advanceTempo` exactly once as its first 
 
 The prover validates each read against the Tempo state root from the corresponding finalized header witness and includes Merkle proofs for every account and storage slot accessed by system precompiles during the batch.
 
-Native L1 storage reads charge a fixed 2,100 gas per slot before the node's cache or RPC provider is consulted. Cache hits and cache misses therefore have identical consensus gas behavior. This is separate from the ordinary local `SLOAD` charge for reading `TempoState.tempoBlockNumber`.
+Native L1 storage reads use transaction-local cold/warm pricing keyed by Tempo account and storage slot. The first native access to a key in a transaction charges 2,100 gas and subsequent accesses charge 100 gas. This consensus access set is independent of the node's block-versioned L1 value cache, so prefetching and cache state cannot affect gas usage. Reading `TempoState.tempoBlockNumber` to select the L1 anchor remains a separate ordinary local `SLOAD`.
 
-The EVM database overlay for mirrored TIP-403 storage uses ordinary EVM cold/warm `SLOAD` pricing and does not apply the native 2,100-gas tariff. Every L1-backed read is charged exactly once by either the native Tempo read path or the EVM overlay path.
+The EVM database overlay for mirrored TIP-403 storage uses REVM's ordinary cold/warm `SLOAD` pricing and does not apply the native tariff. Every L1-backed read is charged exactly once by either the native Tempo read path or the EVM overlay path.
 
 TIP-403 policy authorization on the zone executes Tempo's registry precompile at the canonical address over raw L1 registry storage pinned to the current finalized `tempoBlockNumber`.
 

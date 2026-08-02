@@ -377,7 +377,7 @@ fn advance_rejects_a_preselected_anchor_before_child_selection() -> eyre::Result
     let mut harness = Harness::new()?;
     harness
         .l1_state
-        .read_l1_storage(Address::ZERO, B256::ZERO, 0)?;
+        .read_l1_storage_unmetered(Address::ZERO, B256::ZERO, 0)?;
     let request_count = harness.l1.storage_requests().len();
 
     let result = harness.call(

@@ -53,14 +53,14 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
         self.inner
     }
 
-    /// Returns the execution-local L1 state shared with native precompiles.
+    /// Returns the execution-local L1 state shared with L1-backed precompiles.
     pub const fn l1_state(&self) -> &L1State<L1> {
         &self.l1
     }
 
     /// Clears bookkeeping that is valid only for the current transaction attempt.
     pub(crate) fn reset_transaction_state(&mut self) {
-        self.l1.reset_anchor();
+        self.l1.reset_transaction_state();
     }
 }
 
@@ -93,10 +93,9 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         slot: U256,
         anchor: u64,
     ) -> Result<U256, ZoneDbError<DB::Error>> {
-        // REVM has already charged the cold/warm SLOAD. Use the raw L1 path so the native
-        // L1-read tariff is not applied a second time.
+        // Unmetered path to avoid double-charging, as revm already charges L1OverlayDB SLOADs.
         self.l1
-            .read_l1_storage(address, B256::from(slot), anchor)
+            .read_l1_storage_unmetered(address, B256::from(slot), anchor)
             .map(Into::into)
             .map_err(ZoneDbError::L1State)
     }

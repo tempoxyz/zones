@@ -110,7 +110,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-TEMPO-HEADER-CONTINUITY` | `TempoState.finalizeTempo` only accepts headers whose parent hash and block number continue from the previous finalized Tempo header | 🔴 | Zone reads can bind to a forged or discontinuous Tempo history |
-| `TEMPO-ZONE-TEMPO-READ-METERING` | Native Tempo storage reads charge 2,100 gas each; EVM-overlay reads use ordinary cold/warm SLOAD pricing and are not charged twice | 🔴 | Unpriced native read loops or double-charged overlay reads can cause resource exhaustion or inconsistent gas accounting |
+| `TEMPO-ZONE-TEMPO-READ-METERING` | Native Tempo storage reads charge 2,100 gas on the first transaction-local access to an account/slot and 100 gas on subsequent accesses; EVM-overlay reads use ordinary cold/warm SLOAD pricing and are not charged twice | 🔴 | Unpriced native read loops or double-charged overlay reads can cause resource exhaustion or inconsistent gas accounting |
 | `TEMPO-ZONE-TEMPO-READ-ROOT` | Every Tempo storage read is proven against the `tempoStateRoot` bound at the block where the read occurs | 🔴 | Configuration, token, policy, or queue reads can be forged |
 | `TEMPO-ZONE-TIP403-INHERITANCE` | Zone token transfer, mint, and withdrawal paths enforce the TIP-403 policy inherited from the current finalized Tempo view | 🔴 | Blacklisted or unauthorized accounts can move, receive, mint, or withdraw funds |
 | `TEMPO-ZONE-TIP403-READONLY` | Zone-side TIP-403 registry/proxy cannot mutate policy state | 🟡 | A zone user or sequencer can diverge policy from Tempo |

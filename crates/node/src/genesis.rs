@@ -38,10 +38,9 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
 ///    L1 block that serves as the zone's genesis anchor. Without this, `finalizeTempo`
 ///    rejects the first L1 block for parent hash mismatch.
 ///
-/// 2. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and
-///    ZoneConfig deployed bytecode as `PUSH32` immutables. The template is compiled with
-///    `Address::ZERO`; without this patch, native L1 reads resolve state from
-///    `Address::ZERO` instead of the portal.
+/// 2. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and ZoneConfig
+///    deployed bytecode as `PUSH32` immutables. The template is compiled with `Address::ZERO`.
+///    Without this patch, L1 reads resolve state from `Address::ZERO` instead of the portal.
 ///
 /// 3. **Default fee token**: ZoneFeeManager stores the portal's creation-time token in canonical
 ///    Zone state so fee resolution does not depend on node-local L1 cache state.
