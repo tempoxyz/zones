@@ -21,7 +21,7 @@ use futures::future::try_join_all;
 use std::{collections::HashMap, time::Duration};
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
+    ITempoState, IZoneOutbox, TEMPO_STATE_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
     ZonePortal, ZonePortal::Role as PortalRole,
 };
 use zone_node::dev::{ProvisionConfig, provision_zone};
@@ -161,7 +161,7 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
     assert!(zone_block > 0, "zone L2 should have blocks");
 
     // tempoBlockHash should be non-zero (real L1 headers)
-    let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
+    let tempo_state = ITempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
     let tempo_hash = tempo_state.tempoBlockHash().call().await?;
     assert_ne!(
         tempo_hash,

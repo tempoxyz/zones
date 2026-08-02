@@ -40,7 +40,7 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
 ///
 /// 2. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and
 ///    ZoneConfig deployed bytecode as `PUSH32` immutables. The template is compiled with
-///    `Address::ZERO`; without this patch, `readTempoStorageSlot` reads L1 state from
+///    `Address::ZERO`; without this patch, native L1 reads resolve state from
 ///    `Address::ZERO` instead of the portal.
 ///
 /// 3. **Default fee token**: ZoneFeeManager stores the portal's creation-time token in canonical

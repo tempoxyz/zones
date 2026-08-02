@@ -93,6 +93,8 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         slot: U256,
         anchor: u64,
     ) -> Result<U256, ZoneDbError<DB::Error>> {
+        // REVM has already charged the cold/warm SLOAD. Use the raw L1 path so the native
+        // L1-read tariff is not applied a second time.
         self.l1
             .read_l1_storage(address, B256::from(slot), anchor)
             .map(Into::into)

@@ -500,7 +500,7 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::RedactedRpcConfig,
     l1_provider: DynProvider<TempoNetwork>,
-    tempo_state: tempo_zone_contracts::TempoState::TempoStateInstance<
+    tempo_state: tempo_zone_contracts::ITempoState::ITempoStateInstance<
         DynProvider<TempoNetwork>,
         TempoNetwork,
     >,
@@ -533,7 +533,8 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .await
             .wrap_err("failed to connect redacted RPC zone provider")?
             .erased();
-        let tempo_state = tempo_zone_contracts::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider);
+        let tempo_state =
+            tempo_zone_contracts::ITempoState::new(TEMPO_STATE_ADDRESS, zone_provider);
         let rpc = Self {
             eth,
             config,

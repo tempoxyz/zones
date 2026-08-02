@@ -8,7 +8,9 @@ use alloc::{
 use core::{cell::Cell, fmt};
 
 use alloy_primitives::{Address, B256, U256};
-use revm::{context::result::AnyError, precompile::PrecompileError};
+use revm::{
+    context::result::AnyError, interpreter::gas::COLD_SLOAD_COST, precompile::PrecompileError,
+};
 use tempo_precompiles::{
     error::TempoPrecompileError, zone_factory::ZonePortalStorage as ZonePortal,
 };
@@ -20,7 +22,9 @@ pub(crate) use tempo_precompiles::storage::*;
 
 /// L1 storage access needed by the anchored Zone database and native precompiles.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
-    /// Read `account[slot]` at `block_number` on Tempo L1.
+    /// Read `account[slot]` at `block_number` on Tempo L1 without gas accounting.
+    ///
+    /// **IMPORTANT:** Callers must charge the appropriate execution gas costs.
     fn read_l1_storage(
         &self,
         account: Address,
@@ -124,7 +128,7 @@ impl<P: L1StorageReader> L1State<P> {
         self.provider.read_l1_storage(account, slot, block_number)
     }
 
-    /// Reads and decodes a typed slot from an L1 account at the active anchor.
+    /// Reads, with gas metering, and decodes a typed slot from an L1 account at the active anchor.
     pub fn read_l1<T: Storable>(&self, slot: &Slot<T>) -> tempo_precompiles::Result<T> {
         let storage = L1Storage {
             l1: self,
@@ -217,6 +221,8 @@ struct L1Storage<'a, P> {
 
 impl<P: L1StorageReader> StorageOps for L1Storage<'_, P> {
     fn load(&self, slot: U256) -> tempo_precompiles::Result<U256> {
+        StorageCtx::default().deduct_gas(COLD_SLOAD_COST)?;
+
         let anchor = match self.l1.get_anchor() {
             Some(anchor) => anchor,
             None => TempoState::new().tempo_block_number.read()?,
@@ -237,10 +243,56 @@ impl<P: L1StorageReader> StorageOps for L1Storage<'_, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_utils::MockL1Reader;
+    use crate::test_utils::{MockL1Reader, test_context, test_storage_provider};
 
     fn read(l1: &L1State<MockL1Reader>, anchor: u64) -> Result<B256, L1StateError> {
         l1.read_l1_storage(Address::ZERO, B256::ZERO, anchor)
+    }
+
+    #[test]
+    fn raw_l1_read_is_unmetered() -> eyre::Result<()> {
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        let gas_before = storage.gas_used();
+
+        StorageCtx::enter(&mut storage, || {
+            l1.read_l1_storage(Address::ZERO, B256::ZERO, 10)
+        })?;
+
+        assert_eq!(storage.gas_used() - gas_before, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_l1_read_charges_per_underlying_slot() -> eyre::Result<()> {
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+        let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
+        l1.advance_anchor(9, 10).unwrap();
+        let slot = Slot::<B256>::new(U256::ZERO, Address::ZERO);
+        let gas_before = storage.gas_used();
+
+        StorageCtx::enter(&mut storage, || l1.read_l1(&slot))?;
+
+        assert_eq!(storage.gas_used() - gas_before, COLD_SLOAD_COST);
+        Ok(())
+    }
+
+    #[test]
+    fn typed_l1_read_out_of_gas_halts_before_provider_fetch() -> eyre::Result<()> {
+        let mut ctx = test_context();
+        let mut storage = test_storage_provider(&mut ctx, COLD_SLOAD_COST - 1, false);
+        let reader = MockL1Reader::default();
+        let l1 = L1State::new(reader.clone(), Address::ZERO);
+        l1.advance_anchor(9, 10).unwrap();
+        let slot = Slot::<B256>::new(U256::ZERO, Address::ZERO);
+
+        let result = StorageCtx::enter(&mut storage, || l1.read_l1(&slot));
+
+        assert!(matches!(result, Err(TempoPrecompileError::OutOfGas)));
+        assert!(reader.storage_requests().is_empty());
+        Ok(())
     }
 
     #[test]

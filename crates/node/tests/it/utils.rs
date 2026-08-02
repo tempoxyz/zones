@@ -826,9 +826,9 @@ impl ZoneTestNode {
 
     /// Reads `tempoBlockNumber` from the L2 `TempoState` predeploy right now.
     pub(crate) async fn tempo_block_number(&self) -> eyre::Result<u64> {
-        use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState};
+        use tempo_zone_contracts::{ITempoState, TEMPO_STATE_ADDRESS};
 
-        Ok(TempoState::new(TEMPO_STATE_ADDRESS, self.provider())
+        Ok(ITempoState::new(TEMPO_STATE_ADDRESS, self.provider())
             .tempoBlockNumber()
             .call()
             .await?)
@@ -842,9 +842,9 @@ impl ZoneTestNode {
         target: u64,
         timeout: Duration,
     ) -> eyre::Result<u64> {
-        use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState};
+        use tempo_zone_contracts::{ITempoState, TEMPO_STATE_ADDRESS};
 
-        let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, self.provider());
+        let tempo_state = ITempoState::new(TEMPO_STATE_ADDRESS, self.provider());
         poll_until(
             timeout,
             DEFAULT_POLL,
@@ -915,14 +915,14 @@ impl ZoneTestNode {
         after_block: u64,
         timeout: Duration,
     ) -> eyre::Result<u64> {
-        use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, TempoState};
+        use tempo_zone_contracts::{ITempoState, TEMPO_STATE_ADDRESS};
 
         let provider = self.provider();
-        let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, &provider);
+        let tempo_state = ITempoState::new(TEMPO_STATE_ADDRESS, &provider);
 
         let filter = Filter::new()
             .address(TEMPO_STATE_ADDRESS)
-            .event_signature(TempoState::TempoBlockFinalized::SIGNATURE_HASH);
+            .event_signature(ITempoState::TempoBlockFinalized::SIGNATURE_HASH);
 
         poll_until(
             timeout,
@@ -936,7 +936,7 @@ impl ZoneTestNode {
                     // Check logs first — fast path when events already emitted
                     let logs = provider.get_logs(filter).await?;
                     for log in logs.iter().rev() {
-                        if let Ok(ev) = TempoState::TempoBlockFinalized::decode_log(&log.inner)
+                        if let Ok(ev) = ITempoState::TempoBlockFinalized::decode_log(&log.inner)
                             && ev.blockNumber > after_block
                         {
                             // Confirm on-chain state matches
@@ -4268,8 +4268,8 @@ impl L1Fixture {
     /// via the TempoState precompile.
     ///
     /// Without a real L1, the precompile would fail with a hard error on cache miss.
-    /// This seeds the cache so that `readTempoStorageSlot(portal, slot)` succeeds
-    /// for each block we plan to inject.
+    /// This seeds the cache so that native Tempo L1 handler reads succeed for each
+    /// block we plan to inject.
     pub(crate) fn seed_l1_cache(
         &self,
         cache_handle: &L1StateCache,
