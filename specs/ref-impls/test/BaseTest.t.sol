@@ -152,6 +152,12 @@ contract BaseTest is Test {
         );
 
         _mockTokenPolicyMigration(_PATH_USD, true);
+
+        vm.mockCall(
+            ZONE_FACTORY_ADDRESS,
+            abi.encodeWithSelector(IZoneFactory.isZonePortal.selector),
+            abi.encode(false)
+        );
     }
 
     function _mockTokenPolicyMigration(address token, bool isSet) internal {
@@ -237,11 +243,6 @@ contract BaseTest is Test {
                     rpcUrl: rpcUrl
                 })
             )
-        );
-        vm.mockCall(
-            ZONE_FACTORY_ADDRESS,
-            abi.encodeWithSelector(IZoneFactory.isZonePortal.selector),
-            abi.encode(false)
         );
         vm.mockCall(
             ZONE_FACTORY_ADDRESS,
