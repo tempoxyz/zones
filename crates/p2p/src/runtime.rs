@@ -1053,8 +1053,8 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
-        BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, spawn_p2p,
-        validate_ip_check_configuration,
+        BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, P2pHandle,
+        P2pHandleParts, spawn_p2p, validate_ip_check_configuration,
     };
     use crate::{
         P2pNetworkId, ZoneManifest,
@@ -1158,6 +1158,32 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
         })
+    }
+
+    /// Stop a peer that may still be receiving traffic.
+    ///
+    /// Unlike [`P2pHandle::shutdown`], this keeps the event receiver alive until the runtime
+    /// observes cancellation, so an in-flight `BlockReceived` cannot fail the runtime with
+    /// "P2P event channel closed" during mid-test peer restarts.
+    async fn shutdown_while_receiving(handle: P2pHandle) -> eyre::Result<()> {
+        let P2pHandleParts {
+            shutdown,
+            stopped,
+            thread,
+            commands,
+            events,
+        } = handle.into_parts();
+        shutdown.cancel();
+        drop(commands);
+        let stopped_result = stopped.await;
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .map_err(|err| eyre::eyre!("failed joining P2P runtime thread: {err}"))?
+            .map_err(|_| eyre::eyre!("P2P runtime thread panicked"))?;
+        drop(events);
+        stopped_result
+            .map_err(|err| eyre::eyre!("P2P runtime dropped its completion channel: {err}"))?
+            .map_err(|err| eyre::eyre!("P2P runtime failed: {err}"))
     }
 
     /// Drain events for `duration`, failing if any of them satisfies `forbidden`.
@@ -2248,6 +2274,333 @@ mod tests {
 
         for handle in handles {
             handle.shutdown().await.unwrap();
+        }
+    }
+
+    /// A quorum follower that is shut down and respawned with the same identity and listen
+    /// address must remesh and resume receiving the leader's live block broadcasts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn follower_remeshes_after_shutdown_and_respawn() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [
+            ed25519_identity(61),
+            ed25519_identity(62),
+            ed25519_identity(63),
+        ];
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 61);
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let network_id =
+            P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let leader_peer = identities[0].ed25519_public_key();
+
+        let spawn_node = |index: usize| {
+            spawn_p2p(
+                P2pConfig {
+                    manifest: manifest.clone(),
+                    ed25519_identity: ed25519_identity(index as u64 + 61),
+                    secp256k1_identity: Some(secp256k1_identity(index as u64 + 61)),
+                    listen: addresses[index],
+                    bypass_ip_check: false,
+                    leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+                },
+                network_id,
+            )
+            .unwrap()
+        };
+
+        let leader = spawn_node(0);
+        let mut follower_a = spawn_node(1);
+        let mut follower_b = spawn_node(2);
+
+        let initial_block = vec![0xf8, 0x01, 0x80];
+        let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
+        let initial_broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(initial_block.clone()),
+        );
+        for (label, handle) in [
+            ("follower-a", &mut follower_a),
+            ("follower-b", &mut follower_b),
+        ] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        leader_ed25519_public_key,
+                        block: received,
+                    }) = handle.events_mut().recv().await
+                    {
+                        assert_eq!(leader_ed25519_public_key, leader_peer);
+                        assert_eq!(received, initial_block);
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{label} did not receive the initial leader block"));
+        }
+        initial_broadcaster.abort();
+
+        tokio::time::timeout(Duration::from_secs(10), shutdown_while_receiving(follower_b))
+            .await
+            .expect("stopped follower did not shut down")
+            .expect("stopped follower runtime failed");
+
+        // While the peer is down, the remaining follower must keep receiving broadcasts.
+        let offline_block = vec![0xf8, 0x02, 0x80];
+        let offline_broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(offline_block.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::BlockReceived {
+                    leader_ed25519_public_key,
+                    block: received,
+                }) = follower_a.events_mut().recv().await
+                    && leader_ed25519_public_key == leader_peer
+                    && received == offline_block
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("remaining follower did not receive blocks while the peer was shut down");
+        offline_broadcaster.abort();
+
+        // Listen-port reuse can race the OS briefly after shutdown; retry spawn if needed.
+        let mut follower_b = None;
+        for attempt in 0..10 {
+            match spawn_p2p(
+                P2pConfig {
+                    manifest: manifest.clone(),
+                    ed25519_identity: ed25519_identity(63),
+                    secp256k1_identity: Some(secp256k1_identity(63)),
+                    listen: addresses[2],
+                    bypass_ip_check: false,
+                    leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+                },
+                network_id,
+            ) {
+                Ok(handle) => {
+                    follower_b = Some(handle);
+                    break;
+                }
+                Err(err) => {
+                    assert!(
+                        attempt < 9,
+                        "respawned follower failed to bind after retries: {err}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        let mut follower_b = follower_b.expect("respawned follower handle");
+
+        let remesh_block = vec![0xf8, 0x03, 0x80];
+        let remesh_broadcaster = repeat(
+            leader_commands,
+            P2pCommand::BroadcastBlock(remesh_block.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(P2pEvent::BlockReceived {
+                    leader_ed25519_public_key,
+                    block: received,
+                }) = follower_b.events_mut().recv().await
+                    && leader_ed25519_public_key == leader_peer
+                    && received == remesh_block
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("respawned follower did not remesh and receive subsequent leader blocks");
+        remesh_broadcaster.abort();
+
+        for handle in [leader, follower_a, follower_b] {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
+        }
+    }
+
+    /// Unlike the permanent offline-leader tests, this covers recovery: followers mesh while
+    /// the leader is down, then remesh with the leader once it comes online.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mesh_recovers_when_leader_comes_online_after_being_offline() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [
+            ed25519_identity(71),
+            ed25519_identity(72),
+            ed25519_identity(73),
+        ];
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 71);
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let network_id =
+            P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let leader_peer = identities[0].ed25519_public_key();
+        let sender_peer = identities[1].ed25519_public_key();
+
+        // Spawn only the followers first — same shape as the permanent offline-leader tests.
+        let mut followers = [1_usize, 2]
+            .map(|index| {
+                spawn_p2p(
+                    P2pConfig {
+                        manifest: manifest.clone(),
+                        ed25519_identity: ed25519_identity(index as u64 + 71),
+                        secp256k1_identity: Some(secp256k1_identity(index as u64 + 71)),
+                        listen: addresses[index],
+                        bypass_ip_check: false,
+                        leadership: crate::LeadershipSchedule::seeded(
+                            manifest.bootstrap_leadership(),
+                        ),
+                    },
+                    network_id,
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        for handle in &mut followers {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    handle.events_mut().recv().await,
+                    Some(P2pEvent::Started { .. })
+                ) {}
+            })
+            .await
+            .expect("follower P2P runtime did not start");
+        }
+
+        let offline_transaction = vec![0x76, 0x01];
+        let offline_forwarder = repeat(
+            followers[0].parts.as_ref().unwrap().commands.clone(),
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(1),
+                transaction: offline_transaction.clone(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key,
+                    transaction: received,
+                }) = followers[1].events_mut().recv().await
+                {
+                    assert_eq!(follower_ed25519_public_key, sender_peer);
+                    assert_eq!(received, offline_transaction);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("followers did not exchange transactions while the leader was offline");
+        offline_forwarder.abort();
+
+        let mut leader = spawn_p2p(
+            P2pConfig {
+                manifest: manifest.clone(),
+                ed25519_identity: ed25519_identity(71),
+                secp256k1_identity: Some(secp256k1_identity(71)),
+                listen: addresses[0],
+                bypass_ip_check: false,
+                leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+            },
+            network_id,
+        )
+        .unwrap();
+
+        let block = vec![0xf8, 0x01, 0x80];
+        let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
+        let broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(block.clone()),
+        );
+        for (index, handle) in followers.iter_mut().enumerate() {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        leader_ed25519_public_key,
+                        block: received,
+                    }) = handle.events_mut().recv().await
+                        && leader_ed25519_public_key == leader_peer
+                        && received == block
+                    {
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("follower-{index} did not receive blocks after the leader came online")
+            });
+        }
+        broadcaster.abort();
+
+        let online_transaction = vec![0x76, 0x02];
+        let online_forwarder = repeat(
+            followers[0].parts.as_ref().unwrap().commands.clone(),
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(2),
+                transaction: online_transaction.clone(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key,
+                    transaction: received,
+                }) = leader.events_mut().recv().await
+                    && follower_ed25519_public_key == sender_peer
+                    && received == online_transaction
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive a forwarded transaction after coming online");
+        online_forwarder.abort();
+
+        for handle in std::iter::once(leader).chain(followers) {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
         }
     }
 }
