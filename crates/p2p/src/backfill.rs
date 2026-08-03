@@ -10,8 +10,8 @@ use commonware_p2p::{Recipients, Sender as _, authenticated::lookup};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
-use crate::{LeadershipSchedule, P2pPeerId, PeerTip};
 use crate::{
+    LeadershipSchedule, P2pPeerId, PeerTip,
     protocol::{RequestFrame, ResponseFrame},
     routing::{RoutingMembership, RoutingPolicy},
 };
