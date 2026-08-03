@@ -30,8 +30,7 @@ struct L1BlockObservation {
 /// `advanceTempo`. The tracker also provides backpressure for the L1 subscriber: before fetching
 /// a block, the subscriber waits for capacity relative to the last checkpoint released by the
 /// Zone consumer. Queue-backed subscribers therefore retain observations until block production
-/// or follower import calls [`L1BlockTracker::prune_through`]. Sink-less observers have no Zone
-/// consumer and release each observation after applying its L1-derived state.
+/// or follower import calls [`L1BlockTracker::prune_through`].
 ///
 /// This tracker deliberately assumes observed L1 blocks do not reorg: conflicting or
 /// non-contiguous observations are errors.
@@ -94,7 +93,7 @@ impl L1BlockTracker {
         Ok(())
     }
 
-    /// Return the next L1 height the observer needs to retain.
+    /// Return the next L1 height the subscriber needs to retain.
     pub fn next_observation_number(&self) -> Option<u64> {
         let state = self.state.read();
         state
@@ -294,36 +293,6 @@ pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
     fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash>;
 }
 
-/// Optional sink for finalized deposit-bearing L1 blocks.
-///
-/// Sequencers and P2P replicas retain a queue so blocks can be produced or validated later.
-/// Observer-only nodes still apply finalized events to their caches, but retain no queue.
-#[derive(Debug, Clone)]
-pub(crate) enum DepositSink {
-    Queue(DepositQueue),
-    Observer,
-}
-
-impl DepositSink {
-    fn last_enqueued(&self) -> Option<NumHash> {
-        match self {
-            Self::Queue(queue) => queue.last_enqueued(),
-            Self::Observer => None,
-        }
-    }
-
-    fn enqueue(
-        &self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-    ) -> eyre::Result<bool> {
-        match self {
-            Self::Queue(queue) => queue.try_enqueue_sealed(header, events),
-            Self::Observer => Ok(false),
-        }
-    }
-}
-
 struct ProviderLocalTempoCheckpointReader<P> {
     provider: P,
 }
@@ -343,8 +312,8 @@ where
 pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
-    /// Optional deposit sink. P2P members retain it so follower queues stay warm.
-    pub(crate) deposit_sink: DepositSink,
+    /// Finalized L1 blocks retained until a Zone consumer processes them.
+    pub(crate) deposit_queue: DepositQueue,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
@@ -409,45 +378,12 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        Self::spawn_inner(
-            config,
-            local_state_provider,
-            DepositSink::Queue(deposit_queue),
-            task_executor,
-        );
-    }
-
-    /// Create and spawn an observer that advances finalized L1-derived caches without
-    /// retaining deposit blocks.
-    pub fn spawn_observer<P>(
-        config: L1SubscriberConfig,
-        local_state_provider: P,
-        task_executor: reth_tasks::Runtime,
-    ) where
-        P: StateProviderFactory + Clone + Send + Sync + 'static,
-    {
-        Self::spawn_inner(
-            config,
-            local_state_provider,
-            DepositSink::Observer,
-            task_executor,
-        );
-    }
-
-    fn spawn_inner<P>(
-        config: L1SubscriberConfig,
-        local_state_provider: P,
-        deposit_sink: DepositSink,
-        task_executor: reth_tasks::Runtime,
-    ) where
-        P: StateProviderFactory + Clone + Send + Sync + 'static,
-    {
         let subscriber = Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
-            deposit_sink,
+            deposit_queue,
             subscriber_metrics: Default::default(),
         };
 
@@ -561,7 +497,7 @@ impl L1Subscriber {
     pub(crate) fn next_block_to_sync(&self) -> eyre::Result<u64> {
         let resolved = self.resolve_start_block()?;
         let queued = self
-            .deposit_sink
+            .deposit_queue
             .last_enqueued()
             .map(|last| last.number.saturating_add(1));
         let observed = self
@@ -777,8 +713,8 @@ impl L1Subscriber {
                 }
             }
             let appended = self
-                .deposit_sink
-                .enqueue(sealed, events.clone())
+                .deposit_queue
+                .try_enqueue_sealed(sealed, events.clone())
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
@@ -791,12 +727,6 @@ impl L1Subscriber {
             self.update_l1_state_anchor(block_number, &invalidated);
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
-            }
-            // Queue-backed subscribers are backpressured by the tracker until their Zone
-            // consumer confirms the corresponding queue entry and prunes this observation.
-            // A sink-less observer has no such consumer, so release its observation immediately.
-            if matches!(&self.deposit_sink, DepositSink::Observer) {
-                self.config.block_tracker.prune_through(anchor.number);
             }
             processed += 1;
 

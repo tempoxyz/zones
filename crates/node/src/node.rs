@@ -304,9 +304,8 @@ impl ZoneNode {
 
     /// Declare that a consumer outside this builder drains [`Self::deposit_queue`].
     ///
-    /// Without a sequencer or P2P config the node assumes nothing consumes deposits and
-    /// launches a sink-less L1 observer. Callers that drive their own [`crate::ZoneEngine`]
-    /// against the shared queue — such as test harnesses — must opt back into retention.
+    /// Callers that drive their own [`crate::ZoneEngine`] against the shared queue — such as test
+    /// harnesses — must opt in so node startup knows the Zone chain can advance.
     pub fn with_external_deposit_consumer(mut self) -> Self {
         self.external_deposit_consumer = true;
         self
@@ -517,6 +516,13 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        eyre::ensure!(
+            self.sequencer_config.is_some()
+                || self.p2p_config.is_some()
+                || self.external_deposit_consumer,
+            "no Zone chain advancement mechanism configured: enable a sequencer, configure P2P, or register an external deposit consumer"
+        );
+
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -563,7 +569,13 @@ where
             }));
         }
 
-        self.spawn_l1_subscriber(&ctx);
+        L1Subscriber::spawn(
+            self.l1_config.clone(),
+            ctx.node.provider().clone(),
+            self.deposit_queue.clone(),
+            ctx.node.task_executor().clone(),
+        );
+        info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
         let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
@@ -1159,33 +1171,6 @@ where
         }
 
         Ok(())
-    }
-
-    /// Spawn shared L1 observation.
-    ///
-    /// Sequencers, P2P replicas, and externally driven queue consumers retain finalized blocks
-    /// in the deposit queue. A node with none of those only maintains its L1-derived caches and
-    /// must not accumulate an unconsumed queue.
-    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
-        if self.sequencer_config.is_some()
-            || self.p2p_config.is_some()
-            || self.external_deposit_consumer
-        {
-            L1Subscriber::spawn(
-                self.l1_config.clone(),
-                ctx.node.provider().clone(),
-                self.deposit_queue.clone(),
-                ctx.node.task_executor().clone(),
-            );
-            info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
-        } else {
-            L1Subscriber::spawn_observer(
-                self.l1_config.clone(),
-                ctx.node.provider().clone(),
-                ctx.node.task_executor().clone(),
-            );
-            info!(target: "reth::cli", "L1 observer started without a deposit sink");
-        }
     }
 
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
