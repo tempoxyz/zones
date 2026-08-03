@@ -520,10 +520,7 @@ async fn handle_ws_session(
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (notifications, mut outbound) = mpsc::channel::<String>(MAX_WS_OUTBOUND_QUEUE);
-    let (close_session, mut close_session_rx) = watch::channel(false);
-    let token_expiry = tokio::time::sleep(duration_until_unix_timestamp(auth.expires_at));
-    tokio::pin!(token_expiry);
-    let mut keychain_recheck = tokio::time::interval(Duration::from_secs(1));
+    let (close_session, close_session_rx) = watch::channel(false);
     let writer = tokio::spawn(async move {
         while let Some(message) = outbound.recv().await {
             if ws_sender.send(Message::Text(message.into())).await.is_err() {
@@ -533,75 +530,86 @@ async fn handle_ws_session(
     });
 
     let mut session = WsSession::default();
+    let terminate_connection = async {
+        let token_expiry = tokio::time::sleep(duration_until_unix_timestamp(auth.expires_at));
+        tokio::pin!(token_expiry);
+        let mut keychain_recheck = tokio::time::interval(Duration::from_secs(1));
+        let mut close_session_rx = close_session_rx;
 
-    loop {
-        let msg = tokio::select! {
-            biased;
-            _ = &mut token_expiry => break,
-            _ = close_session_rx.changed() => break,
-            _ = keychain_recheck.tick(), if auth.keychain_key_id.is_some() => {
-                // Revalidation may be slow; allow token expiry / forced close to
-                // interrupt it so those deadlines are not delayed by a hung RPC.
-                let still_valid = tokio::select! {
-                    biased;
-                    _ = &mut token_expiry => false,
-                    _ = close_session_rx.changed() => false,
-                    valid = keychain_auth_still_valid(&auth, &state) => valid,
-                };
-                if !still_valid {
-                    break;
-                }
-                continue;
-            }
-            msg = ws_receiver.next() => match msg {
-                Some(msg) => msg,
-                None => break,
-            },
-        };
-
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Binary(b)) => match std::str::from_utf8(&b) {
-                Ok(s) => s.into(),
-                Err(_) => {
-                    if !try_queue_notification(
-                        &notifications,
-                        &close_session,
-                        serde_json::to_string(&JsonRpcResponse::error(
-                            Value::Null,
-                            JsonRpcError::parse_error("invalid UTF-8"),
-                        ))
-                        .expect("JsonRpcResponse serialization is infallible"),
-                    ) {
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut token_expiry => break,
+                _ = close_session_rx.changed() => break,
+                _ = keychain_recheck.tick(), if auth.keychain_key_id.is_some() => {
+                    // Revalidation may be slow; allow token expiry / forced close to
+                    // interrupt it so those deadlines are not delayed by a hung RPC.
+                    let still_valid = tokio::select! {
+                        biased;
+                        _ = &mut token_expiry => false,
+                        _ = close_session_rx.changed() => false,
+                        valid = keychain_auth_still_valid(&auth, &state) => valid,
+                    };
+                    if !still_valid {
                         break;
                     }
-                    continue;
                 }
-            },
-            Ok(Message::Close(_)) => break,
-            Ok(_) => continue, // Ping/Pong handled by axum
-            Err(e) => {
-                warn!(target: "zone::rpc", err = %e, "ws recv error");
+            }
+        }
+    };
+    let handle_messages = async {
+        loop {
+            let text = match ws_receiver.next().await {
+                Some(Ok(Message::Text(text))) => text,
+                Some(Ok(Message::Binary(bytes))) => match std::str::from_utf8(&bytes) {
+                    Ok(text) => text.into(),
+                    Err(_) => {
+                        if !try_queue_notification(
+                            &notifications,
+                            &close_session,
+                            serde_json::to_string(&JsonRpcResponse::error(
+                                Value::Null,
+                                JsonRpcError::parse_error("invalid UTF-8"),
+                            ))
+                            .expect("JsonRpcResponse serialization is infallible"),
+                        ) {
+                            break;
+                        }
+                        continue;
+                    }
+                },
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Ok(_)) => continue, // Ping/Pong handled by axum
+                Some(Err(err)) => {
+                    warn!(target: "zone::rpc", %err, "ws recv error");
+                    break;
+                }
+            };
+
+            let (response_json, pending_subscriptions) =
+                process_ws_text(&text, &auth, &state, &mut session).await;
+
+            if !try_queue_notification(&notifications, &close_session, response_json) {
                 break;
             }
-        };
 
-        let (response_json, pending_subscriptions) =
-            process_ws_text(&text, &auth, &state, &mut session).await;
-
-        if !try_queue_notification(&notifications, &close_session, response_json) {
-            break;
+            activate_pending_subscriptions(
+                pending_subscriptions,
+                &notifications,
+                &close_session,
+                &mut session,
+            );
         }
+    };
 
-        activate_pending_subscriptions(
-            pending_subscriptions,
-            &notifications,
-            &close_session,
-            &mut session,
-        );
+    tokio::select! {
+        biased;
+        _ = terminate_connection => {}
+        _ = handle_messages => {}
     }
 
     session.cleanup();
+    writer.abort();
     drop(notifications);
     let _ = writer.await;
 }

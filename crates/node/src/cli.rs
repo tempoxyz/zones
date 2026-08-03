@@ -144,7 +144,7 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
             // Replicate only durable blocks. Persist every block immediately so followers can
             // acknowledge each block without waiting for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
-            builder.config_mut().engine.memory_block_buffer_target = 0;
+            builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
         // Every promotable node constructs all the sequencer resources: activation is gated at
         // runtime by the leadership schedule, so a quorum follower must be able to become a

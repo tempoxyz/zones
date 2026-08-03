@@ -337,8 +337,11 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         futures::future::try_join_all(futs).await
     }
 
-    /// Fetches the active sequencer encryption key and its index.
+    /// Fetches the active sequencer encryption key and its index from one L1 snapshot.
     ///
+    /// Reads the current L1 block number, then pins an atomic
+    /// [`encryptionKeyAtBlock`](ZonePortal::encryptionKeyAtBlockCall) call to that block so a key
+    /// rotation cannot pair a key with an index from a different state snapshot.
     /// Returns `(key, key_index)` where `key` is the
     /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
     /// `key_index` is the zero-based index of the current key.
@@ -351,11 +354,53 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         ),
         alloy_contract::Error,
     > {
-        let key_call = self.sequencerEncryptionKey();
-        let count_call = self.encryptionKeyCount();
-        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
-        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
-        Ok((key, key_index))
+        let block_number = self.provider().get_block_number().await?;
+        let key = self
+            .encryptionKeyAtBlock(block_number)
+            .block(alloy_rpc_types_eth::BlockId::number(block_number))
+            .call()
+            .await?;
+        Ok((
+            ZonePortal::sequencerEncryptionKeyReturn {
+                x: key.x,
+                yParity: key.yParity,
+            },
+            key.keyIndex,
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "rpc"))]
+mod tests {
+    use super::*;
+    use alloy_primitives::U256;
+    use alloy_provider::ProviderBuilder;
+    use alloy_sol_types::SolCall;
+    use alloy_transport::mock::Asserter;
+
+    #[tokio::test]
+    async fn encryption_key_reads_key_and_index_from_one_snapshot() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let block_number = 42_u64;
+        let expected = ZonePortal::encryptionKeyAtBlockReturn {
+            x: B256::repeat_byte(0x11),
+            yParity: 1,
+            keyIndex: U256::from(7),
+        };
+
+        asserter.push_success(&block_number);
+        asserter.push_success(&Bytes::from(
+            ZonePortal::encryptionKeyAtBlockCall::abi_encode_returns(&expected),
+        ));
+
+        let portal = ZonePortal::new(Address::ZERO, &provider);
+        let (key, key_index) = portal.encryption_key().await.unwrap();
+
+        assert_eq!(key.x, expected.x);
+        assert_eq!(key.yParity, expected.yParity);
+        assert_eq!(key_index, expected.keyIndex);
+        assert!(asserter.read_q().is_empty());
     }
 }
 

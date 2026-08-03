@@ -10,12 +10,17 @@ from finalized Tempo L1 state — the `ZonePortal`'s `leader`, `leaderEpoch`, an
 `leaderActivationTempoBlock` fields and its `LeaderUpdated` event. Every observed transition
 is retained in an activation-indexed `LeadershipSchedule`.
 
-For manual crashed-leader recovery, an operator may install the same force request on
-the surviving nodes. The request fences the next anchor at the exact operator-selected tip until
-the matching `LeaderUpdated` transition is finalized, then assigns the replacement leader from
-that anchor until the portal activation. The portal schedule is authoritative from its activation
-onward. Operational consumers use `leader_for(anchor)`, which incorporates the recovery without
-mutating the retained portal transition timeline.
+For manual crashed-leader recovery, the operator stops the nodes, selects a canonical tip shared by
+the survivors, adds the same `[forced_recovery]` directive to every manifest, and restarts them.
+Each node verifies that its local canonical head has the configured hash before any role task
+starts. The selected replacement governs from the next Tempo anchor until the first subsequent
+finalized portal transition reaches its activation anchor. Nodes never submit that transition
+automatically: the operator may call the ordinary `zone_setLeader` RPC whenever the zone is ready
+to return to the on-chain schedule.
+
+The configured hash must be the local canonical head at startup. After a normal portal transition
+ends recovery, the operator must remove the directive before restarting the nodes. Restarting with
+the directive after the replacement has produced past `recovery_block_hash` is unsupported.
 
 If a manifest is not specified, `tempo-zone` retains its existing single-sequencer startup
 behavior.
@@ -73,7 +78,7 @@ the configuration shape:
 
 ```toml
 zone_id = 7
-sequencer_set_version = 1
+sequencer_set_version = 0
 leader_ed25519_public_key = "0xleader..."
 
 [[nodes]]
@@ -102,6 +107,23 @@ rpc_only = true
 ```
 
 `rpc_only` defaults to `false`, so existing manifests keep their current meaning.
+
+`sequencer_set_version` must exactly match the value reported by `ZonePortal`. Version `0` is
+valid for the initial sequencer set installed atomically by `ZoneFactory`; later
+`setSequencerSet` calls increment it. The field defaults to `1` for compatibility with existing
+manifests that omitted it.
+
+To recover a crashed leader, add this top-level table before restarting the fleet:
+
+```toml
+[forced_recovery]
+leader = "follower-a"
+recovery_block_hash = "0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+```
+
+`leader` is a manifest node name and must identify a quorum member. Because the configured hash
+must be the current head, the first recovery anchor and portal epoch are taken from the node's
+persisted checkpoint; no independently configured height or epoch can disagree with the hash.
 
 An `rpc_only` entry declares no `secp256k1_address` and the node is started without
 `--secp256k1.key`. It never signs a settlement attestation, so the key would be dead weight —

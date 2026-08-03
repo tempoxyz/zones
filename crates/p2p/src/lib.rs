@@ -9,8 +9,8 @@ mod routing;
 mod runtime;
 
 pub use manifest::{
-    ForcedRecoveryState, LeadershipSchedule, LeadershipState, ManifestAddress, ManifestError,
-    ManifestNode, Role, ZoneManifest,
+    ForcedRecoveryConfig, ForcedRecoveryState, LeadershipSchedule, LeadershipState,
+    ManifestAddress, ManifestError, ManifestNode, Role, ZoneManifest,
 };
 pub use network::P2pNetworkId;
 pub use protocol::PeerTip;

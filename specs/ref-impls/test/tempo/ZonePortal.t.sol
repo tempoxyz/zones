@@ -562,6 +562,20 @@ contract ZonePortalTest is BaseTest {
         signers[2] = vm.addr(SIGNER_C_KEY);
     }
 
+    function test_initializeInstallsFullQuorumAtVersionZero() public {
+        address[] memory signers = _sequencerSet();
+        ZonePortal quorumPortal =
+            _createZonePortal(2, address(pathUSD), admin, signers, 2, "https://quorum.example");
+
+        assertEq(quorumPortal.sequencerSetVersion(), 0);
+        assertEq(quorumPortal.sequencerThreshold(), 2);
+        assertEq(quorumPortal.sequencerCount(), 3);
+        assertEq(quorumPortal.leader(), signers[0]);
+        for (uint256 i; i < signers.length; ++i) {
+            assertTrue(quorumPortal.isSequencer(signers[i]));
+        }
+    }
+
     function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
         signers = _sequencerSet();
         // The portal rejects a set that drops the active leader, so rotation is three steps:
@@ -1502,7 +1516,7 @@ contract ZonePortalTest is BaseTest {
     function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
         uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
         uint64 maximumPublicDeposits = maximum - 20;
-        assertEq(maximum, 640);
+        assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 amount = 1;
@@ -4323,12 +4337,12 @@ contract ZonePortalTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Verify that ZonePortal's storage layout matches the slot constants
-    ///         used by ZoneConfig and ZoneInbox for cross-domain reads.
+    ///         used by ZoneInbox for cross-domain reads.
     /// @dev This is a critical regression test. If the ZonePortal storage layout changes
     ///      (e.g. a variable is added/removed/reordered), this test will fail, preventing
     ///      silent slot mismatches that corrupt zone-side reads.
     ///
-    ///      The zone-side contracts (ZoneConfig, ZoneInbox) read ZonePortal storage via
+    ///      The zone-side contracts ZoneInbox read ZonePortal storage via
     ///      TempoState.readTempoStorageSlot() using hardcoded slot numbers. If those slot
     ///      numbers drift from the actual layout, the zone reads garbage data.
     ///
@@ -4481,7 +4495,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
-    /// @dev This ensures ZoneConfig and ZoneInbox both compute the correct storage slots
+    /// @dev This ensures ZoneInbox both compute the correct storage slots
     ///      when reading encryption keys via readTempoStorageSlot().
     ///
     ///      For a dynamic array at slot S:
@@ -4535,17 +4549,17 @@ contract ZonePortalTest is BaseTest {
         );
     }
 
-    /// @notice Verify that the slot constants used by ZoneInbox and ZoneConfig match
+    /// @notice Verify that the slot constants used by ZoneInbox match
     ///         the actual ZonePortal storage layout.
     /// @dev This is the cross-contract consistency check. The test replicates the exact
     ///      slot computation logic used by ZoneInbox._readEncryptionKey() and
-    ///      ZoneConfig.sequencerEncryptionKey() to ensure they both read the correct data.
+    ///      ZoneInbox encryption-key reads to ensure they both read the correct data.
     function test_storageLayout_crossContractConsistency() public {
         (bytes32 keyX, uint8 keyYParity) = _setEncKeyWithPoP(ENC_KEY_1);
 
         // Use the shared constants from IZone.sol (single source of truth)
 
-        // Verify sequencer membership slot (used by ZoneConfig)
+        // Verify sequencer membership slot (used by zone system contracts)
         bytes32 membershipSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
             uint256(vm.load(address(portal), membershipSlot)),
