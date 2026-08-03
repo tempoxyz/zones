@@ -906,7 +906,7 @@ where
                     }
                 };
                 let policy = RoutingPolicy::new(&membership, &leadership);
-                if !policy.may_accept_backfill_request(&peer) {
+                if !policy.is_remote_peer(&peer) {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill request from ineligible peer");
                     continue;
                 }
@@ -928,7 +928,7 @@ where
                     }
                 };
                 let policy = RoutingPolicy::new(&membership, &leadership);
-                if !policy.may_accept_backfill_response(&peer) {
+                if !policy.is_remote_quorum_peer(&peer) {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill response from ineligible peer");
                     continue;
                 }

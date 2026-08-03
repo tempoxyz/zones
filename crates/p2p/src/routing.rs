@@ -123,14 +123,6 @@ impl<'a> RoutingPolicy<'a> {
             .then_some(leader)
     }
 
-    pub(crate) fn may_accept_backfill_request(&self, peer: &PublicKey) -> bool {
-        self.is_remote_peer(peer)
-    }
-
-    pub(crate) fn may_accept_backfill_response(&self, peer: &PublicKey) -> bool {
-        self.is_remote_quorum_peer(peer)
-    }
-
     pub(crate) fn may_forward_transaction(&self) -> bool {
         self.authority
             .next_anchor_record
@@ -152,11 +144,11 @@ impl<'a> RoutingPolicy<'a> {
             && self.is_retained_leader(peer)
     }
 
-    fn is_remote_peer(&self, peer: &PublicKey) -> bool {
+    pub(crate) fn is_remote_peer(&self, peer: &PublicKey) -> bool {
         peer != self.membership.local() && self.membership.contains(peer)
     }
 
-    fn is_remote_quorum_peer(&self, peer: &PublicKey) -> bool {
+    pub(crate) fn is_remote_quorum_peer(&self, peer: &PublicKey) -> bool {
         self.is_remote_peer(peer) && self.membership.is_quorum_member(peer)
     }
 }
