@@ -39,7 +39,7 @@ impl ZoneInbox {
                     tempoPortal(call) => view(call, |_| Ok(l1.portal())),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
                     refunds(call) => typed::view(call, |call| {
-                       self.view_refund(msg_sender, call.token, call.owner)
+                       self.view_refund(l1, msg_sender, call.token, call.owner)
                     }),
                     claimRefund(call) => crate::dispatch::mutate(call, msg_sender, |caller, call| {
                         self.claim_refund(caller, call.token)

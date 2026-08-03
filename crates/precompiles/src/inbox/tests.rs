@@ -804,8 +804,9 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
 }
 
 #[test]
-fn refund_reads_are_limited_to_owner() -> eyre::Result<()> {
+fn refund_reads_are_limited_to_owner_and_active_sequencer() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
+    harness.l1.seed_active_sequencer(PORTAL, 0, SEQUENCER);
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
@@ -834,10 +835,9 @@ fn refund_reads_are_limited_to_owner() -> eyre::Result<()> {
     );
 
     let sequencer_output = harness.call(SEQUENCER, &calldata)?;
-    assert!(sequencer_output.is_revert());
     assert_eq!(
-        sequencer_output.bytes,
-        IZoneInbox::Unauthorized {}.abi_encode()
+        IZoneInbox::refundsCall::abi_decode_returns(&sequencer_output.bytes)?,
+        444
     );
     Ok(())
 }

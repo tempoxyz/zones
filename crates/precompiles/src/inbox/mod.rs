@@ -320,8 +320,14 @@ impl ZoneInbox {
         Ok(amount)
     }
 
-    fn view_refund(&self, msg_sender: Address, token: Address, owner: Address) -> ZoneResult<u128> {
-        if msg_sender != owner {
+    fn view_refund<P: L1StorageReader>(
+        &self,
+        l1: &L1State<P>,
+        msg_sender: Address,
+        token: Address,
+        owner: Address,
+    ) -> ZoneResult<u128> {
+        if msg_sender != owner && !l1.read_portal(|portal| &portal.is_sequencer[msg_sender])? {
             return Err(ZonePrecompileError::Inbox(ZoneInboxError::Unauthorized(
                 IZoneInbox::Unauthorized {},
             )));

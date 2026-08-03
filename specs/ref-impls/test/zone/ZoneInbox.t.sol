@@ -65,6 +65,7 @@ contract ZoneInboxTest is Test {
     MockTempoState public tempoState;
 
     address public sequencer = address(0);
+    address public activeSequencer = address(0x100);
     address public alice = address(0x200);
     address public bob = address(0x300);
     address public mockPortal = address(0x400);
@@ -78,7 +79,7 @@ contract ZoneInboxTest is Test {
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         tempoState.setMockStorageValue(
             mockPortal,
-            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            keccak256(abi.encode(activeSequencer, PORTAL_IS_SEQUENCER_SLOT)),
             bytes32(uint256(1))
         );
         tempoState.setMockStorageValue(mockPortal, PORTAL_ACCESS_MODE_SLOT, bytes32(uint256(1)));
@@ -1105,6 +1106,11 @@ contract ZoneInboxTest is Test {
 
     function test_refunds_ownerCanRead() public {
         vm.prank(bob);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+    }
+
+    function test_refunds_sequencerCanRead() public {
+        vm.prank(activeSequencer);
         assertEq(inbox.refunds(address(zoneToken), bob), 0);
     }
 

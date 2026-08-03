@@ -18,6 +18,7 @@ import {
     PATH_USD_ADDRESS,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
@@ -61,8 +62,8 @@ contract ZoneInbox is IZoneInbox {
         _tempoState = TempoState(_tempoStateAddr);
     }
 
-    modifier onlyRefundOwner(address owner) {
-        if (msg.sender != owner) {
+    modifier onlyRefundOwnerOrSequencer(address owner) {
+        if (msg.sender != owner && !_isSequencer(msg.sender)) {
             revert Unauthorized();
         }
         _;
@@ -81,7 +82,7 @@ contract ZoneInbox is IZoneInbox {
     )
         external
         view
-        onlyRefundOwner(owner)
+        onlyRefundOwnerOrSequencer(owner)
         returns (uint128)
     {
         return _refunds[token][owner];
@@ -403,6 +404,11 @@ contract ZoneInbox is IZoneInbox {
         internal
     {
         IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, tempoRefundRecipient);
+    }
+
+    function _isSequencer(address account) internal view returns (bool) {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
+        return uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)) != 0;
     }
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
