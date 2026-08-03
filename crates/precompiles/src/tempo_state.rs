@@ -21,7 +21,7 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
-use tempo_zone_contracts::{ITempoState, TempoStateError};
+use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
 use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
 
 alloy_sol_types::sol! {
@@ -117,7 +117,7 @@ impl TempoState {
 
         l1.advance_anchor(prev_block_number, header.number())?;
         let tempo_block_hash = self.write_checkpoint(&header_rlp, header.number())?;
-        self.emit_event(ITempoState::TempoBlockFinalized {
+        self.emit_event(TempoStateAbi::TempoBlockFinalized {
             blockHash: tempo_block_hash,
             blockNumber: header.number(),
             stateRoot: header.state_root(),
@@ -129,13 +129,13 @@ impl TempoState {
         &mut self,
         l1: &L1State<P>,
         sender: Address,
-        call: ITempoState::finalizeTempoCall,
+        call: TempoStateAbi::finalizeTempoCall,
     ) -> PrecompileResult {
         if self.storage.is_static() {
             return self.revert_error(StaticCallNotAllowed {});
         }
         if sender != ZONE_INBOX_ADDRESS {
-            return self.revert_error(ITempoState::OnlyZoneInbox {});
+            return self.revert_error(TempoStateAbi::OnlyZoneInbox {});
         }
 
         self.finalize_checkpoint(l1, call.header)
@@ -166,7 +166,7 @@ impl TempoState {
         dispatch!(
             calldata,
             |call| match call {
-                ITempoState::ITempoStateCalls {
+                TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
                     finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
@@ -250,7 +250,7 @@ mod tests {
             header: Bytes,
             is_static: bool,
         ) -> PrecompileResult {
-            let data = ITempoState::finalizeTempoCall { header }.abi_encode();
+            let data = TempoStateAbi::finalizeTempoCall { header }.abi_encode();
             self.call(caller, data, is_static)
         }
 
@@ -268,17 +268,17 @@ mod tests {
             expected_hash: B256,
             expected_number: u64,
         ) -> eyre::Result<()> {
-            let hash_call = ITempoState::tempoBlockHashCall {};
+            let hash_call = TempoStateAbi::tempoBlockHashCall {};
             let block_hash = self.call(Address::ZERO, hash_call.abi_encode(), true)?;
             assert_eq!(
-                ITempoState::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
+                TempoStateAbi::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
                 expected_hash
             );
 
-            let number_call = ITempoState::tempoBlockNumberCall {};
+            let number_call = TempoStateAbi::tempoBlockNumberCall {};
             let block_number = self.call(Address::ZERO, number_call.abi_encode(), true)?;
             assert_eq!(
-                ITempoState::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
+                TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
                 expected_number
             );
             Ok(())
@@ -356,7 +356,7 @@ mod tests {
         let mut harness = TempoStateHarness::new(&TempoHeader::default())?;
         let output = harness.call_as(
             Address::ZERO,
-            ITempoState::tempoBlockHashCall {}.abi_encode(),
+            TempoStateAbi::tempoBlockHashCall {}.abi_encode(),
             true,
             TEMPO_STATE_ADDRESS,
             address!("0x000000000000000000000000000000000000dEaD"),

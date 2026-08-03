@@ -17,7 +17,7 @@ use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    ITempoState, IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, Withdrawal, ZONE_INBOX_ADDRESS,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS,
 };
 use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
@@ -678,7 +678,7 @@ async fn test_tempo_state_advances_with_l1_blocks() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let tempo_state = ITempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
+    let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
 
     // Before injecting any blocks, tempoBlockNumber should be 0 (genesis)
     let initial_number = tempo_state.tempoBlockNumber().call().await?;
@@ -1490,7 +1490,7 @@ async fn test_chain_tempo_state_ext_from_canon_notification() -> eyre::Result<()
     assert_ne!(last.hash, B256::ZERO, "tempoBlockHash should be non-zero");
 
     // Cross-check against the on-chain TempoState.
-    let tempo_state = ITempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
+    let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
     let on_chain_hash = tempo_state.tempoBlockHash().call().await?;
     assert_eq!(
         last.hash, on_chain_hash,
