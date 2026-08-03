@@ -10,7 +10,8 @@ use alloy::{
     sol_types::SolEvent,
 };
 use alloy_rlp::Encodable;
-use eyre::{WrapErr as _, eyre};
+use alloy_rpc_types_eth::BlockId;
+use eyre::{WrapErr as _, ensure, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
@@ -246,6 +247,9 @@ impl CreateZone {
                 receipt.transaction_hash
             ));
         }
+        let creation_block = receipt
+            .block_number
+            .ok_or_else(|| eyre!("createZone receipt is missing its block number"))?;
 
         let event = receipt
             .inner
@@ -259,7 +263,38 @@ impl CreateZone {
         let chain_id = zone_chain_id(zone_id);
 
         let portal_contract = ZonePortal::new(portal, &provider);
-        let sequencer_set_version = portal_contract.sequencerSetVersion().call().await?;
+        let creation_block_id = BlockId::number(creation_block);
+        let sequencer_set_version = portal_contract
+            .sequencerSetVersion()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let initial_leader = portal_contract
+            .leader()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let leader_epoch = portal_contract
+            .leaderEpoch()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let leader_activation_block = portal_contract
+            .leaderActivationTempoBlock()
+            .block(creation_block_id)
+            .call()
+            .await?;
+
+        ensure!(
+            sequencer_set_version == 0,
+            "ZoneFactory initialized sequencer set version {sequencer_set_version}, expected 0"
+        );
+        ensure!(
+            initial_leader == leader
+                && leader_epoch == 1
+                && leader_activation_block == creation_block,
+            "ZoneFactory initialized leader snapshot ({initial_leader}, epoch {leader_epoch}, activation {leader_activation_block}), expected ({leader}, epoch 1, activation {creation_block})"
+        );
         println!("Sequencer set version: {sequencer_set_version}");
 
         println!(

@@ -1249,7 +1249,7 @@ impl ZoneTestNode {
                 c.network.discovery.disable_discovery = true;
                 if p2p_enabled {
                     c.engine.persistence_threshold = 0;
-                    c.engine.memory_block_buffer_target = 0;
+                    c.engine.memory_block_buffer_target = Some(0);
                 }
                 c
             });

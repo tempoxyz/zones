@@ -24,9 +24,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_registry::AuthRole,
 };
 use tempo_primitives::transaction::Call;
-use tempo_zone_contracts::{
-    EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal,
-};
+use tempo_zone_contracts::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
 
 const AMOUNT: u128 = 1_000_000;
 const REWARD_AMOUNT: u128 = AMOUNT / 10;
@@ -57,7 +55,13 @@ alloy_sol_types::sol! {
     struct EarnVaultControls {
         address emergencyGuardian;
         address asyncJanitor;
+        uint256 maxManagedAssets;
         EngineMigrationMode migrationMode;
+    }
+
+    struct DistributorConfig {
+        address distributor;
+        uint40 updateDelay;
     }
 
     struct FixedFeeRecipient {
@@ -130,6 +134,7 @@ alloy_sol_types::sol! {
         address engine;
         address owner;
         EarnVaultControls controls;
+        DistributorConfig distributorConfig;
         FeeConfig fees;
         uint64 transferPolicyId;
     }
@@ -378,7 +383,12 @@ impl EarnZoneFixture {
             controls: EarnVaultControls {
                 emergencyGuardian: Address::ZERO,
                 asyncJanitor: Address::ZERO,
+                maxManagedAssets: U256::ZERO,
                 migrationMode: EngineMigrationMode::OperatorEnabled,
+            },
+            distributorConfig: DistributorConfig {
+                distributor: Address::ZERO,
+                updateDelay: Default::default(),
             },
             fees,
             transferPolicyId: 0,
