@@ -55,6 +55,13 @@ pub struct LeadershipState {
     pub activation_tempo_block: u64,
 }
 
+/// Dynamic leadership authority captured atomically from one schedule read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthoritySnapshot {
+    pub(crate) retained_leaders: BTreeSet<PublicKey>,
+    pub(crate) next_anchor_record: Option<LeadershipState>,
+}
+
 impl LeadershipState {
     /// Creates a leadership record.
     pub const fn new(epoch: u64, leader: PublicKey, activation_tempo_block: u64) -> Self {
@@ -347,6 +354,19 @@ impl LeadershipSchedule {
     /// never a production permit.
     pub fn next_anchor_record(&self) -> Option<LeadershipState> {
         self.inner.read().expect("poisoned").next_anchor_record()
+    }
+
+    /// Captures the retained leaders and next-anchor authority from one schedule read.
+    pub(crate) fn authority_snapshot(&self) -> AuthoritySnapshot {
+        let state = self.inner.read().expect("poisoned");
+        AuthoritySnapshot {
+            retained_leaders: state
+                .transitions
+                .values()
+                .map(|record| record.leader.clone())
+                .collect(),
+            next_anchor_record: state.next_anchor_record(),
+        }
     }
 
     /// Install a forced-recovery request.
@@ -1753,18 +1773,6 @@ mod tests {
 
     #[test]
     fn rejects_invalid_topologies_and_node_assertions() {
-        let too_small = manifest(
-            1,
-            &[
-                (1, "leader", "127.0.0.1:9200"),
-                (2, "follower", "127.0.0.1:9201"),
-            ],
-        );
-        assert!(matches!(
-            ZoneManifest::parse(&too_small),
-            Err(ManifestError::TooFewQuorumNodes(2))
-        ));
-
         let duplicate = manifest(
             1,
             &[

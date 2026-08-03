@@ -173,6 +173,10 @@ mod tests {
             namespace(7, P2pNetworkId::new(1, portal_a)),
             namespace(7, P2pNetworkId::new(1, portal_b)),
         );
+        assert_ne!(
+            namespace(7, P2pNetworkId::new(1, portal_a)),
+            namespace(8, P2pNetworkId::new(1, portal_a)),
+        );
 
         let namespace = namespace(7, P2pNetworkId::new(1, portal_a));
         assert_eq!(

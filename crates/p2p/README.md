@@ -204,13 +204,14 @@ canonical.
 ## Transaction forwarding
 
 Commonware carries blocks, catch-up traffic, and transactions on independent authenticated
-channels. A follower sends canonical EIP-2718 transaction bytes only to the leader of the next
-Tempo anchor it will consume — during a scheduled handoff that remains the outgoing leader
-until the activation boundary — and a node accepts transaction messages only from manifest
-members while it holds leadership somewhere in the retained transition schedule. An rpc-follower
-forwards on exactly this path: operator RPC submissions reach the leader without exposing it.
+channels. A node that is not the leader of the next Tempo anchor it will consume sends canonical
+EIP-2718 transaction bytes to every other quorum member. During a scheduled handoff, this lets
+both the outgoing and incoming leaders retain transactions before the activation boundary. An
+rpc-follower may originate forwarding, but it does not receive forwarded transactions because it
+is outside the on-chain quorum.
 
-This permits operator RPC to be exposed on followers while keeping the leader's RPC private. The
-leader decodes and validates every forwarded transaction again, and it alone selects and orders
-transactions for blocks; follower validation is not trusted. Followers periodically retry live
-pool transactions, recovering from listener overflow and temporary leader disconnections.
+This permits operator RPC to be exposed on followers while keeping the leader's RPC private. Every
+quorum receiver decodes and validates each forwarded transaction through its pool again; follower
+validation is not trusted. Only the active leader selects and orders transactions into blocks.
+Followers periodically retry live pool transactions, recovering from listener overflow and
+temporary leader disconnections.
