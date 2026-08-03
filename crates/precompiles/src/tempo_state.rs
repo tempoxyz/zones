@@ -1,9 +1,9 @@
 //! Native `TempoState` precompile.
 //!
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
-//! preserving the zone-facing checkpoint ABI.
+//! preserving the zone-facing checkpoint and Tempo storage read ABI.
 
-use alloc::format;
+use alloc::{format, vec::Vec};
 
 use crate::{
     ZoneResult,
@@ -13,7 +13,7 @@ use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
-use alloy_sol_types::SolError;
+use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     EncodePrecompileResult, charge_input_cost, dispatch, error::TempoPrecompileError,
@@ -22,9 +22,10 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
-use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 alloy_sol_types::sol! {
+    error Error(string);
     error StaticCallNotAllowed();
 }
 
@@ -40,7 +41,7 @@ pub const TEMPO_BLOCK_NUMBER_SLOT: alloy_primitives::U256 = slots::TEMPO_BLOCK_N
 impl TempoState {
     /// Creates the direct-call-only `TempoState` precompile with checkpoint storage.
     ///
-    /// The shared L1 storage state is anchored by this precompile's finalized checkpoint.
+    /// System-only arbitrary L1 storage reads are delegated through `l1` at the stored checkpoint.
     pub fn create<P: L1StorageReader>(
         l1: L1State<P>,
         env: &crate::ZonePrecompileEnv,
@@ -80,8 +81,18 @@ impl TempoState {
         Ok(block_hash)
     }
 
+    fn is_system_caller(caller: Address) -> bool {
+        matches!(caller, ZONE_INBOX_ADDRESS | ZONE_OUTBOX_ADDRESS)
+    }
+
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
         Ok(self.storage.revert_output(error.abi_encode().into()))
+    }
+
+    fn revert_string(&self, message: &str) -> PrecompileResult {
+        Ok(self
+            .storage
+            .revert_output(Error(message.into()).abi_encode().into()))
     }
 
     /// Validate and apply a finalized Tempo checkpoint transition.
@@ -152,6 +163,51 @@ impl TempoState {
         self.tempo_block_hash.read()
     }
 
+    fn read_tempo_storage_slot<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        sender: Address,
+        call: TempoStateAbi::readTempoStorageSlotCall,
+    ) -> PrecompileResult {
+        if !Self::is_system_caller(sender) {
+            return self
+                .revert_string("TempoState: only zone system contracts can read Tempo state");
+        }
+
+        let block_number = match self.tempo_block_number.read() {
+            Ok(number) => number,
+            Err(err) => return self.storage.error_result(err),
+        };
+        let value = l1.read_l1_storage(call.account, call.slot, block_number)?;
+        Ok(self.storage.success_output(
+            TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
+        ))
+    }
+
+    fn read_tempo_storage_slots<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        sender: Address,
+        call: TempoStateAbi::readTempoStorageSlotsCall,
+    ) -> PrecompileResult {
+        if !Self::is_system_caller(sender) {
+            return self
+                .revert_string("TempoState: only zone system contracts can read Tempo state");
+        }
+
+        let block_number = match self.tempo_block_number.read() {
+            Ok(number) => number,
+            Err(err) => return self.storage.error_result(err),
+        };
+        let mut values = Vec::with_capacity(call.slots.len());
+        for slot in call.slots {
+            values.push(l1.read_l1_storage(call.account, slot, block_number)?);
+        }
+        Ok(self.storage.success_output(
+            TempoStateAbi::readTempoStorageSlotsCall::abi_encode_returns(&values).into(),
+        ))
+    }
+
     /// Dispatch a `TempoState` call using execution-local L1 state.
     pub(crate) fn call_with_l1_state<P: L1StorageReader>(
         &mut self,
@@ -170,6 +226,12 @@ impl TempoState {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
                     finalizeTempo(call) => self.apply_checkpoint(l1, msg_sender, call),
+                    readTempoStorageSlot(call) => {
+                        self.read_tempo_storage_slot(l1, msg_sender, call)
+                    },
+                    readTempoStorageSlots(call) => {
+                        self.read_tempo_storage_slots(l1, msg_sender, call)
+                    },
                 }
             },
         )
@@ -183,7 +245,6 @@ mod tests {
     use crate::test_utils::{
         MockL1Reader, TestContext, call_precompile, test_context, test_env, test_storage_provider,
     };
-    use alloc::{vec, vec::Vec};
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_primitives::{address, b256};
     use alloy_rlp::Encodable as _;
@@ -192,20 +253,29 @@ mod tests {
 
     struct TempoStateHarness {
         ctx: TestContext,
+        l1: L1State<MockL1Reader>,
         precompile: DynPrecompile,
     }
 
     impl TempoStateHarness {
         fn new(header: &TempoHeader) -> eyre::Result<Self> {
+            Self::with_reader(header, MockL1Reader::default())
+        }
+
+        fn with_reader(header: &TempoHeader, reader: MockL1Reader) -> eyre::Result<Self> {
             let mut ctx = test_context();
             let encoded = encode_header(header);
-            {
-                let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
-                StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
-            }
-            let l1 = L1State::new(MockL1Reader::default(), Address::ZERO);
-            let precompile = TempoState::create(l1, &test_env(&ctx));
-            Ok(Self { ctx, precompile })
+            let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
+            StorageCtx::enter(&mut storage, || TempoState::new().initialize(&encoded))?;
+            drop(storage);
+
+            let l1 = L1State::new(reader, Address::ZERO);
+            let precompile = TempoState::create(l1.clone(), &test_env(&ctx));
+            Ok(Self {
+                ctx,
+                l1,
+                precompile,
+            })
         }
 
         fn call(
@@ -250,8 +320,7 @@ mod tests {
             header: Bytes,
             is_static: bool,
         ) -> PrecompileResult {
-            let data = TempoStateAbi::finalizeTempoCall { header }.abi_encode();
-            self.call(caller, data, is_static)
+            self.call(caller, finalize_calldata(header), is_static)
         }
 
         fn finalize(
@@ -268,15 +337,21 @@ mod tests {
             expected_hash: B256,
             expected_number: u64,
         ) -> eyre::Result<()> {
-            let hash_call = TempoStateAbi::tempoBlockHashCall {};
-            let block_hash = self.call(Address::ZERO, hash_call.abi_encode(), true)?;
+            let block_hash = self.call(
+                Address::ZERO,
+                TempoStateAbi::tempoBlockHashCall {}.abi_encode(),
+                true,
+            )?;
             assert_eq!(
                 TempoStateAbi::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
                 expected_hash
             );
 
-            let number_call = TempoStateAbi::tempoBlockNumberCall {};
-            let block_number = self.call(Address::ZERO, number_call.abi_encode(), true)?;
+            let block_number = self.call(
+                Address::ZERO,
+                TempoStateAbi::tempoBlockNumberCall {}.abi_encode(),
+                true,
+            )?;
             assert_eq!(
                 TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
                 expected_number
@@ -319,6 +394,58 @@ mod tests {
             },
             ..Default::default()
         }
+    }
+
+    fn finalize_calldata(header: Bytes) -> Bytes {
+        TempoStateAbi::finalizeTempoCall { header }
+            .abi_encode()
+            .into()
+    }
+
+    fn read_slot_calldata() -> Bytes {
+        TempoStateAbi::readTempoStorageSlotCall {
+            account: Address::repeat_byte(0x44),
+            slot: B256::ZERO,
+        }
+        .abi_encode()
+        .into()
+    }
+
+    #[test]
+    fn explicit_read_before_finalize_blocks_advancement() -> eyre::Result<()> {
+        let genesis = child_header(B256::repeat_byte(0xaa), 10);
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let mut harness = TempoStateHarness::with_reader(
+            &genesis,
+            MockL1Reader::returning(B256::repeat_byte(0x11)),
+        )?;
+
+        harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
+        assert_eq!(harness.l1.get_anchor(), Some(10));
+
+        let child = child_header(genesis_hash, 11);
+        assert!(harness.finalize(ZONE_INBOX_ADDRESS, &child, false).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn explicit_read_after_finalize_uses_advanced_anchor() -> eyre::Result<()> {
+        let genesis = child_header(B256::repeat_byte(0xaa), 10);
+        let genesis_hash = keccak256(encode_header(&genesis));
+        let reader = MockL1Reader::returning(B256::repeat_byte(0x11));
+        let mut harness = TempoStateHarness::with_reader(&genesis, reader.clone())?;
+
+        let child = child_header(genesis_hash, 11);
+        harness.finalize(ZONE_INBOX_ADDRESS, &child, false)?;
+        harness.call(ZONE_INBOX_ADDRESS, read_slot_calldata(), true)?;
+        assert_eq!(harness.l1.get_anchor(), Some(11));
+        assert!(
+            reader
+                .storage_requests()
+                .iter()
+                .all(|request| request.2 == 11)
+        );
+        Ok(())
     }
 
     #[test]
@@ -440,5 +567,60 @@ mod tests {
                 .is_revert()
         );
         harness.assert_checkpoint(genesis_hash, genesis.number())
+    }
+
+    #[test]
+    fn read_tempo_storage_slot_is_system_only() -> eyre::Result<()> {
+        let expected = b256!("0xabababababababababababababababababababababababababababababababab");
+        let mut harness = TempoStateHarness::with_reader(
+            &TempoHeader::default(),
+            MockL1Reader::returning(expected),
+        )?;
+        let calldata: Bytes = TempoStateAbi::readTempoStorageSlotCall {
+            account: address!("0x0000000000000000000000000000000000009999"),
+            slot: B256::ZERO,
+        }
+        .abi_encode()
+        .into();
+
+        assert!(
+            harness
+                .call(
+                    address!("0x000000000000000000000000000000000000aaaa"),
+                    calldata.clone(),
+                    true,
+                )?
+                .is_revert()
+        );
+        let system = harness.call(ZONE_INBOX_ADDRESS, calldata, true)?;
+        assert_eq!(
+            TempoStateAbi::readTempoStorageSlotCall::abi_decode_returns(&system.bytes)?,
+            expected
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn read_tempo_storage_slots_returns_batch() -> eyre::Result<()> {
+        let expected = b256!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+        let mut harness = TempoStateHarness::with_reader(
+            &TempoHeader::default(),
+            MockL1Reader::returning(expected),
+        )?;
+        let output = harness.call(
+            ZONE_OUTBOX_ADDRESS,
+            TempoStateAbi::readTempoStorageSlotsCall {
+                account: address!("0x0000000000000000000000000000000000009999"),
+                slots: vec![B256::ZERO, B256::with_last_byte(1)],
+            }
+            .abi_encode(),
+            true,
+        )?;
+
+        assert_eq!(
+            TempoStateAbi::readTempoStorageSlotsCall::abi_decode_returns(&output.bytes)?,
+            vec![expected, expected]
+        );
+        Ok(())
     }
 }

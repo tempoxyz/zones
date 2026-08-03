@@ -6,7 +6,7 @@ use tempo_precompiles::{
     EncodePrecompileResult, charge_input_cost, dispatch, dispatch::typed, storage::Handler, view,
 };
 use tempo_zone_contracts::IZoneInbox;
-use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS};
+use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 use super::ZoneInbox;
 use crate::storage::{L1State, L1StorageReader};
@@ -38,7 +38,6 @@ impl ZoneInbox {
                     },
                     tempoPortal(call) => view(call, |_| Ok(l1.portal())),
                     tempoState(call) => view(call, |_| Ok(TEMPO_STATE_ADDRESS)),
-                    config(call) => view(call, |_| Ok(ZONE_CONFIG_ADDRESS)),
                     refunds(call) => typed::view(call, |call| {
                        self.view_refund(l1, msg_sender, call.token, call.owner)
                     }),

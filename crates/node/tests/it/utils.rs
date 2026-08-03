@@ -618,6 +618,8 @@ type RpcApiFactory = dyn Fn(zone_node::rpc::RedactedRpcConfig) -> RpcApiFuture +
 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
+    l1_provider: DynProvider,
+    portal_address: Address,
     deposit_queue: DepositQueue,
     enabled_tokens: EnabledTokenRegistry,
     l1_state_cache: L1StateCache,
@@ -687,56 +689,62 @@ impl ZoneTestNode {
             .erased()
     }
 
-    /// Assert the gateway view exposed by the L2 ZoneConfig predeploy.
+    /// Assert gateway registration on the L1 portal.
     pub(crate) async fn assert_zone_gateway(
         &self,
         gateway: Address,
         expected: bool,
     ) -> eyre::Result<()> {
-        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
-        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        use tempo_zone_contracts::{ZonePortal, ZonePortal::Role};
+        let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         eyre::ensure!(
-            config.isZoneGateway(gateway).call().await? == expected,
-            "ZoneConfig gateway state for {gateway} did not equal {expected}"
+            (portal.role(gateway).call().await? == Role::CallbackGateway) == expected,
+            "portal gateway state for {gateway} did not equal {expected}"
         );
         Ok(())
     }
 
-    /// Assert whether account enforcement is enabled in the L2 ZoneConfig predeploy.
+    /// Assert whether account enforcement is enabled on the L1 portal.
     pub(crate) async fn assert_access_enforced(&self, expected: bool) -> eyre::Result<()> {
-        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
-        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
-        let actual = config.isAccessEnforced().call().await?;
+        use tempo_zone_contracts::ZonePortal;
+        let actual = ZonePortal::new(self.portal_address, &self.l1_provider)
+            .isAccessEnforced()
+            .call()
+            .await?;
         eyre::ensure!(
             actual == expected,
-            "ZoneConfig access enforcement {actual} did not equal {expected}"
+            "portal access enforcement {actual} did not equal {expected}"
         );
         Ok(())
     }
 
-    /// Assert whether gateway registration is open in the L2 ZoneConfig predeploy.
+    /// Assert whether gateway registration is open on the L1 portal.
     pub(crate) async fn assert_gateway_open(&self, expected: bool) -> eyre::Result<()> {
-        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
-        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
-        let actual = config.isGatewayOpen().call().await?;
+        use tempo_zone_contracts::ZonePortal;
+        let actual = ZonePortal::new(self.portal_address, &self.l1_provider)
+            .isGatewayOpen()
+            .call()
+            .await?;
         eyre::ensure!(
             actual == expected,
-            "ZoneConfig gateway openness {actual} did not equal {expected}"
+            "portal gateway openness {actual} did not equal {expected}"
         );
         Ok(())
     }
 
-    /// Assert the mode-aware account authorization view exposed by L2 ZoneConfig.
+    /// Assert mode-aware account authorization on the L1 portal.
     pub(crate) async fn assert_allowed_account(
         &self,
         account: Address,
         expected: bool,
     ) -> eyre::Result<()> {
-        use tempo_zone_contracts::{ZONE_CONFIG_ADDRESS, ZoneConfig};
-        let config = ZoneConfig::new(ZONE_CONFIG_ADDRESS, self.provider());
+        use tempo_zone_contracts::{ZonePortal, ZonePortal::Role};
+        let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
+        let actual = !portal.isAccessEnforced().call().await?
+            || portal.role(account).call().await? == Role::Account;
         eyre::ensure!(
-            config.isAllowedAccount(account).call().await? == expected,
-            "ZoneConfig account state for {account} did not equal {expected}"
+            actual == expected,
+            "portal account state for {account} did not equal {expected}"
         );
         Ok(())
     }
@@ -1159,6 +1167,13 @@ impl ZoneTestNode {
         } else {
             l1_ws_url
         };
+        let mut l1_http_url = url::Url::parse(&l1_ws_url)?;
+        match l1_http_url.scheme() {
+            "ws" => l1_http_url.set_scheme("http").expect("valid HTTP scheme"),
+            "wss" => l1_http_url.set_scheme("https").expect("valid HTTPS scheme"),
+            _ => {}
+        }
+        let l1_provider = ProviderBuilder::new().connect_http(l1_http_url).erased();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -1307,6 +1322,8 @@ impl ZoneTestNode {
             deposit_queue,
             enabled_tokens,
             http_url,
+            l1_provider,
+            portal_address,
             l1_state_cache,
             l1_block_tracker,
             rpc_api_factory,
@@ -4324,7 +4341,7 @@ impl L1Fixture {
                 max_tempo_gas_rate,
             );
             // Local fixtures treat pathUSD as the default enabled bridge token.
-            // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
+            // ZoneOutbox reads the L1 ZonePortal TokenConfig mapping directly, so
             // seed the packed { enabled, depositsActive } value to avoid a dummy
             // RPC fallback on self-contained tests.
             cache.set(

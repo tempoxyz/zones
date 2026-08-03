@@ -18,12 +18,8 @@ pub const GENESIS_TEMPLATE_JSON: &str = include_str!("../assets/zone-dev-genesis
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 /// ZoneInbox predeploy address.
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
-/// ZoneConfig predeploy address.
-const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 /// `tempoPortal` immutable occurrences in ZoneInbox deployed bytecode.
-const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 4;
-/// `tempoPortal` immutable occurrences in ZoneConfig deployed bytecode.
-const ZONE_CONFIG_PORTAL_IMMUTABLES: usize = 6;
+const ZONE_INBOX_PORTAL_IMMUTABLES: usize = 5;
 
 /// Parses the bundled zone genesis template.
 pub fn genesis_template() -> eyre::Result<Genesis> {
@@ -38,9 +34,10 @@ pub fn genesis_template() -> eyre::Result<Genesis> {
 ///    L1 block that serves as the zone's genesis anchor. Without this, `finalizeTempo`
 ///    rejects the first L1 block for parent hash mismatch.
 ///
-/// 2. **`tempoPortal` immutables**: the portal address is embedded in the ZoneInbox and ZoneConfig
-///    deployed bytecode as `PUSH32` immutables. The template is compiled with `Address::ZERO`.
-///    Without this patch, L1 reads resolve state from `Address::ZERO` instead of the portal.
+/// 2. **`tempoPortal` immutables**: the portal address is embedded in ZoneInbox deployed
+///    bytecode as `PUSH32` immutables. The template is compiled with
+///    `Address::ZERO`; without this patch, `readTempoStorageSlot` reads L1 state from
+///    `Address::ZERO` instead of the portal.
 ///
 /// 3. **Default fee token**: ZoneFeeManager stores the portal's creation-time token in canonical
 ///    Zone state so fee resolution does not depend on node-local L1 cache state.
@@ -74,16 +71,14 @@ pub fn l1_anchored_genesis(
         B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
     );
 
-    // Patch 2: portal address immutables in ZoneInbox and ZoneConfig.
+    // Patch 2: portal address immutables in ZoneInbox.
     if !portal_address.is_zero() {
         let needle = [0u8; 32]; // Address::ZERO left-padded to 32 bytes
         let mut replacement = [0u8; 32];
         replacement[12..].copy_from_slice(portal_address.as_slice());
 
-        let contracts_to_patch: &[(Address, usize)] = &[
-            (ZONE_INBOX_ADDRESS, ZONE_INBOX_PORTAL_IMMUTABLES),
-            (ZONE_CONFIG_ADDRESS, ZONE_CONFIG_PORTAL_IMMUTABLES),
-        ];
+        let contracts_to_patch: &[(Address, usize)] =
+            &[(ZONE_INBOX_ADDRESS, ZONE_INBOX_PORTAL_IMMUTABLES)];
 
         for &(addr, expected_count) in contracts_to_patch {
             let account = genesis
@@ -197,12 +192,11 @@ mod tests {
 
         let mut expected = [0u8; 32];
         expected[12..].copy_from_slice(portal.as_slice());
-        for addr in [ZONE_INBOX_ADDRESS, ZONE_CONFIG_ADDRESS] {
-            let code = genesis.alloc[&addr].code.as_ref().unwrap();
-            assert!(
-                code.windows(32).any(|window| window == expected),
-                "patched portal immutable missing in {addr}"
-            );
-        }
+        let addr = ZONE_INBOX_ADDRESS;
+        let code = genesis.alloc[&addr].code.as_ref().unwrap();
+        assert!(
+            code.windows(32).any(|window| window == expected),
+            "patched portal immutable missing in {addr}"
+        );
     }
 }
