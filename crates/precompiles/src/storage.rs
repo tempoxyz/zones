@@ -1,5 +1,5 @@
 //! Anchor coordination and packed-storage compatibility shared by the zone EVM database adapter
-//! and the native `TempoState` precompile.
+//! and the L1-backed `TempoState` precompile.
 
 use alloc::{
     rc::Rc,
@@ -58,16 +58,17 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 /// noncommitting simulations.
 ///
 /// Clones share the selected anchor and provider handle so the Zone database adapter, `TempoState`,
-/// and other native precompiles enforce one view of L1 state. A new `L1State` must be created for
-/// each EVM execution context; it must not be shared across independent EVMs.
+/// and other L1-backed precompiles enforce one view of L1 state. A new `L1State` must be created
+/// for each EVM execution context; it must not be shared across independent EVMs.
 #[derive(Clone)]
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.
     anchor: Rc<Cell<Option<u64>>>,
     /// `(account, slot)` keys accessed during the current transaction attempt.
     ///
-    /// Used for cold/warm gas accounting. Unlike revm's journal, this access set is not rolled back
-    /// when a subcall reverts, unconditionally charging potential L1 fetch latency.
+    /// Used for cold/warm gas accounting. Unlike REVM's journal, this access set is not rolled back
+    /// when a subcall reverts, preserving charges for potentially incurred L1 fetch work and
+    /// simplifying the accounting model.
     access_set: Rc<RefCell<HashSet<(Address, B256)>>>,
     /// Underlying cache/RPC-backed reader for storage at an explicit Tempo block number.
     provider: P,

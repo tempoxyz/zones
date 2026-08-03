@@ -93,7 +93,7 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
         slot: U256,
         anchor: u64,
     ) -> Result<U256, ZoneDbError<DB::Error>> {
-        // Unmetered path to avoid double-charging, as revm already charges L1OverlayDB SLOADs.
+        // REVM already charges TIP-403 overlay SLOADs; use the unmetered path to avoid double-charging.
         self.l1
             .read_l1_storage_unmetered(address, B256::from(slot), anchor)
             .map(Into::into)
