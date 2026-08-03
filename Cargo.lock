@@ -11591,6 +11591,7 @@ dependencies = [
  "alloy-provider",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
+ "alloy-transport",
  "const-hex",
  "futures",
  "serde",

@@ -26,6 +26,7 @@ tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
 [dev-dependencies]
+alloy-transport.workspace = true
 const-hex.workspace = true
 
 [features]
