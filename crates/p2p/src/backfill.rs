@@ -146,6 +146,12 @@ impl BackfillJob {
             .is_some_and(|request| request.expired(now))
     }
 
+    fn is_pending(&self, peer: &PublicKey, now: Instant) -> bool {
+        self.outstanding
+            .get(peer)
+            .is_some_and(|request| !request.expired(now))
+    }
+
     fn complete(&mut self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
         if !self.accepts(peer, request_id, now) {
             return false;
@@ -283,8 +289,8 @@ where
             None => false,
         };
         let mut attempts = Vec::with_capacity(2);
-        if let Some(leader) = leader.filter(|_| leader_first) {
-            attempts.push(vec![leader]);
+        if let Some(leader) = leader.as_ref().filter(|_| leader_first) {
+            attempts.push(vec![leader.clone()]);
         }
         attempts.push(candidates);
 
@@ -293,6 +299,14 @@ where
             let request = self.job.begin_request(&sources, now);
             let Some((request_id, request_peers)) = request else {
                 debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
+                if leader_only
+                    && leader
+                        .as_ref()
+                        .is_some_and(|leader| self.job.is_pending(leader, now))
+                {
+                    debug!(target: "zone::p2p", start, "Keeping the backfill leader as the sole source while its request is still pending");
+                    break;
+                }
                 continue;
             };
             let request_frame = RequestFrame { request_id, start }.encode().to_vec();
@@ -419,7 +433,9 @@ mod tests {
             .unwrap();
         job.finish_send(first, &peers);
         assert!(!job.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
+        assert!(job.is_pending(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
         assert!(job.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
+        assert!(!job.is_pending(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
         assert!(!job.complete(&leader, first, now + BACKFILL_RESPONSE_TIMEOUT));
         let (replacement, peers) = job
             .begin_request(
