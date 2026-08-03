@@ -21,8 +21,8 @@ pub(crate) struct L1SubscriberMetrics {
     /// Number of L1 blocks accepted into the deposit queue.
     pub blocks_enqueued: Counter,
 
-    /// Number of regular deposit events observed on L1.
-    pub regular_deposit_events: Counter,
+    /// Number of withdrawal bounce-back entries observed on L1.
+    pub withdrawal_bounce_back_events: Counter,
 
     /// Number of encrypted deposit events observed on L1.
     pub encrypted_deposit_events: Counter,

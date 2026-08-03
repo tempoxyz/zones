@@ -196,7 +196,7 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system transaction
     /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the unified queue (regular + encrypted)
+    ///      2. Processes encrypted deposits and internal withdrawal bounce-backs
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///      The proof validates contiguity (ancestor check) rather than exact equality.
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
@@ -239,30 +239,13 @@ contract ZoneInbox is IZoneInbox {
             if (qd.depositType == DepositType.Regular) {
                 Deposit memory d = abi.decode(qd.depositData, (Deposit));
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
-
-                if (d.tempoRefundRecipient == address(0)) {
-                    _processWithdrawalBounceBack(d);
-                } else if (qd.rejected) {
-                    _rejectDeposit(
-                        currentHash,
-                        DepositType.Regular,
-                        d.sender,
-                        d.token,
-                        d.amount,
-                        d.tempoRefundRecipient
-                    );
-                } else {
-                    try IZoneToken(d.token).mint(d.to, d.amount) {
-                        emit DepositProcessed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.memo
-                        );
-                    } catch {
-                        _enqueueDepositBounceBack(d.token, d.amount, d.tempoRefundRecipient);
-                        emit DepositFailed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.tempoRefundRecipient
-                        );
-                    }
+                if (
+                    d.sender != tempoPortal || d.tempoRefundRecipient != address(0)
+                        || d.memo != bytes32(0) || qd.rejected
+                ) {
+                    revert InvalidWithdrawalBounceBack();
                 }
+                _processWithdrawalBounceBack(d);
             } else {
                 EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));

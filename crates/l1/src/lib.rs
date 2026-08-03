@@ -69,8 +69,8 @@ pub(crate) mod rpc {
 use crate::abi::{
     EncryptedDeposit as AbiEncryptedDeposit, EncryptedDepositPayload as AbiEncryptedDepositPayload,
     ZonePortal::{
-        DepositMade, EncryptedDepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated,
-        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+        EncryptedDepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
+        WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 

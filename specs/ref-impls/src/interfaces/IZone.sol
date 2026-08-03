@@ -82,7 +82,7 @@ struct DepositQueueTransition {
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
-    Regular, // Standard deposit with plaintext recipient and memo
+    Regular, // Internal withdrawal bounce-back entry
     Encrypted // Encrypted deposit with hidden recipient and memo
 }
 
@@ -499,18 +499,6 @@ struct TokenConfig {
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
 
-    event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash,
-        address indexed sender,
-        address token,
-        address to,
-        uint128 netAmount,
-        uint128 fee,
-        bytes32 memo,
-        address tempoRefundRecipient,
-        uint64 depositNumber
-    );
-
     /// @notice Emitted after a batch is accepted by `submitBatch`.
     /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
     ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
@@ -897,11 +885,14 @@ interface IZonePortal {
         view
         returns (bool valid, uint64 expiresAtBlock);
 
+    /// @notice Alias for `depositEncrypted`.
+    /// @dev This entrypoint accepts only encrypted recipient and memo data and emits
+    ///      `EncryptedDepositMade`.
     function deposit(
         address token,
-        address to,
         uint128 amount,
-        bytes32 memo,
+        uint256 keyIndex,
+        EncryptedDepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
@@ -1065,15 +1056,6 @@ interface IZoneInbox {
         uint64 lastProcessedDepositNumber
     );
 
-    event DepositProcessed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        bytes32 memo
-    );
-
     /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
     // Revealed after decryption
     event EncryptedDepositProcessed(
@@ -1088,15 +1070,6 @@ interface IZoneInbox {
     /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
-
-    event DepositFailed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        address tempoRefundRecipient
     );
 
     event DepositRejected(
@@ -1123,6 +1096,7 @@ interface IZoneInbox {
 
     error OnlySequencer();
     error InvalidDepositQueueHash();
+    error InvalidWithdrawalBounceBack();
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
@@ -1146,7 +1120,7 @@ interface IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system-only call.
     /// @dev This is the main entry point for the block executor at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the unified queue (regular and encrypted)
+    ///      2. Processes encrypted deposits and internal withdrawal bounce-backs
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///
     ///      The system transaction may process a bounded subset of pending deposits.

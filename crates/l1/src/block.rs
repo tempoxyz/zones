@@ -154,7 +154,7 @@ impl L1BlockDeposits {
 pub struct PreparedL1Block {
     /// The sealed L1 block header.
     pub header: SealedHeader<TempoHeader>,
-    /// ABI-encoded queued deposits (regular + encrypted).
+    /// ABI-encoded encrypted deposits and internal withdrawal bounce-backs.
     #[serde(skip)]
     pub queued_deposits: Vec<abi::QueuedDeposit>,
     /// Decryption data for every encrypted deposit submitted for on-chain verification, in order.

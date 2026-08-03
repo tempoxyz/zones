@@ -23,7 +23,7 @@ use zone_precompiles::ecies::encrypt_deposit;
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
     normalize_http_rpc, token_balance, verify_portal_admin, wait_for_balance,
-    wait_for_deposit_processed, wait_for_token_enabled, wait_for_withdrawal_processed,
+    wait_for_encrypted_deposit_processed, wait_for_token_enabled, wait_for_withdrawal_processed,
 };
 
 const DEMO_PATHUSD_GAS_NET: u128 = 5_000_000;
@@ -285,20 +285,24 @@ impl DemoSwapAndDeposit {
             .send_sync()
             .await
             .wrap_err("failed to approve pathUSD for portal")?;
-        let receipt = portal_contract
-            .deposit(
-                PATH_USD_ADDRESS,
-                operator,
-                pathusd_gross_deposit,
-                B256::ZERO,
-                operator,
-            )
-            .send_sync()
-            .await
-            .wrap_err("failed to deposit pathUSD to the zone")?;
-        check(&receipt, "deposit pathUSD")?;
-        wait_for_deposit_processed(&l2, l2_from_block, operator, operator, PATH_USD_ADDRESS)
-            .await?;
+        send_encrypted_deposit(
+            &portal_contract,
+            portal,
+            PATH_USD_ADDRESS,
+            operator,
+            operator,
+            pathusd_gross_deposit,
+        )
+        .await
+        .wrap_err("failed to deposit pathUSD to the zone")?;
+        wait_for_encrypted_deposit_processed(
+            &l2,
+            l2_from_block,
+            operator,
+            operator,
+            PATH_USD_ADDRESS,
+        )
+        .await?;
 
         let l2_from_block = l2.get_block_number().await.unwrap_or(0);
         TIP20Token::new(alpha, &l1)
@@ -306,13 +310,17 @@ impl DemoSwapAndDeposit {
             .send_sync()
             .await
             .wrap_err("failed to approve AlphaUSD for portal")?;
-        let receipt = portal_contract
-            .deposit(alpha, operator, alpha_gross_deposit, B256::ZERO, operator)
-            .send_sync()
-            .await
-            .wrap_err("failed to deposit AlphaUSD to the zone")?;
-        check(&receipt, "deposit AlphaUSD")?;
-        wait_for_deposit_processed(&l2, l2_from_block, operator, operator, alpha).await?;
+        send_encrypted_deposit(
+            &portal_contract,
+            portal,
+            alpha,
+            operator,
+            operator,
+            alpha_gross_deposit,
+        )
+        .await
+        .wrap_err("failed to deposit AlphaUSD to the zone")?;
+        wait_for_encrypted_deposit_processed(&l2, l2_from_block, operator, operator, alpha).await?;
 
         let alpha_before = token_balance(&l2_operator, alpha, operator)
             .await
@@ -595,6 +603,52 @@ struct EncryptedRouterCallbackRequest<'a> {
     memo: B256,
     min_amount_out: u128,
     sequencer_private_key: &'a str,
+}
+
+async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
+    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
+    portal_address: Address,
+    token: Address,
+    recipient: Address,
+    tempo_refund_recipient: Address,
+    amount: u128,
+) -> eyre::Result<()> {
+    let (key, key_index) = portal
+        .encryption_key()
+        .await
+        .wrap_err("failed to fetch the active sequencer encryption key")?;
+    let y_parity = key.normalized_y_parity().ok_or_else(|| {
+        eyre!(
+            "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
+            key.yParity
+        )
+    })?;
+    let encrypted = encrypt_deposit(
+        &key.x,
+        y_parity,
+        recipient,
+        B256::ZERO,
+        portal_address,
+        key_index,
+    )
+    .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
+    let receipt = portal
+        .depositEncrypted(
+            token,
+            amount,
+            key_index,
+            EncryptedDepositPayload {
+                ephemeralPubkeyX: encrypted.eph_pub_x,
+                ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
+                ciphertext: Bytes::from(encrypted.ciphertext),
+                nonce: encrypted.nonce.into(),
+                tag: encrypted.tag.into(),
+            },
+            tempo_refund_recipient,
+        )
+        .send_sync()
+        .await?;
+    check(&receipt, "depositEncrypted")
 }
 
 async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(

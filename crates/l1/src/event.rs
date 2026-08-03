@@ -3,7 +3,7 @@ use super::*;
 /// Events extracted from the ZonePortal in a single L1 block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct L1PortalEvents {
-    /// Deposit events (regular + encrypted).
+    /// Encrypted user deposits and internal withdrawal bounce-backs.
     pub deposits: Vec<L1Deposit>,
     /// Tokens newly enabled for bridging in this block, with metadata.
     pub enabled_tokens: Vec<EnabledToken>,
@@ -70,8 +70,7 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 6] = [
-        DepositMade::SIGNATURE_HASH,
+    const SIGNATURE_HASHES: [B256; 5] = [
         EncryptedDepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
@@ -138,18 +137,6 @@ impl L1PortalEvents {
             return Ok(());
         }
         match ZonePortalEvents::decode_log(&log.inner)?.data {
-            ZonePortalEvents::DepositMade(event) => {
-                info!(
-                    l1_block = block_number,
-                    token = %event.token,
-                    sender = %event.sender,
-                    to = %event.to,
-                    amount = %event.netAmount,
-                    "💰 Deposit from L1"
-                );
-                self.deposits
-                    .push(L1Deposit::Regular(Deposit::from_event(event)));
-            }
             ZonePortalEvents::EncryptedDepositMade(event) => {
                 info!(
                     l1_block = block_number,

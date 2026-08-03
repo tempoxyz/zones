@@ -108,7 +108,7 @@ impl ZoneInbox {
 
             match queued {
                 DecodedQueuedDeposit::Regular(deposit) => {
-                    self.process_deposit(&mut outbox, current_hash, deposit)
+                    self.process_withdrawal_bounce_back(&mut outbox, portal, deposit)
                 }
                 DecodedQueuedDeposit::Encrypted(deposit) => {
                     let Some(decryption) = decryptions.next() else {
@@ -191,35 +191,6 @@ impl ZoneInbox {
         Ok(())
     }
 
-    fn process_deposit(
-        &mut self,
-        outbox: &mut ZoneOutbox,
-        current_hash: B256,
-        deposit: Deposit,
-    ) -> ZoneResult<()> {
-        // The user-facing `ZonePortal.deposit` entry point rejects a zero refund recipient, but
-        // `ZonePortal._enqueueBounceBack` deliberately uses zero as the sentinel for an internal
-        // withdrawal bounce-back and encodes its fallback nonce in `deposit.to`.
-        if deposit.tempoRefundRecipient.is_zero() {
-            return self.process_withdrawal_bounce_back(outbox, deposit);
-        }
-
-        if self.try_mint(deposit.token, deposit.to, deposit.amount)? {
-            self.emit_event(deposit.processed_event(current_hash))?;
-        } else {
-            outbox.enqueue_deposit_bounce_back(
-                ZONE_INBOX_ADDRESS,
-                IZoneOutbox::enqueueDepositBounceBackCall {
-                    token: deposit.token,
-                    amount: deposit.amount,
-                    tempoRefundRecipient: deposit.tempoRefundRecipient,
-                },
-            )?;
-            self.emit_event(deposit.failed_event(current_hash))?;
-        }
-        Ok(())
-    }
-
     fn process_deposit_encrypted(
         &mut self,
         outbox: &mut ZoneOutbox,
@@ -263,8 +234,15 @@ impl ZoneInbox {
     fn process_withdrawal_bounce_back(
         &mut self,
         outbox: &mut ZoneOutbox,
+        portal: Address,
         deposit: Deposit,
     ) -> ZoneResult<()> {
+        if deposit.sender != portal
+            || !deposit.tempoRefundRecipient.is_zero()
+            || !deposit.memo.is_zero()
+        {
+            return Err(ZoneInboxError::invalid_withdrawal_bounce_back().into());
+        }
         let fallback_nonce = u64::from_be_bytes(
             deposit.to.as_slice()[12..]
                 .try_into()

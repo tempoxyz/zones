@@ -20,19 +20,6 @@ pub struct Deposit {
 }
 
 impl Deposit {
-    /// Create a new deposit from an event.
-    pub fn from_event(event: DepositMade) -> Self {
-        Self {
-            token: event.token,
-            sender: event.sender,
-            to: event.to,
-            amount: event.netAmount,
-            fee: event.fee,
-            tempo_refund_recipient: event.tempoRefundRecipient,
-            memo: event.memo,
-        }
-    }
-
     /// Create a bounce-back deposit from an event.
     pub fn from_bounce_back(event: WithdrawalBounceBack, portal_address: Address) -> Self {
         let mut encoded_nonce = [0u8; 20];
@@ -95,10 +82,10 @@ impl EncryptedDeposit {
     }
 }
 
-/// A deposit from L1 — either regular (plaintext) or encrypted.
+/// A deposit from L1 — either an internal withdrawal bounce-back or encrypted user ingress.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum L1Deposit {
-    /// A regular deposit with plaintext recipient and memo.
+    /// An internal withdrawal bounce-back encoded with the regular queue discriminator.
     Regular(Deposit),
     /// An encrypted deposit where recipient and memo are encrypted.
     Encrypted(EncryptedDeposit),

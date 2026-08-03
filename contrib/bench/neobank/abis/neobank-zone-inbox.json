@@ -1,16 +1,5 @@
 [
   {
-    "type":"event", "name":"DepositProcessed", "anonymous":false,
-    "inputs":[
-      {"name":"depositHash","type":"bytes32","indexed":true},
-      {"name":"sender","type":"address","indexed":true},
-      {"name":"to","type":"address","indexed":true},
-      {"name":"token","type":"address","indexed":false},
-      {"name":"amount","type":"uint128","indexed":false},
-      {"name":"memo","type":"bytes32","indexed":false}
-    ]
-  },
-  {
     "type":"event", "name":"EncryptedDepositProcessed", "anonymous":false,
     "inputs":[
       {"name":"depositHash","type":"bytes32","indexed":true},

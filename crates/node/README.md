@@ -215,7 +215,7 @@ just enable-token $TOKEN
 just max-approve-portal
 
 # Deposit to yourself on the zone
-just send-deposit 1000000 "" $TOKEN
+just send-deposit-encrypted 1000000 "" 0x0000000000000000000000000000000000000000000000000000000000000000 $TOKEN
 ```
 
 ### 7. Test enforcement on the zone

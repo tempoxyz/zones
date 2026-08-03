@@ -16,7 +16,7 @@ The harness provides two independent testing paths:
 │           │                 │     │           │                  │
 │           ▼                 │     │           ▼                  │
 │  DepositQueue.enqueue()     │     │  L1Subscriber (WS + HTTP)    │
-│  + seed_l1_cache()          │     │  parses DepositMade logs     │
+│  + seed_l1_cache()          │     │  parses encrypted deposits   │
 │                             │     │           │                  │
 └───────────┬─────────────────┘     └───────────┬──────────────────┘
             │                                   │
@@ -95,7 +95,7 @@ template (`crates/node/assets/zone-dev-genesis.json`, via `zone_node::genesis`):
 | `test_empty_l1_blocks_advance_zone` | Chain continuity without deposits |
 | `test_two_zones_independent_deposits` | Cross-zone isolation (shared L1 timeline, independent queues) |
 | `test_tempo_state_advances_with_l1_blocks` | `tempoBlockNumber` and `tempoBlockHash` tracking |
-| `test_zone_inbox_events_on_deposit` | `TempoAdvanced` + `DepositProcessed` event emission |
+| `test_zone_inbox_events_on_deposit` | `TempoAdvanced` + `EncryptedDepositProcessed` event emission |
 | `test_withdrawal_batch_finalization` | `ZoneOutbox.withdrawalBatchIndex` advancement |
 | `test_large_deposit_batch` | 10 deposits in one L1 block |
 

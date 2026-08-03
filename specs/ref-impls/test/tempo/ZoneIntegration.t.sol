@@ -2,17 +2,25 @@
 pragma solidity ^0.8.13;
 
 import {
+    AES_GCM_DECRYPT,
     BlockTransition,
+    CHAUM_PEDERSEN_VERIFY,
+    ChaumPedersenProof,
     DecryptionData,
     Deposit,
     DepositQueueTransition,
     DepositType,
     EnabledToken,
+    EncryptedDeposit,
     EncryptedDepositPayload,
+    EncryptionKeyEntry,
+    IAesGcmDecrypt,
+    IChaumPedersenVerify,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     Withdrawal,
@@ -202,26 +210,84 @@ contract ZoneIntegrationTest is BaseTest {
         l2ZoneToken.setBurner(address(l2Outbox), true);
     }
 
+    function _encryptedDepositHash(
+        Deposit memory deposit,
+        bytes32 previousHash
+    )
+        internal
+        view
+        returns (bytes32)
+    {
+        EncryptedDeposit memory encryptedDeposit = EncryptedDeposit({
+            token: deposit.token,
+            sender: deposit.sender,
+            amount: deposit.amount,
+            tempoRefundRecipient: deposit.tempoRefundRecipient,
+            keyIndex: l1Portal.encryptionKeyCount() - 1,
+            encrypted: _encryptedDepositPayload(deposit.to, deposit.memo)
+        });
+        return keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, previousHash));
+    }
+
     function _wrapDeposits(Deposit[] memory deposits)
         internal
-        pure
+        view
         returns (QueuedDeposit[] memory queued)
     {
         queued = new QueuedDeposit[](deposits.length);
         for (uint256 i = 0; i < deposits.length; i++) {
+            EncryptedDeposit memory encryptedDeposit = EncryptedDeposit({
+                token: deposits[i].token,
+                sender: deposits[i].sender,
+                amount: deposits[i].amount,
+                tempoRefundRecipient: deposits[i].tempoRefundRecipient,
+                keyIndex: l1Portal.encryptionKeyCount() - 1,
+                encrypted: _encryptedDepositPayload(deposits[i].to, deposits[i].memo)
+            });
             queued[i] = QueuedDeposit({
-                depositType: DepositType.Regular,
-                depositData: abi.encode(deposits[i]),
+                depositType: DepositType.Encrypted,
+                depositData: abi.encode(encryptedDeposit),
                 rejected: false
             });
         }
     }
 
     function _advanceTempo(Deposit[] memory deposits) internal {
-        vm.prank(address(0));
-        l2Inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+        uint256 keyIndex = l1Portal.encryptionKeyCount() - 1;
+        EncryptionKeyEntry memory key = l1Portal.encryptionKeyAt(keyIndex);
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
+        l2TempoState.setMockStorageValue(address(l1Portal), bytes32(base + keyIndex * 2), key.x);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), bytes32(base + keyIndex * 2 + 1), bytes32(uint256(key.yParity))
         );
+
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+
+        DecryptionData[] memory decryptions = new DecryptionData[](deposits.length);
+        bytes[] memory decryptionResults = new bytes[](deposits.length);
+        for (uint256 i; i < deposits.length; ++i) {
+            decryptions[i] = DecryptionData({
+                sharedSecret: bytes32(uint256(0xDEAD)),
+                sharedSecretYParity: 0x02,
+                cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            });
+            decryptionResults[i] =
+                abi.encode(abi.encodePacked(deposits[i].to, deposits[i].memo, bytes12(0)), true);
+        }
+        vm.mockCalls(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            decryptionResults
+        );
+
+        vm.prank(address(0));
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), decryptions, new EnabledToken[](0));
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
@@ -283,18 +349,18 @@ contract ZoneIntegrationTest is BaseTest {
         // Alice, Bob, Charlie all deposit
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("alice1"), alice);
-        l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("alice2"), alice);
+        _deposit(l1Portal, address(l2ZoneToken), alice, 1000e6, bytes32("alice1"), alice);
+        _deposit(l1Portal, address(l2ZoneToken), alice, 2000e6, bytes32("alice2"), alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), 5000e6);
-        l1Portal.deposit(address(l2ZoneToken), bob, 3000e6, bytes32("bob1"), bob);
+        _deposit(l1Portal, address(l2ZoneToken), bob, 3000e6, bytes32("bob1"), bob);
         vm.stopPrank();
 
         vm.startPrank(charlie);
         l2ZoneToken.approve(address(l1Portal), 2000e6);
-        l1Portal.deposit(address(l2ZoneToken), charlie, 500e6, bytes32("charlie1"), charlie);
+        _deposit(l1Portal, address(l2ZoneToken), charlie, 500e6, bytes32("charlie1"), charlie);
         vm.stopPrank();
 
         // Build deposit array
@@ -334,10 +400,10 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Set up L2 mock — hash chain uses l2ZoneToken consistently
         bytes32 l2h0 = bytes32(0);
-        bytes32 l2h1 = keccak256(abi.encode(DepositType.Regular, deposits[0], l2h0));
-        bytes32 l2h2 = keccak256(abi.encode(DepositType.Regular, deposits[1], l2h1));
-        bytes32 l2h3 = keccak256(abi.encode(DepositType.Regular, deposits[2], l2h2));
-        bytes32 l2h4 = keccak256(abi.encode(DepositType.Regular, deposits[3], l2h3));
+        bytes32 l2h1 = _encryptedDepositHash(deposits[0], l2h0);
+        bytes32 l2h2 = _encryptedDepositHash(deposits[1], l2h1);
+        bytes32 l2h3 = _encryptedDepositHash(deposits[2], l2h2);
+        bytes32 l2h4 = _encryptedDepositHash(deposits[3], l2h3);
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2h4
         );
@@ -366,8 +432,8 @@ contract ZoneIntegrationTest is BaseTest {
         // Batch 1: Two deposits
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        bytes32 d1 = l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("d1"), alice);
-        bytes32 d2 = l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("d2"), alice);
+        bytes32 d1 = _deposit(l1Portal, address(l2ZoneToken), alice, 1000e6, bytes32("d1"), alice);
+        bytes32 d2 = _deposit(l1Portal, address(l2ZoneToken), alice, 2000e6, bytes32("d2"), alice);
         vm.stopPrank();
 
         // Process only first deposit
@@ -382,7 +448,7 @@ contract ZoneIntegrationTest is BaseTest {
         });
 
         // Deposit hash uses l2ZoneToken consistently
-        bytes32 l2Hash1 = keccak256(abi.encode(DepositType.Regular, batch1[0], bytes32(0)));
+        bytes32 l2Hash1 = _encryptedDepositHash(batch1[0], bytes32(0));
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash1
         );
@@ -417,7 +483,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // More deposits arrive
         vm.prank(alice);
-        l1Portal.deposit(address(l2ZoneToken), alice, 3000e6, bytes32("d3"), alice);
+        _deposit(l1Portal, address(l2ZoneToken), alice, 3000e6, bytes32("d3"), alice);
 
         // Process remaining deposits
         Deposit[] memory batch2 = new Deposit[](2);
@@ -439,8 +505,8 @@ contract ZoneIntegrationTest is BaseTest {
         });
 
         // Compute L2 hash chain continuing from l2Hash1
-        bytes32 l2Hash2 = keccak256(abi.encode(DepositType.Regular, batch2[0], l2Hash1));
-        bytes32 l2Hash3 = keccak256(abi.encode(DepositType.Regular, batch2[1], l2Hash2));
+        bytes32 l2Hash2 = _encryptedDepositHash(batch2[0], l2Hash1);
+        bytes32 l2Hash3 = _encryptedDepositHash(batch2[1], l2Hash2);
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash3
         );
@@ -459,7 +525,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
         bytes32 depositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, 5000e6, bytes32("deposit"), alice);
+            _deposit(l1Portal, address(l2ZoneToken), alice, 5000e6, bytes32("deposit"), alice);
         vm.stopPrank();
 
         // Process deposit on L2
@@ -542,8 +608,9 @@ contract ZoneIntegrationTest is BaseTest {
         // Initial deposit
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
-        bytes32 depositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, 50_000e6, bytes32("big deposit"), alice);
+        bytes32 depositHash = _deposit(
+            l1Portal, address(l2ZoneToken), alice, 50_000e6, bytes32("big deposit"), alice
+        );
         vm.stopPrank();
 
         // Process on L2
@@ -686,12 +753,12 @@ contract ZoneIntegrationTest is BaseTest {
         // Phase 1: Initial deposits
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 10_000e6, bytes32("d1"), alice);
+        _deposit(l1Portal, address(l2ZoneToken), alice, 10_000e6, bytes32("d1"), alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
-        bytes32 d2 = l1Portal.deposit(address(l2ZoneToken), bob, 5000e6, bytes32("d2"), bob);
+        bytes32 d2 = _deposit(l1Portal, address(l2ZoneToken), bob, 5000e6, bytes32("d2"), bob);
         vm.stopPrank();
 
         // Process both deposits
@@ -734,7 +801,8 @@ contract ZoneIntegrationTest is BaseTest {
         // Phase 3: More deposits arrive while withdrawals are pending
         vm.startPrank(charlie);
         l2ZoneToken.approve(address(l1Portal), 20_000e6);
-        bytes32 d3 = l1Portal.deposit(address(l2ZoneToken), charlie, 7500e6, bytes32("d3"), charlie);
+        bytes32 d3 =
+            _deposit(l1Portal, address(l2ZoneToken), charlie, 7500e6, bytes32("d3"), charlie);
         vm.stopPrank();
 
         // Submit batch with withdrawals
@@ -804,7 +872,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Deposit 10000
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        bytes32 d1 = l1Portal.deposit(address(l2ZoneToken), alice, 10_000e6, bytes32("d1"), alice);
+        bytes32 d1 = _deposit(l1Portal, address(l2ZoneToken), alice, 10_000e6, bytes32("d1"), alice);
         vm.stopPrank();
 
         Deposit[] memory deposits = new Deposit[](1);
@@ -848,7 +916,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Make a deposit to get a non-zero currentDepositQueueHash
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("layout-test"), alice);
+        _deposit(l1Portal, address(l2ZoneToken), alice, 1000e6, bytes32("layout-test"), alice);
         vm.stopPrank();
 
         // Read via vm.load using our constant

@@ -711,7 +711,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{Header, Signed, TxLegacy};
-    use alloy_primitives::{B256, U256, address};
+    use alloy_primitives::{Address, B256, U256, address};
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
     use reth_revm::cancelled::CancelOnDrop;
@@ -850,15 +850,12 @@ mod tests {
         assert_eq!(best_txs.oversized_marked, total - expected_fit);
     }
 
-    /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
-    /// deposit types. The calldata should include `QueuedDeposit` entries with the
-    /// correct `DepositType` discriminator and `DecryptionData` for encrypted deposits.
+    /// Verify calldata for an internal withdrawal bounce-back followed by an
+    /// encrypted user deposit.
     #[test]
     fn test_build_advance_tempo_tx_with_encrypted_deposit() {
         let token = address!("0x0000000000000000000000000000000000001000");
         let sender = address!("0x0000000000000000000000000000000000001234");
-        let recipient = address!("0x0000000000000000000000000000000000005678");
-
         let header = TempoHeader {
             inner: Header {
                 number: 1,
@@ -878,9 +875,9 @@ mod tests {
                         alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
                             token,
                             sender,
-                            to: recipient,
+                            to: Address::with_last_byte(1),
                             amount: 500_000,
-                            tempoRefundRecipient: recipient,
+                            tempoRefundRecipient: Address::ZERO,
                             memo: B256::ZERO,
                         }),
                     ),
@@ -930,11 +927,11 @@ mod tests {
         // Should have 2 queued deposits
         assert_eq!(decoded.deposits.len(), 2, "should have 2 queued deposits");
 
-        // First should be Regular
+        // The internal withdrawal bounce-back keeps the Regular discriminator.
         assert_eq!(
             decoded.deposits[0].depositType,
             DepositType::Regular,
-            "first deposit should be Regular"
+            "first entry should be a withdrawal bounce-back"
         );
 
         // Second should be Encrypted

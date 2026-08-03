@@ -74,12 +74,6 @@ contract MockZonePortalForRouter {
 
     mapping(address => bool) public enabledTokens;
 
-    address public lastDepositRecipient;
-    address public lastDepositBouncebackRecipient;
-    uint128 public lastDepositAmount;
-    bytes32 public lastDepositMemo;
-    bool public depositCalled;
-
     uint128 public lastEncryptedAmount;
     uint256 public lastEncryptedKeyIndex;
     address public lastEncryptedBouncebackRecipient;
@@ -91,25 +85,6 @@ contract MockZonePortalForRouter {
 
     function isTokenEnabled(address _token) external view returns (bool) {
         return enabledTokens[_token];
-    }
-
-    function deposit(
-        address _token,
-        address to,
-        uint128 amount,
-        bytes32 memo,
-        address tempoRefundRecipient
-    )
-        external
-        returns (bytes32)
-    {
-        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
-        lastDepositRecipient = to;
-        lastDepositBouncebackRecipient = tempoRefundRecipient;
-        lastDepositAmount = amount;
-        lastDepositMemo = memo;
-        depositCalled = true;
-        return bytes32(0);
     }
 
     function depositEncrypted(
@@ -177,23 +152,6 @@ contract SwapAndDepositRouterTest is BaseTest {
         token1.grantRole(_ISSUER_ROLE, address(mockDEX));
     }
 
-    function _buildPlaintextData(
-        address tokenOut,
-        address targetPortal,
-        address recipient,
-        address tempoRefundRecipient,
-        bytes32 memo,
-        uint128 minAmountOut
-    )
-        internal
-        pure
-        returns (bytes memory)
-    {
-        return abi.encode(
-            false, tokenOut, targetPortal, recipient, tempoRefundRecipient, memo, minAmountOut
-        );
-    }
-
     function _buildEncryptedData(
         address tokenOut,
         address targetPortal,
@@ -207,7 +165,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         returns (bytes memory)
     {
         return abi.encode(
-            true, tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
+            tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
         );
     }
 
@@ -222,8 +180,8 @@ contract SwapAndDepositRouterTest is BaseTest {
     }
 
     function test_revertUnauthorizedMessenger() public {
-        bytes memory data = _buildPlaintextData(
-            address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
+        bytes memory data = _buildEncryptedData(
+            address(pathUSD), address(mockPortal), 0, _defaultEncryptedPayload(), refundBurner, 0
         );
 
         vm.prank(alice);
@@ -234,8 +192,8 @@ contract SwapAndDepositRouterTest is BaseTest {
     }
 
     function test_revertInvalidSourcePortal() public {
-        bytes memory data = _buildPlaintextData(
-            address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
+        bytes memory data = _buildEncryptedData(
+            address(pathUSD), address(mockPortal), 0, _defaultEncryptedPayload(), refundBurner, 0
         );
 
         vm.prank(ZONE_MESSENGER_ADDRESS);
@@ -247,8 +205,8 @@ contract SwapAndDepositRouterTest is BaseTest {
 
     function test_revertInvalidTargetPortal() public {
         address fakePortal = address(0xFAFAFA);
-        bytes memory data = _buildPlaintextData(
-            address(pathUSD), fakePortal, alice, refundBurner, bytes32("memo"), 0
+        bytes memory data = _buildEncryptedData(
+            address(pathUSD), fakePortal, 0, _defaultEncryptedPayload(), refundBurner, 0
         );
 
         vm.prank(ZONE_MESSENGER_ADDRESS);
@@ -259,8 +217,8 @@ contract SwapAndDepositRouterTest is BaseTest {
     }
 
     function test_revertInvalidToken() public {
-        bytes memory data = _buildPlaintextData(
-            address(token1), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
+        bytes memory data = _buildEncryptedData(
+            address(token1), address(mockPortal), 0, _defaultEncryptedPayload(), refundBurner, 0
         );
 
         vm.prank(ZONE_MESSENGER_ADDRESS);
@@ -268,45 +226,6 @@ contract SwapAndDepositRouterTest is BaseTest {
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
-    }
-
-    function test_plaintextDeposit_sameToken() public {
-        bytes memory data = _buildPlaintextData(
-            address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("hello"), 0
-        );
-
-        vm.prank(ZONE_MESSENGER_ADDRESS);
-        bytes4 ret = router.onWithdrawalReceived(
-            SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
-        );
-
-        assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
-        assertTrue(mockPortal.depositCalled());
-        assertEq(mockPortal.lastDepositRecipient(), alice);
-        assertEq(mockPortal.lastDepositBouncebackRecipient(), refundBurner);
-        assertEq(mockPortal.lastDepositAmount(), AMOUNT);
-        assertEq(mockPortal.lastDepositMemo(), bytes32("hello"));
-    }
-
-    function test_plaintextDeposit_withSwap() public {
-        uint128 swapOut = 990e6;
-        mockDEX.setNextAmountOut(swapOut);
-
-        bytes memory data = _buildPlaintextData(
-            address(token1), address(mockPortal2), alice, refundBurner, bytes32("swap"), 900e6
-        );
-
-        vm.prank(ZONE_MESSENGER_ADDRESS);
-        bytes4 ret = router.onWithdrawalReceived(
-            SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
-        );
-
-        assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
-        assertTrue(mockPortal2.depositCalled());
-        assertEq(mockPortal2.lastDepositRecipient(), alice);
-        assertEq(mockPortal2.lastDepositBouncebackRecipient(), refundBurner);
-        assertEq(mockPortal2.lastDepositAmount(), swapOut);
-        assertEq(mockPortal2.lastDepositMemo(), bytes32("swap"));
     }
 
     function test_encryptedDeposit_sameToken() public {
@@ -350,8 +269,13 @@ contract SwapAndDepositRouterTest is BaseTest {
     function test_swapSlippageReverts() public {
         mockDEX.setNextAmountOut(800e6);
 
-        bytes memory data = _buildPlaintextData(
-            address(token1), address(mockPortal2), alice, refundBurner, bytes32("slip"), 900e6
+        bytes memory data = _buildEncryptedData(
+            address(token1),
+            address(mockPortal2),
+            0,
+            _defaultEncryptedPayload(),
+            refundBurner,
+            900e6
         );
 
         vm.prank(ZONE_MESSENGER_ADDRESS);

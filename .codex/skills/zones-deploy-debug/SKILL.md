@@ -19,7 +19,7 @@ Use this skill for repo-local zone deployment, smoke tests, and sync debugging.
 1. Build `tempo-zone` in release before judging sync speed.
 2. Deploy a fresh zone if you need a clean test surface.
 3. Start the zone node and confirm `http://localhost:8546` is answering.
-4. For a direct bridge smoke test, run `just max-approve-portal`, `just send-deposit`, `just max-approve-outbox`, then `just send-withdrawal`.
+4. For a direct bridge smoke test, run `just max-approve-portal`, `just send-deposit-encrypted`, `just max-approve-outbox`, then `just send-withdrawal`.
 5. Deploy the router for that zone.
 6. Run the same-zone swap-and-deposit demo.
 7. If the demo stalls, compare the L1 block of the relevant tx with the latest `l1_block=` in the zone log before assuming the router flow is broken.

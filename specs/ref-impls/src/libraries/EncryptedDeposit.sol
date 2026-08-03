@@ -108,7 +108,7 @@ library EncryptedDepositLib {
                     UNIFIED DEPOSIT QUEUE PROCESSING
 //////////////////////////////////////////////////////////////*/
 
-/// @dev The deposit queue on Tempo contains both regular and encrypted deposits
+/// @dev The deposit queue contains encrypted user deposits and internal withdrawal bounce-backs
 ///      in a single ordered sequence. The sequencer must provide decryption data
 ///      for encrypted deposits when processing the queue on the zone.
 ///

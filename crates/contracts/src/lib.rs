@@ -202,31 +202,6 @@ mod tests {
     }
 
     #[test]
-    fn test_router_plaintext_callback_encoding_matches_tuple() {
-        let callback = SwapAndDepositRouterPlaintextCallback {
-            token_out: address!("0x0000000000000000000000000000000000001001"),
-            target_portal: address!("0x0000000000000000000000000000000000002001"),
-            recipient: address!("0x0000000000000000000000000000000000003001"),
-            tempo_refund_recipient: address!("0x0000000000000000000000000000000000004001"),
-            memo: B256::from([0x11; 32]),
-            min_amount_out: 1234,
-        };
-
-        let tuple_encoding = (
-            false,
-            callback.token_out,
-            callback.target_portal,
-            callback.recipient,
-            callback.tempo_refund_recipient,
-            callback.memo,
-            callback.min_amount_out,
-        )
-            .abi_encode_params();
-
-        assert_eq!(callback.abi_encode(), tuple_encoding);
-    }
-
-    #[test]
     fn test_sender_tag_matches_plaintext_hash() {
         let sender = address!("0x0000000000000000000000000000000000000001");
         let tx_hash = B256::repeat_byte(0x22);
@@ -259,7 +234,6 @@ mod tests {
         };
 
         let tuple_encoding = (
-            true,
             callback.token_out,
             callback.target_portal,
             callback.key_index,

@@ -42,10 +42,10 @@ ADDR=$(cast wallet address "$PRIVATE_KEY")
 # Fund the wallet on L1 (testnet faucet)
 cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 
-# Approve the portal and deposit tokens to the zone
+# Approve the portal and make an encrypted deposit to the zone
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
-just send-deposit 1000000
+just send-deposit-encrypted 1000000
 
 # Check your balance on the zone
 just check-balance "$ADDR"
@@ -234,16 +234,21 @@ cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 
 #### Deposit from L1 to Zone
 
-Approve the portal to spend your tokens, then deposit:
+All user deposits are encrypted. Approve the portal to spend your tokens, then deposit:
+
+The portal also exposes `deposit(...)` with the same encrypted arguments and behavior as
+`depositEncrypted(...)`; first-party tooling uses the explicit `depositEncrypted` name.
+
+> This deposit ABI is not compatible with earlier plaintext-deposit zones. Recreate an existing development zone after upgrading.
 
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
-just send-deposit 1000000                       # deposit to your own address
-just send-deposit 1000000 <recipient-address>   # deposit to a specific address
+just send-deposit-encrypted 1000000                       # deposit to your own address
+just send-deposit-encrypted 1000000 <recipient-address>   # deposit to a specific address
 ```
 
-#### Encrypted Deposit (Private Recipient)
+#### Encryption Key Setup
 
 Encrypted deposits hide the recipient address and memo on-chain using ECIES encryption to the sequencer's public key. Only the sequencer can decrypt them during block building.
 
@@ -255,8 +260,8 @@ cargo run -p tempo-xtask -- set-encryption-key \
   --private-key "$SEQUENCER_KEY"
 
 # Send an encrypted deposit
-just send-deposit-encrypted 1000000                       # to your own address
-just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+just send-deposit 1000000                       # to your own address
+just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
 
 Before registering a replacement encryption key, add its private key to
@@ -451,7 +456,7 @@ Once the token is enabled, approve the portal and deposit as usual — just pass
 just max-approve-portal <token-address>
 
 # Deposit the custom token into the zone
-just send-deposit 1000000 "" <token-address>
+just send-deposit-encrypted 1000000 "" 0x0000000000000000000000000000000000000000000000000000000000000000 <token-address>
 
 # Check balance on the zone (pass the token address)
 just check-balance "$ADDR" <token-address>
@@ -658,8 +663,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |
-| `just send-deposit [amount] [to] [token] [memo]` | Deposit tokens from L1 to zone (defaults to sender) |
-| `just send-deposit-encrypted [amount] [to] [memo] [token] [rpc]` | Encrypted deposit — hides recipient and memo on-chain |
+| `just send-deposit-encrypted [amount] [to] [memo] [token] [rpc]` | Deposit tokens from L1 to the zone with an encrypted recipient and memo |
 | `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (admin only) |
 | `just pause-deposits <token>` | Pause deposits for an enabled token on the portal (admin only) |
 | `just resume-deposits <token>` | Resume deposits for a paused token on the portal (admin only) |

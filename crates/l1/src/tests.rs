@@ -117,14 +117,14 @@ impl EncryptedDepositFixture {
     }
 }
 
-fn make_deposit(amount: u128) -> L1Deposit {
+fn make_withdrawal_bounce_back(amount: u128) -> L1Deposit {
     L1Deposit::Regular(Deposit {
         token: address!("0x0000000000000000000000000000000000001000"),
         sender: address!("0x0000000000000000000000000000000000000001"),
         to: address!("0x0000000000000000000000000000000000000002"),
         amount,
         fee: 0,
-        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: Address::ZERO,
         memo: B256::ZERO,
     })
 }
@@ -209,7 +209,7 @@ async fn l1_block_tracker_waits_for_exact_observation() {
 async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
     let tracker = L1BlockTracker::default();
     let anchor = NumHash::new(10, B256::with_last_byte(0x10));
-    let events = L1PortalEvents::from_deposits(vec![make_deposit(100)]);
+    let events = L1PortalEvents::from_deposits(vec![make_withdrawal_bounce_back(100)]);
     tracker
         .record_with_portal_events(anchor, events.clone())
         .unwrap();
@@ -225,7 +225,10 @@ async fn l1_block_tracker_returns_receipt_authenticated_portal_events() {
 #[test]
 fn observed_portal_events_require_complete_advance_tempo_inputs() {
     let events = L1PortalEvents {
-        deposits: vec![make_deposit(100), make_deposit(200)],
+        deposits: vec![
+            make_withdrawal_bounce_back(100),
+            make_withdrawal_bounce_back(200),
+        ],
         enabled_tokens: vec![EnabledToken {
             token: address!("0x20C0000000000000000000000000000000000001"),
             name: "Alpha USD".to_owned(),
@@ -950,7 +953,7 @@ fn test_drain_returns_block_grouped_deposits() {
         to: address!("0x0000000000000000000000000000000000000002"),
         amount: 100,
         fee: 0,
-        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000001"),
+        tempo_refund_recipient: Address::ZERO,
         memo: B256::ZERO,
     });
 
@@ -960,7 +963,7 @@ fn test_drain_returns_block_grouped_deposits() {
         to: address!("0x0000000000000000000000000000000000000004"),
         amount: 200,
         fee: 0,
-        tempo_refund_recipient: address!("0x0000000000000000000000000000000000000003"),
+        tempo_refund_recipient: Address::ZERO,
         memo: B256::ZERO,
     });
 
@@ -1026,18 +1029,18 @@ fn test_encrypted_deposit_hash_chain() {
 }
 
 #[test]
-fn test_mixed_deposit_hash_chain() {
+fn test_withdrawal_bounce_back_and_encrypted_deposit_hash_chain() {
     let token = address!("0x0000000000000000000000000000000000001000");
     let sender = address!("0x0000000000000000000000000000000000001111");
     let recipient = address!("0x000000000000000000000000000000000000A11C");
 
-    let regular = Deposit {
+    let bounce_back = Deposit {
         token,
         sender,
         to: recipient,
         amount: 500_000,
         fee: 0,
-        tempo_refund_recipient: sender,
+        tempo_refund_recipient: Address::ZERO,
         memo: B256::ZERO,
     };
 
@@ -1056,7 +1059,7 @@ fn test_mixed_deposit_hash_chain() {
     };
 
     let deposits = vec![
-        L1Deposit::Regular(regular.clone()),
+        L1Deposit::Regular(bounce_back.clone()),
         L1Deposit::Encrypted(encrypted.clone()),
     ];
 
@@ -1067,12 +1070,12 @@ fn test_mixed_deposit_hash_chain() {
         (
             DepositType::Regular,
             abi::Deposit {
-                token: regular.token,
-                sender: regular.sender,
-                to: regular.to,
-                amount: regular.amount,
-                tempoRefundRecipient: regular.tempo_refund_recipient,
-                memo: regular.memo,
+                token: bounce_back.token,
+                sender: bounce_back.sender,
+                to: bounce_back.to,
+                amount: bounce_back.amount,
+                tempoRefundRecipient: bounce_back.tempo_refund_recipient,
+                memo: bounce_back.memo,
             },
             B256::ZERO,
         )

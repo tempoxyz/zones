@@ -4,8 +4,10 @@ pragma solidity ^0.8.13;
 import {
     BlockTransition,
     DepositQueueTransition,
+    EncryptedDepositPayload,
     IZoneFactory,
     IZonePortal,
+    PORTAL_ENCRYPTION_KEYS_SLOT,
     Withdrawal,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
@@ -20,6 +22,7 @@ import { ZonePortal } from "../src/tempo/ZonePortal.sol";
 import { MockZoneGateway } from "./mocks/MockZoneGateway.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
+import { Vm } from "forge-std/Vm.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { IAccountKeychain } from "tempo-std/interfaces/IAccountKeychain.sol";
 import { IFeeManager } from "tempo-std/interfaces/IFeeManager.sol";
@@ -237,6 +240,61 @@ contract BaseTest is Test {
                     rpcUrl: rpcUrl
                 })
             )
+        );
+    }
+
+    /// @notice Submit the encrypted-only user deposit used by shared portal behavior tests.
+    function _encryptedDepositPayload(
+        address to,
+        bytes32 memo
+    )
+        internal
+        pure
+        returns (EncryptedDepositPayload memory)
+    {
+        return EncryptedDepositPayload({
+            ephemeralPubkeyX: bytes32(
+                0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+            ),
+            ephemeralPubkeyYParity: 0x02,
+            ciphertext: abi.encodePacked(to, memo, bytes12(0)),
+            nonce: bytes12(0),
+            tag: bytes16(0)
+        });
+    }
+
+    /// @notice Submit the encrypted-only user deposit used by shared portal behavior tests.
+    function _deposit(
+        ZonePortal portal,
+        address token,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        address tempoRefundRecipient
+    )
+        internal
+        returns (bytes32)
+    {
+        if (portal.encryptionKeyCount() == 0) {
+            bytes32 entriesBase = keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT)));
+            vm.store(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT, bytes32(uint256(1)));
+            vm.store(
+                address(portal),
+                entriesBase,
+                bytes32(0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798)
+            );
+            vm.store(
+                address(portal),
+                bytes32(uint256(entriesBase) + 1),
+                bytes32((uint256(uint64(block.number)) << 8) | uint256(0x02))
+            );
+        }
+        return portal.depositEncrypted(
+            token,
+            amount,
+            portal.encryptionKeyCount() - 1,
+            _encryptedDepositPayload(to, memo),
+            tempoRefundRecipient
         );
     }
 

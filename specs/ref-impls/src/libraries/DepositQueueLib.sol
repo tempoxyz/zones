@@ -9,13 +9,13 @@ import { Deposit, DepositType, EncryptedDeposit } from "../interfaces/IZone.sol"
 ///      The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof
 ///      validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 ///
-///      The queue supports both regular and encrypted deposits. The hash chain includes
-///      a type discriminator to distinguish between them:
-///      - Regular:   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
+///      The queue supports encrypted deposits and internal withdrawal bounce-backs. The hash
+///      chain includes a type discriminator to distinguish between them:
+///      - Regular:   keccak256(abi.encode(DepositType.Regular, bounceBack, prevHash))
 ///      - Encrypted: keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
 library DepositQueueLib {
 
-    /// @notice Enqueue a regular deposit into the queue
+    /// @notice Enqueue an internal withdrawal bounce-back into the queue
     /// @dev Hash chain: newHash = keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
     /// @param currentHash The current head of the deposit queue
     /// @param depositData The deposit to enqueue

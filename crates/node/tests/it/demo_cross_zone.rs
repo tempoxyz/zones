@@ -100,13 +100,15 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
 
     // Use the cross_zone_via_router helper but with Bob as the recipient
     let args = WithdrawalArgs::cross_zone_via_router(
+        &l1,
         cross_amount,
         router,
         portal_b,
         PATH_USD_ADDRESS,
         bob_address,   // recipient on zone_b is Bob
         refund_burner, // Tempo refund target if Zone B later bounces the deposit
-    );
+    )
+    .await?;
     alice.withdraw_with(args).await?;
     let callback_succeeded = l1
         .wait_for_withdrawal_processed_status(

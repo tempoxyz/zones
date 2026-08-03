@@ -5,7 +5,7 @@ pub use IZoneInbox::{
     IZoneInboxErrors as ZoneInboxError, IZoneInboxEvents as ZoneInboxEvent, QueuedDeposit,
 };
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::Address;
 
 crate::sol! {
     #[derive(Debug, PartialEq, Eq)]
@@ -31,11 +31,12 @@ crate::sol! {
 
         /// Deposit types for the unified deposit queue.
         enum DepositType {
+            /// Internal withdrawal bounce-back entry.
             Regular,
             Encrypted,
         }
 
-        /// A canonical deposit (regular or encrypted) passed to `advanceTempo`.
+        /// An encrypted user deposit or internal withdrawal bounce-back passed to `advanceTempo`.
         struct QueuedDeposit {
             DepositType depositType;
             bytes depositData;
@@ -64,15 +65,6 @@ crate::sol! {
             uint64 lastProcessedDepositNumber
         );
 
-        event DepositProcessed(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            address indexed to,
-            address token,
-            uint128 amount,
-            bytes32 memo
-        );
-
         event EncryptedDepositProcessed(
             bytes32 indexed depositHash,
             address indexed sender,
@@ -89,15 +81,6 @@ crate::sol! {
             uint128 amount
         );
 
-        event DepositFailed(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            address indexed to,
-            address token,
-            uint128 amount,
-            address tempoRefundRecipient
-        );
-
         event WithdrawalBounceBackProcessed(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
         event WithdrawalBounceBackPending(address indexed zoneFallbackRecipient, address token, uint128 amount);
@@ -109,6 +92,7 @@ crate::sol! {
 
         error OnlySequencer();
         error InvalidDepositQueueHash();
+        error InvalidWithdrawalBounceBack();
         error MissingDecryptionData();
         error ExtraDecryptionData();
         error InvalidSharedSecretProof();
@@ -138,30 +122,6 @@ impl EnabledToken {
 }
 
 impl Deposit {
-    /// Build the event emitted after a successful regular deposit.
-    pub fn processed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::deposit_processed(
-            deposit_hash,
-            self.sender,
-            self.to,
-            self.token,
-            self.amount,
-            self.memo,
-        )
-    }
-
-    /// Build the event emitted after a failed regular deposit.
-    pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::deposit_failed(
-            deposit_hash,
-            self.sender,
-            self.to,
-            self.token,
-            self.amount,
-            self.tempoRefundRecipient,
-        )
-    }
-
     /// Build the event emitted after processing a withdrawal bounce-back.
     pub fn withdrawal_bounce_back_processed_event(
         &self,

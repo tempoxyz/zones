@@ -93,28 +93,6 @@ max-approve-portal token="0x20C0000000000000000000000000000000000000":
     echo "Approved!"
 
 [group('zone')]
-[doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
-    #!/bin/bash
-    set -euo pipefail
-    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
-    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    SENDER=$(cast wallet address "$PK")
-    TO="{{to}}"
-    if [[ -z "$TO" ]]; then
-        TO="$SENDER"
-    fi
-    echo "Depositing {{amount}} to $TO..."
-    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32,address)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" "$SENDER" \
-        --rpc-url "$RPC" --private-key "$PK" --json)
-    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
-    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
-    echo "Deposit sent! (block $L1_BLOCK_DEC)"
-    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
-
-[group('zone')]
 [doc('Sends an encrypted deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
 send-deposit-encrypted amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     #!/bin/bash
@@ -924,15 +902,12 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
                       --sequencer-key "$SEQUENCER_KEY"
 
 [group('zone')]
-[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000 1 (10 txs, 10 per block, 200000 amount, encrypted)')]
-spam-deposits total="20" per-block="10" amount="1000000" encrypted="" token="0x20C0000000000000000000000000000000000000" lead-time="3":
+[doc('Spam encrypted deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000')]
+spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" lead-time="3":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
-    if [[ "{{encrypted}}" == "true" || "{{encrypted}}" == "1" ]]; then
-        ARGS="$ARGS --encrypted"
-    fi
     cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
 
 [group('zone')]

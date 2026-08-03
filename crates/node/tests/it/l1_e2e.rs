@@ -5,7 +5,7 @@
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
 use crate::utils::{
-    EncryptedRouterCallbackArgs, L1TestNode, PlaintextRouterCallbackArgs, PolicySeed,
+    EncryptedRouterCallbackArgs, L1TestNode, PolicySeed, RouterCallbackArgs,
     STABLECOIN_DEX_ADDRESS, WithdrawalArgs, ZoneAccount, ZoneCreationConfig, ZoneTestNode,
     poll_until, seed_raw_tip403_policy, seed_raw_tip403_token_policy, spawn_sequencer,
     spawn_sequencer_with_config,
@@ -581,13 +581,15 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
     // Open mode does not weaken callback target validation.
     let router = l1.deploy_router(factory).await?;
     let unregistered = WithdrawalArgs::cross_zone_via_router(
+        &l1,
         100_000,
         router,
         portal_address,
         PATH_USD_ADDRESS,
         account.address(),
         account.address(),
-    );
+    )
+    .await?;
     assert!(
         account.simulate_withdraw_with(unregistered).await.is_err(),
         "open mode accepted an unregistered callback target"
@@ -605,13 +607,15 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
         .balance_of(ZONE_TOKEN_ADDRESS, account.address())
         .await?;
     let callback = WithdrawalArgs::cross_zone_via_router(
+        &l1,
         callback_amount,
         router,
         portal_address,
         PATH_USD_ADDRESS,
         account.address(),
         account.address(),
-    );
+    )
+    .await?;
     account.withdraw_with(callback).await?;
     let balance_after_callback_request = zone
         .balance_of(ZONE_TOKEN_ADDRESS, account.address())
@@ -696,15 +700,12 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
             .get_receipt()
             .await?;
         let portal = ZonePortal::new(portal_address, &provider);
+        let (key_index, encrypted) = l1
+            .encrypt_deposit_for_portal(portal_address, allowed_account.address(), B256::ZERO)
+            .await?;
         assert!(
             portal
-                .deposit(
-                    PATH_USD_ADDRESS,
-                    allowed_account.address(),
-                    100_000,
-                    B256::ZERO,
-                    outsider,
-                )
+                .depositEncrypted(PATH_USD_ADDRESS, 100_000, key_index, encrypted, outsider,)
                 .call()
                 .await
                 .is_err(),
@@ -782,13 +783,15 @@ async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Re
 
     let router = l1.deploy_router(factory).await?;
     let callback = WithdrawalArgs::cross_zone_via_router(
+        &l1,
         100_000,
         router,
         portal_address,
         PATH_USD_ADDRESS,
         outsider,
         outsider,
-    );
+    )
+    .await?;
     assert!(
         outsider_account
             .simulate_withdraw_with(callback.clone())
@@ -914,13 +917,15 @@ async fn test_queued_callback_bounces_after_gateway_revocation() -> eyre::Result
     let trailing_recipient = fixture.l1.admin_address();
 
     let callback = WithdrawalArgs::cross_zone_via_router(
+        &fixture.l1,
         callback_amount,
         fixture.router,
         fixture.portal_address,
         PATH_USD_ADDRESS,
         fixture.account.address(),
         fixture.account.address(),
-    );
+    )
+    .await?;
     fixture.account.withdraw_with(callback).await?;
     let mut trailing = WithdrawalArgs::new(trailing_amount);
     trailing.to = Some(trailing_recipient);
@@ -1050,13 +1055,15 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     // --- Step 5: Cross-zone withdrawal: zone_a → router → zone_b ---
     let cross_amount: u128 = 400_000; // 0.4 pathUSD
     let args_a_to_b = WithdrawalArgs::cross_zone_via_router(
+        &l1,
         cross_amount,
         router,
         portal_b,
         PATH_USD_ADDRESS,
         account_a.address(),
         account_a.address(),
-    );
+    )
+    .await?;
     account_a.withdraw_with(args_a_to_b).await?;
 
     // --- Step 6: Verify deposit arrives on zone_b ---
@@ -1092,13 +1099,15 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     let mut account_b = ZoneAccount::from_l1_and_zone(&l1, &zone_b, portal_b);
     let reverse_amount: u128 = 200_000; // 0.2 pathUSD
     let args_b_to_a = WithdrawalArgs::cross_zone_via_router(
+        &l1,
         reverse_amount,
         router,
         portal_a,
         PATH_USD_ADDRESS,
         account_b.address(),
         account_b.address(),
-    );
+    )
+    .await?;
     account_b.withdraw_with(args_b_to_a).await?;
 
     // --- Step 8: Verify deposit arrives on zone_a ---
@@ -1283,16 +1292,20 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
-        amount: fixture.swap_amount,
-        router: fixture.router,
-        token_out: fixture.beta,
-        target_portal: fixture.portal_address,
-        recipient: fixture.account.address(),
-        tempo_refund_recipient: fixture.account.address(),
-        memo: B256::ZERO,
-        min_amount_out: expected_beta,
-    });
+    let args = WithdrawalArgs::swap_and_deposit_via_router(
+        &fixture.l1,
+        RouterCallbackArgs {
+            amount: fixture.swap_amount,
+            router: fixture.router,
+            token_out: fixture.beta,
+            target_portal: fixture.portal_address,
+            recipient: fixture.account.address(),
+            tempo_refund_recipient: fixture.account.address(),
+            memo: B256::ZERO,
+            min_amount_out: expected_beta,
+        },
+    )
+    .await?;
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
@@ -1353,12 +1366,12 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Same-zone routed withdrawal where the downstream plaintext deposit fails.
+/// Same-zone routed withdrawal where the downstream encrypted deposit fails.
 ///
 /// Deposits for BetaUSD are paused on the target portal so the router callback
 /// reverts and the original AlphaUSD withdrawal bounces back to the sender.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_failure()
+async fn test_swap_and_deposit_into_same_zone_bounces_back_when_target_deposits_paused()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1381,16 +1394,20 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
-        amount: fixture.swap_amount,
-        router: fixture.router,
-        token_out: fixture.beta,
-        target_portal: fixture.portal_address,
-        recipient: fixture.account.address(),
-        tempo_refund_recipient: fixture.account.address(),
-        memo: B256::ZERO,
-        min_amount_out: expected_beta,
-    });
+    let args = WithdrawalArgs::swap_and_deposit_via_router(
+        &fixture.l1,
+        RouterCallbackArgs {
+            amount: fixture.swap_amount,
+            router: fixture.router,
+            token_out: fixture.beta,
+            target_portal: fixture.portal_address,
+            recipient: fixture.account.address(),
+            tempo_refund_recipient: fixture.account.address(),
+            memo: B256::ZERO,
+            min_amount_out: expected_beta,
+        },
+    )
+    .await?;
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
@@ -1424,7 +1441,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
     assert_eq!(
         alpha_after,
         U256::from(fixture.swap_amount),
-        "AlphaUSD should bounce back after the router's plaintext deposit reverts"
+        "AlphaUSD should bounce back after the router's encrypted deposit reverts"
     );
 
     let beta_after = fixture
@@ -1434,7 +1451,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
     assert_eq!(
         beta_after,
         U256::ZERO,
-        "BetaUSD should not be minted when the routed plaintext deposit fails"
+        "BetaUSD should not be minted when the routed encrypted deposit fails"
     );
 
     fixture
@@ -1457,7 +1474,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
 /// encrypted payload and key index, a target-portal deposit failure must revert
 /// the callback and bounce the original token back to the sender.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_failure()
+async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_encrypted_payload()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1883,11 +1900,11 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
     Ok(())
 }
 
-/// A plaintext deposit accepted on L1 but rejected by the zone's current token
+/// An encrypted deposit accepted on L1 but rejected by the zone's current token
 /// policy must complete the zone -> batch -> L1 bounceback loop and refund the
 /// explicitly selected Tempo recipient.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient()
+async fn test_encrypted_deposit_policy_failure_bounces_to_tempo_refund_recipient()
 -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -1941,12 +1958,15 @@ async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient
 
     let _sequencer = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let portal = ZonePortal::new(portal_address, &provider);
+    let (key_index, encrypted) = l1
+        .encrypt_deposit_for_portal(portal_address, rejected_recipient, B256::ZERO)
+        .await?;
     let receipt = portal
-        .deposit(
+        .depositEncrypted(
             PATH_USD_ADDRESS,
-            rejected_recipient,
             deposit_amount,
-            B256::ZERO,
+            key_index,
+            encrypted,
             tempo_refund_recipient,
         )
         .send()
@@ -1955,7 +1975,7 @@ async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient
         .await?;
     eyre::ensure!(
         receipt.status(),
-        "plaintext L1 deposit failed before queueing"
+        "encrypted L1 deposit failed before queueing"
     );
 
     l1.wait_for_balance(
@@ -1969,7 +1989,7 @@ async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient
         zone.balance_of(ZONE_TOKEN_ADDRESS, rejected_recipient)
             .await?,
         U256::ZERO,
-        "policy-rejected plaintext recipient should not be minted"
+        "policy-rejected encrypted recipient should not be minted"
     );
 
     let bouncebacks = portal
@@ -1984,7 +2004,7 @@ async fn test_plaintext_deposit_policy_failure_bounces_to_tempo_refund_recipient
     });
     eyre::ensure!(
         bounced,
-        "expected completed plaintext deposit bounceback event"
+        "expected completed encrypted deposit bounceback event"
     );
 
     Ok(())
@@ -2319,8 +2339,17 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
             .await?;
 
         let portal = ZonePortal::new(portal_address, &dev_provider);
+        let (key_index, encrypted) = l1
+            .encrypt_deposit_for_portal(portal_address, alice, B256::ZERO)
+            .await?;
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, alice, deposit_amount, B256::ZERO, alice)
+            .depositEncrypted(
+                PATH_USD_ADDRESS,
+                deposit_amount,
+                key_index,
+                encrypted,
+                alice,
+            )
             .send()
             .await?
             .get_receipt()
@@ -2364,15 +2393,15 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Test that a regular deposit to a blacklisted recipient reverts on L1.
+/// Test that an encrypted deposit defers recipient policy enforcement to the zone.
 ///
 ///  1. Start L1 dev node, deploy zone.
 ///  2. Create a blacklist policy, assign to pathUSD, blacklist a user.
 ///  3. Fund the blacklisted user on L1.
-///  4. Attempt a deposit targeting the blacklisted user — should revert with
-///     `PolicyForbids` on the L1 portal contract.
+///  4. Submit a deposit targeting the blacklisted user — L1 accepts it because the
+///     recipient is encrypted and zone-side processing owns recipient enforcement.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_deposit_to_blacklisted_recipient_reverts_on_l1() -> eyre::Result<()> {
+async fn test_encrypted_deposit_to_blacklisted_recipient_is_accepted_on_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let l1 = L1TestNode::start().await?;
@@ -2412,23 +2441,28 @@ async fn test_deposit_to_blacklisted_recipient_reverts_on_l1() -> eyre::Result<(
         .get_receipt()
         .await?;
 
-    // Attempt a deposit to the blacklisted recipient — should revert on L1
+    // The portal cannot inspect the encrypted recipient, so this is accepted on L1.
     use tempo_zone_contracts::ZonePortal;
     let portal = ZonePortal::new(portal_address, &depositor_provider);
-    let result = portal
-        .deposit(
+    let (key_index, encrypted) = l1
+        .encrypt_deposit_for_portal(portal_address, blacklisted_recipient, B256::ZERO)
+        .await?;
+    let receipt = portal
+        .depositEncrypted(
             PATH_USD_ADDRESS,
-            blacklisted_recipient,
             deposit_amount,
-            B256::ZERO,
+            key_index,
+            encrypted,
             depositor,
         )
         .send()
-        .await;
+        .await?
+        .get_receipt()
+        .await?;
 
     assert!(
-        result.is_err(),
-        "deposit to blacklisted recipient should revert on L1"
+        receipt.status(),
+        "encrypted deposit should be accepted on L1"
     );
 
     Ok(())
