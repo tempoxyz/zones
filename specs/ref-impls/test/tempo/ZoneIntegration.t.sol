@@ -349,7 +349,6 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 supplyPre = l2ZoneToken.totalSupply();
 
         // Process on L2
-        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         // Verify L2 minting: each user receives their deposited amounts
@@ -388,7 +387,6 @@ contract ZoneIntegrationTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash1
         );
         uint256 alicePreBatch1 = l2ZoneToken.balanceOf(alice);
-        vm.prank(sequencer);
         _advanceTempo(batch1);
 
         assertEq(l2ZoneToken.balanceOf(alice), alicePreBatch1 + 1000e6);
@@ -447,7 +445,6 @@ contract ZoneIntegrationTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash3
         );
         uint256 alicePreBatch2 = l2ZoneToken.balanceOf(alice);
-        vm.prank(sequencer);
         _advanceTempo(batch2);
 
         assertEq(l2ZoneToken.balanceOf(alice), alicePreBatch2 + 5000e6);
@@ -478,7 +475,6 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
-        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         bytes memory callbackData = _gatewayCallback();
@@ -563,7 +559,6 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
-        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         // First batch: Alice withdraws to Bob
@@ -721,7 +716,6 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2
         );
-        vm.prank(sequencer);
         _advanceTempo(deposits1);
 
         // Phase 2: Withdrawals
@@ -777,7 +771,6 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3
         );
-        vm.prank(sequencer);
         _advanceTempo(deposits2);
 
         // Verify all L2 balances (initial 1M - deposited + minted - burned)
@@ -826,7 +819,6 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1
         );
-        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         assertEq(l2ZoneToken.totalSupply(), initialSupply + 10_000e6);
