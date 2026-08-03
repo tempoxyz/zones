@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use commonware_cryptography::ed25519::PublicKey;
 
-use crate::{LeadershipSchedule, ZoneManifest, manifest::AuthoritySnapshot};
+use crate::{ZoneManifest, manifest::Authority};
 
 /// Authenticated Commonware identity used to address one manifest peer.
 pub type P2pPeerId = PublicKey;
@@ -10,13 +10,12 @@ pub type P2pPeerId = PublicKey;
 /// Authenticated peers and the static settlement quorum derived from a validated manifest.
 #[derive(Debug, Clone)]
 pub(crate) struct RoutingMembership {
-    local: PublicKey,
     peers: BTreeSet<PublicKey>,
     quorum: BTreeSet<PublicKey>,
 }
 
 impl RoutingMembership {
-    pub(crate) fn from_manifest(manifest: &ZoneManifest, local: PublicKey) -> Self {
+    pub(crate) fn from_manifest(manifest: &ZoneManifest) -> Self {
         let peers = manifest
             .nodes()
             .iter()
@@ -26,15 +25,7 @@ impl RoutingMembership {
             .quorum_nodes()
             .map(|(node, _)| node.ed25519_public_key().clone())
             .collect();
-        Self {
-            local,
-            peers,
-            quorum,
-        }
-    }
-
-    pub(crate) fn local(&self) -> &PublicKey {
-        &self.local
+        Self { peers, quorum }
     }
 
     pub(crate) fn contains(&self, peer: &PublicKey) -> bool {
@@ -45,18 +36,18 @@ impl RoutingMembership {
         self.quorum.contains(peer)
     }
 
-    pub(crate) fn other_peers(&self) -> Vec<PublicKey> {
+    pub(crate) fn other_peers(&self, local: &PublicKey) -> Vec<PublicKey> {
         self.peers
             .iter()
-            .filter(|peer| *peer != &self.local)
+            .filter(|peer| *peer != local)
             .cloned()
             .collect()
     }
 
-    pub(crate) fn other_quorum_peers(&self) -> Vec<PublicKey> {
+    pub(crate) fn other_quorum_peers(&self, local: &PublicKey) -> Vec<PublicKey> {
         self.quorum
             .iter()
-            .filter(|peer| *peer != &self.local)
+            .filter(|peer| *peer != local)
             .cloned()
             .collect()
     }
@@ -64,42 +55,58 @@ impl RoutingMembership {
 
 /// Pure identity, membership, and retained-authority decisions for one routing operation.
 pub(crate) struct RoutingPolicy<'a> {
+    local: &'a PublicKey,
     membership: &'a RoutingMembership,
-    authority: AuthoritySnapshot,
+    authority: Authority<'a>,
 }
 
 impl<'a> RoutingPolicy<'a> {
-    pub(crate) fn new(membership: &'a RoutingMembership, leadership: &LeadershipSchedule) -> Self {
+    pub(crate) fn new(
+        local: &'a PublicKey,
+        membership: &'a RoutingMembership,
+        authority: Authority<'a>,
+    ) -> Self {
         Self {
+            local,
             membership,
-            authority: leadership.authority_snapshot(),
+            authority,
         }
     }
 
-    pub(crate) fn is_leadership_initialized(&self) -> bool {
-        self.authority.next_anchor_record.is_some()
+    pub(crate) fn may_broadcast_block(&self) -> bool {
+        self.authority.is_retained_leader(self.local)
     }
 
     pub(crate) fn am_i_retained_leader(&self) -> bool {
-        self.authority
-            .retained_leaders
-            .contains(self.membership.local())
+        self.may_broadcast_block()
     }
 
     pub(crate) fn am_i_quorum_member(&self) -> bool {
-        self.membership.is_quorum_member(self.membership.local())
+        self.membership.is_quorum_member(self.local)
     }
 
     pub(crate) fn other_peers(&self) -> Vec<PublicKey> {
-        self.membership.other_peers()
+        self.membership.other_peers(self.local)
     }
 
     pub(crate) fn other_quorum_peers(&self) -> Vec<PublicKey> {
-        self.membership.other_quorum_peers()
+        self.membership.other_quorum_peers(self.local)
     }
 
     pub(crate) fn may_accept_block(&self, peer: &PublicKey) -> bool {
         self.is_remote_retained_leader(peer)
+    }
+
+    pub(crate) fn may_broadcast_settlement_proposal(&self) -> bool {
+        self.may_broadcast_block()
+    }
+
+    pub(crate) fn block_recipients(&self) -> Vec<PublicKey> {
+        self.other_peers()
+    }
+
+    pub(crate) fn settlement_proposal_recipients(&self) -> Vec<PublicKey> {
+        self.other_quorum_peers()
     }
 
     pub(crate) fn may_accept_settlement_proposal(&self, peer: &PublicKey) -> bool {
@@ -108,7 +115,7 @@ impl<'a> RoutingPolicy<'a> {
 
     pub(crate) fn may_send_settlement_signature(&self, leader: &PublicKey) -> bool {
         self.am_i_quorum_member()
-            && leader != self.membership.local()
+            && leader != self.local
             && self.is_retained_leader(leader)
             && self.membership.contains(leader)
     }
@@ -118,34 +125,47 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn preferred_backfill_leader(&self) -> Option<PublicKey> {
-        let leader = self.authority.next_anchor_record.as_ref()?.leader.clone();
-        (self.membership.is_quorum_member(&leader) && leader != *self.membership.local())
-            .then_some(leader)
+        let leader = self.authority.next_anchor_record()?.leader;
+        (self.membership.is_quorum_member(&leader) && leader != *self.local).then_some(leader)
     }
 
-    pub(crate) fn may_forward_transaction(&self) -> bool {
+    pub(crate) fn backfill_candidates(&self) -> Vec<PublicKey> {
+        self.membership.other_quorum_peers(self.local)
+    }
+
+    pub(crate) fn is_remote_member(&self, peer: &PublicKey) -> bool {
+        self.is_remote_peer(peer)
+    }
+
+    pub(crate) fn may_accept_backfill_response(&self, peer: &PublicKey) -> bool {
+        self.is_remote_quorum_peer(peer)
+    }
+
+    /// `None` while leadership is uninitialized; otherwise whether this node may forward.
+    pub(crate) fn transaction_forwarding_status(&self) -> Option<bool> {
         self.authority
-            .next_anchor_record
-            .as_ref()
-            .is_some_and(|record| record.leader != *self.membership.local())
+            .next_anchor_record()
+            .map(|record| record.leader != *self.local)
+    }
+
+    pub(crate) fn transaction_recipients(&self) -> Vec<PublicKey> {
+        self.membership.other_quorum_peers(self.local)
     }
 
     pub(crate) fn may_accept_transaction(&self, peer: &PublicKey) -> bool {
-        self.is_remote_peer(peer) && self.am_i_quorum_member()
+        self.is_remote_peer(peer) && self.membership.is_quorum_member(self.local)
     }
 
     fn is_retained_leader(&self, peer: &PublicKey) -> bool {
-        self.authority.retained_leaders.contains(peer)
+        self.authority.is_retained_leader(peer)
     }
 
     fn is_remote_retained_leader(&self, peer: &PublicKey) -> bool {
-        peer != self.membership.local()
-            && self.membership.contains(peer)
-            && self.is_retained_leader(peer)
+        peer != self.local && self.membership.contains(peer) && self.is_retained_leader(peer)
     }
 
     pub(crate) fn is_remote_peer(&self, peer: &PublicKey) -> bool {
-        peer != self.membership.local() && self.membership.contains(peer)
+        peer != self.local && self.membership.contains(peer)
     }
 
     pub(crate) fn is_remote_quorum_peer(&self, peer: &PublicKey) -> bool {
@@ -190,7 +210,7 @@ mod tests {
 
     #[test]
     fn membership_rejects_unknown_peers_as_quorum() {
-        let membership = RoutingMembership::from_manifest(&manifest(), key(1));
+        let membership = RoutingMembership::from_manifest(&manifest());
         assert!(membership.contains(&key(1)));
         assert!(membership.is_quorum_member(&key(1)));
         assert!(!membership.is_quorum_member(&key(99)));
@@ -201,6 +221,7 @@ mod tests {
     #[test]
     fn routing_policy_covers_roles_and_transaction_fanout() {
         let manifest = manifest();
+        let membership = RoutingMembership::from_manifest(&manifest);
         let schedule = LeadershipSchedule::for_membership([key(4)].into_iter().collect());
         schedule
             .publish(LeadershipState::new(1, key(1), 0))
@@ -209,68 +230,50 @@ mod tests {
             .publish(LeadershipState::new(2, key(2), 100))
             .unwrap();
 
-        let leader_membership = RoutingMembership::from_manifest(&manifest, key(1));
-        let leader = RoutingPolicy::new(&leader_membership, &schedule);
-        assert!(leader.am_i_retained_leader());
-        assert!(leader.may_accept_block(&key(2)));
-        assert!(!leader.may_accept_block(&key(99)));
-        assert_eq!(
-            leader.other_peers().into_iter().collect::<BTreeSet<_>>(),
-            [key(2), key(3), key(4)].into_iter().collect()
-        );
-        assert_eq!(
-            leader
-                .other_quorum_peers()
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            [key(2), key(3)].into_iter().collect()
-        );
-        assert!(leader.may_forward_transaction());
-        assert!(leader.may_accept_settlement_signature(&key(2)));
+        schedule.with_authority(|authority| {
+            let leader_key = key(1);
+            let leader = RoutingPolicy::new(&leader_key, &membership, authority);
+            assert!(leader.may_broadcast_block());
+            assert!(leader.may_accept_block(&key(2)));
+            assert_eq!(
+                leader
+                    .block_recipients()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                [key(2), key(3), key(4)].into_iter().collect()
+            );
+            assert_eq!(leader.transaction_forwarding_status(), Some(true));
 
-        let follower_membership = RoutingMembership::from_manifest(&manifest, key(3));
-        let follower = RoutingPolicy::new(&follower_membership, &schedule);
-        assert!(!follower.am_i_retained_leader());
-        assert!(follower.may_forward_transaction());
-        assert_eq!(
-            follower
-                .other_quorum_peers()
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            [key(1), key(2)].into_iter().collect()
-        );
-        assert_eq!(follower.preferred_backfill_leader(), Some(key(2)));
-        assert_eq!(
-            follower
-                .other_quorum_peers()
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            [key(1), key(2)].into_iter().collect()
-        );
-        assert!(follower.may_accept_settlement_proposal(&key(1)));
+            let follower_key = key(3);
+            let follower = RoutingPolicy::new(&follower_key, &membership, authority);
+            assert!(!follower.may_broadcast_block());
+            assert_eq!(follower.preferred_backfill_leader(), Some(key(2)));
+            assert_eq!(
+                follower
+                    .backfill_candidates()
+                    .into_iter()
+                    .collect::<BTreeSet<_>>(),
+                [key(1), key(2)].into_iter().collect()
+            );
 
-        let rpc_membership = RoutingMembership::from_manifest(&manifest, key(4));
-        let rpc = RoutingPolicy::new(&rpc_membership, &schedule);
-        assert!(rpc.may_forward_transaction());
-        assert_eq!(
-            rpc.other_quorum_peers()
-                .into_iter()
-                .collect::<BTreeSet<_>>(),
-            [key(1), key(2), key(3)].into_iter().collect()
-        );
-        assert!(!rpc.may_accept_settlement_proposal(&key(1)));
-        assert!(!rpc.may_accept_transaction(&key(3)));
+            let rpc_key = key(4);
+            let rpc = RoutingPolicy::new(&rpc_key, &membership, authority);
+            assert!(!rpc.may_accept_settlement_proposal(&key(1)));
+            assert!(!rpc.may_accept_transaction(&key(3)));
+        });
     }
 
     #[test]
     fn uninitialized_authority_does_not_authorize_dynamic_traffic() {
         let manifest = manifest();
-        let membership = RoutingMembership::from_manifest(&manifest, key(2));
+        let membership = RoutingMembership::from_manifest(&manifest);
         let schedule = manifest.leadership_schedule();
-        let policy = RoutingPolicy::new(&membership, &schedule);
-        assert!(!policy.is_leadership_initialized());
-        assert!(!policy.am_i_retained_leader());
-        assert!(!policy.may_forward_transaction());
-        assert_eq!(policy.preferred_backfill_leader(), None);
+        let local = key(2);
+        schedule.with_authority(|authority| {
+            let policy = RoutingPolicy::new(&local, &membership, authority);
+            assert!(!policy.may_broadcast_block());
+            assert_eq!(policy.transaction_forwarding_status(), None);
+            assert_eq!(policy.preferred_backfill_leader(), None);
+        });
     }
 }

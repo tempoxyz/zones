@@ -55,11 +55,23 @@ pub struct LeadershipState {
     pub activation_tempo_block: u64,
 }
 
-/// Dynamic leadership authority captured atomically from one schedule read.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AuthoritySnapshot {
-    pub(crate) retained_leaders: BTreeSet<PublicKey>,
-    pub(crate) next_anchor_record: Option<LeadershipState>,
+/// Borrowed dynamic leadership authority evaluated under one schedule read lock.
+#[derive(Clone, Copy)]
+pub(crate) struct Authority<'a> {
+    state: &'a LeadershipScheduleState,
+}
+
+impl Authority<'_> {
+    pub(crate) fn is_retained_leader(&self, peer: &PublicKey) -> bool {
+        self.state
+            .transitions
+            .values()
+            .any(|record| &record.leader == peer)
+    }
+
+    pub(crate) fn next_anchor_record(&self) -> Option<LeadershipState> {
+        self.state.next_anchor_record()
+    }
 }
 
 impl LeadershipState {
@@ -377,17 +389,10 @@ impl LeadershipSchedule {
         self.inner.read().expect("poisoned").next_anchor_record()
     }
 
-    /// Captures the retained leaders and next-anchor authority from one schedule read.
-    pub(crate) fn authority_snapshot(&self) -> AuthoritySnapshot {
+    /// Evaluates a routing decision against one atomic, borrowed authority read.
+    pub(crate) fn with_authority<R>(&self, f: impl FnOnce(Authority<'_>) -> R) -> R {
         let state = self.inner.read().expect("poisoned");
-        AuthoritySnapshot {
-            retained_leaders: state
-                .transitions
-                .values()
-                .map(|record| record.leader.clone())
-                .collect(),
-            next_anchor_record: state.next_anchor_record(),
-        }
+        f(Authority { state: &state })
     }
 
     /// Install a manifest-declared forced recovery.
@@ -1965,6 +1970,18 @@ mod tests {
 
     #[test]
     fn rejects_invalid_topologies_and_node_assertions() {
+        let too_small = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower", "127.0.0.1:9201"),
+            ],
+        );
+        assert!(matches!(
+            ZoneManifest::parse(&too_small),
+            Err(ManifestError::TooFewQuorumNodes(2))
+        ));
+
         let duplicate = manifest(
             1,
             &[
