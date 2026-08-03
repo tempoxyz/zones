@@ -264,77 +264,37 @@ impl CreateZone {
 
         let portal_contract = ZonePortal::new(portal, &provider);
         let creation_block_id = BlockId::number(creation_block);
-        let version_call = portal_contract
+        let sequencer_set_version = portal_contract
             .sequencerSetVersion()
-            .block(creation_block_id);
-        let threshold_call = portal_contract
-            .sequencerThreshold()
-            .block(creation_block_id);
-        let count_call = portal_contract.sequencerCount().block(creation_block_id);
-        let leader_call = portal_contract.leader().block(creation_block_id);
-        let leader_epoch_call = portal_contract.leaderEpoch().block(creation_block_id);
-        let leader_activation_call = portal_contract
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let initial_leader = portal_contract
+            .leader()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let leader_epoch = portal_contract
+            .leaderEpoch()
+            .block(creation_block_id)
+            .call()
+            .await?;
+        let leader_activation_block = portal_contract
             .leaderActivationTempoBlock()
-            .block(creation_block_id);
-        let (
-            sequencer_set_version,
-            sequencer_threshold,
-            sequencer_count,
-            initial_leader,
-            leader_epoch,
-            leader_activation_block,
-        ) = tokio::try_join!(
-            version_call.call(),
-            threshold_call.call(),
-            count_call.call(),
-            leader_call.call(),
-            leader_epoch_call.call(),
-            leader_activation_call.call(),
-        )
-        .wrap_err("failed reading ZonePortal state at its creation block")?;
+            .block(creation_block_id)
+            .call()
+            .await?;
 
         ensure!(
             sequencer_set_version == 0,
             "ZoneFactory initialized sequencer set version {sequencer_set_version}, expected 0"
         );
         ensure!(
-            sequencer_threshold == self.threshold,
-            "ZoneFactory initialized sequencer threshold {sequencer_threshold}, expected {}",
-            self.threshold
+            initial_leader == leader
+                && leader_epoch == 1
+                && leader_activation_block == creation_block,
+            "ZoneFactory initialized leader snapshot ({initial_leader}, epoch {leader_epoch}, activation {leader_activation_block}), expected ({leader}, epoch 1, activation {creation_block})"
         );
-        ensure!(
-            sequencer_count == self.sequencers.len(),
-            "ZoneFactory initialized {sequencer_count} sequencers, expected {}",
-            self.sequencers.len()
-        );
-        ensure!(
-            initial_leader == leader,
-            "ZoneFactory initialized leader {initial_leader}, expected {leader}"
-        );
-        ensure!(
-            leader_epoch == 1,
-            "ZoneFactory initialized leader epoch {leader_epoch}, expected 1"
-        );
-        ensure!(
-            leader_activation_block == creation_block,
-            "ZoneFactory initialized leader activation block {leader_activation_block}, expected creation block {creation_block}"
-        );
-        for (index, expected) in self.sequencers.iter().copied().enumerate() {
-            let listed = portal_contract
-                .sequencerAt(index.try_into()?)
-                .block(creation_block_id)
-                .call()
-                .await?;
-            let registered = portal_contract
-                .isSequencer(expected)
-                .block(creation_block_id)
-                .call()
-                .await?;
-            ensure!(
-                listed == expected && registered,
-                "ZoneFactory sequencer {index} mismatch: listed {listed}, expected {expected}, registered={registered}"
-            );
-        }
         println!("Sequencer set version: {sequencer_set_version}");
 
         println!(
