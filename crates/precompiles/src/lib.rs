@@ -73,18 +73,102 @@ pub use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 pub use tempo_state::TempoState;
 pub use zone_fee_manager::{ZONE_FEE_MANAGER_ADDRESS, ZoneFeeManager};
 
-use alloy_evm::precompiles::DynPrecompile;
+use alloc::rc::Rc;
+use core::cell::RefCell;
+
+use alloy_evm::precompiles::{DynPrecompile, PrecompilesMap};
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
+use revm::context::CfgEnv;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
-    Precompile as _,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, Precompile as _,
+    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS,
+    TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS,
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard as TempoReceivePolicyGuard,
-    storage_credits::StorageCredits,
-    tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
+    storage::actions::StorageActions,
+    storage_credits::{NonCreditableSlots, StorageCredits},
+    tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token, is_tip20_prefix},
     tip403_registry::TIP403Registry,
 };
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS};
+#[cfg(feature = "std")]
+use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+
+/// Registers every precompile that is available to a Zone EVM.
+///
+/// The Zone wrappers all share one [`ZonePrecompileEnv`] and one execution-local [`L1State`].
+/// Sharing those values is important: the database overlay and the L1-backed precompiles must use
+/// the same Tempo anchor and the same storage-credit accounting state during a transaction.
+///
+/// Existing Tempo precompiles that are not supported by Zones are explicitly removed here. TIP-20
+/// instances are resolved lazily because their addresses are derived from the token address rather
+/// than known when the EVM is created.
+pub fn extend_zone_precompiles<P>(
+    precompiles: &mut PrecompilesMap,
+    cfg: &CfgEnv<TempoHardfork>,
+    l1: L1State<P>,
+    actions: StorageActions,
+    non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
+) where
+    P: L1StorageReader,
+{
+    let env = ZonePrecompileEnv::new(cfg, actions, non_creditable_slots);
+
+    precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
+        Some(TempoState::create(l1.clone(), &env))
+    });
+    #[cfg(feature = "std")]
+    precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| {
+        Some(tx_context::ZoneTxContext::create())
+    });
+    precompiles.apply_precompile(&ZONE_INBOX_ADDRESS, |_| {
+        Some(ZoneInbox::create(l1.clone(), &env))
+    });
+    #[cfg(feature = "std")]
+    precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, |_| {
+        Some(create_outbox_precompile(l1.clone(), &env))
+    });
+    precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
+        Some(ChaumPedersenVerify::create(&env))
+    });
+    precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
+        Some(AesGcmDecrypt::create(&env))
+    });
+    precompiles.apply_precompile(&TIP20_FACTORY_ADDRESS, |_| None);
+    precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
+    precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
+
+    let fee_env = env.clone();
+    precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, move |_| {
+        Some(create_zone_fee_manager_precompile(&fee_env))
+    });
+
+    let tip403_env = env.clone();
+    precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
+        Some(create_tip403_precompile(&tip403_env))
+    });
+
+    precompiles.set_precompile_lookup(move |address: &Address| {
+        if is_tip20_prefix(*address) {
+            Some(create_tip20_precompile(*address, &env, l1.clone()))
+        } else if *address == STABLECOIN_DEX_ADDRESS {
+            None
+        } else if *address == NONCE_PRECOMPILE_ADDRESS {
+            Some(create_nonce_manager_precompile(&env, l1.clone()))
+        } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+            Some(create_account_keychain_precompile(&env, l1.clone()))
+        } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
+            Some(create_receive_policy_guard_precompile(&env))
+        } else if *address == STORAGE_CREDITS_ADDRESS {
+            Some(create_storage_credits_precompile(&env, l1.clone()))
+        } else {
+            None
+        }
+    });
+}
 
 /// Creates the zone-native fee manager precompile.
 pub fn create_zone_fee_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {

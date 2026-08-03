@@ -19,14 +19,7 @@ pub use zone_evm::{ZoneEvm, contract_creation::validate_transaction};
 
 use crate::{
     fee_manager::ZoneProtocolFeeManager,
-    precompiles::{
-        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_FEE_MANAGER_ADDRESS,
-        ZoneInbox, ZonePrecompileEnv, create_account_keychain_precompile,
-        create_nonce_manager_precompile, create_receive_policy_guard_precompile,
-        create_storage_credits_precompile, create_tip20_precompile, create_tip403_precompile,
-        create_zone_fee_manager_precompile, tx_context::ZoneTxContext,
-    },
+    precompiles::{L1State, L1StorageReader, extend_zone_precompiles},
 };
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
@@ -52,22 +45,14 @@ use tempo_evm::{
     evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
-use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS,
-    STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
-    TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS, error::Result as TempoResult,
-    storage::actions::StorageActions, tip20::is_tip20_prefix,
-};
+use tempo_precompiles::{error::Result as TempoResult, storage::actions::StorageActions};
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
 use tempo_revm::TempoTxEnv;
-use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
-};
+use tempo_zone_contracts as _;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
-use zone_precompiles::create_outbox_precompile;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -100,66 +85,7 @@ where
         let actions = StorageActions::disabled();
         let non_creditable_slots = evm.non_creditable_slots();
         let (_, _, precompiles) = evm.components_mut();
-        let env = ZonePrecompileEnv::new(&cfg, actions, non_creditable_slots);
-        precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
-            Some(TempoState::create(l1.clone(), &env))
-        });
-        precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
-        let inbox_env = env.clone();
-        let inbox_l1 = l1.clone();
-        precompiles.apply_precompile(&ZONE_INBOX_ADDRESS, move |_| {
-            Some(ZoneInbox::create(inbox_l1.clone(), &inbox_env))
-        });
-        let outbox_env = env.clone();
-        let outbox_l1 = l1.clone();
-        precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, move |_| {
-            Some(create_outbox_precompile(outbox_l1.clone(), &outbox_env))
-        });
-        precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
-            Some(ChaumPedersenVerify::create(&env))
-        });
-        precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
-            Some(AesGcmDecrypt::create(&env))
-        });
-        // Zones activate bridged TIP-20s directly in the Inbox and expose no token factory.
-        precompiles.apply_precompile(&TIP20_FACTORY_ADDRESS, |_| None);
-        precompiles.apply_precompile(&TIP_FEE_MANAGER_ADDRESS, |_| None);
-        precompiles.apply_precompile(&TIP20_CHANNEL_RESERVE_ADDRESS, |_| None);
-        let fee_env = env.clone();
-        precompiles.apply_precompile(&ZONE_FEE_MANAGER_ADDRESS, move |_| {
-            Some(create_zone_fee_manager_precompile(&fee_env))
-        });
-        let tip403_env = env.clone();
-        precompiles.apply_precompile(&TIP403_REGISTRY_ADDRESS, move |_| {
-            Some(create_tip403_precompile(&tip403_env))
-        });
-        let tip20_l1 = l1.clone();
-        let nonce_l1 = l1.clone();
-        let account_keychain_l1 = l1.clone();
-        let storage_credits_l1 = l1.clone();
-        precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
-            if is_tip20_prefix(*address) {
-                Some(create_tip20_precompile(*address, &env, tip20_l1.clone()))
-            } else if *address == STABLECOIN_DEX_ADDRESS {
-                None
-            } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                Some(create_nonce_manager_precompile(&env, nonce_l1.clone()))
-            } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                Some(create_account_keychain_precompile(
-                    &env,
-                    account_keychain_l1.clone(),
-                ))
-            } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
-                Some(create_receive_policy_guard_precompile(&env))
-            } else if *address == STORAGE_CREDITS_ADDRESS {
-                Some(create_storage_credits_precompile(
-                    &env,
-                    storage_credits_l1.clone(),
-                ))
-            } else {
-                None
-            }
-        });
+        extend_zone_precompiles(precompiles, &cfg, l1, actions, non_creditable_slots);
         evm
     }
 }
