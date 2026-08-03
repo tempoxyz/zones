@@ -57,7 +57,13 @@ alloy_sol_types::sol! {
     struct EarnVaultControls {
         address emergencyGuardian;
         address asyncJanitor;
+        uint256 maxManagedAssets;
         EngineMigrationMode migrationMode;
+    }
+
+    struct DistributorConfig {
+        address distributor;
+        uint40 updateDelay;
     }
 
     struct FixedFeeRecipient {
@@ -130,6 +136,7 @@ alloy_sol_types::sol! {
         address engine;
         address owner;
         EarnVaultControls controls;
+        DistributorConfig distributorConfig;
         FeeConfig fees;
         uint64 transferPolicyId;
     }
@@ -378,7 +385,12 @@ impl EarnZoneFixture {
             controls: EarnVaultControls {
                 emergencyGuardian: Address::ZERO,
                 asyncJanitor: Address::ZERO,
+                maxManagedAssets: U256::ZERO,
                 migrationMode: EngineMigrationMode::OperatorEnabled,
+            },
+            distributorConfig: DistributorConfig {
+                distributor: Address::ZERO,
+                updateDelay: Default::default(),
             },
             fees,
             transferPolicyId: 0,
