@@ -381,7 +381,7 @@ Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, 
 An account deposits by calling `deposit(token, to, amount, memo, tempoRefundRecipient)` on the portal. The portal:
 
 1. In closed access mode, requires `msg.sender` and `tempoRefundRecipient` to have the `Account` role. A caller with the `CallbackGateway` role may make callback-return deposits while gateway mode is enforced. Open access mode skips these membership checks. The zone recipient `to` need not be allowed.
-2. Validates the token is enabled and deposits are active, requires `tempoRefundRecipient != address(0)`, validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `tempoRefundRecipient` against the token's TIP-403 recipient policy.
+2. Validates the token is enabled and deposits are active, requires `tempoRefundRecipient` to be nonzero and not a registered `ZonePortal`, validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `tempoRefundRecipient` against the token's TIP-403 recipient policy.
 3. Computes `depositFee` from `zoneGasRate` and checks `amount >= depositFee + currentBouncebackFee`, where `currentBouncebackFee = ceil(bouncebackGas * block.basefee / 1e12)` (reverts `DepositTooSmall` otherwise). This prevents obvious dust deposits that could not pay for an immediate Tempo refund when bounce-back gas is configured.
 4. Transfers `amount` from the user into the portal.
 5. Pays the `depositFee` to the portal admin immediately.
@@ -520,7 +520,7 @@ sequenceDiagram
 
 Deposits can fail because the zone-side mint reverts (including a TIP-403 policy rejection) or because an encrypted deposit fails onchain decryption verification. To make sure that all cases can be handled without loss of user funds, every deposit carries a `tempoRefundRecipient`: a Tempo address that receives a refund if zone-side processing fails. The sequencer has no discretionary rejection flag: every regular deposit attempts its mint, and every encrypted deposit is verified and then attempts its mint when decryption succeeds.
 
-**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require an allowed `tempoRefundRecipient` and require it to be authorized by the token's TIP-403 recipient policy. Zone recipients are not checked against closed-loop membership. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and may be claimed only by that allowed recipient via `claimRefund(token)`.
+**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require an allowed `tempoRefundRecipient` that is neither the zero address nor a registered `ZonePortal`, and require it to be authorized by the token's TIP-403 recipient policy. Zone recipients are not checked against closed-loop membership. If the on-Tempo refund transfer later reverts because policy changed, the funds are parked in a per-recipient refund registry on the portal and may be claimed only by that allowed recipient via `claimRefund(token)`.
 
 **Triggering conditions.** There are two triggering sites:
 

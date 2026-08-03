@@ -1471,6 +1471,12 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), alice, 1, bytes32(0), outsider);
     }
 
+    function test_deposit_revertsForPortalBouncebackRecipient() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.InvalidBouncebackRecipient.selector);
+        portal.deposit(address(pathUSD), alice, 1, bytes32(0), address(portal));
+    }
+
     function test_deposit_updatesHashChain() public {
         uint128 depositAmount = 1000e6;
 
@@ -4239,6 +4245,17 @@ contract ZonePortalTest is BaseTest {
         pathUSD.approve(address(portal), depositAmount);
         vm.expectRevert(ITIP20.PolicyForbids.selector);
         portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), bob);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsForPortalBouncebackRecipient() public {
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        vm.startPrank(alice);
+        vm.expectRevert(IZonePortal.InvalidBouncebackRecipient.selector);
+        portal.depositEncrypted(
+            address(pathUSD), 1000e6, 0, _makeEncryptedPayload(), address(portal)
+        );
         vm.stopPrank();
     }
 

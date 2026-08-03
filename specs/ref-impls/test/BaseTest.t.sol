@@ -238,6 +238,16 @@ contract BaseTest is Test {
                 })
             )
         );
+        vm.mockCall(
+            ZONE_FACTORY_ADDRESS,
+            abi.encodeWithSelector(IZoneFactory.isZonePortal.selector),
+            abi.encode(false)
+        );
+        vm.mockCall(
+            ZONE_FACTORY_ADDRESS,
+            abi.encodeCall(IZoneFactory.isZonePortal, (address(portal))),
+            abi.encode(true)
+        );
     }
 
     function _singleWithdrawal(Withdrawal memory withdrawal)

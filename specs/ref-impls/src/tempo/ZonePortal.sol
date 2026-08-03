@@ -11,6 +11,7 @@ import {
     EncryptedDepositPayload,
     EncryptionKeyEntry,
     IVerifier,
+    IZoneFactory,
     IZoneMessenger,
     IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
@@ -749,6 +750,15 @@ contract ZonePortal is IZonePortal {
         if (role[account] != Role.Account) revert AccountNotAllowed(account);
     }
 
+    function _validateBouncebackRecipient(address tempoRefundRecipient) internal view {
+        if (
+            tempoRefundRecipient == address(0)
+                || IZoneFactory(ZONE_FACTORY_ADDRESS).isZonePortal(tempoRefundRecipient)
+        ) {
+            revert InvalidBouncebackRecipient();
+        }
+    }
+
     function _isAllowed(address account) internal view returns (bool) {
         return !_isAccessEnforced || role[account] == Role.Account;
     }
@@ -833,7 +843,7 @@ contract ZonePortal is IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        _validateBouncebackRecipient(tempoRefundRecipient);
         // An enforced, registered gateway is independently authorized to return callback funds.
         _requireAllowedDepositor(msg.sender);
         _requireAllowed(tempoRefundRecipient);
@@ -891,7 +901,7 @@ contract ZonePortal is IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        _validateBouncebackRecipient(tempoRefundRecipient);
         // Enforced gateways may deposit callback returns without also being allowed accounts.
         _requireAllowedDepositor(msg.sender);
         _requireAllowed(tempoRefundRecipient);
