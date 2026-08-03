@@ -426,18 +426,18 @@ async fn test_batch_only_restart_no_withdrawals() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Withdrawal batching with +1 block deferral survives sequencer restart.
+/// Withdrawal processing survives sequencer restart after same-block batch finalization.
 ///
-/// The batch submitter reconstructs prior withdrawals from chain history on resume;
-/// defer/finalize timing is covered by local e2e tests in `e2e.rs`.
+/// The batch submitter reconstructs finalized withdrawals from chain history on resume;
+/// same-block finalization timing is covered by local e2e tests in `e2e.rs`.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_deferred_withdrawal_survives_sequencer_restart() -> eyre::Result<()> {
+async fn test_finalized_withdrawal_survives_sequencer_restart() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let l1 = L1TestNode::start().await?;
     let portal_address = l1.deploy_zone().await?;
-    // Use a long withdrawal batch interval so this live L1 restart test can
-    // deterministically assert that the request block itself does not finalize.
+    // Use a long withdrawal batch interval so this live L1 restart test knows
+    // finalization was triggered by the withdrawal rather than an empty-batch boundary.
     let zone = ZoneTestNode::start_from_l1_with_withdrawal_batch_interval(
         l1.http_url(),
         l1.ws_url(),
@@ -466,15 +466,13 @@ async fn test_deferred_withdrawal_survives_sequencer_restart() -> eyre::Result<(
         .to_block(withdrawal_block)
         .query()
         .await?;
-    assert!(
-        same_block_finalized.is_empty(),
-        "withdrawal block {withdrawal_block} should defer BatchFinalized"
+    assert_eq!(
+        same_block_finalized.len(),
+        1,
+        "withdrawal block {withdrawal_block} should emit BatchFinalized"
     );
 
-    // Restart the batch submitter after proving the request block deferred finalization.
-    // The continuously running L1/zone stack may already have produced the next L2
-    // block by this point, so checking current pendingWithdrawalsCount() would race
-    // with the intended +1-block finalization.
+    // Restart the batch submitter after proving the request block finalized its withdrawal.
     seq_handle.monitor_handle.abort();
     seq_handle.withdrawal_handle.abort();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;

@@ -37,10 +37,13 @@ impl ZoneFeeManager {
         fee_payer: Address,
         fee_token: Address,
         max_amount: U256,
-        _beneficiary: Address,
+        beneficiary: Address,
     ) -> Result<Address> {
         let mut token = TIP20Token::from_address(fee_token)?;
-        token.ensure_authorized_as(&[(fee_payer, AuthRole::sender())])?;
+        token.ensure_authorized_as(&[
+            (fee_payer, AuthRole::sender()),
+            (beneficiary, AuthRole::recipient()),
+        ])?;
         token.check_not_paused()?;
         token.check_and_update_spending_limit(fee_payer, max_amount)?;
 
@@ -69,7 +72,6 @@ impl ZoneFeeManager {
         }
 
         if !actual_spending.is_zero() {
-            token.ensure_authorized_as(&[(beneficiary, AuthRole::recipient())])?;
             token.decrement_balance(self.address, actual_spending)?;
             token.increment_balance(beneficiary, actual_spending)?;
             StorageCtx.emit_event(
@@ -87,12 +89,14 @@ mod tests {
     use super::*;
     use alloy_sol_types::SolError;
     use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_contracts::precompiles::UnknownFunctionSelector;
+    use tempo_contracts::precompiles::{TIP20Error, UnknownFunctionSelector};
     use tempo_precompiles::{
         Precompile as _, TIP_FEE_MANAGER_ADDRESS,
+        error::TempoPrecompileError,
         storage::{ContractStorage, StorageCtx, hashmap::HashMapStorageProvider},
         test_util::TIP20Setup,
         tip20::ITIP20,
+        tip403_registry::{ITIP403Registry, TIP403Registry},
     };
 
     #[test]
@@ -166,6 +170,55 @@ mod tests {
             assert_eq!(
                 token.balance_of(ITIP20::balanceOfCall { account: user })?,
                 U256::from(7_000),
+            );
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn rejects_unauthorized_beneficiary_before_debit() -> eyre::Result<()> {
+        let mut storage = HashMapStorageProvider::new_with_spec(1, TempoHardfork::T9);
+        StorageCtx::enter(&mut storage, || {
+            let admin = Address::random();
+            let payer = Address::random();
+            let beneficiary = Address::random();
+            let balance = U256::from(10_000);
+            let mut token = TIP20Setup::create("USD", "USD", admin)
+                .with_issuer(admin)
+                .with_mint(payer, balance)
+                .apply()?;
+            let mut registry = TIP403Registry::new();
+            registry.initialize()?;
+            let policy = registry.create_policy_with_accounts(
+                admin,
+                ITIP403Registry::createPolicyWithAccountsCall {
+                    admin,
+                    policyType: ITIP403Registry::PolicyType::WHITELIST,
+                    accounts: vec![payer],
+                },
+            )?;
+            token.change_transfer_policy_id(
+                admin,
+                ITIP20::changeTransferPolicyIdCall {
+                    newPolicyId: policy,
+                },
+            )?;
+
+            let mut manager = ZoneFeeManager::new();
+            manager.initialize(token.address())?;
+            assert!(matches!(
+                manager.collect_fee_pre_tx(payer, token.address(), U256::from(5_000), beneficiary,),
+                Err(TempoPrecompileError::TIP20(TIP20Error::PolicyForbids(_)))
+            ));
+            assert_eq!(
+                token.balance_of(ITIP20::balanceOfCall { account: payer })?,
+                balance
+            );
+            assert_eq!(
+                token.balance_of(ITIP20::balanceOfCall {
+                    account: ZONE_FEE_MANAGER_ADDRESS,
+                })?,
+                U256::ZERO
             );
             Ok(())
         })

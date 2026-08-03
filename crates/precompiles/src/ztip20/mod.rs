@@ -18,9 +18,15 @@ use tempo_zone_contracts::Unauthorized;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
-    execution::{CallCheck, CallRuleError, CallRules},
+    execution::{CallCheck, CallRules},
+    privacy::check_caller_or_sequencer,
     storage::{L1State, L1StorageReader},
 };
+
+alloy_sol_types::sol! {
+    /// Returned instead of the upstream balance error that reveal the user balance to the spender.
+    error InsufficientBalance();
+}
 
 /// Fixed gas charged for TIP20 transfer and approval selectors on the zone.
 ///
@@ -78,17 +84,20 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
             }
             ITIP20::balanceOfCall::SELECTOR => {
                 decode_and_check::<ITIP20::balanceOfCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.account])
+                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
                 })
             }
             ITIP20::allowanceCall::SELECTOR => {
                 decode_and_check::<ITIP20::allowanceCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.owner, call.spender])
+                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
                 })
             }
+            ITIP20::noncesCall::SELECTOR => decode_and_check::<ITIP20::noncesCall>(args, |call| {
+                check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+            }),
             IRolesAuth::hasRoleCall::SELECTOR => {
                 decode_and_check::<IRolesAuth::hasRoleCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.account])
+                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
                 })
             }
             ITIP20::globalRewardPerTokenCall::SELECTOR
@@ -109,24 +118,6 @@ impl<P: L1StorageReader> TIP20Rules<P> {
             CallCheck::Revert(Unauthorized {}.abi_encode().into())
         }
     }
-
-    fn check_auth_with_sequencer(&self, caller: Address, auths: &[Address]) -> CallCheck {
-        match self.check_auth(caller, auths) {
-            CallCheck::Continue => CallCheck::Continue,
-            revert => match self.is_sequencer(caller) {
-                Ok(true) => CallCheck::Continue,
-                Ok(false) => revert,
-                Err(error) => CallCheck::Error(error),
-            },
-        }
-    }
-
-    #[inline]
-    fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        self.l1
-            .read_portal(|portal| &portal.is_sequencer[caller])
-            .map_err(CallRuleError::Tempo)
-    }
 }
 
 #[cfg(test)]
@@ -134,7 +125,7 @@ mod tests {
     use super::*;
     use alloy::primitives::{Address, Bytes, U256, address};
     use alloy_evm::precompiles::DynPrecompile;
-    use alloy_sol_types::{SolCall, SolInterface};
+    use alloy_sol_types::{SolCall, SolError, SolInterface};
     use revm::precompile::PrecompileResult;
     use tempo_contracts::precompiles::TIP20Error;
     use tempo_precompiles::{
@@ -293,6 +284,11 @@ mod tests {
                 assert_allowed(&rules, allowance.clone(), caller);
             }
             assert_unauthorized(&rules, allowance, outsider);
+
+            let nonce = ITIP20::noncesCall { owner };
+            assert_allowed(&rules, nonce.clone(), owner);
+            assert_allowed(&rules, nonce.clone(), sequencer);
+            assert_unauthorized(&rules, nonce, outsider);
 
             let role = IRolesAuth::hasRoleCall {
                 account: owner,
@@ -528,6 +524,44 @@ mod tests {
         )?;
         assert!(outbox_burn.is_success());
         assert_eq!(harness.balance_of(ZONE_OUTBOX_ADDRESS)?, U256::ZERO);
+
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
+        let mut harness = PrecompileHarness::new()?;
+        harness.call(
+            harness.alice,
+            ITIP20::approveCall {
+                spender: harness.spender,
+                amount: U256::from(1_000_001u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+
+        let result = harness.call(
+            harness.spender,
+            ITIP20::transferFromCall {
+                from: harness.alice,
+                to: harness.bob,
+                amount: U256::from(1_000_001u64),
+            }
+            .abi_encode()
+            .into(),
+            TIP20_FIXED_TRANSFER_GAS,
+            false,
+        )?;
+
+        assert!(result.is_revert());
+        assert_eq!(
+            result.bytes,
+            Bytes::from(InsufficientBalance {}.abi_encode())
+        );
+        assert_eq!(harness.balance_of(harness.alice)?, U256::from(1_000_000u64));
 
         Ok(())
     }

@@ -2,7 +2,7 @@
 //!
 //! The [`RoleController`] switches complete role generations — block production or import,
 //! broadcast, transaction flow, settlement, and sequencer background tasks — as one fenced
-//! unit, driven by the finalized [`LeadershipSchedule`].
+//! unit, driven by the effective [`LeadershipSchedule`].
 //!
 //! The control rule is about the **next anchor**, never the last applied one: for the next
 //! Tempo anchor `N` to be consumed, if `schedule.leader_for(N)` is this node and the zone
@@ -57,8 +57,6 @@ const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const GENERATION_RESTART_BACKOFF: Duration = Duration::from_millis(500);
 /// Buffer size for per-generation event channels.
 const GENERATION_EVENT_BACKLOG: usize = 128;
-/// Tip evidence older than this is stale for promotion decisions.
-const TIP_EVIDENCE_TTL: Duration = Duration::from_secs(30);
 
 /// Everything a role generation needs to start its tasks.
 pub(crate) struct RoleControllerContext<P, Pool> {
@@ -225,20 +223,39 @@ enum DesiredRole {
 }
 
 impl DesiredRole {
-    const fn kind(self) -> GenerationKind {
+    /// Stable name for status, metric labels, and logs.
+    const fn name(self) -> &'static str {
         match self {
-            Self::Leader { .. } => GenerationKind::Leader,
-            Self::Follower { .. } => GenerationKind::Follower,
-            Self::Fenced => GenerationKind::Fenced,
+            Self::Leader { .. } => "leader",
+            Self::Follower { .. } => "follower",
+            Self::Fenced => "fenced",
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenerationKind {
-    Leader,
-    Follower,
-    Fenced,
+    /// Value for the `zone_leadership_role` gauge.
+    const fn gauge(self) -> f64 {
+        match self {
+            Self::Leader { .. } => 2.0,
+            Self::Follower { .. } => 1.0,
+            Self::Fenced => 0.0,
+        }
+    }
+
+    /// Epoch of the governing record, when one governs.
+    const fn epoch(self) -> Option<u64> {
+        match self {
+            Self::Leader { epoch, .. } | Self::Follower { epoch } => Some(epoch),
+            Self::Fenced => None,
+        }
+    }
+
+    /// Whether two roles are the same variant, ignoring the epoch.
+    ///
+    /// Generations are switched per variant, not per epoch: an epoch bump that leaves this
+    /// node in the same role must not tear down and rebuild its task graph.
+    fn same_variant(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 }
 
 /// Outcome of one generation task, tagged for supervision decisions.
@@ -299,7 +316,7 @@ async fn supervise_sequencer_tasks(
 
 struct RunningGeneration {
     id: u64,
-    kind: GenerationKind,
+    role: DesiredRole,
     token: CancellationToken,
     tasks: JoinSet<TaskEnd>,
 }
@@ -331,11 +348,14 @@ impl RunningGeneration {
                 }
             }
         }
-        info!(target: "zone::role", generation = self.id, kind = ?self.kind, "Role generation stopped");
+        info!(target: "zone::role", generation = self.id, role = self.role.name(), "Role generation stopped");
     }
 }
 
 /// Derive the desired role for the next anchor from local canonical state and the schedule.
+///
+/// `DesiredRole::Leader` carries the next anchor it was derived from, so the promotion
+/// barrier never re-reads the checkpoint under a second, possibly divergent, error policy.
 fn desired_role<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -374,106 +394,65 @@ where
     })
 }
 
-/// Promotion-readiness verdict from hash-carrying peer tip evidence.
+/// Promotion-readiness verdict from the evidence required by the active transition mode.
 #[derive(Debug)]
 enum Readiness {
     Ready,
-    NotReady(Vec<String>),
-    /// A peer holds a different block at a height we consider canonical: fence.
     Conflicted(String),
 }
 
 /// Evaluate the promotion barrier
 ///
-/// Quorum depends on the mode: a **planned handoff** (the outgoing leader is alive and authoritative)
-/// requires the outgoing leader's fresh evidence to match our head;
-/// **same-identity recovery** (we already governed the previous anchor, or nothing did) requires fresh
-/// evidence from every other manifest peer, because an unreachable follower may hold replicated blocks
-/// the others lack.
+/// Forced-recovery promotion requires the local canonical head to remain exactly at the
+/// operator-selected block. Normal transitions need no additional evidence: the next-anchor rule
+/// and one-to-one zone/L1 block mapping ensure all earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
     local: &P2pPeerId,
-    manifest_peers: &[P2pPeerId],
-    registry: &PeerTipRegistry,
     next_anchor: u64,
 ) -> Readiness
 where
     P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
 {
-    let local_head = match provider.best_block_number() {
-        Ok(head) => head,
-        Err(err) => return Readiness::NotReady(vec![format!("cannot read the local head: {err}")]),
-    };
-
-    let now = tokio::time::Instant::now().into_std();
-    let mut fresh = std::collections::HashMap::new();
-    for (peer, tip, at) in registry.snapshot() {
-        if now.duration_since(at) <= TIP_EVIDENCE_TTL {
-            fresh.insert(peer, tip);
-        }
-    }
-
-    let mut reasons = Vec::new();
-    for (peer, tip) in &fresh {
-        if tip.zone_height > local_head {
-            reasons.push(format!(
-                "peer {peer} advertises tip {} above the local head {local_head}",
-                tip.zone_height
-            ));
-            continue;
-        }
-        match provider.sealed_header(tip.zone_height) {
-            Ok(Some(header)) if header.hash() == tip.zone_hash => {}
-            Ok(Some(header)) => {
+    if let Some(recovery) = schedule.forced_recovery().filter(|recovery| {
+        recovery.is_active()
+            && &recovery.leader == local
+            && next_anchor >= recovery.recovery_start_tempo_block
+    }) {
+        let local_height = match provider.best_block_number() {
+            Ok(height) => height,
+            Err(err) => {
                 return Readiness::Conflicted(format!(
-                    "peer {peer} holds a conflicting block at height {}: local {}, peer {}",
-                    tip.zone_height,
-                    header.hash(),
-                    tip.zone_hash,
+                    "cannot read the local head for forced recovery: {err}"
                 ));
             }
-            Ok(None) => reasons.push(format!(
-                "local canonical header {} is missing while validating peer {peer} evidence",
-                tip.zone_height
-            )),
-            Err(err) => reasons.push(format!(
-                "cannot read local header {}: {err}",
-                tip.zone_height
-            )),
-        }
-    }
-
-    // A planned handoff has a distinct outgoing leader governing the previous anchor.
-    let outgoing = schedule
-        .leader_for(next_anchor.saturating_sub(1))
-        .filter(|record| &record.leader != local)
-        .map(|record| record.leader);
-    match outgoing {
-        Some(outgoing) => {
-            if !fresh.contains_key(&outgoing) {
-                reasons.push(format!(
-                    "no fresh tip evidence from the outgoing leader {outgoing}"
+        };
+        let header = match provider.sealed_header(local_height) {
+            Ok(Some(header)) => header,
+            Ok(None) => {
+                return Readiness::Conflicted(format!(
+                    "forced recovery local header {local_height} is missing"
                 ));
             }
-        }
-        None => {
-            for peer in manifest_peers {
-                if peer != local && !fresh.contains_key(peer) {
-                    reasons.push(format!(
-                        "no fresh tip evidence from peer {peer} (required for same-identity \
-                         recovery; an unreachable follower may hold replicated blocks)"
-                    ));
-                }
+            Err(err) => {
+                return Readiness::Conflicted(format!(
+                    "cannot read forced recovery local header {local_height}: {err}"
+                ));
             }
+        };
+        if header.hash() != recovery.recovery_block_hash {
+            return Readiness::Conflicted(format!(
+                "forced recovery canonical head mismatch at height {local_height}: expected {}, \
+                 found {}",
+                recovery.recovery_block_hash,
+                header.hash(),
+            ));
         }
+        return Readiness::Ready;
     }
 
-    if reasons.is_empty() {
-        Readiness::Ready
-    } else {
-        Readiness::NotReady(reasons)
-    }
+    Readiness::Ready
 }
 
 /// Run the role controller until the process shuts down.
@@ -481,8 +460,8 @@ where
 /// `sinks` must be the same [`EventSinks`] handed to [`route_events_to_generations`] — the
 /// router is long-lived while generations come and go.
 ///
-/// Subscribes to schedule and peer-tip notifications plus generation task completion,
-/// re-derives the desired role by the next-anchor rule, and switches role generations.
+/// Subscribes to schedule notifications plus generation task completion, re-derives the desired
+/// role by the next-anchor rule, and switches role generations.
 /// Observation alone never switches roles — the trigger is consumption progress reaching
 /// the boundary, which this loop tracks by re-reading the local Tempo checkpoint.
 pub(crate) async fn run_role_controller<P, Pool>(
@@ -503,14 +482,18 @@ pub(crate) async fn run_role_controller<P, Pool>(
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
 {
     let mut schedule_changes = context.schedule.subscribe();
-    let mut peer_tip_changes = context.peer_tips.subscribe();
 
     let mut generation_id: u64 = 0;
     let mut current: Option<RunningGeneration> = None;
-    let manifest_peers: Vec<P2pPeerId> = context.attestation.addresses.keys().cloned().collect();
 
     loop {
-        let can_lead = context.sequencer.is_some();
+        // An rpc-only member is not registered with `ZonePortal`, so it can never be named
+        // leader by a finalized transition. Fencing it explicitly means a corrupt or wrongly
+        // provisioned record cannot start a producer whose blocks nobody could settle.
+        let can_lead = context.sequencer.is_some()
+            && context
+                .schedule
+                .is_quorum_member(&context.local_ed25519_public_key);
         let mut retry_decision = false;
         let mut desired = match desired_role(
             &context.provider,
@@ -526,53 +509,39 @@ pub(crate) async fn run_role_controller<P, Pool>(
             }
         };
 
-        // Promotion barrier: switching the head writer to this node requires hash-carrying
-        // tip evidence. Until the barrier is satisfied the node keeps importing as a
-        // follower and actively probes peers for evidence.
-        let mut ready_for_promotion = true;
+        // Only forced recovery has an additional promotion barrier. Normal transitions are
+        // complete when the local next anchor is assigned to this node.
         let mut promotion_reasons = Vec::new();
         if let DesiredRole::Leader { epoch, next_anchor } = desired
-            && current.as_ref().map(|generation| generation.kind) != Some(GenerationKind::Leader)
+            && !current
+                .as_ref()
+                .is_some_and(|generation| generation.role.same_variant(desired))
         {
             match promotion_readiness(
                 &context.provider,
                 &context.schedule,
                 &context.local_ed25519_public_key,
-                &manifest_peers,
-                &context.peer_tips,
                 next_anchor,
             ) {
                 Readiness::Ready => {
                     info!(target: "zone::role", epoch, next_anchor, "Promotion barrier satisfied");
                 }
-                Readiness::NotReady(reasons) => {
-                    retry_decision = true;
-                    ready_for_promotion = false;
-                    debug!(target: "zone::role", epoch, next_anchor, ?reasons, "Promotion pending readiness");
-                    promotion_reasons = reasons;
-                    // Probe peers so evidence (and any missing blocks) arrive promptly.
-                    if let Ok(best) = context.provider.best_block_number() {
-                        let _ = context.commands.try_send(P2pCommand::RequestBackfill {
-                            start: best.saturating_add(1),
-                        });
-                    }
-                    desired = DesiredRole::Follower { epoch };
-                }
                 Readiness::Conflicted(detail) => {
-                    ready_for_promotion = false;
                     error!(
                         target: "zone::role",
                         epoch,
                         %detail,
-                        "Conflicting peer tip evidence; fencing instead of promoting"
+                        "Conflicting promotion evidence; fencing instead of promoting"
                     );
                     promotion_reasons = vec![detail];
                     desired = DesiredRole::Fenced;
                 }
             }
         }
-        let switch = current.as_ref().map(|generation| generation.kind) != Some(desired.kind());
-        if switch {
+        if !current
+            .as_ref()
+            .is_some_and(|generation| generation.role.same_variant(desired))
+        {
             if let Some(generation) = current.take() {
                 generation.stop(&sinks).await;
             }
@@ -587,69 +556,49 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     // complete desired generation after the decision backoff.
                     sinks.clear();
                     retry_decision = true;
-                    ready_for_promotion = false;
                     promotion_reasons = vec![format!(
-                        "failed to start {:?} generation: {err:#}",
-                        desired.kind()
+                        "failed to start {} generation: {err:#}",
+                        desired.name()
                     )];
                     error!(
                         target: "zone::role",
                         generation = generation_id,
-                        kind = ?desired.kind(),
+                        role = desired.name(),
                         %err,
                         "Role generation failed to start; fencing before retry"
                     );
                 }
             }
 
-            let active_kind = current
+            let active_role = current
                 .as_ref()
-                .map(|generation| generation.kind)
-                .unwrap_or(GenerationKind::Fenced);
+                .map(|generation| generation.role)
+                .unwrap_or(DesiredRole::Fenced);
             metrics::counter!(
                 "zone_leadership_transitions_total",
-                "to" => match active_kind {
-                    GenerationKind::Leader => "leader",
-                    GenerationKind::Follower => "follower",
-                    GenerationKind::Fenced => "fenced",
-                },
+                "to" => active_role.name(),
             )
             .increment(1);
-            metrics::gauge!("zone_leadership_role").set(match active_kind {
-                GenerationKind::Leader => 2.0,
-                GenerationKind::Follower => 1.0,
-                GenerationKind::Fenced => 0.0,
-            });
-            if active_kind == desired.kind()
-                && let Some(epoch) = match desired {
-                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
-                        Some(epoch)
-                    }
-                    DesiredRole::Fenced => None,
-                }
+            metrics::gauge!("zone_leadership_role").set(active_role.gauge());
+            if active_role.same_variant(desired)
+                && let Some(epoch) = desired.epoch()
             {
                 metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
             }
         }
 
-        let active_kind = current
+        let active_role = current
             .as_ref()
-            .map(|generation| generation.kind)
-            .unwrap_or(GenerationKind::Fenced);
+            .map(|generation| generation.role)
+            .unwrap_or(DesiredRole::Fenced);
+        // Readiness is exactly "nothing is blocking promotion", so it is derived rather than
+        // tracked alongside the reasons it would have to stay consistent with.
+        let ready_for_promotion = promotion_reasons.is_empty();
         {
             let mut status = context.status.lock().expect("poisoned");
-            status.role = match active_kind {
-                GenerationKind::Leader => "leader",
-                GenerationKind::Follower => "follower",
-                GenerationKind::Fenced => "fenced",
-            };
-            status.epoch = if active_kind == desired.kind() {
-                match desired {
-                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
-                        Some(epoch)
-                    }
-                    DesiredRole::Fenced => None,
-                }
+            status.role = active_role.name();
+            status.epoch = if active_role.same_variant(desired) {
+                desired.epoch()
             } else {
                 None
             };
@@ -662,7 +611,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
         } else {
             0.0
         });
-
         // A fenced generation has no tasks; an empty JoinSet's join_next() is immediately
         // ready with None, so polling it would spin this loop hot. Stay pending instead and
         // wake only on an explicit change or a retry for a failed/pending decision.
@@ -679,12 +627,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
             changed = schedule_changes.changed() => {
                 if changed.is_err() {
                     error!(target: "zone::role", "Leadership schedule notifier closed");
-                    return;
-                }
-            }
-            changed = peer_tip_changes.changed() => {
-                if changed.is_err() {
-                    error!(target: "zone::role", "Peer tip notifier closed");
                     return;
                 }
             }
@@ -777,7 +719,8 @@ where
         }
         DesiredRole::Follower { epoch } => {
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, None);
+            let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            sinks.install(sync_tx, Some(transactions_tx));
 
             let follower_token = token.clone();
             let provider = context.provider.clone();
@@ -820,6 +763,20 @@ where
                     () = forward_token.cancelled() => TaskEnd::Ended("transaction-forwarding (cancelled)"),
                     () = forward_new_transactions(pool, listener, commands) => {
                         TaskEnd::Ended("transaction-forwarding")
+                    }
+                }
+            });
+
+            // Quorum followers retain transactions received from originating peers so a future
+            // promotion cannot lose traffic submitted immediately before the handoff. RPC-only
+            // followers receive no transaction events from the P2P transport.
+            let pool = context.pool.clone();
+            let import_token = token.clone();
+            tasks.spawn(async move {
+                tokio::select! {
+                    () = import_token.cancelled() => TaskEnd::Ended("transaction-import (cancelled)"),
+                    () = insert_forwarded_transactions(pool, transactions_rx) => {
+                        TaskEnd::Ended("transaction-import")
                     }
                 }
             });
@@ -919,7 +876,7 @@ where
 
     Ok(RunningGeneration {
         id,
-        kind: desired.kind(),
+        role: desired,
         token,
         tasks,
     })

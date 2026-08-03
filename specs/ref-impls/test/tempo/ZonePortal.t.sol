@@ -46,6 +46,7 @@ import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLi
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { MockRevertingReceiver } from "../mocks/MockCallbackReceivers.sol";
 import { GatewayCallbackData, GatewayFlow, MockZoneGateway } from "../mocks/MockZoneGateway.sol";
 import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
@@ -559,6 +560,20 @@ contract ZonePortalTest is BaseTest {
         signers[0] = vm.addr(SIGNER_A_KEY);
         signers[1] = vm.addr(SIGNER_B_KEY);
         signers[2] = vm.addr(SIGNER_C_KEY);
+    }
+
+    function test_initializeInstallsFullQuorumAtVersionZero() public {
+        address[] memory signers = _sequencerSet();
+        ZonePortal quorumPortal =
+            _createZonePortal(2, address(pathUSD), admin, signers, 2, "https://quorum.example");
+
+        assertEq(quorumPortal.sequencerSetVersion(), 0);
+        assertEq(quorumPortal.sequencerThreshold(), 2);
+        assertEq(quorumPortal.sequencerCount(), 3);
+        assertEq(quorumPortal.leader(), signers[0]);
+        for (uint256 i; i < signers.length; ++i) {
+            assertTrue(quorumPortal.isSequencer(signers[i]));
+        }
     }
 
     function _activateSequencerSet(uint8 quorum) internal returns (address[] memory signers) {
@@ -1496,6 +1511,115 @@ contract ZonePortalTest is BaseTest {
 
         // Verify total escrow
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
+    }
+
+    function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
+        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximumPublicDeposits = maximum - 20;
+        assertEq(maximum, 230);
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        uint128 amount = 1;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), uint256(maximum) + 2);
+        for (uint256 i; i < maximumPublicDeposits - 1; ++i) {
+            portal.deposit(address(pathUSD), bob, amount, bytes32(i), bob);
+        }
+        portal.depositEncrypted(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
+
+        bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
+        uint256 aliceBalanceAtCapacity = pathUSD.balanceOf(alice);
+        uint256 portalBalanceAtCapacity = pathUSD.balanceOf(address(portal));
+        assertEq(portal.depositCount(), maximumPublicDeposits);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        portal.deposit(address(pathUSD), bob, amount, bytes32("over cap"), bob);
+
+        assertEq(portal.currentDepositQueueHash(), queueHashAtCapacity);
+        assertEq(portal.depositCount(), maximumPublicDeposits);
+        assertEq(pathUSD.balanceOf(alice), aliceBalanceAtCapacity);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
+
+        vm.roll(block.number + 1);
+        portal.deposit(address(pathUSD), bob, amount, bytes32("next block"), bob);
+        vm.stopPrank();
+
+        assertEq(portal.depositCount(), maximumPublicDeposits + 1);
+    }
+
+    function test_withdrawalBounceBack_usesReservedBatchCapacityWithoutBlockingQueue() public {
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+        portal.deposit(address(pathUSD), alice, 1000e6, bytes32("escrow"), alice);
+        vm.stopPrank();
+
+        bytes32 processedDepositHash = portal.currentDepositQueueHash();
+        Withdrawal memory withdrawal = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(gasConsumingReceiver),
+            1,
+            bytes32("failed"),
+            50_000,
+            bob,
+            ""
+        );
+        uint256 reserve = 20;
+        Withdrawal[] memory withdrawals = new Withdrawal[](reserve);
+        bytes32 withdrawalHash = EMPTY_SENTINEL;
+        for (uint256 i = reserve; i > 0; --i) {
+            withdrawals[i - 1] = withdrawal;
+            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
+        }
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("bounce-back-cap")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: processedDepositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 1
+            }),
+            withdrawalHash,
+            "",
+            ""
+        );
+
+        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximumPublicDeposits = maximum - uint64(reserve);
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), maximum);
+        for (uint256 i; i < maximumPublicDeposits; ++i) {
+            portal.deposit(address(pathUSD), bob, 1, bytes32(i), bob);
+        }
+        vm.stopPrank();
+
+        bytes32 queueHashAtPublicCapacity = portal.currentDepositQueueHash();
+        portal.processWithdrawals(withdrawals, bytes32(0));
+
+        bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
+        assertTrue(queueHashAtCapacity != queueHashAtPublicCapacity);
+        assertEq(portal.depositCount(), maximum + 1);
+        assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        vm.prank(alice);
+        portal.deposit(address(pathUSD), bob, 1, bytes32("reserved"), bob);
     }
 
     function test_deposit_hashChainStructure() public {
@@ -3243,6 +3367,74 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
 
+    /// A reverting callback must not outspend its declared `gasLimit` plus fixed overhead.
+    /// The blob used to be copied into the messenger frame and again into the portal's, so one
+    /// attacker withdrawal could exhaust a batch sized from the queue's declared limits. The batch
+    /// reverted, the dequeue rolled back, and since the sequencer rebuilds the same batch
+    /// deterministically the FIFO stalled for good — TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS.
+    function test_withdrawal_revertBombDoesNotStallWithdrawalQueue() public {
+        MockRevertingReceiver bomb = new MockRevertingReceiver(900_000);
+        vm.prank(admin);
+        portal.setRole(address(bomb), Role.CallbackGateway);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 2000e6);
+        portal.deposit(address(pathUSD), alice, 2000e6, bytes32(""), alice);
+        vm.stopPrank();
+
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+
+        uint64 bombGasLimit = 3_000_000;
+        Withdrawal[] memory withdrawals = new Withdrawal[](2);
+        withdrawals[0] = _withdrawal(
+            address(pathUSD), alice, address(bomb), 500e6, bytes32(0), bombGasLimit, alice, ""
+        );
+        // A second, well-behaved withdrawal that must still be delivered.
+        withdrawals[1] = _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
+
+        bytes32 tailHash = keccak256(abi.encode(withdrawals[1], EMPTY_SENTINEL));
+        bytes32 headHash = keccak256(abi.encode(withdrawals[0], tailHash));
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHashBefore,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            headHash,
+            "",
+            ""
+        );
+
+        // Exactly what the sequencer's planner budgets for this pair, per its own allowances in
+        // crates/sequencer/src/withdrawals.rs. The bomb must not push the batch past it.
+        uint256 plannedGas = 500_000 + (1_750_000 + uint256(bombGasLimit)) + 1_000_000;
+
+        uint256 bobBefore = pathUSD.balanceOf(bob);
+        (bool success,) = address(portal).call{ gas: plannedGas }(
+            abi.encodeCall(IZonePortal.processWithdrawals, (withdrawals, bytes32(0)))
+        );
+
+        assertTrue(success, "batch must not revert");
+        assertEq(portal.withdrawalQueueHead(), 1, "the queue slot must be consumed");
+        assertEq(
+            portal.withdrawalQueueSlot(0), EMPTY_SENTINEL, "both items must have been dequeued"
+        );
+        assertEq(pathUSD.balanceOf(address(bomb)), 0, "bomb must not keep the tokens");
+        assertEq(
+            pathUSD.balanceOf(bob) - bobBefore, 500e6, "honest withdrawal must still be delivered"
+        );
+        assertTrue(
+            portal.currentDepositQueueHash() != depositHashBefore, "bomb must have bounced back"
+        );
+    }
+
     function test_withdrawal_zeroGasLimit_noCallback() public {
         // Fund portal
         vm.startPrank(alice);
@@ -4145,12 +4337,12 @@ contract ZonePortalTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Verify that ZonePortal's storage layout matches the slot constants
-    ///         used by ZoneConfig and ZoneInbox for cross-domain reads.
+    ///         used by ZoneInbox for cross-domain reads.
     /// @dev This is a critical regression test. If the ZonePortal storage layout changes
     ///      (e.g. a variable is added/removed/reordered), this test will fail, preventing
     ///      silent slot mismatches that corrupt zone-side reads.
     ///
-    ///      The zone-side contracts (ZoneConfig, ZoneInbox) read ZonePortal storage via
+    ///      The zone-side contracts ZoneInbox read ZonePortal storage via
     ///      TempoState.readTempoStorageSlot() using hardcoded slot numbers. If those slot
     ///      numbers drift from the actual layout, the zone reads garbage data.
     ///
@@ -4303,7 +4495,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
-    /// @dev This ensures ZoneConfig and ZoneInbox both compute the correct storage slots
+    /// @dev This ensures ZoneInbox both compute the correct storage slots
     ///      when reading encryption keys via readTempoStorageSlot().
     ///
     ///      For a dynamic array at slot S:
@@ -4357,17 +4549,17 @@ contract ZonePortalTest is BaseTest {
         );
     }
 
-    /// @notice Verify that the slot constants used by ZoneInbox and ZoneConfig match
+    /// @notice Verify that the slot constants used by ZoneInbox match
     ///         the actual ZonePortal storage layout.
     /// @dev This is the cross-contract consistency check. The test replicates the exact
     ///      slot computation logic used by ZoneInbox._readEncryptionKey() and
-    ///      ZoneConfig.sequencerEncryptionKey() to ensure they both read the correct data.
+    ///      ZoneInbox encryption-key reads to ensure they both read the correct data.
     function test_storageLayout_crossContractConsistency() public {
         (bytes32 keyX, uint8 keyYParity) = _setEncKeyWithPoP(ENC_KEY_1);
 
         // Use the shared constants from IZone.sol (single source of truth)
 
-        // Verify sequencer membership slot (used by ZoneConfig)
+        // Verify sequencer membership slot (used by zone system contracts)
         bytes32 membershipSlot = keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT));
         assertEq(
             uint256(vm.load(address(portal), membershipSlot)),

@@ -12,7 +12,7 @@ use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 use crate::{auth::AuthContext, types::JsonRpcError};
 
-/// Enforce all private RPC authorization rules for simulation-style requests.
+/// Enforce all redacted RPC authorization rules for simulation-style requests.
 pub fn enforce_authorized(
     request: &mut TempoTransactionRequest,
     auth: &AuthContext,

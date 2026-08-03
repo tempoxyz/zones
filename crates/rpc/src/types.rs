@@ -1,4 +1,4 @@
-//! JSON-RPC types for the private zone RPC.
+//! JSON-RPC types for the redacted zone RPC.
 
 use std::{future::Future, pin::Pin};
 
@@ -195,8 +195,10 @@ pub struct ZoneInfoResponse {
 pub struct LocalSequencerInfo {
     /// Manifest node name.
     pub name: String,
-    /// Individual secp256k1 address.
-    pub sequencer_address: Address,
+    /// Individual secp256k1 address. Absent on an `rpc_only` node, which holds no
+    /// individual key and is not registered with `ZonePortal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
     /// Hex-encoded Ed25519 Commonware public key.
     pub p2p_public_key: String,
     /// Current role: `leader`, `follower`, or `fenced`.
@@ -211,7 +213,8 @@ pub struct ActiveLeaderInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Individual secp256k1 address registered on the portal.
-    pub sequencer_address: Address,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
     /// Hex-encoded Ed25519 Commonware public key.
     pub p2p_public_key: String,
     /// Leadership epoch.
@@ -226,8 +229,11 @@ pub struct ActiveLeaderInfo {
 pub struct SequencerPeerInfo {
     /// Manifest node name.
     pub name: String,
-    /// Individual secp256k1 address.
-    pub sequencer_address: Address,
+    /// Individual secp256k1 address. Absent for an `rpc_only` peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
+    /// Whether this peer replicates without joining the on-chain settlement quorum.
+    pub rpc_only: bool,
     /// Whether this entry describes the local node.
     pub is_local: bool,
     /// Most recent hash-carrying tip evidence, when observed.
@@ -291,6 +297,9 @@ pub struct SequencerInfoResponse {
     /// Active finalized leader (multi-sequencer mode only, once observed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_leader: Option<ActiveLeaderInfo>,
+    /// Exact local canonical tip usable as a forced-recovery point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_tip: Option<PeerTipInfo>,
     /// All configured manifest members with observed tip evidence.
     pub peers: Vec<SequencerPeerInfo>,
     /// Consumption and observation progress (multi-sequencer mode only).
@@ -299,6 +308,41 @@ pub struct SequencerInfoResponse {
     /// Promotion-readiness snapshot (multi-sequencer mode only).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub readiness: Option<SequencerReadiness>,
+}
+
+/// Optional behavior for `zone_setLeader`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLeaderOptions {
+    /// Enable the crashed-leader recovery override.
+    #[serde(default)]
+    pub force: bool,
+    /// Finalized portal epoch that the call is expected to replace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_epoch: Option<U64>,
+    /// Exact canonical zone head from which the selected leader must recover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_block_hash: Option<B256>,
+}
+
+/// Backward-compatible parameters for `zone_setLeader`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+pub enum SetLeaderParams {
+    /// Existing form: `[target]`.
+    Regular((Address,)),
+    /// Extended form: `[target, options]`.
+    WithOptions((Address, SetLeaderOptions)),
+}
+
+impl SetLeaderParams {
+    /// Split the parsed parameters into their target and optional behavior.
+    pub fn into_parts(self) -> (Address, SetLeaderOptions) {
+        match self {
+            Self::Regular((target,)) => (target, SetLeaderOptions::default()),
+            Self::WithOptions((target, options)) => (target, options),
+        }
+    }
 }
 
 /// Response payload for `zone_setLeader`.
@@ -323,7 +367,7 @@ pub enum MethodTier {
     Public,
     /// Only available to the sequencer.
     Restricted,
-    /// Disabled on the private RPC.
+    /// Disabled on the redacted RPC.
     Disabled,
 }
 
@@ -423,4 +467,38 @@ pub fn to_raw<T: serde::Serialize>(value: &T) -> Result<Box<RawValue>, JsonRpcEr
 /// Shorthand for wrapping any `Display` error into a [`JsonRpcError::internal`].
 pub fn internal(e: impl std::fmt::Display) -> JsonRpcError {
     JsonRpcError::internal(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Address, B256};
+
+    use super::SetLeaderParams;
+
+    #[test]
+    fn set_leader_params_accept_legacy_and_force_forms() {
+        let target = Address::repeat_byte(0x11);
+        let legacy: SetLeaderParams = serde_json::from_value(serde_json::json!([target])).unwrap();
+        let (parsed_target, options) = legacy.into_parts();
+        assert_eq!(parsed_target, target);
+        assert!(!options.force);
+
+        let forced: SetLeaderParams = serde_json::from_value(serde_json::json!([
+            target,
+            {
+                "force": true,
+                "expectedEpoch": "0x7",
+                "recoveryBlockHash": B256::repeat_byte(0x22),
+            }
+        ]))
+        .unwrap();
+        let (parsed_target, options) = forced.into_parts();
+        assert_eq!(parsed_target, target);
+        assert!(options.force);
+        assert_eq!(options.expected_epoch.unwrap().to::<u64>(), 7);
+        assert_eq!(
+            options.recovery_block_hash.unwrap(),
+            B256::repeat_byte(0x22)
+        );
+    }
 }

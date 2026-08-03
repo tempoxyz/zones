@@ -21,7 +21,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
 | `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash` starts at zero, and the first proof starts with the canonical genesis block derived from `zoneId` before transitioning through at least one non-genesis block | 🔴 | The zone may bootstrap from an attacker-chosen genesis state |
 | `TEMPO-ZONE-FIRST-TEMPO-ANCHOR` | The first proof contains at least two blocks, and its first non-genesis block imports Tempo and proves the portal's `sequencer` slot is non-zero at that block | 🔴 | The zone may settle an unanchored bootstrap state or anchor to Tempo state from before its portal existed |
-| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
+| `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
 ### Access Control and Configuration
 
@@ -77,6 +77,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-WITHDRAWAL-FEE-SNAPSHOT` | Withdrawal fee equals `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate` at request time, with the rate bounded by the finalized admin maximum, and is burned with the amount | 🟢 | Fee changes retroactively alter user economics or underfund processing |
 | `TEMPO-ZONE-WITHDRAWAL-BURN-BEFORE-QUEUE` | `requestWithdrawal` burns `amount + fee` before appending the pending withdrawal | 🔴 | Portal can release funds without removing zone supply |
 | `TEMPO-ZONE-WITHDRAWAL-CALLBACK-BOUNDS` | `gasLimit <= MAX_WITHDRAWAL_GAS_LIMIT`, callback data is bounded, and over-limit legacy withdrawals bounce back after dequeue | 🟡 | A withdrawal can exceed block gas limits or permanently block the FIFO queue |
+| `TEMPO-ZONE-WITHDRAWAL-CALLBACK-RETURNDATA-BOUND` | Realized delivery cost of a callback withdrawal stays within its `gasLimit` plus a fixed overhead: `relayMessage` bounds its return and revert data for any callback target, and enabled tokens are native TIP-20s with constant-size errors | 🟡 | A callback can charge unbounded quadratic memory gas to the delivery frame, exhausting a `processWithdrawals` batch and permanently blocking the FIFO queue |
 | `TEMPO-ZONE-SENDER-TAG-BINDING` | `senderTag == keccak256(abi.encodePacked(sender, txHash))`, where `txHash` is the current withdrawal request transaction hash | 🟡 | Authenticated withdrawals can reveal or misattribute the sender |
 | `TEMPO-ZONE-ENCRYPTED-SENDER-SHAPE` | If `revealTo` is set, `encryptedSender` is present and exactly 113 bytes; otherwise it is empty | 🟢 | Selective reveal consumers cannot authenticate sender metadata reliably |
 | `TEMPO-ZONE-WITHDRAWAL-BATCH-INDEX` | `finalizeWithdrawalBatch` advances `withdrawalBatchIndex` exactly once per submitted batch, including zero-withdrawal batches | 🔴 | Sequencer can omit or replay batches containing withdrawals |
@@ -109,7 +110,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-TEMPO-HEADER-CONTINUITY` | `TempoState.finalizeTempo` only accepts headers whose parent hash and block number continue from the previous finalized Tempo header | 🔴 | Zone reads can bind to a forged or discontinuous Tempo history |
-| `TEMPO-ZONE-TEMPO-READ-AUTHZ` | Only zone system contracts can read arbitrary Tempo storage through `TempoState.readTempoStorageSlot` | 🟡 | Users can inspect L1-derived private or policy state through system read paths |
+| `TEMPO-ZONE-TEMPO-READ-METERING` | Native Tempo storage reads charge 2,100 gas on the first transaction-local access to an account/slot and 100 gas on subsequent accesses; EVM-overlay reads use ordinary cold/warm SLOAD pricing and are not charged twice | 🔴 | Unpriced native read loops or double-charged overlay reads can cause resource exhaustion or inconsistent gas accounting |
 | `TEMPO-ZONE-TEMPO-READ-ROOT` | Every Tempo storage read is proven against the `tempoStateRoot` bound at the block where the read occurs | 🔴 | Configuration, token, policy, or queue reads can be forged |
 | `TEMPO-ZONE-TIP403-INHERITANCE` | Zone token transfer, mint, and withdrawal paths enforce the TIP-403 policy inherited from the current finalized Tempo view | 🔴 | Blacklisted or unauthorized accounts can move, receive, mint, or withdraw funds |
 | `TEMPO-ZONE-TIP403-READONLY` | Zone-side TIP-403 registry/proxy cannot mutate policy state | 🟡 | A zone user or sequencer can diverge policy from Tempo |
@@ -121,11 +122,12 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | `TEMPO-ZONE-ADVANCE-TEMPO-FIRST` | When present, `advanceTempo` is the first transaction in a zone block | 🟡 | User transactions can execute against the wrong Tempo binding or stale config |
 | `TEMPO-ZONE-CONTRACT-CREATION-DISABLED` | User `CREATE` and `CREATE2` always revert on zones | 🟡 | Users can deploy contracts that bypass privacy and system-token assumptions |
 | `TEMPO-ZONE-BALANCE-ALLOWANCE-PRIVACY` | `balanceOf` and `allowance` reveal values only to authorized callers or the sequencer | 🟡 | Account balances and approvals leak through token precompiles |
+| `TEMPO-ZONE-ACCOUNT-GETTER-PRIVACY` | Account-indexed `NonceManager` and `AccountKeychain` getters reveal values only when their immediate caller owns the queried account or is an active sequencer | 🟡 | Forwarding contracts or ordinary users can expose another account's nonce activity, keys, limits, call scopes, or authorization metadata |
 | `TEMPO-ZONE-REFUND-READ-PRIVACY` | `ZoneInbox.refunds(token, owner)` reveals a value only when its immediate caller is `owner` or an active sequencer | 🟡 | Forwarding contracts can expose another account's pending refund balance |
 | `TEMPO-ZONE-FIXED-TOKEN-GAS` | TIP-20 transfer and approve operations charge fixed gas independent of account storage layout | 🟢 | Gas timing leaks whether addresses have prior token activity |
 | `TEMPO-ZONE-BLOCK-TIMESTAMP-MONOTONIC` | Zone block timestamps are non-decreasing and block numbers increment by one | 🟢 | Time-dependent application logic and proof replay assumptions can break |
 
-### Private RPC
+### Redacted RPC
 
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|

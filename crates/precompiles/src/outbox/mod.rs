@@ -7,6 +7,7 @@ mod tests;
 use alloc::vec::Vec;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_sol_types::SolCall;
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
@@ -30,6 +31,14 @@ use crate::{
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
+
+/// Returns whether `calldata` is a canonical `finalizeWithdrawalBatch` call.
+pub fn is_finalize_withdrawal_batch_calldata(calldata: &[u8]) -> bool {
+    let Ok(call) = IZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(calldata) else {
+        return false;
+    };
+    call.abi_encode() == calldata
+}
 
 #[contract(addr = ZONE_OUTBOX_ADDRESS)]
 pub struct ZoneOutbox {
@@ -274,11 +283,13 @@ impl ZoneOutbox {
 
     fn finalize_withdrawal_batch<P: L1StorageReader>(
         &mut self,
-        l1: &L1State<P>,
+        _l1: &L1State<P>,
         caller: Address,
         call: IZoneOutbox::finalizeWithdrawalBatchCall,
     ) -> ZoneResult<B256> {
-        self.ensure_sequencer(l1, caller)?;
+        if caller != Address::ZERO {
+            return Err(ZoneOutboxError::only_sequencer().into());
+        }
         if call.blockNumber != self.storage.block_number() {
             return Err(ZoneOutboxError::invalid_block_number().into());
         }

@@ -30,6 +30,120 @@ const QUIESCENCE: Duration = Duration::from_secs(3);
 /// the window to backfill-paced replication fails fast instead of passing slowly.
 const LIVE_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(15);
 
+/// A crashes after producing a tip shared by every follower. Three L1 anchors pass with no zone
+/// blocks, then an operator selects B and the shared tip for forced recovery. The matching
+/// finalized transition lets B fill the missing anchor range and continue as the portal leader,
+/// without replacing any block preceding the crash.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut cluster = start_local_p2p_cluster(24).await?;
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    for _ in 0..3 {
+        cluster.inject_block(vec![])?;
+    }
+    cluster.wait_all_at(3, HANDOFF_TIMEOUT).await?;
+
+    let recovery_tip_height = 3;
+    let mut original_hashes = Vec::new();
+    for height in 1..=recovery_tip_height {
+        original_hashes.push(cluster.assert_same_block(height).await?.hash);
+    }
+    let recovery_block_hash = original_hashes[(recovery_tip_height - 1) as usize];
+    let recovery_start_tempo_block = cluster.next_anchor_number();
+    assert_eq!(recovery_start_tempo_block, 4);
+
+    // Node 0 is A. Removing it leaves B and C running with their original manifest identities.
+    let crashed_leader = cluster.nodes.remove(0);
+    crashed_leader.crash();
+
+    // These are the three missed boundaries used by the operator's failure detector. B and C
+    // observe and queue them, but cannot build while finalized portal authority still names A.
+    for _ in 0..3 {
+        cluster.inject_block(vec![])?;
+    }
+    tokio::time::sleep(QUIESCENCE).await;
+    for node in &cluster.nodes {
+        assert_eq!(
+            node.provider().get_block_number().await?,
+            recovery_tip_height,
+            "a follower produced while the crashed leader still held authority"
+        );
+    }
+
+    // The force RPC installs this request on each surviving node before relaying setLeader.
+    // Publishing the matching transition stands in for their subscribers finalizing that L1
+    // transaction. Its portal activation is anchor 7, while the recovery override starts at 4.
+    let recovery_epoch = 1;
+    let replacement_index = 1;
+    let replacement = cluster.p2p_public_keys[replacement_index].clone();
+    for node in &cluster.nodes {
+        assert!(node.leadership().prepare_forced_recovery(
+            recovery_epoch,
+            replacement.clone(),
+            recovery_block_hash,
+            recovery_start_tempo_block,
+        )?);
+        assert!(
+            node.leadership()
+                .leader_for(recovery_start_tempo_block)
+                .is_none(),
+            "the recovery range must remain fenced before setLeader finalizes"
+        );
+    }
+
+    let portal_activation_tempo_block = cluster.next_anchor_number();
+    assert_eq!(portal_activation_tempo_block, 7);
+    cluster.publish_transition(
+        recovery_epoch,
+        replacement_index,
+        portal_activation_tempo_block,
+    )?;
+    cluster.inject_block(vec![])?;
+    cluster
+        .wait_all_at(portal_activation_tempo_block, HANDOFF_TIMEOUT)
+        .await?;
+
+    // The pre-crash prefix is unchanged on both survivors.
+    for (offset, expected_hash) in original_hashes.into_iter().enumerate() {
+        let height = offset as u64 + 1;
+        assert_eq!(
+            cluster.assert_same_block(height).await?.hash,
+            expected_hash,
+            "forced recovery replaced pre-crash block {height}"
+        );
+    }
+
+    // B produced every missing block and the portal-activation block. Once anchor 7 is applied,
+    // ordinary portal authority takes over and the temporary recovery state is removed.
+    let b_producer = cluster.sequencer_signers[replacement_index].address();
+    for height in recovery_start_tempo_block..=portal_activation_tempo_block {
+        assert_eq!(
+            cluster.assert_same_block(height).await?.beneficiary,
+            b_producer,
+            "replacement leader B did not produce recovery block {height}"
+        );
+    }
+    for node in &cluster.nodes {
+        assert!(
+            node.leadership().forced_recovery().is_none(),
+            "recovery state remained after portal activation was applied"
+        );
+    }
+
+    // Production remains live under ordinary portal authority after the recovery window.
+    cluster.inject_block(vec![])?;
+    let next_height = portal_activation_tempo_block + 1;
+    cluster.wait_all_at(next_height, HANDOFF_TIMEOUT).await?;
+    assert_eq!(
+        cluster.assert_same_block(next_height).await?.beneficiary,
+        b_producer
+    );
+    Ok(())
+}
+
 /// Planned A→B handoff at an exact activation boundary.
 ///
 /// Asserts the plan's v1 success criterion: no missing or duplicate zone height, no
@@ -52,7 +166,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     cluster.wait_all_at(3, HANDOFF_TIMEOUT).await?;
 
     // --- Block 4 funds a sender so a pending transaction can ride through the handoff. ---
-    let (sender_wallet, sender) = local_dev_zone_account(&cluster.nodes[1])?;
+    let (sender_wallet, sender) = local_dev_zone_account(&cluster.nodes[2])?;
     let amount = 1_000_000_u128;
     cluster.inject_block(vec![L1Fixture::make_deposit_for_block(
         PATH_USD_ADDRESS,
@@ -61,7 +175,7 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         amount,
     )])?;
     cluster.wait_all_at(4, DEFAULT_TIMEOUT).await?;
-    cluster.nodes[1]
+    cluster.nodes[2]
         .wait_for_balance(
             PATH_USD_ADDRESS,
             sender,
@@ -70,9 +184,9 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         )
         .await?;
 
-    // Submit a transfer to follower B. B admits it locally and forwards it to the active
-    // leader A; nobody includes it before the handoff because no further anchor is injected
-    // under A's authorization.
+    // Submit a transfer to follower C. C admits it locally and forwards it to every quorum peer,
+    // including active leader A and incoming leader B. Nobody includes it before the handoff
+    // because no further anchor is injected under A's authorization.
     let recipient = address!("0x00000000000000000000000000000000000ffff1");
     cluster.fixture.seed_no_receive_policy(recipient)?;
     let transfer_amount = 123_456_u128;
@@ -98,6 +212,21 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
         },
     )
     .await?;
+    let incoming_leader_provider = cluster.nodes[1].provider();
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "forwarded transaction in the incoming leader's pool",
+        || {
+            let incoming_leader_provider = &incoming_leader_provider;
+            async move {
+                Ok(incoming_leader_provider
+                    .get_transaction_by_hash(transaction_hash)
+                    .await?)
+            }
+        },
+    )
+    .await?;
 
     // --- The handoff: leadership of every anchor >= H moves to B. ---
     let handoff_anchor = cluster.next_anchor_number();
@@ -107,8 +236,8 @@ async fn test_planned_handoff_moves_production_at_exact_activation_boundary() ->
     );
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // Produce blocks under B until the pending transfer is included. B's own pool already
-    // holds the transaction, and A's post-demotion reconciliation re-forwards its pool to B.
+    // Produce blocks under B until the pending transfer is included. B already retained the
+    // transaction before the handoff, independently of A's post-demotion reconciliation.
     let receipt = tokio::time::timeout(HANDOFF_TIMEOUT, async {
         loop {
             cluster.inject_block(vec![])?;
@@ -317,9 +446,8 @@ async fn test_advance_scheduled_handoff_keeps_outgoing_leader_live() -> eyre::Re
     let handoff_anchor = next_anchor + 3;
     cluster.publish_transition(1, 1, handoff_anchor)?;
 
-    // A transfer submitted to follower C during the window must be forwarded to the
-    // still-active leader A — not to the not-yet-active B, whose follower generation
-    // holds no transaction sink.
+    // A transfer submitted to follower C during the window is forwarded to every quorum peer,
+    // including both still-active leader A and not-yet-active leader B.
     let recipient = address!("0x00000000000000000000000000000000000ffff2");
     cluster.fixture.seed_no_receive_policy(recipient)?;
     let transfer_amount = 123_456_u128;

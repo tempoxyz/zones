@@ -14,8 +14,8 @@ use crate::{
         route_events_to_generations, run_role_controller,
     },
     rpc::{
-        PublicZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
-        public_zone_rpc_module, rpc_connection_config, start_private_rpc,
+        OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
+        operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
 use alloy_primitives::{Address, U256};
@@ -164,7 +164,7 @@ pub struct ZoneSequencerAddOnsConfig {
     pub sequencer_signer: PrivateKeySigner,
     /// Individual manifest-node signer used for L1 settlement transactions.
     pub l1_transaction_signer: Option<PrivateKeySigner>,
-    /// Zone ID for chain ID validation.
+    /// Zone ID used by sequencer encryption.
     pub zone_id: u32,
     /// Fallback interval for reconciling the canonical Zone head.
     pub zone_poll_interval: Duration,
@@ -176,14 +176,14 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_batch_limits: WithdrawalBatchLimits,
 }
 
-/// Configuration for the Zone private RPC server extension.
+/// Configuration for the Zone redacted RPC server extension.
 #[derive(Debug, Clone, Default)]
-pub struct ZonePrivateRpcConfig {
+pub struct ZoneRedactedRpcConfig {
     /// Port for RPC traffic.
-    pub private_rpc_port: u16,
-    /// Zone ID for chain ID validation and private RPC auth.
+    pub redacted_rpc_port: u16,
+    /// Zone ID used by redacted RPC authentication.
     pub zone_id: u32,
-    /// Max duration for private RPC auth.
+    /// Max duration for redacted RPC auth.
     pub max_auth_token_validity: Duration,
 }
 
@@ -209,8 +209,8 @@ pub struct ZoneNode {
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
-    /// Private RPC config.
-    private_rpc_config: ZonePrivateRpcConfig,
+    /// Redacted RPC config.
+    redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Optional static Zone P2P networking config.
@@ -262,16 +262,16 @@ impl ZoneNode {
             portal_address,
             withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             withdrawal_reveal_encryptor: None,
-            private_rpc_config: ZonePrivateRpcConfig::default(),
+            redacted_rpc_config: ZoneRedactedRpcConfig::default(),
             sequencer_config: None,
             p2p_config: None,
             external_deposit_consumer: false,
         }
     }
 
-    /// Set the private RPC configuration.
-    pub fn with_private_rpc(mut self, config: ZonePrivateRpcConfig) -> Self {
-        self.private_rpc_config = config;
+    /// Set the redacted RPC configuration.
+    pub fn with_redacted_rpc(mut self, config: ZoneRedactedRpcConfig) -> Self {
+        self.redacted_rpc_config = config;
         self
     }
 
@@ -449,8 +449,8 @@ where
     l1_config: L1SubscriberConfig,
     /// ZonePortal address on L1.
     portal_address: Address,
-    /// Private RPC configuration.
-    private_rpc_config: ZonePrivateRpcConfig,
+    /// Redacted RPC configuration.
+    redacted_rpc_config: ZoneRedactedRpcConfig,
     /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     /// Static Zone P2P networking configuration.
@@ -478,7 +478,7 @@ where
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
         portal_address: Address,
-        private_rpc_config: ZonePrivateRpcConfig,
+        redacted_rpc_config: ZoneRedactedRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
         p2p_config: Option<P2pConfig>,
         external_deposit_consumer: bool,
@@ -495,7 +495,7 @@ where
             deposit_queue,
             l1_config,
             portal_address,
-            private_rpc_config,
+            redacted_rpc_config,
             sequencer_config,
             p2p_config,
             external_deposit_consumer,
@@ -581,12 +581,22 @@ where
                 .as_ref()
                 .map(|config| config.batch_anchor_config)
                 .unwrap_or_default();
+            // The manifest decides who this node collects settlement signatures from; the portal
+            // decides whose signatures count and how many are needed. Reconcile them before any
+            // role task starts, so a disagreement fails at startup instead of stalling
+            // settlement at the next batch boundary.
+            crate::settlement_attestation::validate_registered_sequencer_set(
+                config.manifest(),
+                self.portal_address,
+                &l1_provider,
+            )
+            .await?;
             // Every node holds an attestation store so it can be promoted anytime.
             let attestation = AttestationContext::new(
                 attestation_domain,
                 config.block_attestation_signer(),
                 config.block_attestation_addresses(),
-                Some(AttestationStore::default()),
+                AttestationStore::default(),
                 l1_provider.clone(),
                 anchor_config,
             );
@@ -602,21 +612,27 @@ where
             let (sinks, commands) =
                 Self::launch_p2p_network(config, network_id, &task_executor, backfill_requests_tx)?;
 
-            // Operator RPC handles: every node holds a wallet-backed L1 provider signing
-            // with its individual key so any member can relay setLeader.
+            // Operator RPC handles: every quorum member holds a wallet-backed L1 provider
+            // signing with its individual key so any of them can relay setLeader. An rpc-only
+            // standby holds no individual key, so it cannot relay and gets no provider.
             let role_status: SharedRoleStatus = Default::default();
             let peer_tips = PeerTipRegistry::default();
-            let relayer = {
-                use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
-                alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                    .with_nonce_key_filler()
-                    .wallet(alloy_network::EthereumWallet::from(individual_signer))
-                    .connect_with_config(
-                        &self.l1_config.l1_rpc_url,
-                        rpc_connection_config(self.l1_config.retry_connection_interval),
+            let relayer = match individual_signer {
+                Some(signer) => {
+                    use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
+                    Some(
+                        alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                            .with_nonce_key_filler()
+                            .wallet(alloy_network::EthereumWallet::from(signer))
+                            .connect_with_config(
+                                &self.l1_config.l1_rpc_url,
+                                rpc_connection_config(self.l1_config.retry_connection_interval),
+                            )
+                            .await?
+                            .erased(),
                     )
-                    .await?
-                    .erased()
+                }
+                None => None,
             };
             sequencer_rpc_slot
                 .set(SequencerRpcContext::new(
@@ -651,10 +667,10 @@ where
         let pool = ctx.node.pool().clone();
         let engine_handle = ctx.beacon_engine_handle.clone();
         let payload_builder = ctx.node.payload_builder_handle().clone();
-        let public_rpc_slot = sequencer_rpc_slot.clone();
-        let public_rpc_provider = provider.clone();
-        let public_zone_api = PublicZoneApi::new(
-            self.private_rpc_config.zone_id,
+        let operator_rpc_slot = sequencer_rpc_slot.clone();
+        let operator_rpc_provider = provider.clone();
+        let operator_zone_api = OperatorZoneApi::new(
+            self.redacted_rpc_config.zone_id,
             chain_id,
             self.portal_address,
             l1_provider.clone(),
@@ -666,18 +682,18 @@ where
             .launch_add_ons_with(ctx, move |container| {
                 container
                     .modules
-                    .merge_configured(public_zone_api.into_rpc())?;
-                container.modules.merge_http(public_zone_rpc_module(
+                    .merge_configured(operator_zone_api.into_rpc())?;
+                container.modules.merge_http(operator_zone_rpc_module(
                     portal_address,
-                    public_rpc_slot,
-                    public_rpc_provider,
+                    operator_rpc_slot,
+                    operator_rpc_provider,
                 )?)?;
                 Ok(())
             })
             .await?;
 
-        Self::launch_private_rpc(
-            self.private_rpc_config,
+        Self::launch_redacted_rpc(
+            self.redacted_rpc_config,
             &handle,
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
@@ -710,7 +726,6 @@ where
                     self.l1_config.l1_rpc_url.clone(),
                     self.l1_config.portal_address,
                     self.l1_config.retry_connection_interval,
-                    chain_id,
                     attestation.store.clone(),
                 )?),
                 None => None,
@@ -761,7 +776,6 @@ where
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
                 sequencer_addr,
-                chain_id,
                 None,
             )
             .await?;
@@ -844,18 +858,21 @@ async fn seed_leadership_schedule(
     }
 
     let portal = ZonePortal::new(portal_address, l1_provider);
-    let leader = portal.leader().block(block_id).call().await?;
+    // All three describe the same transition at the same block and have no data dependency
+    // on each other, so they go out as one batch rather than three serial round trips on the
+    // startup path.
+    let leader_call = portal.leader().block(block_id);
+    let epoch_call = portal.leaderEpoch().block(block_id);
+    let activation_call = portal.leaderActivationTempoBlock().block(block_id);
+    let (leader, epoch, activation) = tokio::try_join!(
+        leader_call.call(),
+        epoch_call.call(),
+        activation_call.call(),
+    )?;
     eyre::ensure!(
         !leader.is_zero(),
         "portal {portal_address} has no leader at finalized L1 snapshot block {snapshot_anchor}"
     );
-
-    let epoch = portal.leaderEpoch().block(block_id).call().await?;
-    let activation = portal
-        .leaderActivationTempoBlock()
-        .block(block_id)
-        .call()
-        .await?;
     let node = manifest.node_by_secp256k1_address(leader).ok_or_else(|| {
         eyre::eyre!(
             "finalized portal leader {leader} (epoch {epoch}) does not map to any manifest \
@@ -954,20 +971,8 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        chain_id: u64,
-        attestation_store: Option<AttestationStore>,
+        attestation_store: AttestationStore,
     ) -> eyre::Result<LeaderSequencerDeps> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
@@ -978,7 +983,7 @@ where
             outbox_address: ZONE_OUTBOX_ADDRESS,
             inbox_address: ZONE_INBOX_ADDRESS,
             batch_anchor_config: config.batch_anchor_config,
-            attestation_store,
+            attestation_store: Some(attestation_store),
         };
         Ok(LeaderSequencerDeps {
             config,
@@ -1154,35 +1159,23 @@ where
         Ok(())
     }
 
-    /// Launch the private RPC server.
-    async fn launch_private_rpc(
-        config: ZonePrivateRpcConfig,
+    /// Launch the redacted RPC server.
+    async fn launch_redacted_rpc(
+        config: ZoneRedactedRpcConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         portal_address: Address,
         chain_id: u64,
     ) -> eyre::Result<()> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
-
         let eth_handlers = handle.eth_handlers().clone();
         let zone_rpc_url = handle
             .rpc_server_handles
             .rpc
             .http_url()
-            .expect("HTTP RPC server must be enabled for private RPC");
-        let private_rpc_config = zone_rpc::PrivateRpcConfig {
-            listen_addr: ([0, 0, 0, 0], config.private_rpc_port).into(),
+            .expect("HTTP RPC server must be enabled for redacted RPC");
+        let redacted_rpc_config = zone_rpc::RedactedRpcConfig {
+            listen_addr: ([0, 0, 0, 0], config.redacted_rpc_port).into(),
             l1_rpc_url,
             zone_rpc_url,
             retry_connection_interval,
@@ -1192,9 +1185,9 @@ where
             zone_portal: portal_address,
         };
         let api: Arc<dyn ZoneRpcApi> =
-            Arc::new(ZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
-        let local_addr = start_private_rpc(private_rpc_config, api).await?;
-        info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
+            Arc::new(ZoneRpc::new(eth_handlers, redacted_rpc_config.clone()).await?);
+        let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
+        info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
 
         Ok(())
     }
@@ -1210,21 +1203,8 @@ where
         portal_address: Address,
         retry_connection_interval: Duration,
         sequencer_addr: Address,
-        chain_id: u64,
         attestation_store: Option<AttestationStore>,
     ) -> eyre::Result<()> {
-        if config.zone_id != 0 {
-            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
-            if chain_id != expected {
-                eyre::bail!(
-                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                    config.zone_id,
-                    expected,
-                    chain_id,
-                );
-            }
-        }
-
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1343,7 +1323,7 @@ where
             self.deposit_queue.clone(),
             self.l1_config.clone(),
             self.portal_address,
-            self.private_rpc_config.clone(),
+            self.redacted_rpc_config.clone(),
             self.sequencer_config.clone(),
             self.p2p_config.clone(),
             self.external_deposit_consumer,

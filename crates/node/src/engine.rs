@@ -56,10 +56,10 @@ use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, 
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
-/// Per-anchor production permit backed by the leadership schedule.
+/// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if
-/// `schedule.leader_for(N)` is this node.
+/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or an
+/// active bounded forced-recovery override assigns `N` to this node.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -76,15 +76,16 @@ impl ProductionPermit {
     }
 
     /// Decide whether this node may produce the zone block embedding `tempo_anchor`.
-    pub fn check(&self, tempo_anchor: u64) -> PermitDecision {
+    ///
+    /// `None` authorizes production; `Some(exit)` is the reason the engine must stop.
+    pub fn check(&self, tempo_anchor: u64) -> Option<EngineExit> {
         match self.schedule.leader_for(tempo_anchor) {
-            None => PermitDecision::Fenced,
-            Some(record) if record.leader == self.local_ed25519_public_key => {
-                PermitDecision::Produce
-            }
-            Some(record) => PermitDecision::Demoted {
+            None => Some(EngineExit::Fenced { tempo_anchor }),
+            Some(record) if record.leader == self.local_ed25519_public_key => None,
+            Some(record) => Some(EngineExit::Demoted {
+                tempo_anchor,
                 epoch: record.epoch,
-            },
+            }),
         }
     }
 
@@ -92,17 +93,6 @@ impl ProductionPermit {
     pub fn record_applied_anchor(&self, tempo_anchor: u64) {
         self.schedule.record_applied_anchor(tempo_anchor);
     }
-}
-
-/// Outcome of a per-anchor production permit check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermitDecision {
-    /// This node is the scheduled leader for the anchor.
-    Produce,
-    /// A retained transition assigns the anchor to another node.
-    Demoted { epoch: u64 },
-    /// Something bad happened. No leadership record is available.
-    Fenced,
 }
 
 /// Why the engine loop returned.
@@ -127,7 +117,9 @@ trait AvailableBlockDrain {
     fn next_available(&self) -> Option<Self::Block>;
 
     /// Checks the leadership permit for one available block.
-    fn permit(&self, block: &Self::Block) -> (u64, PermitDecision);
+    ///
+    /// `None` authorizes production; `Some(exit)` halts the drain with that reason.
+    fn permit(&self, block: &Self::Block) -> Option<EngineExit>;
 
     /// Completes and consumes one block.
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()>;
@@ -153,17 +145,8 @@ where
         let Some(block) = drain.next_available() else {
             return Ok(None);
         };
-        match drain.permit(&block) {
-            (_, PermitDecision::Produce) => {}
-            (tempo_anchor, PermitDecision::Demoted { epoch }) => {
-                return Ok(Some(EngineExit::Demoted {
-                    tempo_anchor,
-                    epoch,
-                }));
-            }
-            (tempo_anchor, PermitDecision::Fenced) => {
-                return Ok(Some(EngineExit::Fenced { tempo_anchor }));
-            }
+        if let Some(exit) = drain.permit(&block) {
+            return Ok(Some(exit));
         }
         drain.advance_one(block).await?;
     }
@@ -430,13 +413,11 @@ impl AvailableBlockDrain for ZoneEngine {
         self.deposit_queue.peek()
     }
 
-    fn permit(&self, block: &Self::Block) -> (u64, PermitDecision) {
-        let tempo_anchor = block.header.number();
-        let decision = self
-            .production_permit
+    fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+        // No permit is legacy single-sequencer mode: production is always authorized.
+        self.production_permit
             .as_ref()
-            .map_or(PermitDecision::Produce, |permit| permit.check(tempo_anchor));
-        (tempo_anchor, decision)
+            .and_then(|permit| permit.check(block.header.number()))
     }
 
     async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -455,8 +436,8 @@ mod tests {
         advanced: Vec<u64>,
         first_started: Option<oneshot::Sender<()>>,
         release_first: Option<oneshot::Receiver<()>>,
-        /// Blocks (by value) the permit rejects, with the simulated decision.
-        denied: Vec<(u64, PermitDecision)>,
+        /// Blocks (by value) the permit rejects, with the exit it produces.
+        denied: Vec<(u64, EngineExit)>,
     }
 
     impl AvailableBlockDrain for PausedDrain {
@@ -466,13 +447,11 @@ mod tests {
             self.pending.front().copied()
         }
 
-        fn permit(&self, block: &Self::Block) -> (u64, PermitDecision) {
-            let decision = self
-                .denied
+        fn permit(&self, block: &Self::Block) -> Option<EngineExit> {
+            self.denied
                 .iter()
                 .find(|(denied, _)| denied == block)
-                .map_or(PermitDecision::Produce, |(_, decision)| *decision);
-            (*block, decision)
+                .map(|(_, exit)| exit.clone())
         }
 
         async fn advance_one(&mut self, block: Self::Block) -> eyre::Result<()> {
@@ -532,7 +511,13 @@ mod tests {
             advanced: Vec::new(),
             first_started: None,
             release_first: None,
-            denied: vec![(3, PermitDecision::Demoted { epoch: 7 })],
+            denied: vec![(
+                3,
+                EngineExit::Demoted {
+                    tempo_anchor: 3,
+                    epoch: 7,
+                },
+            )],
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -558,7 +543,7 @@ mod tests {
             advanced: Vec::new(),
             first_started: None,
             release_first: None,
-            denied: vec![(5, PermitDecision::Fenced)],
+            denied: vec![(5, EngineExit::Fenced { tempo_anchor: 5 })],
         };
 
         let exit = drain_all_available(&mut drain, &stop)
@@ -571,6 +556,7 @@ mod tests {
 
     #[test]
     fn production_permit_is_a_single_schedule_lookup() {
+        use alloy_primitives::B256;
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use zone_p2p::LeadershipState;
 
@@ -578,19 +564,53 @@ mod tests {
         let other = PrivateKey::from_seed(2).public_key();
         let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, me.clone(), 0));
         schedule
-            .publish(LeadershipState::new(2, other, 100))
+            .publish(LeadershipState::new(2, other.clone(), 100))
             .unwrap();
-        let permit = ProductionPermit::new(schedule, me);
+        let permit = ProductionPermit::new(schedule, me.clone());
 
-        assert_eq!(permit.check(0), PermitDecision::Produce);
-        assert_eq!(permit.check(99), PermitDecision::Produce);
-        assert_eq!(permit.check(100), PermitDecision::Demoted { epoch: 2 });
-        assert_eq!(permit.check(u64::MAX), PermitDecision::Demoted { epoch: 2 });
+        assert_eq!(permit.check(0), None);
+        assert_eq!(permit.check(99), None);
+        assert_eq!(
+            permit.check(100),
+            Some(EngineExit::Demoted {
+                tempo_anchor: 100,
+                epoch: 2
+            })
+        );
+        assert_eq!(
+            permit.check(u64::MAX),
+            Some(EngineExit::Demoted {
+                tempo_anchor: u64::MAX,
+                epoch: 2
+            })
+        );
+
+        let recovery_schedule = LeadershipSchedule::seeded(LeadershipState::new(7, me, 0));
+        recovery_schedule
+            .prepare_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
+            .unwrap();
+        recovery_schedule
+            .publish(LeadershipState::new(8, other.clone(), 60))
+            .unwrap();
+        let recovery_permit = ProductionPermit::new(recovery_schedule, other);
+        assert_eq!(
+            recovery_permit.check(50),
+            Some(EngineExit::Demoted {
+                tempo_anchor: 50,
+                epoch: 7
+            })
+        );
+        assert_eq!(recovery_permit.check(51), None);
+        assert_eq!(recovery_permit.check(59), None);
+        assert_eq!(recovery_permit.check(60), None);
 
         let uninitialized = ProductionPermit::new(
             LeadershipSchedule::uninitialized(),
             PrivateKey::from_seed(1).public_key(),
         );
-        assert_eq!(uninitialized.check(0), PermitDecision::Fenced);
+        assert_eq!(
+            uninitialized.check(0),
+            Some(EngineExit::Fenced { tempo_anchor: 0 })
+        );
     }
 }
