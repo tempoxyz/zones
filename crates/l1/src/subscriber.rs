@@ -6,9 +6,9 @@ use tempo_primitives::is_tip20_prefix;
 
 use std::collections::BTreeMap;
 
-/// Maximum number of authenticated L1 blocks a follower may retain ahead of its imported Tempo
-/// checkpoint (approximately one hour at Tempo's 500ms block time).
-pub const MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
+/// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
+/// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
+pub const MAX_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
 
 #[derive(Debug, Default)]
 struct L1BlockTrackerState {
@@ -26,9 +26,15 @@ struct L1BlockObservation {
 /// L1 blocks whose headers and receipts have been independently validated and
 /// whose derived state has been applied to the local caches.
 ///
-/// Followers use this to gate zone-block import on the exact L1 anchor embedded
-/// in `advanceTempo`. This tracker deliberately assumes observed L1 blocks do
-/// not reorg: conflicting or non-contiguous observations are errors.
+/// Followers use this to gate zone-block import on the exact L1 anchor embedded in
+/// `advanceTempo`. The tracker also provides backpressure for the L1 subscriber: before fetching
+/// a block, the subscriber waits for capacity relative to the last checkpoint released by the
+/// Zone consumer. Queue-backed subscribers therefore retain observations until block production
+/// or follower import calls [`L1BlockTracker::prune_through`]. Sink-less observers have no Zone
+/// consumer and release each observation after applying its L1-derived state.
+///
+/// This tracker deliberately assumes observed L1 blocks do not reorg: conflicting or
+/// non-contiguous observations are errors.
 #[derive(Debug, Clone)]
 pub struct L1BlockTracker {
     state: Arc<parking_lot::RwLock<L1BlockTrackerState>>,
@@ -68,14 +74,15 @@ impl L1BlockTracker {
         self.state.read().latest
     }
 
-    /// Return whether `number` fits inside the bounded follower lookahead window.
+    /// Return whether `number` fits inside the bounded subscriber lookahead window.
     pub fn has_capacity_for(&self, number: u64) -> bool {
-        self.state.read().pruned_through.is_none_or(|consumed| {
-            number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
-        })
+        self.state
+            .read()
+            .pruned_through
+            .is_none_or(|consumed| number <= consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS))
     }
 
-    /// Wait until canonical follower import advances enough to retain `number`.
+    /// Wait until the Zone consumer advances enough for the subscriber to retain `number`.
     pub async fn wait_for_capacity(&self, number: u64) -> eyre::Result<()> {
         let mut changed = self.changed.subscribe();
         while !self.has_capacity_for(number) {
@@ -183,10 +190,10 @@ impl L1BlockTracker {
             .pruned_through
             .get_or_insert_with(|| block.number.saturating_sub(1));
         eyre::ensure!(
-            block.number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS),
-            "L1 observation {} exceeds follower lookahead through {}",
+            block.number <= consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS),
+            "L1 observation {} exceeds subscriber lookahead through {}",
             block.number,
-            consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+            consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS)
         );
         if let Some(latest) = state.latest {
             eyre::ensure!(
@@ -216,7 +223,10 @@ impl L1BlockTracker {
         Ok(())
     }
 
-    /// Drop observations through `number` after canonical follower import.
+    /// Drop observations through `number` after the corresponding Zone checkpoint is canonical.
+    ///
+    /// Advancing this watermark releases L1 subscriber capacity, so queue consumers must call it
+    /// only after successfully consuming the matching finalized L1 work.
     pub fn prune_through(&self, number: u64) {
         let mut state = self.state.write();
         state.observed.retain(|height, _| *height > number);
@@ -268,8 +278,6 @@ pub struct L1SubscriberConfig {
     pub l1_state_cache: crate::state::cache::L1StateCache,
     /// Validated and applied L1 anchors shared with follower block import.
     pub block_tracker: L1BlockTracker,
-    /// Whether observations must be retained until a consumer releases them.
-    pub retain_observations: bool,
     /// Maximum number of concurrent header and receipt fetches while syncing a
     /// finalized L1 range.
     pub l1_fetch_concurrency: usize,
@@ -784,7 +792,10 @@ impl L1Subscriber {
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
             }
-            if !self.config.retain_observations {
+            // Queue-backed subscribers are backpressured by the tracker until their Zone
+            // consumer confirms the corresponding queue entry and prunes this observation.
+            // A sink-less observer has no such consumer, so release its observation immediately.
+            if matches!(&self.deposit_sink, DepositSink::Observer) {
                 self.config.block_tracker.prune_through(anchor.number);
             }
             processed += 1;

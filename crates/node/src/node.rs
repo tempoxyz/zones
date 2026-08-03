@@ -240,7 +240,6 @@ impl ZoneNode {
             block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
-            retain_observations: false,
             leadership_sink: None,
             encryption_keys: None,
         };
@@ -315,9 +314,6 @@ impl ZoneNode {
 
     /// Enable static Zone P2P networking for this node.
     pub fn with_p2p(mut self, config: P2pConfig) -> Self {
-        // Multi-sequencer members gate follower block import on independently observed L1
-        // anchors, so observations must survive until their zone block is consumed.
-        self.l1_config.retain_observations = true;
         self.p2p_config = Some(config);
         self
     }

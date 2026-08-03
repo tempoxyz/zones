@@ -173,7 +173,6 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
             enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(),
             block_tracker: L1BlockTracker::default(),
-            retain_observations: true,
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
             leadership_sink: None,
@@ -187,7 +186,6 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
 
 fn test_observer(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscriber {
     let mut subscriber = test_subscriber(local_state);
-    subscriber.config.retain_observations = false;
     subscriber.deposit_sink = DepositSink::Observer;
     subscriber
 }
@@ -314,13 +312,13 @@ async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
     let consumed = 100;
     tracker.initialize_consumed_through(consumed);
 
-    for number in consumed + 1..=consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS {
+    for number in consumed + 1..=consumed + MAX_L1_LOOKAHEAD_BLOCKS {
         tracker
             .record(NumHash::new(number, B256::with_last_byte(number as u8)))
             .unwrap();
     }
 
-    let blocked_number = consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS + 1;
+    let blocked_number = consumed + MAX_L1_LOOKAHEAD_BLOCKS + 1;
     assert!(!tracker.has_capacity_for(blocked_number));
     assert_eq!(tracker.next_observation_number(), Some(blocked_number));
     assert!(
@@ -743,6 +741,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     let header_10 = make_test_header(10);
     let header_11 = make_chained_header(11, header_hash(&header_10));
     let header_12 = make_chained_header(12, header_hash(&header_11));
+    let anchor_12 = seal(header_12.clone()).num_hash();
 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
@@ -773,6 +772,11 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
             .map(|block| block.header.number())
             .collect::<Vec<_>>(),
         vec![10, 11, 12]
+    );
+    assert_eq!(
+        subscriber.config.block_tracker.observed_hash(12),
+        Some(anchor_12.hash),
+        "a queue-backed subscriber must retain observations until its consumer prunes them"
     );
     assert!(asserter.read_q().is_empty());
 }
