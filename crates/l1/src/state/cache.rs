@@ -9,13 +9,13 @@
 //!
 //! Each `(contract_address, slot_key)` pair maps to a [`BTreeMap<u64, B256>`] of
 //! `block_number → value`. Slot histories are bounded by both a weighted LRU and a per-slot limit.
-//! A lookup for block N may inherit the most recent earlier value only when verified receipt
-//! coverage and mutation barriers prove that it remained current.
+//! A lookup for block N may inherit the most recent earlier value only when authenticated account
+//! storage roots prove that it remained current.
 //!
 //! ## Write path
 //!
-//! - The [`L1Subscriber`](crate::l1::L1Subscriber) records mutation barriers from finalized L1
-//!   receipts.
+//! - The [`L1Subscriber`](crate::l1::L1Subscriber) verifies tracked account proofs against each
+//!   finalized header and records mutation barriers when their storage roots change.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
 
@@ -24,7 +24,7 @@ use derive_more::Deref;
 use parking_lot::Mutex;
 use schnellru::{Limiter, LruMap};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, hash_map::Entry},
     ops::RangeInclusive,
     sync::Arc,
 };
@@ -55,6 +55,52 @@ impl L1StateCache {
     }
 }
 
+/// Authenticated storage-root history for one continuously tracked L1 account.
+#[derive(Debug)]
+struct RootHistory {
+    /// Most recently authenticated storage root.
+    root: B256,
+    /// First block in the current proof-coverage range.
+    first_observed: u64,
+    /// Blocks in the current range where the storage root changed.
+    changes: BTreeSet<u64>,
+}
+
+impl RootHistory {
+    /// Start a new proof-coverage range at `anchor`.
+    fn new(root: B256, anchor: u64) -> Self {
+        Self {
+            root,
+            first_observed: anchor,
+            changes: BTreeSet::new(),
+        }
+    }
+
+    fn reset(&mut self, floor: u64) {
+        self.first_observed = floor;
+        self.changes.clear();
+    }
+
+    /// Replace the current root and return whether it changed.
+    fn update_root(&mut self, root: B256) -> bool {
+        if self.root == root {
+            return false;
+        }
+        self.root = root;
+        true
+    }
+
+    /// Return whether a value cached at `cached` remains valid at `requested`.
+    fn allows_inheritance(&self, cached: u64, requested: u64) -> bool {
+        requested >= self.first_observed
+            && self
+                .changes
+                .range(..=requested)
+                .next_back()
+                .is_none_or(|&changed_at| changed_at <= cached)
+    }
+}
+
 /// Block-versioned cache of Tempo L1 contract storage slots.
 ///
 /// Each `(contract_address, slot_key)` pair maintains a history of values indexed by L1 block
@@ -62,20 +108,20 @@ impl L1StateCache {
 /// i.e. the value that was current at that height. This allows the zone to read L1 state at
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
-/// Inherited values are valid only when the subscriber has processed every intervening L1 block
-/// and no log from the owning contract indicates a possible mutation. The coverage range starts
-/// at the current floor and ends at the latest finalized block whose receipts were processed.
+/// Inherited values are valid only when the subscriber has authenticated the owning account's
+/// storage root at every intervening L1 block. The coverage range starts at the current floor and
+/// ends at the latest finalized block whose account proofs were processed.
 #[derive(Debug)]
 pub struct L1StateCacheInner {
     /// Bounded per-slot value histories, promoted as a unit on access.
     slots: LruMap<(Address, B256), BTreeMap<u64, B256>, ByVersionCount>,
-    /// Per-address block heights that prevent reuse across possible mutations.
-    invalidations: HashMap<Address, BTreeSet<u64>>,
-    /// Total number of retained mutation barriers.
+    /// Per-address storage roots and block heights that prevent reuse across possible mutations.
+    account_roots: HashMap<Address, RootHistory>,
+    /// Total number of retained root changes.
     invalidation_count: usize,
-    /// Maximum number of mutation barriers retained before resetting.
+    /// Maximum number of root changes retained before resetting.
     max_invalidations: usize,
-    /// Contiguous receipt coverage: earliest usable value height through latest processed block.
+    /// Contiguous proof coverage: earliest usable value height through latest processed block.
     coverage: RangeInclusive<u64>,
 }
 
@@ -94,7 +140,7 @@ impl L1StateCacheInner {
     fn with_limits(max_versions: usize, max_invalidations: usize) -> Self {
         Self {
             slots: LruMap::new(ByVersionCount::new(max_versions)),
-            invalidations: HashMap::new(),
+            account_roots: HashMap::new(),
             invalidation_count: 0,
             max_invalidations,
             coverage: 0..=0,
@@ -104,8 +150,8 @@ impl L1StateCacheInner {
     /// Returns the cached value for a storage slot at the given block number.
     ///
     /// An exact-height value is always valid. A value inherited from an earlier height is returned
-    /// only when the subscriber has processed receipts through `block_number` and no mutation
-    /// barrier exists after the value was populated.
+    /// only when the owning account has continuous authenticated storage-root coverage through
+    /// `block_number` and no root-change barrier exists after the value was populated.
     pub fn get(&mut self, address: Address, slot: B256, block_number: u64) -> Option<B256> {
         let (&cached_block, &value) = self
             .slots
@@ -123,17 +169,10 @@ impl L1StateCacheInner {
             return None;
         }
 
-        // If there was an invalidation between cached and requested block, we can't use the cached value
-        if self
-            .invalidations
-            .get(&address)
-            .and_then(|blocks| blocks.range(..=block_number).next_back())
-            .is_some_and(|&invalidated_at| invalidated_at > cached_block)
-        {
-            return None;
-        }
-
-        Some(value)
+        self.account_roots
+            .get(&address)?
+            .allows_inheritance(cached_block, block_number)
+            .then_some(value)
     }
 
     /// Sets a storage slot value in the forward cache at the given block number.
@@ -159,51 +198,68 @@ impl L1StateCacheInner {
         debug_assert!(inserted, "trimmed slot history must fit cache capacity");
     }
 
-    /// Clears cached state and establishes a new contiguous receipt-coverage baseline.
+    /// Clears cached state and establishes a new proof-coverage baseline.
     fn reset(&mut self, floor: u64) {
         self.slots.clear();
-        self.invalidations.clear();
+        for history in self.account_roots.values_mut() {
+            history.reset(floor);
+        }
         self.invalidation_count = 0;
         self.coverage = floor..=floor;
     }
 
-    /// Records mutation barriers and publishes receipt coverage for one finalized block.
-    ///
-    /// Coverage only advances one block at a time. A duplicate, skipped, or out-of-order block
-    /// invalidates the cache's continuity assumptions, so cached state is cleared and `anchor`
-    /// becomes the new coverage floor.
-    pub fn invalidate_and_set_anchor(
+    /// Records authenticated account storage roots and publishes coverage for one finalized block.
+    pub fn set_anchor_with_storage_roots(
         &mut self,
         anchor: u64,
-        invalidated_addresses: impl IntoIterator<Item = Address>,
+        storage_roots: impl IntoIterator<Item = (Address, Option<B256>)>,
     ) {
+        let mut should_reset_cache = false;
         if self.coverage.end().checked_add(1) != Some(anchor) {
             warn!(
                 anchor,
                 previous_anchor = *self.coverage.end(),
                 "Non-contiguous L1 state cache update; resetting cache coverage"
             );
-            self.reset(anchor);
-            return;
+            should_reset_cache = true;
+        };
+
+        for (address, root) in storage_roots {
+            // Drop account root from cache if proof failed.
+            let Some(root) = root else {
+                if let Some(history) = self.account_roots.remove(&address) {
+                    self.invalidation_count -= history.changes.len();
+                }
+                continue;
+            };
+
+            // Always store the latest root and report if it changed to invalidate stale slots.
+            let (history, has_changed) = match self.account_roots.entry(address) {
+                Entry::Occupied(e) => {
+                    let history = e.into_mut();
+                    let changed = history.update_root(root);
+                    (history, changed)
+                }
+                Entry::Vacant(e) => (e.insert(RootHistory::new(root, anchor)), true),
+            };
+
+            // Only record root changes when the latest root has changed.
+            if has_changed && history.changes.insert(anchor) {
+                self.invalidation_count += 1;
+            }
         }
 
-        for address in invalidated_addresses {
-            let inserted = self
-                .invalidations
-                .entry(address)
-                .or_default()
-                .insert(anchor);
-            self.invalidation_count += usize::from(inserted);
+        if self.invalidation_count > self.max_invalidations {
+            warn!(
+                anchor,
+                cap = self.max_invalidations,
+                "Root-change capacity reached; resetting"
+            );
+            should_reset_cache = true;
+        }
 
-            if self.invalidation_count > self.max_invalidations {
-                warn!(
-                    anchor,
-                    invalidation_capacity = self.max_invalidations,
-                    "L1 state invalidation capacity reached; resetting cache coverage"
-                );
-                self.reset(anchor);
-                return;
-            }
+        if should_reset_cache {
+            return self.reset(anchor);
         }
 
         self.coverage = *self.coverage.start()..=anchor;
@@ -291,10 +347,15 @@ mod tests {
     use alloy_primitives::address;
 
     const PORTAL: Address = address!("0x0000000000000000000000000000000000004242");
+    const PORTAL_ROOT: B256 = B256::with_last_byte(0x42);
+
+    fn roots(root: B256) -> [(Address, Option<B256>); 2] {
+        [(PORTAL, Some(root)), (Address::ZERO, None)]
+    }
 
     fn cover_through(cache: &mut L1StateCacheInner, block_number: u64) {
         while *cache.coverage.end() < block_number {
-            cache.invalidate_and_set_anchor(*cache.coverage.end() + 1, []);
+            cache.set_anchor_with_storage_roots(*cache.coverage.end() + 1, roots(PORTAL_ROOT));
         }
     }
 
@@ -351,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn inherited_value_requires_receipt_coverage() {
+    fn inherited_value_requires_verified_root_coverage() {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0x0a);
@@ -363,6 +424,38 @@ mod tests {
     }
 
     #[test]
+    fn untracked_accounts_are_exact_height_only() {
+        let mut cache = L1StateCacheInner::new();
+        let untracked = address!("0x0000000000000000000000000000000000004343");
+        let slot = B256::with_last_byte(1);
+        let value = B256::with_last_byte(0x0a);
+        cache.set(untracked, slot, 10, value);
+        cover_through(&mut cache, 11);
+
+        assert_eq!(cache.get(untracked, slot, 10), Some(value));
+        assert_eq!(cache.get(untracked, slot, 11), None);
+    }
+
+    #[test]
+    fn unavailable_root_breaks_inheritance_until_a_fresh_value_is_cached() {
+        let mut cache = L1StateCacheInner::new();
+        let slot = B256::with_last_byte(1);
+        let value = B256::with_last_byte(0x0a);
+        cover_through(&mut cache, 10);
+        cache.set(PORTAL, slot, 10, value);
+
+        cache.set_anchor_with_storage_roots(11, [(PORTAL, None), (Address::ZERO, None)]);
+        cache.set_anchor_with_storage_roots(12, roots(PORTAL_ROOT));
+
+        assert_eq!(cache.get(PORTAL, slot, 11), None);
+        assert_eq!(cache.get(PORTAL, slot, 12), None);
+
+        cache.set(PORTAL, slot, 12, value);
+        cache.set_anchor_with_storage_roots(13, roots(PORTAL_ROOT));
+        assert_eq!(cache.get(PORTAL, slot, 13), Some(value));
+    }
+
+    #[test]
     fn invalidation_blocks_inheritance_until_refetched() {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
@@ -370,8 +463,9 @@ mod tests {
         let new = B256::with_last_byte(0x0b);
         cache.set(PORTAL, slot, 10, old);
         cover_through(&mut cache, 10);
-        cache.invalidate_and_set_anchor(11, [PORTAL]);
-        cover_through(&mut cache, 12);
+        let changed_root = B256::with_last_byte(0x43);
+        cache.set_anchor_with_storage_roots(11, roots(changed_root));
+        cache.set_anchor_with_storage_roots(12, roots(changed_root));
 
         assert_eq!(cache.get(PORTAL, slot, 11), None);
         assert_eq!(cache.get(PORTAL, slot, 12), None);
@@ -386,6 +480,7 @@ mod tests {
         let mut cache = L1StateCacheInner::new();
         let slot = B256::with_last_byte(1);
         cache.reset(10);
+        cache.set_anchor_with_storage_roots(10, roots(PORTAL_ROOT));
         cache.set(PORTAL, slot, 9, B256::with_last_byte(9));
         cover_through(&mut cache, 11);
 
@@ -406,7 +501,7 @@ mod tests {
     #[test]
     fn contiguous_update_advances_coverage() {
         let mut cache = L1StateCacheInner::new();
-        cache.invalidate_and_set_anchor(1, []);
+        cache.set_anchor_with_storage_roots(1, roots(PORTAL_ROOT));
         assert_eq!(*cache.coverage.end(), 1);
     }
 
@@ -416,11 +511,16 @@ mod tests {
         let slot = B256::with_last_byte(1);
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
 
-        cache.invalidate_and_set_anchor(10, [PORTAL]);
+        cache.set_anchor_with_storage_roots(10, roots(PORTAL_ROOT));
 
         assert_eq!(*cache.coverage.end(), 10);
         assert_eq!(*cache.coverage.start(), 10);
-        assert!(cache.invalidations.is_empty());
+        assert!(
+            cache
+                .account_roots
+                .values()
+                .all(|account| account.changes.is_empty())
+        );
         assert_eq!(cache.get(PORTAL, slot, 10), None);
     }
 
@@ -527,23 +627,27 @@ mod tests {
         let slot = B256::with_last_byte(1);
 
         cache.reset(10);
+        cache.set_anchor_with_storage_roots(10, roots(PORTAL_ROOT));
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
-        cache.invalidate_and_set_anchor(11, [PORTAL]);
-        cache.invalidate_and_set_anchor(12, [PORTAL]);
+        cache.set_anchor_with_storage_roots(11, roots(B256::with_last_byte(0x43)));
+        cache.set_anchor_with_storage_roots(12, roots(B256::with_last_byte(0x44)));
 
         assert_eq!(*cache.coverage.start(), 12);
         assert_eq!(cache.invalidation_count, 0);
-        assert!(cache.invalidations.is_empty());
+        assert!(
+            cache
+                .account_roots
+                .values()
+                .all(|account| account.changes.is_empty())
+        );
         assert_eq!(cache.get(PORTAL, slot, 10), None);
 
         cache.set(PORTAL, slot, 11, B256::with_last_byte(0x0b));
         assert_eq!(cache.get(PORTAL, slot, 11), None);
 
-        cache.set(PORTAL, slot, 12, B256::with_last_byte(0x0c));
-        cover_through(&mut cache, 13);
-        assert_eq!(
-            cache.get(PORTAL, slot, 13),
-            Some(B256::with_last_byte(0x0c))
-        );
+        let current = B256::with_last_byte(0x0c);
+        cache.set(PORTAL, slot, 12, current);
+        cache.set_anchor_with_storage_roots(13, roots(B256::with_last_byte(0x44)));
+        assert_eq!(cache.get(PORTAL, slot, 13), Some(current));
     }
 }

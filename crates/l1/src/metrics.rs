@@ -12,6 +12,9 @@ pub(crate) struct L1SubscriberMetrics {
     /// Duration of a backfill run in seconds.
     pub backfill_duration_seconds: Histogram,
 
+    /// Duration of fetching and verifying tracked-account proofs for one L1 block, in seconds.
+    pub account_proof_fetch_duration_seconds: Histogram,
+
     /// Most recent finalized L1 block number observed by the subscriber.
     pub latest_l1_block_seen: Gauge,
 

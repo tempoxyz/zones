@@ -5,14 +5,11 @@ use crate::{
 };
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
-use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
+use alloy_rpc_types_eth::{EIP1186AccountProofResponse, Header as RpcHeader, TransactionReceipt};
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
 use serde::Deserialize;
-use std::{
-    collections::{HashSet, VecDeque},
-    time::Duration,
-};
+use std::{collections::VecDeque, time::Duration};
 use tempo_alloy::rpc::{TempoHeaderResponse, TempoTransactionReceipt};
 use tempo_contracts::precompiles::TIP403_REGISTRY_ADDRESS;
 use tempo_primitives::{TempoReceipt, TempoTxType};
@@ -368,16 +365,29 @@ fn subscriber_applies_state_and_records_observation() {
     let header = make_test_header(10);
     let sealed = seal(header);
     let anchor = sealed.num_hash();
-    let cached_address = address!("0x0000000000000000000000000000000000000ABC");
+    let cached_address = subscriber.config.portal_address;
     let cached_slot = B256::with_last_byte(1);
     let cached_value = B256::with_last_byte(2);
+    let storage_root = B256::with_last_byte(3);
 
     {
         let mut cache = subscriber.config.l1_state_cache.lock();
-        cache.invalidate_and_set_anchor(9, []);
+        cache.set_anchor_with_storage_roots(
+            9,
+            [
+                (cached_address, Some(storage_root)),
+                (TIP403_REGISTRY_ADDRESS, None),
+            ],
+        );
         cache.set(cached_address, cached_slot, 9, cached_value);
     }
-    subscriber.update_l1_state_anchor(10, &HashSet::new());
+    subscriber.update_l1_state_anchor(
+        10,
+        [
+            (cached_address, Some(storage_root)),
+            (TIP403_REGISTRY_ADDRESS, None),
+        ],
+    );
     subscriber.config.block_tracker.record(anchor).unwrap();
 
     assert_eq!(
@@ -439,6 +449,20 @@ fn header_response(header: TempoHeader) -> TempoHeaderResponse {
 fn push_header_and_empty_receipts(asserter: &Asserter, header: TempoHeader) {
     asserter.push_success(&Some(header_response(header)));
     asserter.push_success(&Some(Vec::<TempoTransactionReceipt>::new()));
+}
+
+fn missing_account_proof(address: Address) -> EIP1186AccountProofResponse {
+    EIP1186AccountProofResponse {
+        address,
+        code_hash: alloy_consensus::constants::KECCAK_EMPTY,
+        storage_hash: alloy_consensus::constants::EMPTY_ROOT_HASH,
+        ..Default::default()
+    }
+}
+
+fn push_tracked_account_proofs(asserter: &Asserter, portal_address: Address) {
+    asserter.push_success(&missing_account_proof(portal_address));
+    asserter.push_success(&missing_account_proof(TIP403_REGISTRY_ADDRESS));
 }
 
 fn make_test_receipt(
@@ -650,18 +674,26 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 }
 
 #[test]
-fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
+fn update_l1_state_anchor_applies_storage_root_changes_before_publishing_coverage() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([0])));
     let slot = B256::with_last_byte(1);
     let value = B256::with_last_byte(2);
     let stable_account = address!("0x0000000000000000000000000000000000000ABC");
     let stable_slot = B256::with_last_byte(3);
     let stable_value = B256::with_last_byte(4);
+    let registry_root = B256::with_last_byte(5);
+    let stable_root = B256::with_last_byte(6);
     subscriber
         .config
         .l1_state_cache
         .lock()
-        .invalidate_and_set_anchor(9, []);
+        .set_anchor_with_storage_roots(
+            9,
+            [
+                (TIP403_REGISTRY_ADDRESS, Some(registry_root)),
+                (stable_account, Some(stable_root)),
+            ],
+        );
     subscriber
         .config
         .l1_state_cache
@@ -673,7 +705,13 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
         .lock()
         .set(stable_account, stable_slot, 10, stable_value);
 
-    subscriber.update_l1_state_anchor(10, &HashSet::new());
+    subscriber.update_l1_state_anchor(
+        10,
+        [
+            (TIP403_REGISTRY_ADDRESS, Some(registry_root)),
+            (stable_account, Some(stable_root)),
+        ],
+    );
     assert_eq!(
         subscriber
             .config
@@ -683,7 +721,13 @@ fn update_l1_state_anchor_applies_raw_mutations_before_publishing_coverage() {
         Some(value)
     );
 
-    subscriber.update_l1_state_anchor(11, &HashSet::from([TIP403_REGISTRY_ADDRESS]));
+    subscriber.update_l1_state_anchor(
+        11,
+        [
+            (TIP403_REGISTRY_ADDRESS, Some(B256::with_last_byte(7))),
+            (stable_account, Some(stable_root)),
+        ],
+    );
     let mut cache = subscriber.config.l1_state_cache.lock();
     assert_eq!(
         cache.get(stable_account, stable_slot, 11),
@@ -745,12 +789,15 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
     push_header_and_empty_receipts(&asserter, header_10);
+    push_tracked_account_proofs(&asserter, subscriber.config.portal_address);
 
     // One newHeads notification wakes the subscriber. The finalized tag has
     // advanced by two blocks, so both missing blocks must be ingested.
     asserter.push_success(&Some(header_response(header_12.clone())));
     push_header_and_empty_receipts(&asserter, header_11);
+    push_tracked_account_proofs(&asserter, subscriber.config.portal_address);
     push_header_and_empty_receipts(&asserter, header_12);
+    push_tracked_account_proofs(&asserter, subscriber.config.portal_address);
 
     let err = subscriber
         .follow_finalized(
@@ -783,7 +830,13 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
     let cached_value = B256::with_last_byte(2);
     {
         let mut cache = subscriber.config.l1_state_cache.lock();
-        cache.invalidate_and_set_anchor(9, []);
+        cache.set_anchor_with_storage_roots(
+            9,
+            [(
+                cached_address,
+                Some(alloy_consensus::constants::EMPTY_ROOT_HASH),
+            )],
+        );
         cache.set(cached_address, cached_slot, 9, cached_value);
     }
 
@@ -796,8 +849,11 @@ async fn observer_advances_caches_without_retaining_deposit_blocks() {
 
     asserter.push_success(&Some(header_response(header_12.clone())));
     push_header_and_empty_receipts(&asserter, header_10);
+    push_tracked_account_proofs(&asserter, subscriber.config.portal_address);
     push_header_and_empty_receipts(&asserter, header_11);
+    push_tracked_account_proofs(&asserter, subscriber.config.portal_address);
     push_header_and_empty_receipts(&asserter, header_12);
+    push_tracked_account_proofs(&asserter, subscriber.config.portal_address);
 
     assert_eq!(
         subscriber
@@ -1560,7 +1616,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
         ..Default::default()
     };
     let receipt = make_receipt_with_logs(10, B256::with_last_byte(0x10), vec![unknown]);
-    let (events, _) = subscriber.extract_events(10, &[receipt]).unwrap();
+    let events = subscriber.extract_events(10, &[receipt]).unwrap();
     assert!(events.deposits.is_empty());
     assert!(events.leader_transitions.is_empty());
 }

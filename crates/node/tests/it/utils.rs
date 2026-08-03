@@ -68,7 +68,7 @@ use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
+    L1PortalEvents, L1StateCache, MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS, state::EnabledTokenRegistry,
 };
 use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
@@ -2535,6 +2535,7 @@ impl L1TestNode {
             .apply(|mut c| {
                 c.dev.block_time = Some(Duration::from_millis(500));
                 c.dev.finality_depth = std::num::NonZeroUsize::MIN;
+                c.rpc.rpc_eth_proof_window = MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS;
                 c
             });
 
@@ -4236,12 +4237,15 @@ pub(crate) struct FixtureBlock {
 ///
 /// Maintains monotonic block numbers and timestamps, and chains parent hashes
 /// to mirror what the real L1Subscriber would produce.
+const FIXTURE_PORTAL_ROOT: B256 = B256::with_last_byte(0xa1);
+const FIXTURE_REGISTRY_ROOT: B256 = B256::with_last_byte(0xa2);
+
 pub(crate) struct L1Fixture {
     next_block_number: u64,
     next_timestamp: u64,
     last_hash: B256,
     /// Raw L1 caches seeded by this fixture, updated with state implied by injected deposits.
-    caches: Mutex<Vec<L1StateCache>>,
+    caches: Mutex<Vec<(L1StateCache, Address)>>,
     /// Enabled-token registries kept in sync with injected portal events.
     enabled_token_registries: Mutex<Vec<EnabledTokenRegistry>>,
 }
@@ -4279,6 +4283,13 @@ impl L1Fixture {
         num_blocks: u64,
     ) {
         let mut cache = cache_handle.lock();
+        cache.set_anchor_with_storage_roots(
+            0,
+            [
+                (portal_address, Some(FIXTURE_PORTAL_ROOT)),
+                (TIP403_REGISTRY_ADDRESS, Some(FIXTURE_REGISTRY_ROOT)),
+            ],
+        );
         let deposit_queue_hash_slot = B256::with_last_byte(3);
         let refunds_slot = B256::with_last_byte(8);
         let sequencer_membership_slot =
@@ -4341,7 +4352,10 @@ impl L1Fixture {
         seed_raw_tip403_token_policy(&mut cache, 0, Address::ZERO, ALLOW_ALL_POLICY_ID);
         seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
         drop(cache);
-        self.caches.lock().unwrap().push(cache_handle.clone());
+        self.caches
+            .lock()
+            .unwrap()
+            .push((cache_handle.clone(), portal_address));
         self.enabled_token_registries
             .lock()
             .unwrap()
@@ -4381,7 +4395,7 @@ impl L1Fixture {
     fn seed_no_receive_policy_at(&self, block_number: u64, recipient: Address) -> eyre::Result<()> {
         // TODO(rusowsky): make `ReceivePolicy` public upstream to use the handlers
         let receive_policy_slot = recipient.mapping_slot(tip403_registry_slots::RECEIVE_POLICIES);
-        for cache in self.caches.lock().unwrap().iter() {
+        for (cache, _) in self.caches.lock().unwrap().iter() {
             cache.lock().set(
                 TIP403_REGISTRY_ADDRESS,
                 B256::from(receive_policy_slot.to_be_bytes()),
@@ -4400,7 +4414,7 @@ impl L1Fixture {
     }
 
     fn seed_enabled_token_policy_state(&self, block_number: u64, tokens: &[EnabledToken]) {
-        for cache in self.caches.lock().unwrap().iter() {
+        for (cache, _) in self.caches.lock().unwrap().iter() {
             let mut cache = cache.lock();
             for token in tokens {
                 seed_raw_tip403_token_policy(
@@ -4450,10 +4464,16 @@ impl L1Fixture {
         self.next_block_number += 1;
         self.next_timestamp += 1; // 1s per L1 block
 
-        // Synthetic injection bypasses the subscriber, so publish the same verified-receipt
-        // coverage the subscriber would publish before the engine consumes this block.
-        for cache in self.caches.lock().unwrap().iter() {
-            cache.lock().invalidate_and_set_anchor(number, []);
+        // Synthetic injection bypasses the subscriber, so publish stable authenticated account
+        // roots before the engine consumes this block.
+        for (cache, portal_address) in self.caches.lock().unwrap().iter() {
+            cache.lock().set_anchor_with_storage_roots(
+                number,
+                [
+                    (*portal_address, Some(FIXTURE_PORTAL_ROOT)),
+                    (TIP403_REGISTRY_ADDRESS, Some(FIXTURE_REGISTRY_ROOT)),
+                ],
+            );
         }
 
         header

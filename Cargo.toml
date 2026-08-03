@@ -158,6 +158,7 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400", features = ["eip1186"] }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "01d3400" }
 revm = { version = "41.0.0", features = [
@@ -182,6 +183,7 @@ alloy-signer = "2.1.0"
 alloy-signer-local = "2.1.0"
 alloy-sol-types = { version = "1.6.0", default-features = false }
 alloy-transport = "2.1.0"
+alloy-trie = { version = "0.9.5", default-features = false }
 
 # commonware
 commonware-codec = "=2026.4.0"
