@@ -1072,6 +1072,14 @@ fn validate_l1_checkpoint_transition(
             local_hash
         );
     }
+    let base_fee = zone_block.header().base_fee_per_gas().unwrap_or_default();
+    if base_fee != 0 {
+        eyre::bail!(
+            "peer block {} base fee {} != Zone base fee 0",
+            zone_block.number(),
+            base_fee
+        );
+    }
     if zone_block.timestamp() != l1_header.timestamp() {
         eyre::bail!(
             "peer block {} timestamp {} != anchored L1 timestamp {}",
@@ -1482,6 +1490,37 @@ mod tests {
 
         let error = validate(make_l1_header(456, 124)).unwrap_err();
         assert!(error.to_string().contains("millisecond part 123"));
+    }
+
+    #[test]
+    fn rejects_nonzero_zone_base_fee() {
+        use alloy_consensus::Header;
+        use reth_primitives_traits::{SealedBlock, SealedHeader};
+        use tempo_primitives::{Block, TempoHeader};
+
+        let local_hash = B256::ZERO;
+        let block = SealedBlock::seal_slow(Block {
+            header: TempoHeader {
+                inner: Header {
+                    base_fee_per_gas: Some(77),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            body: Default::default(),
+        });
+        let l1_header = SealedHeader::seal_slow(TempoHeader {
+            inner: Header {
+                number: 11,
+                parent_hash: local_hash,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        let error = super::validate_l1_checkpoint_transition(&l1_header, 10, local_hash, &block)
+            .unwrap_err();
+        assert!(error.to_string().contains("base fee 77"));
     }
 
     #[tokio::test]
