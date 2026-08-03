@@ -64,7 +64,7 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 pub struct L1State<P> {
     /// Tempo block number selected for the current transaction attempt.
     anchor: Rc<Cell<Option<u64>>>,
-    /// `(account, slot)` keys accessed during the current transaction attempt.
+    /// `(account, slot)` keys successfully accessed during the current transaction attempt.
     ///
     /// Used for cold/warm gas accounting. Unlike REVM's journal, this access set is not rolled back
     /// when a subcall reverts, preserving charges for potentially incurred L1 fetch work and
@@ -155,22 +155,17 @@ impl<P: L1StorageReader> L1State<P> {
         block_number: u64,
     ) -> tempo_precompiles::Result<B256> {
         let key = (account, slot);
-        let is_cold = self.access_set.borrow_mut().insert(key);
-        let result = (|| {
-            StorageCtx.deduct_gas(if is_cold {
-                COLD_SLOAD_COST
-            } else {
-                WARM_STORAGE_READ_COST
-            })?;
-            self.read_l1_storage_unmetered(account, slot, block_number)
-                .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))
-        })();
-
-        // Failed accesses do not warm a previously cold key. An already-warm key remains warm.
-        if is_cold && result.is_err() {
-            self.access_set.borrow_mut().remove(&key);
-        }
-        result
+        let gas_cost = if self.access_set.borrow().contains(&key) {
+            WARM_STORAGE_READ_COST
+        } else {
+            COLD_SLOAD_COST
+        };
+        StorageCtx.deduct_gas(gas_cost)?;
+        let value = self
+            .read_l1_storage_unmetered(account, slot, block_number)
+            .map_err(|err| TempoPrecompileError::Fatal(err.to_string()))?;
+        self.access_set.borrow_mut().insert(key);
+        Ok(value)
     }
 
     /// Reads, with gas metering, and decodes a typed slot from an L1 account at the active anchor.
