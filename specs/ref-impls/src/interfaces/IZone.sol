@@ -1033,11 +1033,11 @@ interface ITempoState {
     /// @notice Current finalized Tempo block number
     function tempoBlockNumber() external view returns (uint64);
 
-    /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity (parent hash must match, number must be +1).
+    /// @notice Finalize an ordered array of Tempo block headers. Only callable by ZoneInbox.
+    /// @dev Validates chain continuity across the full array and stores only the final header.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
-    /// @param header RLP-encoded Tempo header
-    function finalizeTempo(bytes calldata header) external;
+    /// @param headers Ordered RLP-encoded Tempo headers
+    function finalizeTempo(bytes[] calldata headers) external;
 
     /// @notice Read a storage slot from a Tempo contract
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
@@ -1145,7 +1145,7 @@ interface IZoneInbox {
 
     /// @notice Advance Tempo state and process deposits in a single system-only call.
     /// @dev This is the main entry point for the block executor at block start.
-    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      1. Advances the zone's view of Tempo by processing the header array
     ///      2. Processes deposits from the unified queue (regular and encrypted)
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///
@@ -1156,12 +1156,13 @@ interface IZoneInbox {
     ///      For encrypted deposits, the sequencer provides DecryptionData with the
     ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
     ///
-    /// @param header RLP-encoded Tempo block header
+    /// @param headers Ordered RLP-encoded Tempo block headers; only the final
+    ///        header's state root is used for Tempo reads in this call
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid encrypted deposits, in order
     /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
-        bytes calldata header,
+        bytes[] calldata headers,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens

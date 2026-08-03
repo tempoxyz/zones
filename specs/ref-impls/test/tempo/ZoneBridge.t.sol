@@ -358,7 +358,7 @@ contract ZoneBridgeTest is BaseTest {
         // Empty header since MockTempoState just advances block number
         vm.prank(address(0));
         l2Inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+            new bytes[](1), _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
 
         // Clear pending
@@ -790,7 +790,7 @@ contract ZoneBridgeTest is BaseTest {
         // Should succeed — proof validates ancestor contiguity, not exact match
         vm.prank(address(0));
         l2Inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+            new bytes[](1), _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
     }
 
@@ -1050,7 +1050,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process on zone via advanceTempo
         vm.prank(address(0));
-        l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
+        l2Inbox.advanceTempo(new bytes[](1), queued, decs, new EnabledToken[](0));
 
         // Clear pending
         delete pendingEncryptedDeposits;
@@ -1298,7 +1298,7 @@ contract ZoneBridgeTest is BaseTest {
         _setupPrecompileMocksSuccess(decryptedTo, decryptedMemo);
 
         vm.prank(address(0));
-        l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
+        l2Inbox.advanceTempo(new bytes[](1), queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify all balances ===
         // alice: 100K - deposit + zone mint = 100K
@@ -1442,7 +1442,7 @@ contract ZoneBridgeTest is BaseTest {
         );
 
         vm.prank(address(0));
-        l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
+        l2Inbox.advanceTempo(new bytes[](1), queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify ===
         // Both deposits go to sharedRecipient (no prior balance)

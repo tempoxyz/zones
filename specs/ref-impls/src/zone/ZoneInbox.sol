@@ -195,16 +195,17 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice Advance Tempo state and process deposits in a single system transaction
     /// @dev This is the main entry point for the sequencer's system transaction.
-    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      1. Advances the zone's view of Tempo by processing the header array
     ///      2. Processes deposits from the unified queue (regular + encrypted)
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///      The proof validates contiguity (ancestor check) rather than exact equality.
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
-    /// @param header RLP-encoded Tempo block header
+    /// @param headers Ordered RLP-encoded Tempo block headers; only the final
+    ///        header's state root is used for Tempo reads in this call
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid encrypted deposits, in order
     function advanceTempo(
-        bytes calldata header,
+        bytes[] calldata headers,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
@@ -214,7 +215,7 @@ contract ZoneInbox is IZoneInbox {
         if (msg.sender != address(0)) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
-        _tempoState.finalizeTempo(header);
+        _tempoState.finalizeTempo(headers);
 
         // Activate new tokens directly in the Inbox.
         for (uint256 i = 0; i < enabledTokens.length; i++) {

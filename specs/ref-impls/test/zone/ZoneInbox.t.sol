@@ -109,7 +109,7 @@ contract ZoneInboxTest is Test {
 
     function _advanceTempo(Deposit[] memory deposits) internal {
         inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+            new bytes[](1), _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
     }
 
@@ -121,7 +121,7 @@ contract ZoneInboxTest is Test {
         vm.prank(alice);
         vm.expectRevert(IZoneInbox.OnlySequencer.selector);
         inbox.advanceTempo(
-            "", new QueuedDeposit[](0), new DecryptionData[](0), new EnabledToken[](0)
+            new bytes[](1), new QueuedDeposit[](0), new DecryptionData[](0), new EnabledToken[](0)
         );
     }
 
@@ -657,7 +657,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Verify minting to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), amount);
@@ -732,7 +732,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Invalid encrypted deposits bounce to Tempo via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0);
@@ -783,7 +783,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Regular deposit: bob gets 100e6
         // Encrypted deposit: recipient gets 200e6
@@ -811,7 +811,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.MissingDecryptionData.selector);
-        inbox.advanceTempo("", deposits, emptyDecs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, emptyDecs, new EnabledToken[](0));
     }
 
     function test_advanceTempo_extraDecryptionData() public {
@@ -846,7 +846,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.ExtraDecryptionData.selector);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -888,7 +888,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
         assertEq(zoneToken.balanceOf(alice), 0);
     }
 
@@ -965,7 +965,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(shortPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Deposit should bounce via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0, "sender should not receive a zone mint");
@@ -988,7 +988,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(longPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Deposit should bounce via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0, "sender should not receive a zone mint");
@@ -1006,7 +1006,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(emptyPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Deposit should bounce via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0, "sender should not receive a zone mint");
@@ -1025,7 +1025,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(correctPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Deposit should succeed — minted to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
@@ -1041,7 +1041,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(plaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         assertEq(zoneToken.balanceOf(outsider), 1000e6);
         assertEq(zoneToken.balanceOf(alice), 0);
@@ -1054,7 +1054,7 @@ contract ZoneInboxTest is Test {
     )
         internal
     {
-        inbox.advanceTempo("", deposits, decryptions, enabledTokens);
+        inbox.advanceTempo(new bytes[](1), deposits, decryptions, enabledTokens);
     }
 
     function _mockTokenActivation(address token) internal {
@@ -1261,7 +1261,7 @@ contract ZoneInboxTest is Test {
         );
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         vm.prank(bob);
         uint128 bobRefunds = inbox.refunds(address(zoneToken), bob);
