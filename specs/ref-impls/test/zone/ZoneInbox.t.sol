@@ -165,6 +165,65 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(bob), 1000e6);
     }
 
+    function test_advanceTempo_rejectedRegularDeposit_bouncesBackWithoutMinting() public {
+        Deposit memory deposit = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: bob,
+            amount: 1000e6,
+            tempoRefundRecipient: alice,
+            memo: bytes32("rejected")
+        });
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposit, bytes32(0)));
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
+        );
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = QueuedDeposit({
+            depositType: DepositType.Regular, depositData: abi.encode(deposit), rejected: true
+        });
+
+        vm.expectCall(
+            ZONE_OUTBOX,
+            abi.encodeCall(
+                IZoneOutbox.enqueueDepositBounceBack,
+                (address(zoneToken), deposit.amount, deposit.tempoRefundRecipient)
+            )
+        );
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, new DecryptionData[](0), new EnabledToken[](0));
+
+        assertEq(zoneToken.balanceOf(bob), 0);
+        assertEq(inbox.processedDepositQueueHash(), expectedHash);
+    }
+
+    function test_advanceTempo_rejectedEncryptedDeposit_doesNotRequireDecryption() public {
+        (QueuedDeposit memory deposit, EncryptedDeposit memory encryptedDeposit) =
+            _makeEncryptedDeposit(alice, 1000e6, 0);
+        deposit.rejected = true;
+        bytes32 expectedHash =
+            keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, bytes32(0)));
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
+        );
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = deposit;
+
+        vm.expectCall(
+            ZONE_OUTBOX,
+            abi.encodeCall(
+                IZoneOutbox.enqueueDepositBounceBack,
+                (address(zoneToken), encryptedDeposit.amount, encryptedDeposit.tempoRefundRecipient)
+            )
+        );
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, new DecryptionData[](0), new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), expectedHash);
+    }
+
     function test_advanceTempo_multipleDeposits() public {
         Deposit[] memory deposits = new Deposit[](3);
         deposits[0] = Deposit({
