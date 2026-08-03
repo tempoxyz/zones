@@ -831,7 +831,7 @@ Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a gene
 
 The first import is the exception to the continuity check. When `tempoBlockHash == 0`, `finalizeTempo` may start at any finalized Tempo block only if a proof against the final header's state root shows that this zone's portal already exists. Existence is established by reading the portal's `sequencer` storage field and requiring it to be non-zero. This prevents importing a Tempo block from before the portal's creation without requiring its hash or number during zone deployment. The headers after the first must still form a consecutive hash chain. After this bootstrap import, ordinary parent-hash and consecutive-number validation applies to the first header and to every later header in each array.
 
-Every non-genesis zone block must call `advanceTempo` exactly once as its first transaction. Consequently, its Tempo binding advances to the final header in its array, while every intermediate header is consumed by that same zone block and cannot be shared with another zone block. The first import retains the bootstrap exception above; after it, parent-hash and consecutive-number validation enforce the ordered mapping.
+Every non-genesis zone block must call `advanceTempo` exactly once as its first transaction. Consequently, its Tempo binding advances to the final header in its array.
 
 ### L1 Storage Reads
 
