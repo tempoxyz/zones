@@ -2304,8 +2304,7 @@ mod tests {
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
-        let network_id =
-            P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
         let leader_peer = identities[0].ed25519_public_key();
 
         let spawn_node = |index: usize| {
@@ -2355,10 +2354,13 @@ mod tests {
         }
         initial_broadcaster.abort();
 
-        tokio::time::timeout(Duration::from_secs(10), shutdown_while_receiving(follower_b))
-            .await
-            .expect("stopped follower did not shut down")
-            .expect("stopped follower runtime failed");
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            shutdown_while_receiving(follower_b),
+        )
+        .await
+        .expect("stopped follower did not shut down")
+        .expect("stopped follower runtime failed");
 
         // While the peer is down, the remaining follower must keep receiving broadcasts.
         let offline_block = vec![0xf8, 0x02, 0x80];
@@ -2469,8 +2471,7 @@ mod tests {
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
-        let network_id =
-            P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
         let leader_peer = identities[0].ed25519_public_key();
         let sender_peer = identities[1].ed25519_public_key();
 
