@@ -1007,10 +1007,10 @@ mod tests {
         BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, P2pReceivers,
         run_receivers, spawn_p2p, validate_ip_check_configuration,
     };
-    use crate::protocol::ResponseFrame;
     use crate::{
         P2pNetworkId, ZoneManifest,
         identity::{Ed25519Identity, Secp256k1Identity},
+        protocol::ResponseFrame,
         routing::RoutingMembership,
     };
 
