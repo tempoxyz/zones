@@ -847,7 +847,7 @@ TIP-403 policy authorization on the zone executes Tempo's registry precompile at
 
 ### Staleness and Finality
 
-The zone's view of Tempo is the final Tempo block imported by its latest zone block. It may lag the finalized Tempo head when zone block production is behind, but every catch-up zone block imports the next consecutive range of Tempo blocks and reads state only from the range's final block.
+The zone's view of Tempo is the final Tempo block imported by the latest zone block. It may lag the finalized Tempo head when zone block production is behind, but every catch-up zone block imports the next consecutive range of Tempo block.
 
 The zone node must only finalize Tempo headers that have reached finality on Tempo. Proofs should only reference finalized Tempo blocks to avoid reorg risk.
 
