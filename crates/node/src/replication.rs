@@ -1072,12 +1072,11 @@ fn validate_l1_checkpoint_transition(
             local_hash
         );
     }
-    let base_fee = zone_block.header().base_fee_per_gas().unwrap_or_default();
-    if base_fee != 0 {
+    if zone_block.header().base_fee_per_gas().unwrap_or_default() != 0 {
         eyre::bail!(
             "peer block {} base fee {} != Zone base fee 0",
             zone_block.number(),
-            base_fee
+            zone_block.header().base_fee_per_gas().unwrap_or_default()
         );
     }
     if zone_block.timestamp() != l1_header.timestamp() {
