@@ -6,7 +6,7 @@ use tempo_precompiles::{
     charge_input_cost, dispatch, dispatch::typed::metadata as typed_metadata, storage::Handler,
 };
 use tempo_zone_contracts::IZoneOutbox;
-use zone_primitives::constants::{MAX_WITHDRAWAL_GAS_LIMIT, ZONE_CONFIG_ADDRESS};
+use zone_primitives::constants::MAX_WITHDRAWAL_GAS_LIMIT;
 
 use crate::{
     dispatch::{metadata, mutate, mutate_void, view},
@@ -31,7 +31,6 @@ impl ZoneOutbox {
 
         dispatch!(calldata, |call| match call {
             IZoneOutbox::IZoneOutboxCalls {
-                config(_) => metadata::<IZoneOutbox::configCall>(|| Ok(ZONE_CONFIG_ADDRESS)),
                 tempoGasRate(_) => metadata::<IZoneOutbox::tempoGasRateCall>(|| self.tempo_gas_rate.read()),
                 maxWithdrawalsPerBlock(_) => metadata::<IZoneOutbox::maxWithdrawalsPerBlockCall>(|| self.max_withdrawals_per_block.read()),
                 lastBatch(_) => metadata::<IZoneOutbox::lastBatchCall>(|| self.last_batch()),

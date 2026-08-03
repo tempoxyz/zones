@@ -18,7 +18,8 @@ use tempo_zone_contracts::Unauthorized;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
-    execution::{CallCheck, CallRuleError, CallRules},
+    execution::{CallCheck, CallRules},
+    privacy::check_caller_or_sequencer,
     storage::{L1State, L1StorageReader},
 };
 
@@ -83,17 +84,20 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
             }
             ITIP20::balanceOfCall::SELECTOR => {
                 decode_and_check::<ITIP20::balanceOfCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.account])
+                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
                 })
             }
             ITIP20::allowanceCall::SELECTOR => {
                 decode_and_check::<ITIP20::allowanceCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.owner, call.spender])
+                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
                 })
             }
+            ITIP20::noncesCall::SELECTOR => decode_and_check::<ITIP20::noncesCall>(args, |call| {
+                check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+            }),
             IRolesAuth::hasRoleCall::SELECTOR => {
                 decode_and_check::<IRolesAuth::hasRoleCall>(args, |call| {
-                    self.check_auth_with_sequencer(caller, &[call.account])
+                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
                 })
             }
             ITIP20::globalRewardPerTokenCall::SELECTOR
@@ -113,24 +117,6 @@ impl<P: L1StorageReader> TIP20Rules<P> {
         } else {
             CallCheck::Revert(Unauthorized {}.abi_encode().into())
         }
-    }
-
-    fn check_auth_with_sequencer(&self, caller: Address, auths: &[Address]) -> CallCheck {
-        match self.check_auth(caller, auths) {
-            CallCheck::Continue => CallCheck::Continue,
-            revert => match self.is_sequencer(caller) {
-                Ok(true) => CallCheck::Continue,
-                Ok(false) => revert,
-                Err(error) => CallCheck::Error(error),
-            },
-        }
-    }
-
-    #[inline]
-    fn is_sequencer(&self, caller: Address) -> Result<bool, CallRuleError> {
-        self.l1
-            .read_portal(|portal| &portal.is_sequencer[caller])
-            .map_err(CallRuleError::Tempo)
     }
 }
 
@@ -298,6 +284,11 @@ mod tests {
                 assert_allowed(&rules, allowance.clone(), caller);
             }
             assert_unauthorized(&rules, allowance, outsider);
+
+            let nonce = ITIP20::noncesCall { owner };
+            assert_allowed(&rules, nonce.clone(), owner);
+            assert_allowed(&rules, nonce.clone(), sequencer);
+            assert_unauthorized(&rules, nonce, outsider);
 
             let role = IRolesAuth::hasRoleCall {
                 account: owner,

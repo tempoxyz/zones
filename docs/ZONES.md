@@ -538,7 +538,6 @@ graph TB
     subgraph L2["Zone L2 Node"]
         direction TB
         Tasks["Sequencer Tasks<br/>• L1 subscriber (deposit backfill + live)<br/>• Zone engine (L1-driven block building)<br/>• Zone monitor (batch submission to L1)<br/>• Withdrawal processor (L1 queue drain)"]
-        Predeploys["Predeploys<br/>0x1c00…0000 TempoState<br/>0x1c00…0001 ZoneInbox<br/>0x1c00…0002 ZoneOutbox<br/>0x1c00…0003 ZoneConfig<br/>0x1c00…0004 TempoStateReader<br/>0x20C0…0000 pathUSD"]
     end
 
     Portal -- "WSS subscription<br/>(deposits, headers)" --> Tasks

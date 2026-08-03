@@ -12,7 +12,7 @@ use tempo_precompiles::{
     storage::{ContractStorage, Handler, StorageCtx},
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
-    tip403_registry::{ALLOW_ALL_POLICY_ID, ITIP403Registry, REJECT_ALL_POLICY_ID, TIP403Registry},
+    tip403_registry::{REJECT_ALL_POLICY_ID, TIP403Registry},
     zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
@@ -209,20 +209,15 @@ impl Harness {
     }
 }
 
-fn worst_case_encrypted_deposit_block_gas() -> eyre::Result<u64> {
-    const SYSTEM_GAS: u64 = 250_000_000;
-    const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 640;
-
+fn failed_encrypted_deposit_gas(deposits: usize) -> eyre::Result<u64> {
     let mut harness = Harness::new()?;
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
         StorageCtx::enter(&mut storage, || {
-            TIP403Registry::new().set_receive_policy(
-                BOB,
-                ITIP403Registry::setReceivePolicyCall {
-                    senderPolicyId: REJECT_ALL_POLICY_ID,
-                    tokenFilterId: ALLOW_ALL_POLICY_ID,
-                    recoveryAuthority: Address::ZERO,
+            TIP20Token::from_address(PATH_USD_ADDRESS)?.change_transfer_policy_id(
+                ALICE,
+                ITIP20::changeTransferPolicyIdCall {
+                    newPolicyId: REJECT_ALL_POLICY_ID,
                 },
             )
         })?;
@@ -270,12 +265,12 @@ fn worst_case_encrypted_deposit_block_gas() -> eyre::Result<u64> {
         },
     };
 
-    let mut deposits = Vec::with_capacity(MAX_DEPOSITS_PER_TEMPO_BLOCK);
-    let mut decryptions = Vec::with_capacity(MAX_DEPOSITS_PER_TEMPO_BLOCK);
+    let mut queued_deposits = Vec::with_capacity(deposits);
+    let mut decryptions = Vec::with_capacity(deposits);
     let mut head = B256::ZERO;
-    for _ in 0..MAX_DEPOSITS_PER_TEMPO_BLOCK {
+    for _ in 0..deposits {
         head = keccak256((DepositType::Encrypted, deposit.clone(), head).abi_encode_params());
-        deposits.push(QueuedDeposit {
+        queued_deposits.push(QueuedDeposit {
             depositType: DepositType::Encrypted,
             depositData: deposit.abi_encode().into(),
         });
@@ -283,22 +278,29 @@ fn worst_case_encrypted_deposit_block_gas() -> eyre::Result<u64> {
     }
 
     harness.set_queue_hash(head);
-    let calldata = harness.advance_call(deposits, decryptions).abi_encode();
-    let output = harness.call_with_gas(Address::ZERO, calldata, SYSTEM_GAS)?;
-    assert!(output.is_success());
+    let calldata = harness
+        .advance_call(queued_deposits, decryptions)
+        .abi_encode();
+    let output = harness.call_with_gas(Address::ZERO, calldata, u64::MAX)?;
+    assert!(output.is_success(), "deposit block failed: {output:?}");
     Ok(output.gas_used)
 }
 
 #[test]
 fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
     const BUFFERED_GAS_LIMIT: u64 = 200_000_000;
+    const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
 
-    let gas_used = worst_case_encrypted_deposit_block_gas()?;
-    eprintln!("max portal deposit block: {gas_used} gas");
-    assert!(
-        gas_used <= BUFFERED_GAS_LIMIT,
-        "max deposit block used {gas_used} gas"
-    );
+    for deposits in [640, MAX_DEPOSITS_PER_TEMPO_BLOCK] {
+        let should_fit = deposits <= MAX_DEPOSITS_PER_TEMPO_BLOCK;
+        let gas_used = failed_encrypted_deposit_gas(deposits)?;
+        eprintln!("{deposits} portal deposit block: {gas_used} gas");
+        assert_eq!(
+            gas_used <= BUFFERED_GAS_LIMIT,
+            should_fit,
+            "{deposits} deposit block used {gas_used} gas"
+        );
+    }
     Ok(())
 }
 
@@ -377,7 +379,7 @@ fn advance_rejects_a_preselected_anchor_before_child_selection() -> eyre::Result
     let mut harness = Harness::new()?;
     harness
         .l1_state
-        .read_l1_storage(Address::ZERO, B256::ZERO, 0)?;
+        .read_l1_storage_unmetered(Address::ZERO, B256::ZERO, 0)?;
     let request_count = harness.l1.storage_requests().len();
 
     let result = harness.call(

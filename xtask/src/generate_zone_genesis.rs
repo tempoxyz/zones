@@ -48,7 +48,6 @@ use zone_precompiles::{
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
-const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -149,27 +148,13 @@ impl GenerateZoneGenesis {
         initialize_receive_policy_guard(&mut evm)?;
         initialize_storage_credits(&mut evm)?;
 
-        let mut nonce = 0u64;
+        let nonce = 0u64;
 
         initialize_tempo_state(&mut evm, &header_rlp)?;
         initialize_zone_outbox(&mut evm)?;
 
-        let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
-        let zone_config_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
-        deploy_contract(
-            &mut evm,
-            &zone_config_bytecode,
-            &zone_config_args,
-            ZONE_CONFIG_ADDRESS,
-            "ZoneConfig",
-            self.chain_id,
-            nonce,
-        )?;
-        nonce += 1;
-
         let zone_inbox_bytecode = load_artifact(&self.specs_out, "ZoneInbox")?;
-        let zone_inbox_args =
-            (ZONE_CONFIG_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
+        let zone_inbox_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_inbox_bytecode,
@@ -183,7 +168,6 @@ impl GenerateZoneGenesis {
         let db = evm.db_mut();
         for (name, addr) in [
             ("TempoState", TEMPO_STATE_ADDRESS),
-            ("ZoneConfig", ZONE_CONFIG_ADDRESS),
             ("ZoneInbox", ZONE_INBOX_ADDRESS),
             ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
         ] {

@@ -22,9 +22,10 @@ use crate::{
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         L1State, L1StorageReader, TIP403_REGISTRY_ADDRESS, TempoState, ZONE_FEE_MANAGER_ADDRESS,
-        ZoneInbox, ZonePrecompileEnv, create_receive_policy_guard_precompile,
-        create_tip20_precompile, create_tip403_precompile, create_zone_fee_manager_precompile,
-        tx_context::ZoneTxContext,
+        ZoneInbox, ZonePrecompileEnv, create_account_keychain_precompile,
+        create_nonce_manager_precompile, create_receive_policy_guard_precompile,
+        create_storage_credits_precompile, create_tip20_precompile, create_tip403_precompile,
+        create_zone_fee_manager_precompile, tx_context::ZoneTxContext,
     },
 };
 use alloy_evm::{
@@ -52,11 +53,10 @@ use tempo_evm::{
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv,
-    RECEIVE_POLICY_GUARD_ADDRESS, STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS,
-    TIP_FEE_MANAGER_ADDRESS, TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS,
-    account_keychain::AccountKeychain, error::Result as TempoResult, nonce::NonceManager,
-    storage::actions::StorageActions, storage_credits::StorageCredits, tip20::is_tip20_prefix,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS,
+    STABLECOIN_DEX_ADDRESS, STORAGE_CREDITS_ADDRESS, TIP_FEE_MANAGER_ADDRESS,
+    TIP20_CHANNEL_RESERVE_ADDRESS, TIP20_FACTORY_ADDRESS, error::Result as TempoResult,
+    storage::actions::StorageActions, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
@@ -100,7 +100,7 @@ where
         let actions = StorageActions::disabled();
         let non_creditable_slots = evm.non_creditable_slots();
         let (_, _, precompiles) = evm.components_mut();
-        let env = ZonePrecompileEnv::new(&cfg, actions.clone(), non_creditable_slots.clone());
+        let env = ZonePrecompileEnv::new(&cfg, actions, non_creditable_slots);
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
             Some(TempoState::create(l1.clone(), &env))
         });
@@ -134,20 +134,28 @@ where
             Some(create_tip403_precompile(&tip403_env))
         });
         let tip20_l1 = l1.clone();
-        let tempo_env = PrecompileEnv::new(&cfg, actions, non_creditable_slots);
+        let nonce_l1 = l1.clone();
+        let account_keychain_l1 = l1.clone();
+        let storage_credits_l1 = l1.clone();
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
                 Some(create_tip20_precompile(*address, &env, tip20_l1.clone()))
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                Some(NonceManager::create_precompile(&tempo_env))
+                Some(create_nonce_manager_precompile(&env, nonce_l1.clone()))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                Some(AccountKeychain::create_precompile(&tempo_env))
+                Some(create_account_keychain_precompile(
+                    &env,
+                    account_keychain_l1.clone(),
+                ))
             } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
                 Some(create_receive_policy_guard_precompile(&env))
             } else if *address == STORAGE_CREDITS_ADDRESS {
-                Some(StorageCredits::create_precompile(&tempo_env))
+                Some(create_storage_credits_precompile(
+                    &env,
+                    storage_credits_l1.clone(),
+                ))
             } else {
                 None
             }

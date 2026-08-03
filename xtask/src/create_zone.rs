@@ -61,11 +61,8 @@ pub(crate) struct CreateZone {
     /// Sequencer address that will operate the zone. Repeat for a
     /// multi-sequencer set; the first address is the leader.
     ///
-    /// A multi-sequencer set is installed via a post-creation `setSequencerSet`
-    /// call so the on-chain `sequencerSetVersion` becomes non-zero, which the
-    /// P2P manifest requires. That call must be signed by the zone admin, so
-    /// `--private-key` must be the admin key when more than one sequencer is
-    /// given.
+    /// The complete set and threshold are installed atomically by `createZone`;
+    /// the first address is also the initial block-production leader.
     #[arg(long = "sequencer", required = true)]
     sequencers: Vec<Address>,
 
@@ -107,6 +104,20 @@ pub(crate) struct CreateZone {
 const MAX_SEQUENCERS: usize = 8;
 
 impl CreateZone {
+    fn factory_params(&self) -> ZoneFactory::CreateZoneParams {
+        ZoneFactory::CreateZoneParams {
+            initialToken: self.initial_token,
+            accessMode: self.access_mode,
+            gatewayMode: self.gateway_mode,
+            allowedAccounts: self.allowed_accounts.clone(),
+            zoneGateways: self.zone_gateways.clone(),
+            admin: self.admin,
+            sequencers: self.sequencers.clone(),
+            threshold: self.threshold,
+            rpcUrl: self.rpc_url.clone(),
+        }
+    }
+
     pub(crate) async fn run(self) -> eyre::Result<()> {
         let leader = *self
             .sequencers
@@ -150,15 +161,6 @@ impl CreateZone {
             .strip_prefix("0x")
             .unwrap_or(&self.private_key);
         let signer: PrivateKeySigner = key_str.parse()?;
-        let signer_address = signer.address();
-        if self.sequencers.len() > 1 && signer_address != self.admin {
-            return Err(eyre!(
-                "multi-sequencer creation requires --private-key to be the admin key \
-                 ({}) so the sequencer set can be installed via setSequencerSet, \
-                 but the key resolves to {signer_address}",
-                self.admin
-            ));
-        }
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
@@ -224,26 +226,14 @@ impl CreateZone {
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
         );
-        // The native factory initializes the portal at `sequencerSetVersion` 0,
-        // but the P2P manifest (and follower attestation checks) require a
-        // non-zero version. Create the zone with a 1-of-1 leader set, then
-        // install the full set via `setSequencerSet`, which bumps the version
-        // to 1. Single-sequencer zones keep the legacy 1-of-1 set at version 0.
-        // The portal also bootstraps the first sequencer as the initial
+        // Install the requested set in the factory transaction. A separate
+        // setSequencerSet call would leave the portal live as a temporary
+        // 1-of-1 settlement authority before the intended quorum is active.
+        // The portal bootstraps the first sequencer as the initial
         // block-production leader (leaderEpoch 1); later transfers go through
-        // setLeader.
+        // setLeader. The factory-installed set starts at version 0.
         let receipt = factory
-            .createZone(ZoneFactory::CreateZoneParams {
-                initialToken: self.initial_token,
-                accessMode: self.access_mode,
-                gatewayMode: self.gateway_mode,
-                allowedAccounts: self.allowed_accounts.clone(),
-                zoneGateways: self.zone_gateways.clone(),
-                admin: self.admin,
-                sequencers: vec![leader],
-                threshold: 1,
-                rpcUrl: self.rpc_url.clone(),
-            })
+            .createZone(self.factory_params())
             .send_sync()
             .await?;
         println!("Transaction confirmed in block {:?}", receipt.block_number);
@@ -269,23 +259,6 @@ impl CreateZone {
         let chain_id = zone_chain_id(zone_id);
 
         let portal_contract = ZonePortal::new(portal, &provider);
-        if self.sequencers.len() > 1 {
-            println!(
-                "Installing {}-of-{} sequencer set via setSequencerSet...",
-                self.threshold,
-                self.sequencers.len()
-            );
-            let receipt = portal_contract
-                .setSequencerSet(self.sequencers.clone(), self.threshold)
-                .send_sync()
-                .await?;
-            if !receipt.status() {
-                return Err(eyre!(
-                    "setSequencerSet transaction reverted (tx: {:?})",
-                    receipt.transaction_hash
-                ));
-            }
-        }
         let sequencer_set_version = portal_contract.sequencerSetVersion().call().await?;
         println!("Sequencer set version: {sequencer_set_version}");
 
@@ -364,5 +337,41 @@ impl CreateZone {
         println!("  Zone metadata written to: {}", zone_json_path.display());
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn factory_params_install_the_requested_quorum_atomically() {
+        let sequencers = vec![
+            address!("0x1000000000000000000000000000000000000001"),
+            address!("0x2000000000000000000000000000000000000002"),
+            address!("0x3000000000000000000000000000000000000003"),
+        ];
+        let command = CreateZone {
+            output: PathBuf::new(),
+            l1_rpc_url: String::new(),
+            zone_factory: Address::ZERO,
+            initial_token: address!("0x4000000000000000000000000000000000000004"),
+            access_mode: true,
+            gateway_mode: true,
+            zone_gateways: Vec::new(),
+            allowed_accounts: Vec::new(),
+            sequencers: sequencers.clone(),
+            threshold: 2,
+            admin: address!("0x5000000000000000000000000000000000000005"),
+            rpc_url: String::new(),
+            private_key: String::new(),
+            base_fee_per_gas: 1,
+            gas_limit: 30_000_000,
+            specs_out: PathBuf::new(),
+        };
+
+        let params = command.factory_params();
+        assert_eq!(params.sequencers, sequencers);
+        assert_eq!(params.threshold, 2);
     }
 }
