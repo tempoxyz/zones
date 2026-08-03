@@ -77,7 +77,7 @@ pub(crate) struct DemoSwapAndDeposit {
     #[arg(long)]
     router: Option<Address>,
 
-    /// Tempo refund recipient for the routed ZonePortal.depositEncrypted call.
+    /// Tempo refund recipient for the routed ZonePortal.deposit call.
     /// Defaults to the operator. Use a controlled burner or stealth address when
     /// the zone recipient should stay unlinkable from a later bounce-back.
     #[arg(long, env = "ROUTER_BOUNCEBACK_RECIPIENT")]
@@ -633,7 +633,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     )
     .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
     let receipt = portal
-        .depositEncrypted(
+        .deposit(
             token,
             amount,
             key_index,
@@ -648,7 +648,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
         )
         .send_sync()
         .await?;
-    check(&receipt, "depositEncrypted")
+    check(&receipt, "deposit")
 }
 
 async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(

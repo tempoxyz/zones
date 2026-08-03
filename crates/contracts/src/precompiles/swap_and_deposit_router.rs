@@ -22,7 +22,7 @@ crate::sol! {
 /// Encrypted callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
 ///
 /// This payload tells the router to optionally swap the withdrawn token on L1
-/// and then call `ZonePortal.depositEncrypted(...)` with an ECIES-encrypted
+/// and then call `ZonePortal.deposit(...)` with an ECIES-encrypted
 /// `(recipient, memo)` payload.
 #[derive(Debug, Clone)]
 pub struct SwapAndDepositRouterEncryptedCallback {
@@ -32,7 +32,7 @@ pub struct SwapAndDepositRouterEncryptedCallback {
     pub target_portal: Address,
     /// Portal encryption key index used to build [`Self::encrypted`].
     pub key_index: U256,
-    /// ECIES-encrypted `(recipient, memo)` payload for `depositEncrypted`.
+    /// ECIES-encrypted `(recipient, memo)` payload for `deposit`.
     pub encrypted: EncryptedDepositPayload,
     /// Tempo refund recipient if the downstream encrypted deposit later bounces.
     pub tempo_refund_recipient: Address,

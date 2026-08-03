@@ -115,15 +115,15 @@ impl EncryptedDeposit {
 
         println!("Sending encrypted deposit of {} to {to}...", self.amount);
         let receipt = portal
-            .depositEncrypted(self.token, self.amount, key_index, payload, sender)
+            .deposit(self.token, self.amount, key_index, payload, sender)
             .send_sync()
             .await
-            .wrap_err("failed to send depositEncrypted transaction")?;
+            .wrap_err("failed to send deposit transaction")?;
         let tx_hash = receipt.transaction_hash;
         let block_number = receipt.block_number.unwrap_or_default();
 
         if !receipt.status() {
-            return Err(eyre!("depositEncrypted reverted (tx: {tx_hash})"));
+            return Err(eyre!("deposit reverted (tx: {tx_hash})"));
         }
 
         println!("Encrypted deposit sent! (block {block_number})");

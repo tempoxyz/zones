@@ -74,7 +74,7 @@ contract MockZoneGateway is IWithdrawalReceiver {
         // The mock returns the received token. The production gateway owns conversion semantics.
         if (!ITIP20(token).approve(sourcePortal, amount)) revert ApprovalFailed();
         IZonePortal(sourcePortal)
-            .depositEncrypted(
+            .deposit(
                 token, amount, callback.keyIndex, callback.encrypted, callback.tempoRefundRecipient
             );
         if (!ITIP20(token).approve(sourcePortal, 0)) revert ApprovalFailed();

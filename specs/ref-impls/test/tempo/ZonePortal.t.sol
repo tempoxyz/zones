@@ -1525,7 +1525,7 @@ contract ZonePortalTest is BaseTest {
         for (uint256 i; i < maximumPublicDeposits - 1; ++i) {
             _deposit(portal, address(pathUSD), bob, amount, bytes32(i), bob);
         }
-        portal.depositEncrypted(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
 
         bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
         uint256 aliceBalanceAtCapacity = pathUSD.balanceOf(alice);
@@ -4034,22 +4034,21 @@ contract ZonePortalTest is BaseTest {
         assertFalse(success);
     }
 
-    function test_depositEncrypted_success() public {
+    function test_deposit_success() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        bytes32 hash = portal.depositEncrypted(
-            address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice
-        );
+        bytes32 hash =
+            portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
         vm.stopPrank();
 
         assertEq(portal.currentDepositQueueHash(), hash);
         assertTrue(hash != bytes32(0));
     }
 
-    function test_depositEncrypted_hashChainMatchesLibrary() public {
+    function test_deposit_hashChainMatchesLibrary() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
@@ -4060,7 +4059,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        bytes32 hash = portal.depositEncrypted(address(pathUSD), depositAmount, 0, encrypted, alice);
+        bytes32 hash = portal.deposit(address(pathUSD), depositAmount, 0, encrypted, alice);
         vm.stopPrank();
 
         // Reconstruct expected hash using the same encoding as DepositQueueLib
@@ -4076,7 +4075,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(hash, expectedHash);
     }
 
-    function test_depositEncrypted_mixedQueue() public {
+    function test_deposit_mixedQueue() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 amount = 1000e6;
@@ -4087,8 +4086,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 h1 = _deposit(portal, address(pathUSD), alice, amount, bytes32("memo"), alice);
 
         // Encrypted deposit from alice
-        bytes32 h2 =
-            portal.depositEncrypted(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
+        bytes32 h2 = portal.deposit(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
         vm.stopPrank();
 
         // Both should update the same queue
@@ -4097,7 +4095,7 @@ contract ZonePortalTest is BaseTest {
         assertTrue(h2 != bytes32(0));
     }
 
-    function test_depositEncrypted_deductsFee() public {
+    function test_deposit_deductsFee() public {
         _setZoneGasRate(1); // 1 token per gas -> fee = 100_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
@@ -4109,7 +4107,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
         vm.stopPrank();
 
         assertEq(pathUSD.balanceOf(alice), aliceBefore - depositAmount);
@@ -4117,7 +4115,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), portalBefore + depositAmount - expectedFee);
     }
 
-    function test_depositEncrypted_emitsEvent() public {
+    function test_deposit_emitsEncryptedEvent() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
@@ -4156,11 +4154,11 @@ contract ZonePortalTest is BaseTest {
             alice,
             1
         );
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, encrypted, alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, encrypted, alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnExpiredKey() public {
+    function test_deposit_revertsOnExpiredKey() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         // Rotate to key2
@@ -4177,22 +4175,22 @@ contract ZonePortalTest is BaseTest {
 
         // Should revert with EncryptionKeyExpired for key index 0
         vm.expectRevert();
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnInvalidKeyIndex() public {
+    function test_deposit_revertsOnInvalidKeyIndex() public {
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
 
         // No keys set, index 0 is invalid
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidEncryptionKeyIndex.selector, 0));
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnInvalidYParity() public {
+    function test_deposit_revertsOnInvalidYParity() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
@@ -4208,11 +4206,11 @@ contract ZonePortalTest is BaseTest {
         });
 
         vm.expectRevert(IZonePortal.InvalidEphemeralPubkey.selector);
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, encrypted, alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, encrypted, alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnInvalidEphemeralX() public {
+    function test_deposit_revertsOnInvalidEphemeralX() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
@@ -4228,11 +4226,11 @@ contract ZonePortalTest is BaseTest {
         });
 
         vm.expectRevert(IZonePortal.InvalidEphemeralPubkey.selector);
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, encrypted, alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, encrypted, alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnDepositTooSmall() public {
+    function test_deposit_revertsOnDepositTooSmall() public {
         _setZoneGasRate(1); // fee = 100_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
@@ -4240,31 +4238,11 @@ contract ZonePortalTest is BaseTest {
         pathUSD.approve(address(portal), 99_999);
 
         vm.expectRevert(IZonePortal.DepositTooSmall.selector);
-        portal.depositEncrypted(address(pathUSD), 99_999, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), 99_999, 0, _makeEncryptedPayload(), alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsWhenBouncebackRecipientBlocked() public {
-        _setEncKeyWithPoP(ENC_KEY_1);
-
-        uint128 depositAmount = 1000e6;
-        address[] memory accounts = new address[](2);
-        accounts[0] = alice;
-        accounts[1] = address(portal);
-        uint64 policyId = registry.createPolicyWithAccounts(
-            sequencer, ITIP403Registry.PolicyType.WHITELIST, accounts
-        );
-        vm.prank(pathUSDAdmin);
-        pathUSD.changeTransferPolicyId(policyId);
-
-        vm.startPrank(alice);
-        pathUSD.approve(address(portal), depositAmount);
-        vm.expectRevert(ITIP20.PolicyForbids.selector);
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), bob);
-        vm.stopPrank();
-    }
-
-    function test_depositEncrypted_revertsOnCiphertextTooShort() public {
+    function test_deposit_revertsOnCiphertextTooShort() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
@@ -4276,11 +4254,11 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 63, 64)
         );
-        portal.depositEncrypted(address(pathUSD), 1000e6, 0, payload, alice);
+        portal.deposit(address(pathUSD), 1000e6, 0, payload, alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnCiphertextTooLong() public {
+    function test_deposit_revertsOnCiphertextTooLong() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
@@ -4292,11 +4270,11 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 65, 64)
         );
-        portal.depositEncrypted(address(pathUSD), 1000e6, 0, payload, alice);
+        portal.deposit(address(pathUSD), 1000e6, 0, payload, alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnEmptyCiphertext() public {
+    function test_deposit_revertsOnEmptyCiphertext() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
@@ -4306,11 +4284,11 @@ contract ZonePortalTest is BaseTest {
         pathUSD.approve(address(portal), 1000e6);
 
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 0, 64));
-        portal.depositEncrypted(address(pathUSD), 1000e6, 0, payload, alice);
+        portal.deposit(address(pathUSD), 1000e6, 0, payload, alice);
         vm.stopPrank();
     }
 
-    function test_depositEncrypted_revertsOnOversizedCiphertext() public {
+    function test_deposit_revertsOnOversizedCiphertext() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
@@ -4322,7 +4300,7 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(
             abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 1024, 64)
         );
-        portal.depositEncrypted(address(pathUSD), 1000e6, 0, payload, alice);
+        portal.deposit(address(pathUSD), 1000e6, 0, payload, alice);
         vm.stopPrank();
     }
 

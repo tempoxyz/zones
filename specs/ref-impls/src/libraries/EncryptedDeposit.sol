@@ -22,7 +22,7 @@ Encryption scheme: ECIES with secp256k1
 - Ciphertext includes ephemeral public key for sequencer to derive same shared secret
 
 Types (EncryptedDepositPayload, EncryptedDeposit, EncryptionKeyEntry) are defined in IZone.sol.
-Portal interface (depositEncrypted, key management) is in IZonePortal.
+Portal interface (deposit, key management) is in IZonePortal.
 */
 
 /*//////////////////////////////////////////////////////////////

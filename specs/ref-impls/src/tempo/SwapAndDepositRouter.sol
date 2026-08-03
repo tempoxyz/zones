@@ -96,7 +96,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
         ITIP20(tokenOut).approve(targetPortal, amountOut);
         IZonePortal(targetPortal)
-            .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, tempoRefundRecipient);
+            .deposit(tokenOut, amountOut, keyIndex, encrypted, tempoRefundRecipient);
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }

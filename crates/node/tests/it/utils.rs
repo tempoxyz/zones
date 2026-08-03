@@ -2977,7 +2977,7 @@ impl ZoneAccount {
             .await?;
 
         ZonePortal::new(self.portal_address, &self.l1_provider)
-            .depositEncrypted(
+            .deposit(
                 PATH_USD_ADDRESS,
                 amount,
                 key_index,
@@ -3053,7 +3053,7 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .depositEncrypted(token, amount, key_index, encrypted, self.address)
+            .deposit(token, amount, key_index, encrypted, self.address)
             .send()
             .await?
             .get_receipt()
@@ -3069,13 +3069,13 @@ impl ZoneAccount {
         .await
     }
 
-    /// Approve portal + call `depositEncrypted` on L1 with properly ECIES-encrypted payload.
+    /// Approve portal + call `deposit` on L1 with properly ECIES-encrypted payload.
     ///
     /// Performs ECIES encryption client-side (matching what a real depositor would do):
     /// 1. Read the sequencer's encryption key from the portal
     /// 2. Generate an ephemeral key pair
     /// 3. ECDH → HKDF → AES-256-GCM encrypt (to, memo)
-    /// 4. Call `depositEncrypted` on the portal
+    /// 4. Call `deposit` on the portal
     /// 5. Wait for the zone to mint tokens to the decrypted recipient
     pub(crate) async fn deposit_encrypted(
         &mut self,
@@ -3124,14 +3124,14 @@ impl ZoneAccount {
         // Snapshot balance before deposit
         let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, recipient).await?;
 
-        // Call depositEncrypted on portal
+        // Call deposit on portal
         let receipt = portal
-            .depositEncrypted(PATH_USD_ADDRESS, amount, key_index, encrypted, self.address)
+            .deposit(PATH_USD_ADDRESS, amount, key_index, encrypted, self.address)
             .send()
             .await?
             .get_receipt()
             .await?;
-        eyre::ensure!(receipt.status(), "L1 depositEncrypted tx failed");
+        eyre::ensure!(receipt.status(), "L1 deposit tx failed");
 
         // Wait for the zone to process the encrypted deposit and mint to recipient
         let balance = zone
@@ -3145,7 +3145,7 @@ impl ZoneAccount {
 
         let block_number = receipt
             .block_number
-            .ok_or_else(|| eyre::eyre!("depositEncrypted receipt missing block number"))?;
+            .ok_or_else(|| eyre::eyre!("deposit receipt missing block number"))?;
 
         Ok((block_number, balance))
     }

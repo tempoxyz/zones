@@ -1080,7 +1080,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
         bytes32 l1DepositHash =
-            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload, alice);
+            l1Portal.deposit(address(l2ZoneToken), depositAmount, 0, payload, alice);
         vm.stopPrank();
 
         // Verify L1 state
@@ -1146,7 +1146,7 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload, alice);
+        l1Portal.deposit(address(l2ZoneToken), depositAmount, 0, payload, alice);
         vm.stopPrank();
 
         // === STEP 3: Sequencer observes and relays with FAILED decryption ===
@@ -1208,8 +1208,7 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h1 =
-            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload1, alice);
+        bytes32 h1 = l1Portal.deposit(address(l2ZoneToken), depositAmount, 0, payload1, alice);
         vm.stopPrank();
 
         // === STEP 3: Sequencer rotates to second encryption key ===
@@ -1221,8 +1220,7 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h2 =
-            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 1, payload2, bob);
+        bytes32 h2 = l1Portal.deposit(address(l2ZoneToken), depositAmount, 1, payload2, bob);
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h2, "L1 hash after both deposits");

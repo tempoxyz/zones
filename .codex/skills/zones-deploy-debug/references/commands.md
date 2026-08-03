@@ -59,7 +59,7 @@ just max-approve-portal
 Send a deposit to the zone:
 
 ```bash
-just send-deposit-encrypted 1000000
+just send-deposit 1000000
 ```
 
 Approve the L2 outbox before withdrawing:

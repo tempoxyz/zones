@@ -87,7 +87,7 @@ contract MockZonePortalForRouter {
         return enabledTokens[_token];
     }
 
-    function depositEncrypted(
+    function deposit(
         address _token,
         uint128 amount,
         uint256 keyIndex,

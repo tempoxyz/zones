@@ -84,8 +84,8 @@ export PRIVATE_KEY=$(jq -r '.sequencerKey' generated/my-zone/zone.json)
 just max-approve-portal
 
 # Deposits are encrypted; the command fetches the portal's active encryption key.
-just send-deposit-encrypted 1000000                       # to your own address
-just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+just send-deposit 1000000                       # to your own address
+just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
 
 ### Withdrawing from Zone to Tempo

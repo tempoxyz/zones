@@ -705,7 +705,7 @@ async fn test_closed_mode_rejects_unlisted_deposit_and_withdrawal_recipient() ->
             .await?;
         assert!(
             portal
-                .depositEncrypted(PATH_USD_ADDRESS, 100_000, key_index, encrypted, outsider,)
+                .deposit(PATH_USD_ADDRESS, 100_000, key_index, encrypted, outsider,)
                 .call()
                 .await
                 .is_err(),
@@ -1470,7 +1470,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_when_target_deposits_
 
 /// Same-zone routed withdrawal where the downstream encrypted deposit fails.
 ///
-/// This pins the callback behavior for `depositEncrypted`: even with a valid
+/// This pins the callback behavior for `deposit`: even with a valid
 /// encrypted payload and key index, a target-portal deposit failure must revert
 /// the callback and bounce the original token back to the sender.
 #[tokio::test(flavor = "multi_thread")]
@@ -1723,7 +1723,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///  1. Start L1 dev node and create a zone through the native ZoneFactory.
 ///  2. Generate sequencer encryption key, start zone with sequencer key.
 ///  3. Register encryption key on the portal via `setSequencerEncryptionKey`.
-///  4. Fund depositor, call `depositEncrypted` on the portal — encrypting
+///  4. Fund depositor, call `deposit` on the portal — encrypting
 ///     (recipient, memo) to the sequencer's public key. The recipient is a
 ///     known key (mnemonic index 2) so we can withdraw later.
 ///     The zone processes this automatically: ECIES decrypt → CP proof →
@@ -1737,7 +1737,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///   │                                         │
 ///   │  setSequencerEncryptionKey              │
 ///   │                                         │
-///   │  depositEncrypted ─────────►    │
+///   │  deposit ──────────────────►    │
 ///   │                                         │
 ///   │               ECIES decrypt             │
 ///   │               + CP proof                │
@@ -1962,7 +1962,7 @@ async fn test_encrypted_deposit_policy_failure_bounces_to_tempo_refund_recipient
         .encrypt_deposit_for_portal(portal_address, rejected_recipient, B256::ZERO)
         .await?;
     let receipt = portal
-        .depositEncrypted(
+        .deposit(
             PATH_USD_ADDRESS,
             deposit_amount,
             key_index,
@@ -2228,7 +2228,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
         .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
 
         let receipt = portal
-            .depositEncrypted(
+            .deposit(
                 PATH_USD_ADDRESS,
                 deposit_amount,
                 key_index,
@@ -2245,7 +2245,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
             .await?
             .get_receipt()
             .await?;
-        eyre::ensure!(receipt.status(), "L1 depositEncrypted tx failed");
+        eyre::ensure!(receipt.status(), "L1 deposit tx failed");
     }
 
     // Wait for the bounce-back refund to arrive at the sender on L1 (not the
@@ -2343,7 +2343,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
             .encrypt_deposit_for_portal(portal_address, alice, B256::ZERO)
             .await?;
         let receipt = portal
-            .depositEncrypted(
+            .deposit(
                 PATH_USD_ADDRESS,
                 deposit_amount,
                 key_index,
@@ -2448,7 +2448,7 @@ async fn test_encrypted_deposit_to_blacklisted_recipient_is_accepted_on_l1() -> 
         .encrypt_deposit_for_portal(portal_address, blacklisted_recipient, B256::ZERO)
         .await?;
     let receipt = portal
-        .depositEncrypted(
+        .deposit(
             PATH_USD_ADDRESS,
             deposit_amount,
             key_index,

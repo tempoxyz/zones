@@ -161,7 +161,7 @@ pub fn decrypt_deposit(
 
 /// Result of client-side ECIES encryption for a deposit.
 ///
-/// Contains all fields needed to call `ZonePortal.depositEncrypted`.
+/// Contains all fields needed to call `ZonePortal.deposit`.
 pub struct EncryptedDepositArgs {
     /// Ephemeral public key x-coordinate.
     pub eph_pub_x: B256,
@@ -396,7 +396,7 @@ pub fn decrypt_authenticated_withdrawal(
     Some((sender, tx_hash))
 }
 
-/// Encrypt deposit data for `ZonePortal.depositEncrypted`.
+/// Encrypt deposit data for `ZonePortal.deposit`.
 ///
 /// This is the depositor-side counterpart of [`decrypt_deposit`] — it performs
 /// ECIES encryption of `(to, memo)` to the sequencer's public key:

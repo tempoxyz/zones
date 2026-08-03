@@ -696,11 +696,11 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     };
 
     let receipt = portal
-        .depositEncrypted(token, amount, key_index, payload, tempo_refund_recipient)
+        .deposit(token, amount, key_index, payload, tempo_refund_recipient)
         .send_sync()
         .await
-        .wrap_err("depositEncrypted send failed")?;
-    check(&receipt, "depositEncrypted")?;
+        .wrap_err("deposit send failed")?;
+    check(&receipt, "deposit")?;
     println!(
         "  Encrypted deposit sent (block {})",
         receipt.block_number.unwrap_or(0),

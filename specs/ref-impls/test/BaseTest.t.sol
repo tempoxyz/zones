@@ -289,7 +289,7 @@ contract BaseTest is Test {
                 bytes32((uint256(uint64(block.number)) << 8) | uint256(0x02))
             );
         }
-        return portal.depositEncrypted(
+        return portal.deposit(
             token,
             amount,
             portal.encryptionKeyCount() - 1,
