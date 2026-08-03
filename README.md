@@ -108,7 +108,7 @@ The sequencer includes the withdrawal in the next batch submission to L1 and pro
 
 ### Querying the Redacted RPC
 
-Zone balances are private by default. Every RPC request must include a signed authorization token that proves you control the querying account.
+Zone balances are private by default. RPC requests must include a signed authorization token that proves you control the querying account, except `eth_sendRawTransaction`, whose signed transaction already authenticates the sender.
 
 `just zone-auth-token` reads `generated/<name>/zone.json` and signs a short-lived auth token:
 

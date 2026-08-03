@@ -36,6 +36,8 @@ use crate::{
     ws::handle_ws_upgrade,
 };
 
+const UNAUTHENTICATED_METHODS: &[&str] = &["eth_sendRawTransaction"];
+
 /// Maximum number of requests in a single JSON-RPC batch.
 pub(crate) const MAX_BATCH_SIZE: usize = 100;
 
@@ -175,6 +177,17 @@ async fn handle_rpc(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let body_str = match std::str::from_utf8(&body) {
+        Ok(s) => s,
+        Err(_) => {
+            return (StatusCode::BAD_REQUEST, "invalid UTF-8").into_response();
+        }
+    };
+
+    if let Some(result) = process_unauthenticated_rpc_text(body_str, state.api.as_ref()).await {
+        return result.into_response();
+    }
+
     let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
@@ -186,16 +199,52 @@ async fn handle_rpc(
         }
     };
 
-    let body_str = match std::str::from_utf8(&body) {
-        Ok(s) => s,
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "invalid UTF-8").into_response();
-        }
-    };
-
     process_rpc_text(body_str, &auth, state.api.as_ref())
         .await
         .into_response()
+}
+
+/// Dispatch a request without RPC authentication when every method in the
+/// payload is explicitly allowed to rely on its own cryptographic signature.
+async fn process_unauthenticated_rpc_text(text: &str, api: &dyn ZoneRpcApi) -> Option<RpcResult> {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with('[') {
+        let requests = serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed).ok()?;
+        if requests.is_empty()
+            || requests.len() > MAX_BATCH_SIZE
+            || requests
+                .iter()
+                .any(|req| !UNAUTHENTICATED_METHODS.contains(&req.method.as_str()))
+        {
+            return None;
+        }
+
+        let mut responses = Vec::with_capacity(requests.len());
+        for req in &requests {
+            responses.push(dispatch_unauthenticated_request(req, api).await);
+        }
+        Some(RpcResult::Batch(responses))
+    } else {
+        let request = serde_json::from_str::<JsonRpcRequest>(trimmed).ok()?;
+        if !UNAUTHENTICATED_METHODS.contains(&request.method.as_str()) {
+            return None;
+        }
+        Some(RpcResult::Single(
+            dispatch_unauthenticated_request(&request, api).await,
+        ))
+    }
+}
+
+async fn dispatch_unauthenticated_request(
+    req: &JsonRpcRequest,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let raw = req
+        .params
+        .as_deref()
+        .map(|params| params.get())
+        .unwrap_or("[]");
+    handlers::handle_send_raw_transaction(req.id.clone(), raw, api).await
 }
 
 /// Authenticate the request using the `X-Authorization-Token` header.
@@ -298,7 +347,7 @@ pub(crate) fn now_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::authenticate_token;
+    use super::{RpcResult, authenticate_token, process_unauthenticated_rpc_text};
     use crate::{
         RedactedRpcConfig,
         auth::build_token_fields,
@@ -385,7 +434,7 @@ mod tests {
         stub!(transaction_receipt, _a: alloy_primitives::B256, _c: crate::auth::AuthContext);
         stub!(call, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: crate::auth::AuthContext);
         stub!(estimate_gas, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: crate::auth::AuthContext);
-        stub!(send_raw_transaction, _a: Bytes, _c: crate::auth::AuthContext);
+        stub!(send_raw_transaction, _a: Bytes);
         stub!(send_raw_transaction_sync, _a: Bytes, _c: crate::auth::AuthContext);
         stub!(fill_transaction, _a: tempo_alloy::rpc::TempoTransactionRequest, _c: crate::auth::AuthContext);
         stub!(get_logs, _a: alloy_rpc_types_eth::Filter, _c: crate::auth::AuthContext);
@@ -410,6 +459,48 @@ mod tests {
             max_auth_token_validity: crate::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: PORTAL,
         }
+    }
+
+    #[tokio::test]
+    async fn send_raw_transaction_does_not_require_rpc_authentication() {
+        let api = TestApi {
+            key_infos: Mutex::new(HashMap::new()),
+        };
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_sendRawTransaction",
+            "params": ["0x01"],
+            "id": 1
+        })
+        .to_string();
+
+        let result = process_unauthenticated_rpc_text(&request, &api)
+            .await
+            .expect("signed transaction submission should bypass RPC auth");
+        let RpcResult::Single(response) = result else {
+            panic!("expected a single response");
+        };
+        assert_eq!(response.id, serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn private_method_still_requires_rpc_authentication() {
+        let api = TestApi {
+            key_infos: Mutex::new(HashMap::new()),
+        };
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_getBalance",
+            "params": [Address::ZERO, "latest"],
+            "id": 1
+        })
+        .to_string();
+
+        assert!(
+            process_unauthenticated_rpc_text(&request, &api)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]

@@ -128,9 +128,9 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_sendRawTransaction(data)` — submits a signed transaction to the pool.
     ///
-    /// Verifies that the recovered tx sender matches the authenticated account;
-    /// rejects with `-32003` on mismatch.
-    fn send_raw_transaction(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_>;
+    /// This method does not require an authorization token: the transaction
+    /// signature itself authenticates the sender.
+    fn send_raw_transaction(&self, data: Bytes) -> BoxFut<'_>;
 
     /// `eth_sendRawTransactionSync(data)` — submits a signed transaction and
     /// waits for inclusion, returning the receipt.
@@ -318,7 +318,7 @@ pub async fn dispatch(
 
         // Transaction preparation & submission
         "eth_fillTransaction" => handle_fill_transaction(id, raw, auth, api).await,
-        "eth_sendRawTransaction" => handle_send_raw_transaction(id, raw, auth, api).await,
+        "eth_sendRawTransaction" => handle_send_raw_transaction(id, raw, api).await,
         "eth_sendRawTransactionSync" => handle_send_raw_transaction_sync(id, raw, auth, api).await,
 
         // Log & filter queries
@@ -529,11 +529,10 @@ async fn handle_fill_transaction(
     )
 }
 
-/// Handle `eth_sendRawTransaction`. Sender verification is delegated to the API impl.
-async fn handle_send_raw_transaction(
+/// Handle `eth_sendRawTransaction`.
+pub(crate) async fn handle_send_raw_transaction(
     id: Value,
     raw: &str,
-    auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
     let (data,) = match parse_params::<(Bytes,)>(raw, &id, "expected [data]") {
@@ -544,7 +543,7 @@ async fn handle_send_raw_transaction(
     api_result(
         id,
         "eth_sendRawTransaction",
-        api.send_raw_transaction(data, auth.clone()).await,
+        api.send_raw_transaction(data).await,
     )
 }
 
@@ -782,7 +781,7 @@ mod tests {
         stub!(transaction_receipt, _hash: B256, _auth: AuthContext);
         stub!(call, _request: TempoTransactionRequest, _block: Option<BlockId>, _state_override: Option<StateOverride>, _auth: AuthContext);
         stub!(estimate_gas, _request: TempoTransactionRequest, _block: Option<BlockId>, _state_override: Option<StateOverride>, _auth: AuthContext);
-        stub!(send_raw_transaction, _data: Bytes, _auth: AuthContext);
+        stub!(send_raw_transaction, _data: Bytes);
         stub!(send_raw_transaction_sync, _data: Bytes, _auth: AuthContext);
         stub!(fill_transaction, _request: TempoTransactionRequest, _auth: AuthContext);
         stub!(get_logs, _filter: Filter, _auth: AuthContext);
