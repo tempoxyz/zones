@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 
 # Run the complete private-Zone journey. Provisioning, fixture deployment,
-# admission seeding, approvals, and private-RPC authentication are deliberately
+# admission seeding, approvals, and redacted-RPC authentication are deliberately
 # outside the scenario measurement.
 set -Eeuo pipefail
 
@@ -64,7 +64,7 @@ ZONES_BENCH_EARN_ROUTER="${ZONES_BENCH_EARN_ROUTER:-${ZONES_BENCH_GATEWAY:-}}"
 ZONES_BENCH_EARN_VAULT="${ZONES_BENCH_EARN_VAULT:-${ZONES_BENCH_VAULT_ADAPTER:-}}"
 ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER="${ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER:-${ZONES_BENCH_REWARDS:-}}"
 
-for name in L1_RPC_URL L1_WS_RPC_URL ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL \
+for name in L1_RPC_URL L1_WS_RPC_URL ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_REDACTED_RPC_URL \
     L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN ZONES_BENCH_DLUSD ZONES_BENCH_PATHUSD ZONES_BENCH_EARN_TOKEN \
     ZONES_BENCH_EARN_ROUTER ZONES_BENCH_BRIDGE_WALLET ZONES_BENCH_VAULT ZONES_BENCH_ENGINE \
     ZONES_BENCH_EARN_VAULT ZONES_BENCH_EARN_CONTRIBUTION_CONTROLLER ZONES_BENCH_SEED \
@@ -313,7 +313,7 @@ ZONES_BENCH_REWARD_FIRST_REDEEM_AMOUNT="$reward_first_redeem_amount"
 ZONES_BENCH_REWARD_SECOND_REDEEM_AMOUNT="$reward_second_redeem_amount"
 ZONES_BENCH_SWAPPED_REDEMPTION_ONRAMP_PER_ACCOUNT="$swapped_redemption_onramp_per_account"
 ZONES_BENCH_SWAPPED_REDEMPTION_POSITION_PER_ACCOUNT="$swapped_redemption_position_per_account"
-export L1_RPC_URL L1_WS_RPC_URL ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL
+export L1_RPC_URL L1_WS_RPC_URL ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_REDACTED_RPC_URL
 export L1_PORTAL_ADDRESS ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_MNEMONIC
 export ZONES_BENCH_ACCOUNT_START ZONES_BENCH_ACCOUNT_END ZONES_BENCH_ACCOUNTS
 export ZONES_BENCH_CONTROL_ACCOUNT_INDEX ZONES_BENCH_CONTROL_ACCOUNT_END
@@ -404,7 +404,7 @@ verify_reward_zone_balances() {
                     params: [{from: $from, to: $to, data: $data}, "latest"]
                 }' > "$request_file"
             {
-                printf 'url = "%s"\n' "$ZONE_PRIVATE_RPC_URL"
+                printf 'url = "%s"\n' "$ZONE_REDACTED_RPC_URL"
                 printf 'request = "POST"\n'
                 printf 'header = "Content-Type: application/json"\n'
                 printf 'header = "X-Authorization-Token: %s"\n' "$authorization"

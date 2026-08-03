@@ -51,7 +51,7 @@ just send-deposit 1000000
 just check-balance "$ADDR"
 ```
 
-See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
+See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and redacted RPC usage.
 
 For a fully local development stack, use Foundry 1.8 or newer, or a nightly
 build from July 11, 2026 or later. Run Anvil in Tempo mode and point the dev
@@ -323,20 +323,20 @@ just demo-swap-and-deposit my-zone 100000000 0
 
 This is a same-zone demo only. The command creates its own temporary tokens and DEX liquidity automatically, so you do not need to pre-create assets or seed the order book yourself.
 
-#### Query the Private RPC
+#### Query the Redacted RPC
 
-The private RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own scoped state.
+The redacted RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own scoped state. The operator RPC (port 8545) is restricted to the zone operator and exposes full state plus administrative methods.
 
 Use the built-in helper if you only want a quick balance check:
 
 ```bash
-just check-balance-private my-zone
+just check-balance-redacted my-zone
 ```
 
 For direct RPC calls, `just zone-auth-token` generates a 10-minute token from `generated/<name>/zone.json`, and `cast rpc` forwards it with `X-Authorization-Token`.
 HTTP header names are case-insensitive, so `x-authorization-token` works too, but the examples here use the canonical casing from the spec.
 
-One-liner to verify the private endpoint and inspect the authenticated account:
+One-liner to verify the redacted endpoint and inspect the authenticated account:
 
 ```bash
 cast rpc zone_getAuthorizationTokenInfo \
@@ -538,7 +538,6 @@ graph TB
     subgraph L2["Zone L2 Node"]
         direction TB
         Tasks["Sequencer Tasks<br/>• L1 subscriber (deposit backfill + live)<br/>• Zone engine (L1-driven block building)<br/>• Zone monitor (batch submission to L1)<br/>• Withdrawal processor (L1 queue drain)"]
-        Predeploys["Predeploys<br/>0x1c00…0000 TempoState<br/>0x1c00…0001 ZoneInbox<br/>0x1c00…0002 ZoneOutbox<br/>0x1c00…0003 ZoneConfig<br/>0x1c00…0004 TempoStateReader<br/>0x20C0…0000 pathUSD"]
     end
 
     Portal -- "WSS subscription<br/>(deposits, headers)" --> Tasks
@@ -609,7 +608,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 |------|---------|-------------|
 | `--l1.rpc-url` | (required) | Certified Tempo follower WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
-| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `421700000 + (zone_id % 1002610000)` (mainnet) or `1424310000 + (zone_id % 723173648)` (testnet). |
+| `--zone.id` | 0 | Zone ID from ZoneFactory (for redacted RPC auth). The zone's chain ID is derived as `421700000 + (zone_id % 1002610000)` (mainnet) or `1424310000 + (zone_id % 723173648)` (testnet). |
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled; conflicts with `--sequencer-key-file` |
 | `--sequencer-key-file` | (optional) | File or FIFO containing the sequencer private key; avoids exposing it in process arguments |
@@ -620,8 +619,8 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `--withdrawal-max-batch-gas` | 10000000 | Maximum planned gas for one `processWithdrawals` transaction (up to 20000000); an oversized FIFO head is still sent alone |
 | `--withdrawal-max-in-flight-batches` | 8 | Maximum ordered withdrawal transactions kept concurrently in flight |
 | `--http.port` | 8546 | HTTP JSON-RPC port |
-| `--private-rpc.port` | 8544 | Private RPC server port |
-| `--private-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
+| `--redacted-rpc.port` | 8544 | Redacted RPC server port |
+| `--redacted-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the redacted RPC accepts, in seconds. The effective limit is capped at 30 days. |
 
 ### Environment Variables
 
@@ -634,7 +633,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
 | `ROUTER_BOUNCEBACK_RECIPIENT` | No | Optional controlled burner/stealth address for `demo-swap-and-deposit` routed deposit refunds |
-| `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
+| `REDACTED_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the redacted RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `WITHDRAWAL_MAX_BATCH_GAS` | No | Override the per-transaction withdrawal gas budget (maximum 20000000) |
 | `WITHDRAWAL_MAX_IN_FLIGHT_BATCHES` | No | Override the maximum number of ordered withdrawal transactions in flight |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
@@ -661,8 +660,8 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 | `just send-withdrawal [amount] [to] [token] [memo] [gas-limit] [fallback-recipient] [data] [reveal-to] [rpc]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just demo-swap-and-deposit <name> [amount] [tick] [rpc]` | Self-contained same-zone router demo: create tokens, seed DEX liquidity, swap on L1, deposit output back into the zone; set `ROUTER_BOUNCEBACK_RECIPIENT` for routed deposit refunds |
 | `just check-balance <addr> [token] [rpc]` | Check token balance on the zone |
-| `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
-| `just check-balance-private <name> [token] [rpc]` | Check balance via the private RPC (auto-generates auth token) |
+| `just zone-auth-token <name>` | Generate a signed redacted RPC auth token (10 min TTL) |
+| `just check-balance-redacted <name> [token] [rpc]` | Check balance via the redacted RPC (auto-generates auth token) |
 | `just zone-info <id-or-portal>` | Fetch zone metadata from ZoneFactory |
 | `just demo-blacklist [amount] [rpc] [zone-dir]` | End-to-end TIP-20 + TIP-403 blacklist lifecycle demo |
 | `just spam-deposits [total] [per-block] [amount] [encrypted] [token] [lead-time]` | Send many deposit transactions to measure portal throughput |

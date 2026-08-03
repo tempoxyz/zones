@@ -118,7 +118,6 @@ crate::sol! {
         function processedDepositNumber() external view returns (uint64);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
-        function config() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
         function claimRefund(address token) external returns (uint128 amount);
 

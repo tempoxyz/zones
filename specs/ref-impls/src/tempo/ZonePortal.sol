@@ -56,10 +56,10 @@ contract ZonePortal is IZonePortal {
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
     /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
-    /// @dev Under T9, processing 640 encrypted deposits uses 185,349,414 of the
-    ///      250,000,000 gas available to `advanceTempo`. This leaves 64,650,586 gas
-    ///      (25.86%) for fixed overhead and gas-cost variance.
-    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 640;
+    /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
+    ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
+    ///      below the buffered 200,000,000 gas ceiling.
+    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 230;
 
     /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
     ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
@@ -140,7 +140,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
-    /// @notice Public RPC endpoint for the zone
+    /// @notice Operator RPC endpoint for the zone
     string public rpcUrl;
 
     /// @notice Pending admin for two-step admin transfer
@@ -174,7 +174,7 @@ contract ZonePortal is IZonePortal {
     uint240 private _enforcementModesPadding;
 
     /// @notice Maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
-    /// @dev Defaults to zero and is read from finalized Tempo state by ZoneConfig.
+    /// @dev Defaults to zero and is read from finalized Tempo state by zone system contracts.
     uint128 public maxTempoGasRate;
 
     /// @notice Individual sequencer address of the active block-producing leader.
@@ -572,7 +572,7 @@ contract ZonePortal is IZonePortal {
         emit TokenEnabled(_token, name, symbol, currency);
     }
 
-    /// @notice Update the zone's public RPC endpoint.
+    /// @notice Update the zone's operator RPC endpoint.
     /// @param _rpcUrl The new RPC url
     function setRpcUrl(string calldata _rpcUrl) external onlySequencer {
         rpcUrl = _rpcUrl;

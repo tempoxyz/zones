@@ -188,7 +188,7 @@ contract WithdrawalQueueSymbolic is Test {
 
 /// @title ZoneOutbox symbolic properties
 /// @notice Symbolic checks for the zone→Tempo withdrawal fee arithmetic. Inherits ZoneOutboxTest
-///         to reuse its concrete setUp (real ZoneOutbox + ZoneConfig, `sequencer` authorized).
+///         to reuse its concrete setUp (real ZoneOutbox, `sequencer` authorized).
 contract ZoneOutboxSymbolic is ZoneOutboxTest {
 
     /// @notice The withdrawal fee `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate` never
@@ -203,7 +203,7 @@ contract ZoneOutboxSymbolic is ZoneOutboxTest {
     function check_withdrawalFeeNeverOverflows(uint64 gasLimit) external {
         vm.assume(gasLimit <= outbox.MAX_WITHDRAWAL_GAS_LIMIT());
 
-        uint128 cap = config.maxTempoGasRate();
+        uint128 cap = TEST_MAX_TEMPO_GAS_RATE;
         vm.prank(sequencer);
         outbox.setTempoGasRate(cap);
 
@@ -216,7 +216,7 @@ contract ZoneOutboxSymbolic is ZoneOutboxTest {
     function check_tempoGasRateAlwaysWithinCap(uint128 rate) external {
         vm.prank(sequencer);
         try outbox.setTempoGasRate(rate) {
-            assertLe(uint256(outbox.tempoGasRate()), uint256(config.maxTempoGasRate()));
+            assertLe(uint256(outbox.tempoGasRate()), uint256(TEST_MAX_TEMPO_GAS_RATE));
         } catch { }
     }
 

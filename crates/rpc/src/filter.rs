@@ -1,4 +1,4 @@
-//! Privacy-enforced log filtering for the zone's private RPC.
+//! Privacy-enforced log filtering for the zone's redacted RPC.
 //!
 //! Only whitelisted TIP-20 event logs are returned to callers, and only when
 //! the caller's address appears in an eligible indexed topic position for that

@@ -34,7 +34,7 @@ pub enum Role {
     Follower,
     /// Follows `Leader`s blocks without joining the on-chain quorum.
     ///
-    /// A hot standby for public RPC: it imports and serves the same chain and forwards
+    /// A hot standby for operator RPC: it imports and serves the same chain and forwards
     /// transactions to the leader, but never signs a settlement attestation and holds no
     /// individual secp256k1 key. That keeps the leader and the quorum followers off the
     /// internet without changing the quorum.
@@ -1528,7 +1528,7 @@ mod tests {
                 (1, "leader", "127.0.0.1:9200", false),
                 (2, "follower-a", "127.0.0.1:9201", false),
                 (3, "follower-b", "127.0.0.1:9202", false),
-                (4, "public-rpc", "127.0.0.1:9203", true),
+                (4, "operator-rpc", "127.0.0.1:9203", true),
             ],
         );
         let manifest = ZoneManifest::parse(&input).unwrap();
@@ -1591,8 +1591,8 @@ mod tests {
             &[
                 (1, "leader", "127.0.0.1:9200", false),
                 (2, "follower", "127.0.0.1:9201", false),
-                (3, "public-rpc-a", "127.0.0.1:9202", true),
-                (4, "public-rpc-b", "127.0.0.1:9203", true),
+                (3, "operator-rpc-a", "127.0.0.1:9202", true),
+                (4, "operator-rpc-b", "127.0.0.1:9203", true),
             ],
         );
         assert!(matches!(
@@ -1638,7 +1638,7 @@ mod tests {
                 (1, "leader", "127.0.0.1:9200", false),
                 (2, "follower-a", "127.0.0.1:9201", false),
                 (3, "follower-b", "127.0.0.1:9202", false),
-                (4, "public-rpc", "127.0.0.1:9203", true),
+                (4, "operator-rpc", "127.0.0.1:9203", true),
             ],
         );
         standby_with_address.push_str(&format!(
@@ -1647,7 +1647,7 @@ mod tests {
         ));
         assert!(matches!(
             ZoneManifest::parse(&standby_with_address),
-            Err(ManifestError::RpcOnlySecp256k1Address(node)) if node == "public-rpc"
+            Err(ManifestError::RpcOnlySecp256k1Address(node)) if node == "operator-rpc"
         ));
     }
 
@@ -1657,7 +1657,7 @@ mod tests {
             (1, "leader", "127.0.0.1:9200", false),
             (2, "follower-a", "127.0.0.1:9201", false),
             (3, "follower-b", "127.0.0.1:9202", false),
-            (4, "public-rpc", "127.0.0.1:9203", true),
+            (4, "operator-rpc", "127.0.0.1:9203", true),
         ];
         let baseline = ZoneManifest::parse(&manifest_with_rpc_only(1, &nodes))
             .unwrap()
@@ -1678,7 +1678,7 @@ mod tests {
             (1, "leader", "127.0.0.1:9200", false),
             (2, "follower-a", "follower-a.zone.local:9300", false),
             (3, "follower-b", "127.0.0.1:9202", false),
-            (4, "public-rpc", "127.0.0.1:9203", true),
+            (4, "operator-rpc", "127.0.0.1:9203", true),
         ];
         assert_eq!(
             ZoneManifest::parse(&manifest_with_rpc_only(1, &moved))
@@ -1692,7 +1692,7 @@ mod tests {
             (1, "leader", "127.0.0.1:9200", false),
             (2, "follower-a", "127.0.0.1:9201", false),
             (3, "follower-b", "127.0.0.1:9202", false),
-            (4, "public-rpc", "127.0.0.1:9203", false),
+            (4, "operator-rpc", "127.0.0.1:9203", false),
         ];
         assert_ne!(
             ZoneManifest::parse(&manifest_with_rpc_only(1, &promoted))
@@ -1729,7 +1729,7 @@ mod tests {
                 (1, "leader", "127.0.0.1:9200", false),
                 (2, "follower-a", "127.0.0.1:9201", false),
                 (3, "follower-b", "127.0.0.1:9202", false),
-                (4, "public-rpc", "127.0.0.1:9203", true),
+                (4, "operator-rpc", "127.0.0.1:9203", true),
             ],
         ))
         .unwrap();
@@ -1747,7 +1747,7 @@ mod tests {
                 Some(secp256k1_address(4).parse().unwrap()),
                 None
             ),
-            Err(ManifestError::LocalSecp256k1KeyUnexpected(node)) if node == "public-rpc"
+            Err(ManifestError::LocalSecp256k1KeyUnexpected(node)) if node == "operator-rpc"
         ));
     }
 

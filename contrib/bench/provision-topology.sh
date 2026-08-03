@@ -27,7 +27,6 @@ readonly ZONE_FACTORY="0x5aF2000000000000000000000000000000000000"
 readonly PATH_USD="0x20C0000000000000000000000000000000000000"
 readonly DLUSD="0x20C0000000000000000000000000000000000001"
 readonly TEMPO_STATE="0x1c00000000000000000000000000000000000000"
-readonly ZONE_CONFIG="0x1c00000000000000000000000000000000000003"
 readonly EIP2935_HISTORY_STORAGE="0x0000F90827F1C53a10cb7A02335B175320002935"
 readonly LOCALNET_SIGNING_SECRET="tempo-localnet-signing-key-secret"
 
@@ -291,90 +290,18 @@ derive_address() {
     cast wallet address --mnemonic "$mnemonic_file" --mnemonic-index "$index"
 }
 
-wait_for_zone_configuration() {
-    local zone_rpc="$1"
-    local anchor_block="$2"
-    local expected_sequencer="$3"
-    local initial_token="$4"
-    local timeout="$5"
-    local deadline=$((SECONDS + timeout)) finalized is_sequencer enabled
-
-    while (( SECONDS < deadline )); do
-        finalized="$(cast call "$TEMPO_STATE" 'tempoBlockNumber()(uint64)' \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        is_sequencer="$(cast call "$ZONE_CONFIG" 'isSequencer(address)(bool)' "$expected_sequencer" \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        enabled="$(cast call "$ZONE_CONFIG" 'isEnabledToken(address)(bool)' "$initial_token" \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-
-        if [[ "$finalized" =~ ^[0-9]+$ ]] \
-            && (( finalized > anchor_block )) \
-            && [[ "$is_sequencer" == "true" ]] \
-            && [[ "$enabled" == "true" ]]; then
-            return 0
-        fi
-        sleep 1
-    done
-
-    die "timed out waiting for the Zone to ingest its portal configuration past L1 anchor \
-$anchor_block (finalized=${finalized:-unavailable}, \
-expected_sequencer=${expected_sequencer}, is_sequencer=${is_sequencer:-unavailable}, \
-token=${initial_token}, enabled=${enabled:-unavailable})"
-}
-
 wait_for_zone_enabled_token() {
-    local zone_rpc="$1"
-    local token="$2"
-    local timeout="$3"
-    local deadline=$((SECONDS + timeout)) enabled
+    local zone_rpc="$1" token="$2" timeout="$3"
+    local deadline=$((SECONDS + timeout)) code
     while (( SECONDS < deadline )); do
-        enabled="$(cast call "$ZONE_CONFIG" 'isEnabledToken(address)(bool)' "$token" \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        [[ "$enabled" == "true" ]] && return 0
+        code="$(rpc "$zone_rpc" eth_getCode "[\"$token\",\"latest\"]" 2>/dev/null || true)"
+        [[ -n "$code" && "$code" != "0x" ]] && return 0
         sleep 1
     done
-    die "timed out waiting for Zone to enable token $token"
+    die "timed out waiting for Zone to deploy enabled token $token"
 }
 
-wait_for_neobank_enforcement() {
-    local zone_rpc="$1"
-    local timeout="$2"
-    local earn_router="$3"
-    shift 3
-    local -a allowed_accounts=("$@")
-    local deadline=$((SECONDS + timeout))
-    local access_enforced gateway_open router_allowed account account_allowed
-    local all_accounts_allowed
 
-    while (( SECONDS < deadline )); do
-        access_enforced="$(cast call "$ZONE_CONFIG" 'isAccessEnforced()(bool)' \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        gateway_open="$(cast call "$ZONE_CONFIG" 'isGatewayOpen()(bool)' \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-        router_allowed="$(cast call "$ZONE_CONFIG" 'isZoneGateway(address)(bool)' "$earn_router" \
-            --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-
-        if [[ "$access_enforced" == "true" && "$gateway_open" == "false" &&
-            "$router_allowed" == "true" ]]; then
-            all_accounts_allowed=true
-            for account in "${allowed_accounts[@]}"; do
-                account_allowed="$(cast call "$ZONE_CONFIG" 'isAllowedAccount(address)(bool)' "$account" \
-                    --rpc-url "$zone_rpc" 2>/dev/null | awk '{print $1}' || true)"
-                if [[ "$account_allowed" != "true" ]]; then
-                    all_accounts_allowed=false
-                    break
-                fi
-            done
-            [[ "$all_accounts_allowed" == "true" ]] && return 0
-        fi
-        sleep 1
-    done
-
-    die "timed out waiting for the Zone to ingest neobank enforcement \
-(access_enforced=${access_enforced:-unavailable}, gateway_open=${gateway_open:-unavailable}, \
-earn_router=${earn_router}, router_allowed=${router_allowed:-unavailable}, \
-last_account=${account:-unavailable}, account_allowed=${account_allowed:-unavailable})"
-}
 
 verify_neobank_token_topology() {
     local l1_rpc="$1"
@@ -1104,14 +1031,13 @@ provision_up() {
         --chain "$zone_genesis" --datadir "$zone_db" \
         --l1.rpc-url ws://127.0.0.1:8545 \
         --l1.portal-address "$portal" \
-        --l1.genesis-block-number "$anchor_block" \
         --zone.id "$zone_id" \
         --http --http.addr 127.0.0.1 --http.port 8546 \
         --http.api eth,net,web3,txpool \
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
         --ws.api eth,net,web3,txpool \
         --metrics 127.0.0.1:9201 \
-        --private-rpc.port 8544 \
+        --redacted-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
         --withdrawal-poll-interval-secs "$withdrawal_poll_interval_secs" \
         --withdrawal-max-batch-gas "$withdrawal_max_batch_gas" \
@@ -1123,15 +1049,11 @@ provision_up() {
     unset SEQUENCER_KEY sequencer_key owner_key admin_key
 
     local zone_rpc="http://127.0.0.1:8546"
-    local zone_private_rpc="http://127.0.0.1:8544"
+    local zone_redacted_rpc="http://127.0.0.1:8544"
     wait_for_rpc "$zone_rpc" "Zone" "$zone_timeout"
     wait_for_chain_advance "$zone_rpc" "Zone" "$zone_timeout"
-    wait_for_zone_configuration "$zone_rpc" "$anchor_block" "$sequencer_address" "$zone_token" "$zone_timeout"
     wait_for_zone_enabled_token "$zone_rpc" "$(jq -er '.earnToken' "$fixture_metadata")" "$zone_timeout"
     neobank_allowed_accounts+=("$(jq -er '.bridgeWallet' "$fixture_metadata")")
-    wait_for_neobank_enforcement \
-        "$zone_rpc" "$zone_timeout" "$(jq -er '.earnRouter' "$fixture_metadata")" \
-        "${neobank_allowed_accounts[@]}"
     local queried_zone_chain_id
     queried_zone_chain_id="$(hex_to_dec "$(rpc "$zone_rpc" eth_chainId)")"
     [[ "$queried_zone_chain_id" == "$zone_chain_id" ]] \
@@ -1146,7 +1068,7 @@ provision_up() {
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
         ZONE_WS_RPC_URL "ws://127.0.0.1:8546" \
-        ZONE_PRIVATE_RPC_URL "$zone_private_rpc" \
+        ZONE_REDACTED_RPC_URL "$zone_redacted_rpc" \
         ZONES_BENCH_TOKEN "$zone_token" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \

@@ -22,9 +22,7 @@ use tempo_precompiles::{
 use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{TempoState as TempoStateAbi, TempoStateError};
-use zone_primitives::constants::{
-    TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
-};
+use zone_primitives::constants::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 alloy_sol_types::sol! {
     error Error(string);
@@ -84,10 +82,7 @@ impl TempoState {
     }
 
     fn is_system_caller(caller: Address) -> bool {
-        matches!(
-            caller,
-            ZONE_INBOX_ADDRESS | ZONE_OUTBOX_ADDRESS | ZONE_CONFIG_ADDRESS
-        )
+        matches!(caller, ZONE_INBOX_ADDRESS | ZONE_OUTBOX_ADDRESS)
     }
 
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
@@ -597,7 +592,7 @@ mod tests {
                 )?
                 .is_revert()
         );
-        let system = harness.call(ZONE_CONFIG_ADDRESS, calldata, true)?;
+        let system = harness.call(ZONE_INBOX_ADDRESS, calldata, true)?;
         assert_eq!(
             TempoStateAbi::readTempoStorageSlotCall::abi_decode_returns(&system.bytes)?,
             expected

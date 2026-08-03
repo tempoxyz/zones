@@ -3,6 +3,9 @@ name: Sync Tempo Zone runtimes
 on:
   push:
     branches: [main]
+    paths:
+      - "specs/ref-impls/**"
+      - ".github/workflows/sync-tempo-zone-runtimes.yml"
   workflow_dispatch:
 
 concurrency:
@@ -12,11 +15,10 @@ concurrency:
 permissions: {}
 
 jobs:
-  sync:
-    name: Sync Zone runtimes to Tempo
-    if: github.repository == 'tempoxyz/zones'
+  request:
+    name: Request AI Zone runtime hardfork sync
+    if: github.repository == 'tempoxyz/zones' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    environment: release-pr
     permissions: {}
     steps:
       - name: Checkout Zones
@@ -36,107 +38,52 @@ jobs:
         run: |
           forge inspect ZonePortal deployedBytecode > "$RUNNER_TEMP/ZonePortal"
           forge inspect ZoneMessenger deployedBytecode > "$RUNNER_TEMP/ZoneMessenger"
+          forge inspect Verifier deployedBytecode > "$RUNNER_TEMP/Verifier"
 
-      - name: Mint Tempo pull request token
-        id: app-token
-        uses: actions/create-github-app-token@1b10c78c7865c340bc4f6099eb2f838309f1e8c3 # v3.1.1
-        with:
-          app-id: ${{ secrets.RELEASE_BOT_APP_ID }}
-          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
-          owner: tempoxyz
-          repositories: tempo
-          permission-contents: write
-          permission-pull-requests: write
-          permission-metadata: read
-
-      - name: Checkout Tempo
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0 # zizmor: ignore[artipacked]
-        with:
-          repository: tempoxyz/tempo
-          path: tempo
-          token: ${{ steps.app-token.outputs.token }}
-          persist-credentials: true
-
-      - name: Compare and update Zone runtimes
-        id: runtimes
-        run: |
-          python3 zones/scripts/sync-tempo-zone-runtimes.py \
-            --runtime "ZonePortal=$RUNNER_TEMP/ZonePortal" \
-            --runtime "ZoneMessenger=$RUNNER_TEMP/ZoneMessenger" \
-            --tempo-file tempo/crates/contracts/src/zones.rs \
-            --presto tempo/crates/chainspec/src/genesis/presto.json \
-            --zones-sha "$GITHUB_SHA" \
-            --github-output "$GITHUB_OUTPUT"
-
-      - name: Push update
-        if: steps.runtimes.outputs.changed == 'true'
-        working-directory: tempo
+      - name: Publish runtime sync event
         env:
-          BRANCH: automation/sync-zone-runtimes
+          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
+          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
+          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
           ZONES_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -B "$BRANCH"
-          git add crates/contracts/src/zones.rs
-          git commit -m "chore(contracts): sync Zone runtimes"
-          git push --force origin "HEAD:refs/heads/$BRANCH"
 
-      - name: Open or update Tempo pull request
-        id: pull-request
-        if: steps.runtimes.outputs.changed == 'true'
-        working-directory: tempo
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BASE_BRANCH: main
-          BRANCH: automation/sync-zone-runtimes
-          HARDFORK: ${{ steps.runtimes.outputs.hardfork }}
-          ZONES_SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          if [[ "$HARDFORK" == "true" ]]; then
-            title="[DRAFT] feat(hardfork): stage updated Zone runtimes"
-          else
-            title="chore(contracts): sync Zone runtimes"
-          fi
-          printf \
-            "Syncs the embedded ZonePortal and ZoneMessenger runtimes with [tempoxyz/zones@%s](https://github.com/tempoxyz/zones/commit/%s).\n" \
-            "$ZONES_SHA" "$ZONES_SHA" > "$RUNNER_TEMP/runtimes-pr-body.md"
+          install -m 0700 -d "$RUNNER_TEMP/events"
+          printf '%s' "$EVENTS_KEY" > "$RUNNER_TEMP/events/key.pem"
+          printf '%s' "$EVENTS_CERT" > "$RUNNER_TEMP/events/cert.pem"
+          payload=$(jq -cn \
+            --arg zones_sha "$ZONES_SHA" \
+            --arg run_url "$RUN_URL" \
+            '{
+              repository: "tempoxyz/zones",
+              event: "tempo_zone_runtime_sync_requested",
+              data: {
+                zones_sha: $zones_sha,
+                run_url: $run_url
+              }
+            }')
+          command -v python3 >/dev/null || {
+            echo "python3 is required to parse EVENTS_ARGS" >&2
+            exit 1
+          }
+          mapfile -t events_args < <(
+            python3 - "$EVENTS_ARGS" <<'PY'
+          import shlex
+          import sys
 
-          pr=$(gh pr list \
-            --repo tempoxyz/tempo \
-            --head "$BRANCH" \
-            --base "$BASE_BRANCH" \
-            --state open \
-            --json number \
-            --jq '.[0].number // empty')
-          if [[ -n "$pr" ]]; then
-            gh pr edit "$pr" \
-              --repo tempoxyz/tempo \
-              --title "$title" \
-              --body-file "$RUNNER_TEMP/runtimes-pr-body.md"
-            if [[ "$HARDFORK" == "true" ]]; then
-              gh pr ready "$pr" --repo tempoxyz/tempo --undo
-            fi
-            url=$(gh pr view "$pr" --repo tempoxyz/tempo --json url --jq .url)
-          else
-            draft=()
-            [[ "$HARDFORK" == "true" ]] && draft=(--draft)
-            url=$(gh pr create \
-              --repo tempoxyz/tempo \
-              --head "$BRANCH" \
-              --base "$BASE_BRANCH" \
-              --title "$title" \
-              --body-file "$RUNNER_TEMP/runtimes-pr-body.md" \
-              "${draft[@]}")
-          fi
-          echo "url=$url" >> "$GITHUB_OUTPUT"
-
-      - name: Require Tempo alignment
-        if: steps.runtimes.outputs.changed == 'true'
-        env:
-          PR_URL: ${{ steps.pull-request.outputs.url }}
-        run: |
-          echo "::error title=Tempo Zone runtimes are stale::Merge $PR_URL to align Tempo with Zones."
-          exit 1
+          for argument in shlex.split(sys.argv[1]):
+              print(argument)
+          PY
+          )
+          (( ${#events_args[@]} > 0 )) || {
+            echo "EVENTS_ARGS is empty" >&2
+            exit 1
+          }
+          curl --fail-with-body --silent --show-error \
+            --key "$RUNNER_TEMP/events/key.pem" \
+            --cert "$RUNNER_TEMP/events/cert.pem" \
+            "${events_args[@]}" \
+            -H "Content-Type: application/json" \
+            -d "$payload"
