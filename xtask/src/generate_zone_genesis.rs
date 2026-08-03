@@ -140,7 +140,7 @@ impl GenerateZoneGenesis {
         deploy_permit2(&mut evm)?;
 
         initialize_tip403_registry(&mut evm)?;
-        create_path_usd_token(&mut evm, self.admin)?;
+        create_path_usd_token(&mut evm)?;
         initialize_fee_manager(&mut evm, self.default_fee_token)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
@@ -481,7 +481,8 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 /// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
-fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -> eyre::Result<()> {
+/// ZoneInbox is the fixed token admin; the configured zone admin receives no token roles.
+fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,
@@ -496,11 +497,10 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
                 "pathUSD",
                 "USD",
                 Address::ZERO,
-                admin,
+                ZONE_INBOX_ADDRESS,
             )?;
 
             let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
-            token.grant_role_internal(admin, *ISSUER_ROLE)?;
             // Allow address(0) to mint (system transactions use sender=0)
             token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
             // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
@@ -510,7 +510,7 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
 
             // Set a large supply cap
             token.set_supply_cap(
-                admin,
+                ZONE_INBOX_ADDRESS,
                 ITIP20::setSupplyCapCall {
                     newSupplyCap: U256::from(u128::MAX),
                 },
