@@ -537,18 +537,22 @@ impl LeadershipSchedule {
             .cloned()
             .collect()
     }
-    /// Returns whether `ed25519_public_key` leads any retained transition.
+    /// Returns whether `ed25519_public_key` leads any retained portal transition or forced
+    /// recovery range.
     ///
     /// A transport-level acceptance check for live blocks: a lagging follower must keep
     /// accepting the rightful producer of in-between anchors after a later transition is
     /// observed. The exact per-anchor fence lives in the import path.
     pub fn is_scheduled_leader(&self, ed25519_public_key: &PublicKey) -> bool {
-        self.inner
-            .read()
-            .expect("poisoned")
+        let state = self.inner.read().expect("poisoned");
+        state
             .transitions
             .values()
             .any(|record| &record.leader == ed25519_public_key)
+            || state
+                .forced_recovery
+                .as_ref()
+                .is_some_and(|recovery| &recovery.leader == ed25519_public_key)
     }
 }
 
@@ -1318,6 +1322,27 @@ mod tests {
         assert!(schedule.forced_recovery().is_some());
         schedule.record_applied_anchor(60);
         assert!(schedule.forced_recovery().is_none());
+    }
+
+    #[test]
+    fn forced_recovery_leader_is_scheduled_until_recovery_completes() {
+        let recovery_leader = public_key(2);
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, public_key(1), 0));
+        schedule.record_applied_anchor(50);
+
+        assert!(!schedule.is_scheduled_leader(&recovery_leader));
+        schedule
+            .install_forced_recovery(8, recovery_leader.clone(), recovery_block_hash(), 51)
+            .unwrap();
+        assert!(schedule.is_scheduled_leader(&recovery_leader));
+
+        schedule
+            .publish(LeadershipState::new(8, public_key(3), 60))
+            .unwrap();
+        assert!(schedule.is_scheduled_leader(&recovery_leader));
+
+        schedule.record_applied_anchor(60);
+        assert!(!schedule.is_scheduled_leader(&recovery_leader));
     }
 
     #[test]
