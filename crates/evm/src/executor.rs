@@ -40,6 +40,13 @@ enum ZoneBlockPhase {
 
 impl ZoneBlockPhase {
     fn validate_transaction(self, tx: &TempoTxEnvelope) -> Result<Self, BlockExecutionError> {
+        if tx.subblock_proposer().is_some() {
+            return Err(BlockValidationError::msg(
+                "subblock transactions are not supported in zone blocks",
+            )
+            .into());
+        }
+
         let tx_kind = ZoneTransactionKind::classify(tx);
 
         match (self, tx_kind) {
@@ -175,6 +182,16 @@ where
     type Result = ZoneTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        if self
+            .inner
+            .ctx
+            .withdrawals
+            .as_ref()
+            .is_some_and(|withdrawals| !withdrawals.is_empty())
+        {
+            return Err(BlockValidationError::msg("withdrawals are not permitted").into());
+        }
+
         self.inner.apply_pre_execution_changes()
     }
 
@@ -251,7 +268,13 @@ mod tests {
         test_util::TIP20Setup,
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
-    use tempo_primitives::{TempoTxEnvelope, transaction::envelope::TEMPO_SYSTEM_TX_SIGNATURE};
+    use tempo_primitives::{
+        TempoTxEnvelope,
+        subblock::TEMPO_SUBBLOCK_NONCE_KEY_PREFIX,
+        transaction::{
+            Call, TempoSignature, TempoTransaction, envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+        },
+    };
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
     use tempo_zone_contracts::IZoneOutbox;
 
@@ -295,6 +318,24 @@ mod tests {
             },
             Signature::test_signature(),
         ))
+    }
+
+    fn subblock_tx() -> TempoTxEnvelope {
+        let mut nonce_key = [0u8; 32];
+        nonce_key[0] = TEMPO_SUBBLOCK_NONCE_KEY_PREFIX;
+
+        TempoTxEnvelope::AA(
+            TempoTransaction {
+                calls: vec![Call {
+                    to: Address::ZERO.into(),
+                    value: U256::ZERO,
+                    input: Bytes::new(),
+                }],
+                nonce_key: U256::from_be_bytes(nonce_key),
+                ..Default::default()
+            }
+            .into_signed(TempoSignature::from(Signature::test_signature())),
+        )
     }
 
     #[test]
@@ -383,6 +424,24 @@ mod tests {
                 .unwrap(),
             ZoneBlockPhase::Executing
         );
+    }
+
+    #[test]
+    fn subblock_transactions_are_rejected_in_every_block_phase() {
+        let subblock = subblock_tx();
+        assert!(subblock.subblock_proposer().is_some());
+
+        for phase in [
+            ZoneBlockPhase::AwaitingAdvanceTempo,
+            ZoneBlockPhase::Executing,
+            ZoneBlockPhase::WithdrawalsFinalized,
+        ] {
+            let error = phase.validate_transaction(&subblock).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "subblock transactions are not supported in zone blocks"
+            );
+        }
     }
 
     #[test]

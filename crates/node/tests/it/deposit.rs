@@ -1,11 +1,12 @@
 use alloy::{
-    primitives::{Address, B256, U256},
+    primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
 };
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::ZonePortal;
+use tempo_zone_contracts::{DepositPayload, ZonePortal};
+use zone_precompiles::ecies::encrypt_deposit;
 
 use crate::utils::{DEFAULT_POLL, ZoneTestNode, poll_until};
 
@@ -78,13 +79,33 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
         .await
         .unwrap_or(U256::ZERO);
 
-    // Execute deposit on L1
+    let (key, key_index) = portal.encryption_key().await?;
+    let y_parity = key
+        .normalized_y_parity()
+        .ok_or_else(|| eyre::eyre!("invalid portal encryption key parity"))?;
+    let encrypted = encrypt_deposit(
+        &key.x,
+        y_parity,
+        recipient,
+        B256::ZERO,
+        portal_address,
+        key_index,
+    )
+    .ok_or_else(|| eyre::eyre!("failed to encrypt deposit"))?;
+
+    // Execute encrypted deposit on L1
     let deposit_receipt = portal
         .deposit(
             l1_token_address,
-            recipient,
             deposit_amount,
-            B256::ZERO,
+            key_index,
+            DepositPayload {
+                ephemeralPubkeyX: encrypted.eph_pub_x,
+                ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
+                ciphertext: Bytes::from(encrypted.ciphertext),
+                nonce: encrypted.nonce.into(),
+                tag: encrypted.tag.into(),
+            },
             depositor,
         )
         .send()

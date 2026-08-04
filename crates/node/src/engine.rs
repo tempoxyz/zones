@@ -181,7 +181,7 @@ pub struct ZoneEngine {
     last_header: SealedHeader<TempoHeader>,
     /// Address that receives block fees.
     fee_recipient: Address,
-    /// Private keys bound to the Portal indexes used by encrypted deposits.
+    /// Private keys bound to the Portal indexes used by deposits.
     encryption_keys: EncryptionKeyRing,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
@@ -311,7 +311,7 @@ impl ZoneEngine {
         }
     }
 
-    /// Decrypt encrypted deposits and ABI-encode them into a [`PreparedL1Block`] ready for
+    /// Decrypt deposits and ABI-encode them into a [`PreparedL1Block`] ready for
     /// the payload builder. Mint-recipient policy is enforced during upstream TIP-20 execution
     /// against the finalized L1 anchor.
     async fn prepare_l1_block(&self, l1_block: L1BlockDeposits) -> eyre::Result<PreparedL1Block> {

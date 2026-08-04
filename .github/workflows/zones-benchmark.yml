@@ -233,7 +233,7 @@ jobs:
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
-          INPUT_TEMPO_REF: a55a6395567f529f03fa88bc457584fa8ed89af8
+          INPUT_TEMPO_REF: a80c1438241e9edd67d8a96c6c07d3697fcf77d8
           INPUT_TXGEN_REF: 072877b673f60b5f559f17da098296f1841b6732
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -516,30 +516,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - name: Resolve pinned Earn revision
-        id: earn-revision
-        run: |
-          set -euo pipefail
-          earn_revision="$(tr -d '\r\n' < contrib/bench/earn-revision.lock)"
-          [[ "$earn_revision" =~ ^[0-9a-f]{40}$ ]]
-          echo "sha=$earn_revision" >> "$GITHUB_OUTPUT"
-
       - name: Check out Earn contracts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
-          ref: ${{ steps.earn-revision.outputs.sha }}
+          ref: main
           path: earn
           ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
           persist-credentials: false
           submodules: true
-
-      - name: Verify pinned Earn revision
-        env:
-          EXPECTED_EARN_REVISION: ${{ steps.earn-revision.outputs.sha }}
-        run: |
-          set -euo pipefail
-          test "$(git -C earn rev-parse HEAD)" = "$EXPECTED_EARN_REVISION"
 
       - name: Prepare persistent topology control path
         env:

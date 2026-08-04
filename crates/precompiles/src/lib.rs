@@ -190,7 +190,7 @@ where
 {
     // Redacts TIP20 transfer from reverts that reveal user balances to the spender.
     let redact = |mut res: revm::precompile::PrecompileOutput| {
-        if res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
+        if res.is_revert() && res.bytes.starts_with(&TIP20InsufficientBalance::SELECTOR) {
             res.bytes = crate::ztip20::InsufficientBalance {}.abi_encode().into();
         }
         res

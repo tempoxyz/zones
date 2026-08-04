@@ -35,25 +35,12 @@ templates:
     call:
       to: "${L1_PORTAL_ADDRESS}"
       abi: ZonePortal
-      function: "deposit(address,address,uint128,bytes32,address)"
+      function: "deposit(address,uint128,uint256,(bytes32,uint8,bytes,bytes12,bytes16),address)"
       args:
         - "${ZONES_BENCH_TOKEN}"
-        - "${ZONES_BENCH_SEQUENCER_ADDRESS}"
         - ${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT}
-        - { random_bytes: 32 }
+        - { var: encryption.keyIndex }
+        - { var: encryption.encrypted }
         - { var: account.address }
 
-sequences:
-  bootstrap:
-    bindings:
-      account:
-        account:
-          pool: control
-          select: { index: 0 }
-    steps:
-      - name: deposit
-        template: bootstrap_deposit
-
-mix:
-  - sequence: bootstrap
-    weight: 100
+mix: []

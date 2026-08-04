@@ -711,7 +711,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::{Header, Signed, TxLegacy};
-    use alloy_primitives::{B256, U256, address};
+    use alloy_primitives::{Address, B256, U256, address};
     use alloy_sol_types::SolCall;
     use reth_primitives_traits::{Recovered, SealedHeader};
     use reth_revm::cancelled::CancelOnDrop;
@@ -850,15 +850,12 @@ mod tests {
         assert_eq!(best_txs.oversized_marked, total - expected_fit);
     }
 
-    /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
-    /// deposit types. The calldata should include `QueuedDeposit` entries with the
-    /// correct `DepositType` discriminator and `DecryptionData` for encrypted deposits.
+    /// Verify calldata for an internal withdrawal bounce-back followed by an
+    /// encrypted user deposit.
     #[test]
-    fn test_build_advance_tempo_tx_with_encrypted_deposit() {
+    fn test_build_advance_tempo_tx_with_deposit() {
         let token = address!("0x0000000000000000000000000000000000001000");
         let sender = address!("0x0000000000000000000000000000000000001234");
-        let recipient = address!("0x0000000000000000000000000000000000005678");
-
         let header = TempoHeader {
             inner: Header {
                 number: 1,
@@ -873,28 +870,25 @@ mod tests {
             header: SealedHeader::seal_slow(header),
             queued_deposits: vec![
                 abi::QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
                     depositData: alloy_primitives::Bytes::from(
-                        alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
+                        alloy_sol_types::SolValue::abi_encode(&abi::WithdrawalBounceBackDeposit {
                             token,
-                            sender,
-                            to: recipient,
+                            to: Address::with_last_byte(1),
                             amount: 500_000,
-                            tempoRefundRecipient: recipient,
-                            memo: B256::ZERO,
                         }),
                     ),
                 },
                 abi::QueuedDeposit {
-                    depositType: DepositType::Encrypted,
+                    depositType: DepositType::Deposit,
                     depositData: alloy_primitives::Bytes::from(
-                        alloy_sol_types::SolValue::abi_encode(&abi::EncryptedDeposit {
+                        alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
                             token,
                             sender,
                             amount: 300_000,
                             tempoRefundRecipient: sender,
                             keyIndex: U256::ZERO,
-                            encrypted: abi::EncryptedDepositPayload {
+                            encrypted: abi::DepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),
                                 ephemeralPubkeyYParity: 0x02,
                                 ciphertext: vec![0xAA; 64].into(),
@@ -930,17 +924,17 @@ mod tests {
         // Should have 2 queued deposits
         assert_eq!(decoded.deposits.len(), 2, "should have 2 queued deposits");
 
-        // First should be Regular
+        // The internal withdrawal bounce-back keeps its dedicated discriminator.
         assert_eq!(
             decoded.deposits[0].depositType,
-            DepositType::Regular,
-            "first deposit should be Regular"
+            DepositType::WithdrawalBounceBack,
+            "first entry should be a withdrawal bounce-back"
         );
 
         // Second should be Encrypted
         assert_eq!(
             decoded.deposits[1].depositType,
-            DepositType::Encrypted,
+            DepositType::Deposit,
             "second deposit should be Encrypted"
         );
 

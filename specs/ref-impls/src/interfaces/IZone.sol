@@ -81,26 +81,23 @@ struct DepositQueueTransition {
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
-    Regular, // Standard deposit with plaintext recipient and memo
-    Encrypted // Encrypted deposit with hidden recipient and memo
+    WithdrawalBounceBack, // Internal withdrawal bounce-back entry
+    Deposit // User deposit with hidden recipient and memo
 }
 
-struct Deposit {
+struct WithdrawalBounceBackDeposit {
     address token; // TIP-20 token being deposited
-    address sender;
     address to;
     uint128 amount;
-    address tempoRefundRecipient;
-    bytes32 memo;
 }
 
 /*//////////////////////////////////////////////////////////////
-                        ENCRYPTED DEPOSITS
+                              DEPOSITS
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Encrypted deposit payload (recipient and memo encrypted to sequencer)
+/// @notice Deposit payload with recipient and memo encrypted to the sequencer
 /// @dev Uses ECIES with secp256k1: ephemeral ECDH + AES-256-GCM
-struct EncryptedDepositPayload {
+struct DepositPayload {
     bytes32 ephemeralPubkeyX; // Ephemeral public key X coordinate (for ECDH)
     uint8 ephemeralPubkeyYParity; // Y coordinate parity (0x02 or 0x03)
     bytes ciphertext; // AES-256-GCM encrypted (to || memo || padding)
@@ -108,18 +105,18 @@ struct EncryptedDepositPayload {
     bytes16 tag; // GCM authentication tag
 }
 
-/// @notice Encrypted deposit stored in the queue
+/// @notice User deposit stored in the queue
 /// @dev Sender, token, amount, and key index are public; recipient and memo are encrypted.
 ///      The token identity is public because the portal must escrow the correct token.
 ///      The keyIndex specifies which encryption key the user used, allowing the prover
 ///      to look up the correct key for decryption even after key rotations.
-struct EncryptedDeposit {
+struct Deposit {
     address token; // TIP-20 token being deposited (public, for escrow accounting)
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     address tempoRefundRecipient; // Tempo recipient for a failed-deposit refund
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
-    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+    DepositPayload encrypted; // Encrypted (to, memo)
 }
 
 /// @notice Historical record of an encryption key with its activation block
@@ -145,10 +142,10 @@ uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
 
 /// @notice A deposit entry in the unified queue (for zone-side processing)
 /// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
-///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
+///      The depositData is ABI-encoded WithdrawalBounceBackDeposit or Deposit depending on type.
 struct QueuedDeposit {
     DepositType depositType;
-    bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bytes depositData; // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
     bool rejected;
 }
 
@@ -162,8 +159,8 @@ struct ChaumPedersenProof {
     bytes32 c; // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
 }
 
-/// @notice Decryption data provided by sequencer for encrypted deposits
-/// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance).
+/// @notice Decryption data provided by the sequencer for deposits
+/// @dev Must match 1:1 with user deposits in the queue (in order of appearance).
 ///      Includes a Chaum-Pedersen proof to verify the shared secret was correctly derived
 ///      without exposing the sequencer's private key.
 ///      The sequencer's public key is looked up from the deposit's keyIndex on-chain,
@@ -498,18 +495,6 @@ struct TokenConfig {
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
 
-    event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash,
-        address indexed sender,
-        address token,
-        address to,
-        uint128 netAmount,
-        uint128 fee,
-        bytes32 memo,
-        address tempoRefundRecipient,
-        uint64 depositNumber
-    );
-
     /// @notice Emitted after a batch is accepted by `submitBatch`.
     /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
     ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
@@ -546,8 +531,8 @@ interface IZonePortal {
     /// @notice Emitted when a pending admin accepts and the admin role is handed over.
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
 
-    /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
-    event EncryptedDepositMade(
+    /// @notice Emitted when a deposit is made (recipient/memo not revealed)
+    event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address token,
@@ -825,7 +810,7 @@ interface IZonePortal {
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
     function acceptAdmin() external;
 
-    /// @notice Get the sequencer's current encryption public key for encrypted deposits
+    /// @notice Get the sequencer's current encryption public key for deposits
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
@@ -896,11 +881,14 @@ interface IZonePortal {
         view
         returns (bool valid, uint64 expiresAtBlock);
 
+    /// @notice Alias for `depositEncrypted`.
+    /// @dev This entrypoint accepts only encrypted recipient and memo data and emits
+    ///      `DepositMade`.
     function deposit(
         address token,
-        address to,
         uint128 amount,
-        bytes32 memo,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
@@ -920,7 +908,7 @@ interface IZonePortal {
         address token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
@@ -1064,6 +1052,8 @@ interface IZoneInbox {
         uint64 lastProcessedDepositNumber
     );
 
+    /// @notice Emitted when a deposit is processed (decrypted and credited)
+    // Revealed after decryption
     event DepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
@@ -1073,29 +1063,9 @@ interface IZoneInbox {
         bytes32 memo
     );
 
-    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
-    // Revealed after decryption
-    event EncryptedDepositProcessed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        bytes32 memo
-    );
-
-    /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
-    event EncryptedDepositFailed(
-        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
-
+    /// @notice Emitted when a deposit fails (invalid ciphertext, funds returned to sender)
     event DepositFailed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        address tempoRefundRecipient
+        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
 
     event DepositRejected(
@@ -1122,6 +1092,7 @@ interface IZoneInbox {
 
     error OnlySequencer();
     error InvalidDepositQueueHash();
+    error InvalidWithdrawalBounceBack();
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
@@ -1151,13 +1122,13 @@ interface IZoneInbox {
     ///      The system transaction is all-or-nothing and must process every pending deposit
     ///      through the final queue head. A mismatch reverts the complete call.
     ///
-    ///      For encrypted deposits, the sequencer provides DecryptionData with the
+    ///      For user deposits, the sequencer provides DecryptionData with the
     ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
     ///
     /// @param headers Ordered RLP-encoded Tempo block headers; only the final
     ///        header's state root is used for Tempo reads in this call
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
-    /// @param decryptions Decryption data for valid encrypted deposits, in order
+    /// @param decryptions Decryption data for valid user deposits, in order
     /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
         bytes[] calldata headers,

@@ -242,7 +242,7 @@ contract EncryptedDepositHarness {
 
 }
 
-/// @title EncryptedDeposit symbolic properties
+/// @title Deposit symbolic properties
 /// @notice Symbolic check for the (to, memo) plaintext packing round-trip. Pure byte manipulation
 ///         (no keccak, no external calls) — a clean symbolic-execution target.
 contract EncryptedDepositSymbolic is Test {

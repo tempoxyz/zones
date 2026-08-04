@@ -19,7 +19,7 @@ fragments:
           from_block: { param: from_block }
           address: "${ZONES_BENCH_INBOX}"
           abi: ZoneInbox
-          event: EncryptedDepositProcessed
+          event: DepositProcessed
           where:
             depositHash: { param: deposit_hash }
             sender: { param: sender }
@@ -86,7 +86,7 @@ fragments:
             deposit:
               address: "${L1_PORTAL_ADDRESS}"
               abi: ZonePortal
-              event: EncryptedDepositMade
+              event: DepositMade
               where:
                 sender: { param: sender_address }
                 token: { param: token }

@@ -209,7 +209,7 @@ impl Harness {
     }
 }
 
-fn failed_encrypted_deposit_gas(deposits: usize) -> eyre::Result<u64> {
+fn failed_deposit_gas(deposits: usize) -> eyre::Result<u64> {
     let mut harness = Harness::new()?;
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
@@ -242,13 +242,13 @@ fn failed_encrypted_deposit_gas(deposits: usize) -> eyre::Result<u64> {
         U256::from(sequencer_y_parity),
     );
 
-    let deposit = EncryptedDeposit {
+    let deposit = Deposit {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 1,
         tempoRefundRecipient: ALICE,
         keyIndex: fixture.key_index,
-        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+        encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
             ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
             ciphertext: ciphertext.into(),
@@ -269,9 +269,9 @@ fn failed_encrypted_deposit_gas(deposits: usize) -> eyre::Result<u64> {
     let mut decryptions = Vec::with_capacity(deposits);
     let mut head = B256::ZERO;
     for _ in 0..deposits {
-        head = keccak256((DepositType::Encrypted, deposit.clone(), head).abi_encode_params());
+        head = keccak256((DepositType::Deposit, deposit.clone(), head).abi_encode_params());
         queued_deposits.push(QueuedDeposit {
-            depositType: DepositType::Encrypted,
+            depositType: DepositType::Deposit,
             depositData: deposit.abi_encode().into(),
         });
         decryptions.push(decryption.clone());
@@ -293,7 +293,7 @@ fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
 
     for deposits in [640, MAX_DEPOSITS_PER_TEMPO_BLOCK] {
         let should_fit = deposits <= MAX_DEPOSITS_PER_TEMPO_BLOCK;
-        let gas_used = failed_encrypted_deposit_gas(deposits)?;
+        let gas_used = failed_deposit_gas(deposits)?;
         eprintln!("{deposits} portal deposit block: {gas_used} gas");
         assert_eq!(
             gas_used <= BUFFERED_GAS_LIMIT,
@@ -412,23 +412,25 @@ fn child_anchor_storage_failure_is_fatal_and_rolls_back_checkpoint() -> eyre::Re
 #[test]
 fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
-    let first = Deposit {
+    let nonce = 1u64;
+    harness.seed_fallback_recipient(nonce, BOB)?;
+    let mut encoded_nonce = [0u8; 20];
+    encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
+    let first = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        sender: ALICE,
-        to: BOB,
+        to: Address::from(encoded_nonce),
         amount: 100,
-        tempoRefundRecipient: ALICE,
-        memo: B256::repeat_byte(0x11),
     };
-    let first_hash =
-        keccak256((DepositType::Regular, first.clone(), B256::ZERO).abi_encode_params());
+    let first_hash = keccak256(
+        (DepositType::WithdrawalBounceBack, first.clone(), B256::ZERO).abi_encode_params(),
+    );
     let first_data = first.abi_encode();
-    let second = Deposit {
+    let second = WithdrawalBounceBackDeposit {
         amount: 200,
-        memo: B256::repeat_byte(0x22),
         ..first
     };
-    let tempo_head = keccak256((DepositType::Regular, second, first_hash).abi_encode_params());
+    let tempo_head =
+        keccak256((DepositType::WithdrawalBounceBack, second, first_hash).abi_encode_params());
     harness.set_queue_hash(tempo_head);
 
     let output = harness.call_atomic(
@@ -436,7 +438,7 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
         harness
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
                     depositData: first_data.into(),
                 }],
                 Vec::new(),
@@ -460,85 +462,6 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
         assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 0);
         Ok(())
     })?;
-    Ok(())
-}
-
-#[test]
-fn regular_deposit_mints_and_updates_hash_and_number() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let deposit = Deposit {
-        token: PATH_USD_ADDRESS,
-        sender: ALICE,
-        to: BOB,
-        amount: 500,
-        tempoRefundRecipient: ALICE,
-        memo: B256::repeat_byte(0x11),
-    };
-    let expected_hash =
-        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
-    harness.set_queue_hash(expected_hash);
-    let queued = QueuedDeposit {
-        depositType: DepositType::Regular,
-        depositData: deposit.abi_encode().into(),
-    };
-
-    harness.call(
-        Address::ZERO,
-        harness.advance_call(vec![queued], Vec::new()).abi_encode(),
-    )?;
-
-    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::from(500));
-    assert!(harness.pending_withdrawals()?.is_empty());
-    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
-    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
-        assert_eq!(
-            ZoneInbox::new().processed_deposit_queue_hash.read()?,
-            expected_hash
-        );
-        assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 1);
-        assert_eq!(
-            StorageCtx::default().sload(ZONE_INBOX_ADDRESS, U256::ZERO)?,
-            U256::from_be_bytes(expected_hash.0)
-        );
-        assert_eq!(
-            StorageCtx::default().sload(ZONE_INBOX_ADDRESS, U256::ONE)?,
-            U256::ONE
-        );
-        Ok(())
-    })?;
-    Ok(())
-}
-
-#[test]
-fn failed_regular_mint_enqueues_one_bounce_back() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let uninitialized_token = address!("0x20c0000000000000000000000000000000000099");
-    let deposit = Deposit {
-        token: uninitialized_token,
-        sender: ALICE,
-        to: BOB,
-        amount: 222,
-        tempoRefundRecipient: ALICE,
-        memo: B256::ZERO,
-    };
-    let expected_hash =
-        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
-    harness.set_queue_hash(expected_hash);
-
-    harness.call(
-        Address::ZERO,
-        harness
-            .advance_call(
-                vec![QueuedDeposit {
-                    depositType: DepositType::Regular,
-                    depositData: deposit.abi_encode().into(),
-                }],
-                Vec::new(),
-            )
-            .abi_encode(),
-    )?;
-
-    harness.assert_single_bounce_back(uninitialized_token, 222, ALICE)?;
     Ok(())
 }
 
@@ -590,7 +513,7 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
         harness
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
                     depositData: Bytes::from_static(b"malformed"),
                 }],
                 Vec::new(),
@@ -605,7 +528,7 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
 }
 
 #[test]
-fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result<()> {
+fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
     let decrypted = fixture.decrypt().expect("fixture decrypts");
@@ -628,13 +551,13 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         U256::from(sequencer_y_parity),
     );
 
-    let deposit = EncryptedDeposit {
+    let deposit = Deposit {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 900,
         tempoRefundRecipient: ALICE,
         keyIndex: fixture.key_index,
-        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+        encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
             ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
             ciphertext: ciphertext.into(),
@@ -643,7 +566,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         },
     };
     let expected_hash =
-        keccak256((DepositType::Encrypted, deposit.clone(), B256::ZERO).abi_encode_params());
+        keccak256((DepositType::Deposit, deposit.clone(), B256::ZERO).abi_encode_params());
     harness.set_queue_hash(expected_hash);
 
     harness.call(
@@ -651,7 +574,7 @@ fn encrypted_deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> ey
         harness
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Encrypted,
+                    depositType: DepositType::Deposit,
                     depositData: deposit.abi_encode().into(),
                 }],
                 vec![DecryptionData {
@@ -697,13 +620,13 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
         1,
         U256::from(sequencer_y_parity),
     );
-    let deposit = EncryptedDeposit {
+    let deposit = Deposit {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 333,
         tempoRefundRecipient: BOB,
         keyIndex: fixture.key_index,
-        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+        encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
             ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
             ciphertext: fixture.ciphertext.into(),
@@ -712,7 +635,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
         },
     };
     let expected_hash =
-        keccak256((DepositType::Encrypted, deposit.clone(), B256::ZERO).abi_encode_params());
+        keccak256((DepositType::Deposit, deposit.clone(), B256::ZERO).abi_encode_params());
     harness.set_queue_hash(expected_hash);
 
     harness.call(
@@ -720,7 +643,7 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
         harness
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Encrypted,
+                    depositType: DepositType::Deposit,
                     depositData: deposit.abi_encode().into(),
                 }],
                 vec![DecryptionData {
@@ -743,13 +666,13 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
 #[test]
 fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
     let fixture = EncryptedDepositFixture::new();
-    let deposit = EncryptedDeposit {
+    let deposit = Deposit {
         token: PATH_USD_ADDRESS,
         sender: ALICE,
         amount: 1,
         tempoRefundRecipient: BOB,
         keyIndex: fixture.key_index,
-        encrypted: tempo_zone_contracts::EncryptedDepositPayload {
+        encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
             ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
             ciphertext: fixture.ciphertext.into(),
@@ -758,7 +681,7 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
         },
     };
     let expected_hash =
-        keccak256((DepositType::Encrypted, deposit.clone(), B256::ZERO).abi_encode_params());
+        keccak256((DepositType::Deposit, deposit.clone(), B256::ZERO).abi_encode_params());
     let mut missing = Harness::new()?;
     missing.set_queue_hash(expected_hash);
     let output = missing.call_atomic(
@@ -766,7 +689,7 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
         missing
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Encrypted,
+                    depositType: DepositType::Deposit,
                     depositData: deposit.abi_encode().into(),
                 }],
                 Vec::new(),
@@ -886,16 +809,19 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     let token = address!("0x20c00000000000000000000000000000000000cc");
     let mut encoded_nonce = [0u8; 20];
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
-    let deposit = Deposit {
+    let deposit = WithdrawalBounceBackDeposit {
         token,
-        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 555,
-        tempoRefundRecipient: Address::ZERO,
-        memo: B256::ZERO,
     };
-    let expected_hash =
-        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    let expected_hash = keccak256(
+        (
+            DepositType::WithdrawalBounceBack,
+            deposit.clone(),
+            B256::ZERO,
+        )
+            .abi_encode_params(),
+    );
     harness.set_queue_hash(expected_hash);
 
     harness.call(
@@ -903,7 +829,7 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
         harness
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
                     depositData: deposit.abi_encode().into(),
                 }],
                 Vec::new(),
@@ -931,16 +857,19 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     harness.seed_fallback_recipient(nonce, BOB)?;
     let mut encoded_nonce = [0u8; 20];
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
-    let deposit = Deposit {
+    let deposit = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 321,
-        tempoRefundRecipient: Address::ZERO,
-        memo: B256::ZERO,
     };
-    let expected_hash =
-        keccak256((DepositType::Regular, deposit.clone(), B256::ZERO).abi_encode_params());
+    let expected_hash = keccak256(
+        (
+            DepositType::WithdrawalBounceBack,
+            deposit.clone(),
+            B256::ZERO,
+        )
+            .abi_encode_params(),
+    );
     harness.set_queue_hash(expected_hash);
 
     harness.call(
@@ -948,7 +877,7 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
         harness
             .advance_call(
                 vec![QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
                     depositData: deposit.abi_encode().into(),
                 }],
                 Vec::new(),

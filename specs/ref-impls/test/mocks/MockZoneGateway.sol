@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IWithdrawalReceiver,
     IZonePortal,
     Role
@@ -18,7 +18,7 @@ struct GatewayCallbackData {
     GatewayFlow flow;
     address outputToken;
     uint256 keyIndex;
-    EncryptedDepositPayload encrypted;
+    DepositPayload encrypted;
     uint128 minVaultAssets;
     uint128 minVaultShares;
     uint128 minOutputAmount;
@@ -74,7 +74,7 @@ contract MockZoneGateway is IWithdrawalReceiver {
         // The mock returns the received token. The production gateway owns conversion semantics.
         if (!ITIP20(token).approve(sourcePortal, amount)) revert ApprovalFailed();
         IZonePortal(sourcePortal)
-            .depositEncrypted(
+            .deposit(
                 token, amount, callback.keyIndex, callback.encrypted, callback.tempoRefundRecipient
             );
         if (!ITIP20(token).approve(sourcePortal, 0)) revert ApprovalFailed();

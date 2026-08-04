@@ -16,7 +16,8 @@ use std::{
 };
 use tempo_contracts::precompiles::INITIAL_FACTORY_OWNER;
 use tempo_zone_contracts::{
-    ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_VERIFIER_ADDRESS,
+    ZONE_FACTORY_ADDRESS, ZONE_MESSENGER_ADDRESS, ZONE_PORTAL_IMPL_ADDRESS, ZONE_PORTAL_PREFIX,
+    ZONE_VERIFIER_ADDRESS,
 };
 
 #[derive(Debug, clap::Parser)]
@@ -77,6 +78,7 @@ impl InstallReferenceZoneFactory {
         let mut genesis: Genesis = serde_json::from_str(&genesis_json)
             .wrap_err_with(|| format!("failed parsing genesis `{}`", self.genesis.display()))?;
 
+        reject_zone_portal_allocations(&genesis)?;
         let artifacts = load_native_artifacts(&self.specs_out)?;
         install_eip2935_history_storage(&mut genesis)?;
         install_native_zone_factory(&mut genesis, self.owner, artifacts)?;
@@ -164,6 +166,18 @@ fn load_runtime(specs_out: &Path, contract: &str) -> eyre::Result<Bytes> {
     Ok(bytecode.into())
 }
 
+fn reject_zone_portal_allocations(genesis: &Genesis) -> eyre::Result<()> {
+    if let Some(address) = genesis.alloc.keys().find(|address| {
+        address
+            .as_slice()
+            .starts_with(ZONE_PORTAL_PREFIX.as_slice())
+    }) {
+        eyre::bail!("genesis cannot allocate reserved ZonePortal address {address}");
+    }
+
+    Ok(())
+}
+
 fn install_native_zone_factory(
     genesis: &mut Genesis,
     owner: Address,
@@ -226,4 +240,34 @@ fn native_factory_account(owner: Address) -> GenesisAccount {
     GenesisAccount::default()
         .with_code(Some(Bytes::from_static(&[0xef])))
         .with_storage(Some(factory_storage))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy::primitives::address;
+
+    #[test]
+    fn validates_zone_portal_allocations() {
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            address!("0x5AD1000000000000000000000000000000000000"),
+            GenesisAccount::default(),
+        );
+        reject_zone_portal_allocations(&genesis).unwrap();
+
+        genesis.alloc.insert(
+            address!("0x5AD0000000000000000000000000000000000001"),
+            GenesisAccount::default().with_storage(Some(BTreeMap::from([(
+                B256::ZERO,
+                B256::with_last_byte(1),
+            )]))),
+        );
+
+        let error = reject_zone_portal_allocations(&genesis).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "genesis cannot allocate reserved ZonePortal address 0x5ad0000000000000000000000000000000000001"
+        );
+    }
 }
