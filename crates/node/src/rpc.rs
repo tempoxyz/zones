@@ -688,14 +688,16 @@ where
         reward_percentiles: Option<Vec<f64>>,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // The redacted RPC never returns reward percentiles. Keep the requested
-            // width so we can preserve the response shape, but do not forward the
-            // caller's percentiles to Reth: calculating them loads private block
-            // bodies and receipts.
+            // Avoid loading private block bodies to calculate reward percentiles.
             let mut history = EthFees::fee_history(&self.eth.api, block_count, newest_block, None)
                 .await
                 .map_err(internal)?;
-            synthesize_redacted_fee_history_rewards(&mut history, reward_percentiles.as_deref());
+            if let Some(reward_percentiles) = reward_percentiles.as_deref() {
+                history.reward = Some(vec![
+                    vec![0; reward_percentiles.len()];
+                    history.gas_used_ratio.len()
+                ]);
+            }
 
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
             redact_fee_history(&mut history);
@@ -1265,7 +1267,7 @@ fn redact_header(header: &mut TempoHeaderResponse) {
     inner.withdrawals_root = inner.withdrawals_root.map(|_| B256::ZERO);
 }
 
-/// Clear gas related fields that leak the size (and therefore tx counts)
+/// Clear gas-related fields that leak the size (and therefore tx counts).
 fn redact_fee_history(history: &mut FeeHistory) {
     history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
     history.gas_used_ratio.fill(0.0);
@@ -1275,19 +1277,6 @@ fn redact_fee_history(history: &mut FeeHistory) {
         for block_rewards in rewards {
             block_rewards.fill(0);
         }
-    }
-}
-
-/// Preserve the `eth_feeHistory` reward matrix shape without loading private receipts.
-fn synthesize_redacted_fee_history_rewards(
-    history: &mut FeeHistory,
-    reward_percentiles: Option<&[f64]>,
-) {
-    if let Some(reward_percentiles) = reward_percentiles {
-        history.reward = Some(vec![
-            vec![0; reward_percentiles.len()];
-            history.gas_used_ratio.len()
-        ]);
     }
 }
 
@@ -1434,18 +1423,6 @@ mod tests {
         assert_eq!(history.base_fee_per_blob_gas, vec![0; 3]);
         assert_eq!(history.blob_gas_used_ratio, vec![0.0; 2]);
         assert_eq!(history.reward, Some(vec![vec![0, 0], vec![0, 0]]));
-    }
-
-    #[test]
-    fn synthesize_redacted_fee_history_rewards_preserves_requested_shape() {
-        let mut history = FeeHistory {
-            gas_used_ratio: vec![0.25, 0.75],
-            ..Default::default()
-        };
-
-        synthesize_redacted_fee_history_rewards(&mut history, Some(&[1.0, 50.0, 99.0]));
-
-        assert_eq!(history.reward, Some(vec![vec![0, 0, 0], vec![0, 0, 0]]));
     }
 
     #[test]
