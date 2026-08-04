@@ -151,7 +151,10 @@ mod tests {
         PATH_USD_ADDRESS,
         storage::{Handler, StorageCtx},
         test_util::TIP20Setup,
-        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
+        tip20::{
+            IRolesAuth, ISSUER_ROLE, ITIP20,
+            ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token,
+        },
         zone_factory::ZonePortalStorage as ZonePortal,
     };
     use tempo_zone_contracts::Unauthorized;
@@ -631,17 +634,41 @@ mod tests {
     #[test]
     fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
+        // Craft a successful allowance return whose first four bytes collide with the upstream
+        // error selector, exercising the redaction filter's revert-status guard.
+        let mut allowance_bytes = [0u8; 32];
+        allowance_bytes[..4].copy_from_slice(&TIP20InsufficientBalance::SELECTOR);
+        allowance_bytes[31] = 1;
+        let allowance = U256::from_be_bytes(allowance_bytes);
+
         harness.call(
             harness.alice,
             ITIP20::approveCall {
                 spender: harness.spender,
-                amount: U256::from(1_000_001u64),
+                amount: allowance,
             }
             .abi_encode()
             .into(),
             TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
+
+        let allowance_result = harness.call(
+            harness.alice,
+            ITIP20::allowanceCall {
+                owner: harness.alice,
+                spender: harness.spender,
+            }
+            .abi_encode()
+            .into(),
+            100_000,
+            true,
+        )?;
+        assert!(allowance_result.is_success());
+        assert_eq!(
+            allowance_result.bytes,
+            Bytes::copy_from_slice(&allowance_bytes)
+        );
 
         let result = harness.call(
             harness.spender,
