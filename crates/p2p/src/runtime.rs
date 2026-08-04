@@ -526,11 +526,10 @@ async fn run_commands(
                 // `producer == leader_for(anchor)` fence. Recipients are all other manifest
                 // members — during a scheduled handoff the incoming leader must keep
                 // receiving live blocks.
-                let (may_broadcast, recipients) = leadership.with_authority(|authority| {
-                    let policy =
-                        RoutingPolicy::new(&local_ed25519_public_key, &membership, authority);
-                    (policy.may_broadcast_block(), policy.block_recipients())
-                });
+                let policy =
+                    RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership);
+                let (may_broadcast, recipients) =
+                    (policy.may_broadcast_block(), policy.block_recipients());
                 if !may_broadcast {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", "Ignoring live block broadcast command without retained scheduled leadership");
@@ -568,13 +567,11 @@ async fn run_commands(
             }
 
             P2pCommand::BroadcastSettlementProposal(proposal) => {
-                let recipients = leadership.with_authority(|authority| {
-                    let policy =
-                        RoutingPolicy::new(&local_ed25519_public_key, &membership, authority);
-                    policy
-                        .may_broadcast_settlement_proposal()
-                        .then(|| policy.settlement_proposal_recipients())
-                });
+                let policy =
+                    RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership);
+                let recipients = policy
+                    .may_broadcast_settlement_proposal()
+                    .then(|| policy.settlement_proposal_recipients());
                 let Some(recipients) = recipients else {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", "Ignoring settlement proposal command without retained scheduled leadership");
@@ -592,10 +589,9 @@ async fn run_commands(
             P2pCommand::SendSettlementSignature { leader, signature } => {
                 // The signature answers a specific proposal, so it returns to that
                 // proposal's sender (not to the most recent leader. Important during handoff)
-                let may_send = leadership.with_authority(|authority| {
-                    RoutingPolicy::new(&local_ed25519_public_key, &membership, authority)
-                        .may_send_settlement_signature(&leader)
-                });
+                let may_send =
+                    RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership)
+                        .may_send_settlement_signature(&leader);
                 if !may_send {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %leader, "Ignoring settlement signature addressed to a peer without retained scheduled leadership");
@@ -616,17 +612,14 @@ async fn run_commands(
                 // fence, but send to every other quorum member so every possible successor
                 // retains the transaction before a leadership handoff. RPC-only standbys can
                 // originate transactions but never need to retain transactions from other nodes.
-                let (may_forward, initialized, recipients) =
-                    leadership.with_authority(|authority| {
-                        let policy =
-                            RoutingPolicy::new(&local_ed25519_public_key, &membership, authority);
-                        let forwarding = policy.transaction_forwarding_status();
-                        (
-                            forwarding.unwrap_or(false),
-                            forwarding.is_some(),
-                            policy.transaction_recipients(),
-                        )
-                    });
+                let policy =
+                    RoutingPolicy::new(&local_ed25519_public_key, &membership, &leadership);
+                let forwarding = policy.transaction_forwarding_status();
+                let (may_forward, initialized, recipients) = (
+                    forwarding.unwrap_or(false),
+                    forwarding.is_some(),
+                    policy.transaction_recipients(),
+                );
                 if !may_forward {
                     if !initialized {
                         metrics::counter!(
@@ -705,10 +698,12 @@ where
                 // outgoing leader still settles pre-boundary batches. The follower rebuilds
                 // the proposal from its own state before signing. An RPC-only member drops the
                 // proposal here: only the on-chain quorum signs.
-                let may_accept = leadership.with_authority(|authority| {
-                    RoutingPolicy::new(&local_ed25519_public_key, &membership, authority)
-                        .may_accept_settlement_proposal(&peer)
-                });
+                let may_accept = RoutingPolicy::new(
+                    &local_ed25519_public_key,
+                    &membership,
+                    &leadership,
+                )
+                .may_accept_settlement_proposal(&peer);
                 if !may_accept {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement proposal from ineligible peer");
                     continue;
@@ -722,10 +717,12 @@ where
                 // An RPC-only member has no address registered with `ZonePortal`, so its
                 // signature could never be counted; reject it at the transport instead of
                 // relying on the attestation-address lookup further in.
-                let may_accept = leadership.with_authority(|authority| {
-                    RoutingPolicy::new(&local_ed25519_public_key, &membership, authority)
-                        .may_accept_settlement_signature(&peer)
-                });
+                let may_accept = RoutingPolicy::new(
+                    &local_ed25519_public_key,
+                    &membership,
+                    &leadership,
+                )
+                .may_accept_settlement_signature(&peer);
                 if !may_accept {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement signature from ineligible peer");
                     continue;
@@ -737,10 +734,12 @@ where
             // admit these into their pools; RPC-only standbys can never become leader.
             result = transactions.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("transaction channel receive failed: {err}"))?;
-                let may_accept = leadership.with_authority(|authority| {
-                    RoutingPolicy::new(&local_ed25519_public_key, &membership, authority)
-                        .may_accept_transaction(&peer)
-                });
+                let may_accept = RoutingPolicy::new(
+                    &local_ed25519_public_key,
+                    &membership,
+                    &leadership,
+                )
+                .may_accept_transaction(&peer);
                 if !may_accept {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %peer, "Ignoring transaction from role-invalid peer");

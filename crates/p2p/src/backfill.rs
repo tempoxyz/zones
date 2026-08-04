@@ -229,10 +229,9 @@ where
                 request_id,
                 block,
             } => {
-                let is_remote_member = self.leadership.with_authority(|authority| {
-                    RoutingPolicy::new(&self.local, &self.membership, authority)
-                        .is_remote_member(&peer)
-                });
+                let is_remote_member =
+                    RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
+                        .is_remote_member(&peer);
                 if !is_remote_member {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill block addressed to an unknown peer");
                     return Ok(());
@@ -255,10 +254,9 @@ where
                 request_id,
                 tip,
             } => {
-                let is_remote_member = self.leadership.with_authority(|authority| {
-                    RoutingPolicy::new(&self.local, &self.membership, authority)
-                        .is_remote_member(&peer)
-                });
+                let is_remote_member =
+                    RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
+                        .is_remote_member(&peer);
                 if !is_remote_member {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill completion addressed to an unknown peer");
                     return Ok(());
@@ -276,13 +274,11 @@ where
     }
 
     async fn request_blocks(&mut self, start: u64) -> eyre::Result<()> {
-        let (candidates, leader) = self.leadership.with_authority(|authority| {
-            let policy = RoutingPolicy::new(&self.local, &self.membership, authority);
-            (
-                policy.backfill_candidates(),
-                policy.preferred_backfill_leader(),
-            )
-        });
+        let policy = RoutingPolicy::new(&self.local, &self.membership, &self.leadership);
+        let (candidates, leader) = (
+            policy.backfill_candidates(),
+            policy.preferred_backfill_leader(),
+        );
         let now = Instant::now();
         let leader_first = match &leader {
             Some(leader) => candidates.contains(leader) && !self.job.is_unresponsive(leader, now),
@@ -343,9 +339,8 @@ where
                 return Ok(());
             }
         };
-        let is_remote_member = self.leadership.with_authority(|authority| {
-            RoutingPolicy::new(&self.local, &self.membership, authority).is_remote_member(&peer)
-        });
+        let is_remote_member = RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
+            .is_remote_member(&peer);
         if !is_remote_member {
             warn!(target: "zone::p2p", %peer, "Ignoring backfill request from ineligible peer");
             return Ok(());
@@ -368,10 +363,8 @@ where
                 return Ok(());
             }
         };
-        let may_accept = self.leadership.with_authority(|authority| {
-            RoutingPolicy::new(&self.local, &self.membership, authority)
-                .may_accept_backfill_response(&peer)
-        });
+        let may_accept = RoutingPolicy::new(&self.local, &self.membership, &self.leadership)
+            .may_accept_backfill_response(&peer);
         if !may_accept {
             warn!(target: "zone::p2p", %peer, "Ignoring backfill response from ineligible peer");
             return Ok(());

@@ -55,20 +55,13 @@ pub struct LeadershipState {
     pub activation_tempo_block: u64,
 }
 
-/// Borrowed dynamic leadership authority evaluated under one schedule read lock.
-#[derive(Clone, Copy)]
-pub(crate) struct Authority<'a> {
-    state: &'a LeadershipScheduleState,
-}
-
-impl Authority<'_> {
-    pub(crate) fn is_retained_leader(&self, peer: &PublicKey) -> bool {
-        self.state.is_retained_leader(peer)
-    }
-
-    pub(crate) fn next_anchor_record(&self) -> Option<LeadershipState> {
-        self.state.next_anchor_record()
-    }
+/// Dynamic leadership authority captured from one schedule read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AuthoritySnapshot {
+    /// Leaders retained by the observed portal schedule or forced recovery directive.
+    pub(crate) retained_leaders: BTreeSet<PublicKey>,
+    /// Authority governing the next anchor this node will consume.
+    pub(crate) next_anchor_record: Option<LeadershipState>,
 }
 
 impl LeadershipState {
@@ -396,10 +389,21 @@ impl LeadershipSchedule {
         self.inner.read().expect("poisoned").next_anchor_record()
     }
 
-    /// Evaluates a routing decision against one atomic, borrowed authority read.
-    pub(crate) fn with_authority<R>(&self, f: impl FnOnce(Authority<'_>) -> R) -> R {
+    /// Captures routing authority from one atomic schedule read.
+    pub(crate) fn authority_snapshot(&self) -> AuthoritySnapshot {
         let state = self.inner.read().expect("poisoned");
-        f(Authority { state: &state })
+        let mut retained_leaders = state
+            .transitions
+            .values()
+            .map(|record| record.leader.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(recovery) = state.forced_recovery.as_ref() {
+            retained_leaders.insert(recovery.leader.clone());
+        }
+        AuthoritySnapshot {
+            retained_leaders,
+            next_anchor_record: state.next_anchor_record(),
+        }
     }
 
     /// Install a manifest-declared forced recovery.

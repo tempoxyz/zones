@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use commonware_cryptography::ed25519::PublicKey;
 
-use crate::{ZoneManifest, manifest::Authority};
+use crate::{LeadershipSchedule, ZoneManifest, manifest::AuthoritySnapshot};
 
 /// Authenticated Commonware identity used to address one manifest peer.
 pub type P2pPeerId = PublicKey;
@@ -57,24 +57,24 @@ impl RoutingMembership {
 pub(crate) struct RoutingPolicy<'a> {
     local: &'a PublicKey,
     membership: &'a RoutingMembership,
-    authority: Authority<'a>,
+    authority: AuthoritySnapshot,
 }
 
 impl<'a> RoutingPolicy<'a> {
     pub(crate) fn new(
         local: &'a PublicKey,
         membership: &'a RoutingMembership,
-        authority: Authority<'a>,
+        leadership: &LeadershipSchedule,
     ) -> Self {
         Self {
             local,
             membership,
-            authority,
+            authority: leadership.authority_snapshot(),
         }
     }
 
     pub(crate) fn may_broadcast_block(&self) -> bool {
-        self.authority.is_retained_leader(self.local)
+        self.authority.retained_leaders.contains(self.local)
     }
 
     pub(crate) fn am_i_retained_leader(&self) -> bool {
@@ -121,7 +121,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     pub(crate) fn preferred_backfill_leader(&self) -> Option<PublicKey> {
-        let leader = self.authority.next_anchor_record()?.leader;
+        let leader = self.authority.next_anchor_record.as_ref()?.leader.clone();
         (self.membership.is_quorum_member(&leader) && leader != *self.local).then_some(leader)
     }
 
@@ -140,7 +140,8 @@ impl<'a> RoutingPolicy<'a> {
     /// `None` while leadership is uninitialized; otherwise whether this node may forward.
     pub(crate) fn transaction_forwarding_status(&self) -> Option<bool> {
         self.authority
-            .next_anchor_record()
+            .next_anchor_record
+            .as_ref()
             .map(|record| record.leader != *self.local)
     }
 
@@ -153,7 +154,7 @@ impl<'a> RoutingPolicy<'a> {
     }
 
     fn is_retained_leader(&self, peer: &PublicKey) -> bool {
-        self.authority.is_retained_leader(peer)
+        self.authority.retained_leaders.contains(peer)
     }
 
     fn is_remote_retained_leader(&self, peer: &PublicKey) -> bool {
@@ -227,36 +228,34 @@ mod tests {
             .publish(LeadershipState::new(2, key(2), 100))
             .unwrap();
 
-        schedule.with_authority(|authority| {
-            let leader_key = key(1);
-            let leader = RoutingPolicy::new(&leader_key, &membership, authority);
-            assert!(leader.may_broadcast_block());
-            assert_eq!(
-                leader
-                    .block_recipients()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
-                [key(2), key(3), key(4)].into_iter().collect()
-            );
-            assert_eq!(leader.transaction_forwarding_status(), Some(true));
+        let leader_key = key(1);
+        let leader = RoutingPolicy::new(&leader_key, &membership, &schedule);
+        assert!(leader.may_broadcast_block());
+        assert_eq!(
+            leader
+                .block_recipients()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            [key(2), key(3), key(4)].into_iter().collect()
+        );
+        assert_eq!(leader.transaction_forwarding_status(), Some(true));
 
-            let follower_key = key(3);
-            let follower = RoutingPolicy::new(&follower_key, &membership, authority);
-            assert!(!follower.may_broadcast_block());
-            assert_eq!(follower.preferred_backfill_leader(), Some(key(2)));
-            assert_eq!(
-                follower
-                    .backfill_candidates()
-                    .into_iter()
-                    .collect::<BTreeSet<_>>(),
-                [key(1), key(2)].into_iter().collect()
-            );
+        let follower_key = key(3);
+        let follower = RoutingPolicy::new(&follower_key, &membership, &schedule);
+        assert!(!follower.may_broadcast_block());
+        assert_eq!(follower.preferred_backfill_leader(), Some(key(2)));
+        assert_eq!(
+            follower
+                .backfill_candidates()
+                .into_iter()
+                .collect::<BTreeSet<_>>(),
+            [key(1), key(2)].into_iter().collect()
+        );
 
-            let rpc_key = key(4);
-            let rpc = RoutingPolicy::new(&rpc_key, &membership, authority);
-            assert!(!rpc.may_accept_settlement_proposal(&key(1)));
-            assert!(!rpc.may_accept_transaction(&key(3)));
-        });
+        let rpc_key = key(4);
+        let rpc = RoutingPolicy::new(&rpc_key, &membership, &schedule);
+        assert!(!rpc.may_accept_settlement_proposal(&key(1)));
+        assert!(!rpc.may_accept_transaction(&key(3)));
     }
 
     #[test]
@@ -265,12 +264,10 @@ mod tests {
         let membership = RoutingMembership::from_manifest(&manifest);
         let schedule = manifest.leadership_schedule();
         let local = key(2);
-        schedule.with_authority(|authority| {
-            let policy = RoutingPolicy::new(&local, &membership, authority);
-            assert!(!policy.may_broadcast_block());
-            assert_eq!(policy.transaction_forwarding_status(), None);
-            assert_eq!(policy.preferred_backfill_leader(), None);
-        });
+        let policy = RoutingPolicy::new(&local, &membership, &schedule);
+        assert!(!policy.may_broadcast_block());
+        assert_eq!(policy.transaction_forwarding_status(), None);
+        assert_eq!(policy.preferred_backfill_leader(), None);
     }
 
     #[test]
@@ -288,29 +285,21 @@ mod tests {
             .publish(LeadershipState::new(2, portal_successor.clone(), 60))
             .unwrap();
 
-        schedule.with_authority(|authority| {
-            let recovery_policy = RoutingPolicy::new(&recovery, &membership, authority);
-            assert!(recovery_policy.may_broadcast_block());
-            assert!(recovery_policy.may_broadcast_settlement_proposal());
-            assert!(
-                recovery_policy.may_accept_settlement_signature(&portal_successor),
-                "the recovery leader must accept quorum signatures"
-            );
-        });
-        schedule.with_authority(|authority| {
-            let follower = RoutingPolicy::new(&portal_successor, &membership, authority);
-            assert!(follower.may_accept_settlement_proposal(&recovery));
-            assert!(follower.may_send_settlement_signature(&recovery));
-        });
+        let recovery_policy = RoutingPolicy::new(&recovery, &membership, &schedule);
+        assert!(recovery_policy.may_broadcast_block());
+        assert!(recovery_policy.may_broadcast_settlement_proposal());
+        assert!(
+            recovery_policy.may_accept_settlement_signature(&portal_successor),
+            "the recovery leader must accept quorum signatures"
+        );
+        let follower = RoutingPolicy::new(&portal_successor, &membership, &schedule);
+        assert!(follower.may_accept_settlement_proposal(&recovery));
+        assert!(follower.may_send_settlement_signature(&recovery));
 
         schedule.record_applied_anchor(60);
-        schedule.with_authority(|authority| {
-            let completed_recovery = RoutingPolicy::new(&recovery, &membership, authority);
-            assert!(!completed_recovery.may_broadcast_block());
-        });
-        schedule.with_authority(|authority| {
-            let follower = RoutingPolicy::new(&portal_successor, &membership, authority);
-            assert!(!follower.may_send_settlement_signature(&recovery));
-        });
+        let completed_recovery = RoutingPolicy::new(&recovery, &membership, &schedule);
+        assert!(!completed_recovery.may_broadcast_block());
+        let follower = RoutingPolicy::new(&portal_successor, &membership, &schedule);
+        assert!(!follower.may_send_settlement_signature(&recovery));
     }
 }
