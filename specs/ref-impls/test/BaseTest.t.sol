@@ -3,8 +3,8 @@ pragma solidity ^0.8.13;
 
 import {
     BlockTransition,
+    DepositPayload,
     DepositQueueTransition,
-    EncryptedDepositPayload,
     IZoneFactory,
     IZonePortal,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -244,15 +244,15 @@ contract BaseTest is Test {
     }
 
     /// @notice Submit the encrypted-only user deposit used by shared portal behavior tests.
-    function _encryptedDepositPayload(
+    function _depositPayload(
         address to,
         bytes32 memo
     )
         internal
         pure
-        returns (EncryptedDepositPayload memory)
+        returns (DepositPayload memory)
     {
-        return EncryptedDepositPayload({
+        return DepositPayload({
             ephemeralPubkeyX: bytes32(
                 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
             ),
@@ -292,7 +292,7 @@ contract BaseTest is Test {
             keyCount = 1;
         }
         return portal.deposit(
-            token, amount, keyCount - 1, _encryptedDepositPayload(to, memo), tempoRefundRecipient
+            token, amount, keyCount - 1, _depositPayload(to, memo), tempoRefundRecipient
         );
     }
 

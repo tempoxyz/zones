@@ -77,7 +77,7 @@ Chain continuity is enforced: the L1 block number must equal
 `tempoBlockNumber + 1` and its parent hash must match the stored
 `tempoBlockHash`.
 
-### Encrypted Deposits
+### Deposits
 
 Deposits can be encrypted using ECIES with the sequencer's public key. The
 sequencer decrypts them off-chain and provides `DecryptionData` (ECDH shared

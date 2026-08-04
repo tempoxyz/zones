@@ -1,8 +1,9 @@
 //! `IZoneInbox` — Zone L2 system contract interface (0x1c00...0001).
 
 pub use IZoneInbox::{
-    ChaumPedersenProof, DecryptionData, Deposit, DepositType, EnabledToken,
+    ChaumPedersenProof, DecryptionData, DepositType, EnabledToken,
     IZoneInboxErrors as ZoneInboxError, IZoneInboxEvents as ZoneInboxEvent, QueuedDeposit,
+    WithdrawalBounceBackDeposit,
 };
 
 use alloy_primitives::Address;
@@ -12,7 +13,7 @@ crate::sol! {
     contract IZoneInbox {
         // -- Shared types --
 
-        struct Deposit {
+        struct WithdrawalBounceBackDeposit {
             address token;
             address sender;
             address to;
@@ -29,14 +30,15 @@ crate::sol! {
             string currency;
         }
 
-        /// Deposit types for the unified deposit queue.
+        /// Entry types for the unified deposit queue.
         enum DepositType {
             /// Internal withdrawal bounce-back entry.
-            Regular,
-            Encrypted,
+            WithdrawalBounceBack,
+            /// User deposit with an encrypted recipient and memo.
+            Deposit,
         }
 
-        /// An encrypted user deposit or internal withdrawal bounce-back passed to `advanceTempo`.
+        /// A user deposit or internal withdrawal bounce-back passed to `advanceTempo`.
         struct QueuedDeposit {
             DepositType depositType;
             bytes depositData;
@@ -48,7 +50,7 @@ crate::sol! {
             bytes32 c;
         }
 
-        /// Decryption data provided by the sequencer for encrypted deposits.
+        /// Decryption data provided by the sequencer for user deposits.
         struct DecryptionData {
             bytes32 sharedSecret;
             uint8 sharedSecretYParity;
@@ -65,7 +67,7 @@ crate::sol! {
             uint64 lastProcessedDepositNumber
         );
 
-        event EncryptedDepositProcessed(
+        event DepositProcessed(
             bytes32 indexed depositHash,
             address indexed sender,
             address indexed to,
@@ -74,7 +76,7 @@ crate::sol! {
             bytes32 memo
         );
 
-        event EncryptedDepositFailed(
+        event DepositFailed(
             bytes32 indexed depositHash,
             address indexed sender,
             address token,
@@ -121,7 +123,7 @@ impl EnabledToken {
     }
 }
 
-impl Deposit {
+impl WithdrawalBounceBackDeposit {
     /// Build the event emitted after processing a withdrawal bounce-back.
     pub fn withdrawal_bounce_back_processed_event(
         &self,

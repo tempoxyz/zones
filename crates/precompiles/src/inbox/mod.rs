@@ -30,8 +30,8 @@ use tempo_precompiles::{
 };
 use tempo_precompiles_macros::contract;
 use tempo_zone_contracts::{
-    DecryptionData, Deposit, DepositType, EnabledToken, EncryptedDeposit, IZoneInbox, IZoneOutbox,
-    QueuedDeposit, ZoneInboxError, ZoneInboxEvent,
+    DecryptionData, Deposit, DepositType, EnabledToken, IZoneInbox, IZoneOutbox, QueuedDeposit,
+    WithdrawalBounceBackDeposit, ZoneInboxError, ZoneInboxEvent,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -107,15 +107,15 @@ impl ZoneInbox {
             current_hash = queued.hash_with_tail(current_hash)?;
 
             match queued {
-                DecodedQueuedDeposit::Regular(deposit) => {
+                DecodedQueuedDeposit::WithdrawalBounceBack(deposit) => {
                     self.process_withdrawal_bounce_back(&mut outbox, portal, deposit)
                 }
-                DecodedQueuedDeposit::Encrypted(deposit) => {
+                DecodedQueuedDeposit::Deposit(deposit) => {
                     let Some(decryption) = decryptions.next() else {
                         return Err(ZoneInboxError::missing_decryption_data().into());
                     };
                     let key = read_encryption_key(l1, deposit.keyIndex)?;
-                    self.process_deposit_encrypted(
+                    self.process_deposit(
                         &mut outbox,
                         portal,
                         current_hash,
@@ -191,33 +191,33 @@ impl ZoneInbox {
         Ok(())
     }
 
-    fn process_deposit_encrypted(
+    fn process_deposit(
         &mut self,
         outbox: &mut ZoneOutbox,
         portal: Address,
         current_hash: B256,
-        deposit: EncryptedDeposit,
+        deposit: Deposit,
         decryption: DecryptionData,
         key: (B256, u8),
     ) -> ZoneResult<()> {
         let Some((to, memo)) = recover_encrypted_payload(portal, &deposit, &decryption, key)?
         else {
-            return self.fail_encrypted_deposit(outbox, current_hash, deposit);
+            return self.fail_deposit(outbox, current_hash, deposit);
         };
 
         if self.try_mint(deposit.token, to, deposit.amount)? {
             self.emit_event(deposit.processed_event(current_hash, to, memo))?;
         } else {
-            self.fail_encrypted_deposit(outbox, current_hash, deposit)?;
+            self.fail_deposit(outbox, current_hash, deposit)?;
         }
         Ok(())
     }
 
-    fn fail_encrypted_deposit(
+    fn fail_deposit(
         &mut self,
         outbox: &mut ZoneOutbox,
         current_hash: B256,
-        deposit: EncryptedDeposit,
+        deposit: Deposit,
     ) -> ZoneResult<()> {
         outbox.enqueue_deposit_bounce_back(
             ZONE_INBOX_ADDRESS,
@@ -235,7 +235,7 @@ impl ZoneInbox {
         &mut self,
         outbox: &mut ZoneOutbox,
         portal: Address,
-        deposit: Deposit,
+        deposit: WithdrawalBounceBackDeposit,
     ) -> ZoneResult<()> {
         if deposit.sender != portal
             || !deposit.tempoRefundRecipient.is_zero()
@@ -316,18 +316,18 @@ impl ZoneInbox {
 
 /// A queue entry whose nested ABI payload has been validated before execution begins.
 enum DecodedQueuedDeposit {
-    Regular(Deposit),
-    Encrypted(EncryptedDeposit),
+    WithdrawalBounceBack(WithdrawalBounceBackDeposit),
+    Deposit(Deposit),
 }
 
 impl DecodedQueuedDeposit {
     fn hash_with_tail(&self, tail: B256) -> tempo_precompiles::Result<B256> {
         let encoded = match self {
-            Self::Regular(deposit) => {
-                (DepositType::Regular, deposit.clone(), tail).abi_encode_params()
+            Self::WithdrawalBounceBack(deposit) => {
+                (DepositType::WithdrawalBounceBack, deposit.clone(), tail).abi_encode_params()
             }
-            Self::Encrypted(deposit) => {
-                (DepositType::Encrypted, deposit.clone(), tail).abi_encode_params()
+            Self::Deposit(deposit) => {
+                (DepositType::Deposit, deposit.clone(), tail).abi_encode_params()
             }
         };
         StorageCtx::default().keccak256(&encoded)
@@ -339,10 +339,11 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
 
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
         match queued.depositType {
-            DepositType::Regular => Deposit::abi_decode(&queued.depositData).map(Self::Regular),
-            DepositType::Encrypted => {
-                EncryptedDeposit::abi_decode(&queued.depositData).map(Self::Encrypted)
+            DepositType::WithdrawalBounceBack => {
+                WithdrawalBounceBackDeposit::abi_decode(&queued.depositData)
+                    .map(Self::WithdrawalBounceBack)
             }
+            DepositType::Deposit => Deposit::abi_decode(&queued.depositData).map(Self::Deposit),
             _ => return Err(ZonePrecompileError::MalformedCalldata),
         }
         .map_err(|_| ZonePrecompileError::MalformedCalldata)
@@ -355,7 +356,7 @@ fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueued
 
 fn recover_encrypted_payload(
     portal: Address,
-    deposit: &EncryptedDeposit,
+    deposit: &Deposit,
     decryption: &DecryptionData,
     (key_x, key_y_parity): (B256, u8),
 ) -> ZoneResult<Option<(Address, B256)>> {

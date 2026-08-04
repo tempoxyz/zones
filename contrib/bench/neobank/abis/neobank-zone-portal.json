@@ -5,7 +5,7 @@
       {"name":"token","type":"address"},
       {"name":"amount","type":"uint128"},
       {"name":"keyIndex","type":"uint256"},
-      {"name":"encrypted","type":"tuple","internalType":"struct EncryptedDepositPayload","components":[
+      {"name":"encrypted","type":"tuple","internalType":"struct DepositPayload","components":[
         {"name":"ephemeralPubkeyX","type":"bytes32"},
         {"name":"ephemeralPubkeyYParity","type":"uint8"},
         {"name":"ciphertext","type":"bytes"},
@@ -21,7 +21,7 @@
       {"name":"token","type":"address"},
       {"name":"amount","type":"uint128"},
       {"name":"keyIndex","type":"uint256"},
-      {"name":"encrypted","type":"tuple","internalType":"struct EncryptedDepositPayload","components":[
+      {"name":"encrypted","type":"tuple","internalType":"struct DepositPayload","components":[
         {"name":"ephemeralPubkeyX","type":"bytes32"},
         {"name":"ephemeralPubkeyYParity","type":"uint8"},
         {"name":"ciphertext","type":"bytes"},
@@ -32,7 +32,7 @@
     ], "outputs":[{"name":"newCurrentDepositQueueHash","type":"bytes32"}]
   },
   {
-    "type":"event", "name":"EncryptedDepositMade", "anonymous":false,
+    "type":"event", "name":"DepositMade", "anonymous":false,
     "inputs":[
       {"name":"newCurrentDepositQueueHash","type":"bytes32","indexed":true},
       {"name":"sender","type":"address","indexed":true},

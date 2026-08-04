@@ -68,7 +68,7 @@ scenario:
         sender: { var: bootstrap_deposit.sender }
         address: "${L1_PORTAL_ADDRESS}"
         abi: ZonePortal
-        event: EncryptedDepositMade
+        event: DepositMade
         where:
           sender: { var: account.address }
           token: "${ZONES_BENCH_TOKEN}"
@@ -79,7 +79,7 @@ scenario:
         from_block: { var: zone_before_deposit.block_number }
         address: "${ZONES_BENCH_INBOX}"
         abi: ZoneInbox
-        event: EncryptedDepositProcessed
+        event: DepositProcessed
         where:
           depositHash: { var: deposit_made.args.newCurrentDepositQueueHash }
           sender: { var: account.address }

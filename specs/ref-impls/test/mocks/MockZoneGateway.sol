@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IWithdrawalReceiver,
     IZonePortal,
     Role
@@ -18,7 +18,7 @@ struct GatewayCallbackData {
     GatewayFlow flow;
     address outputToken;
     uint256 keyIndex;
-    EncryptedDepositPayload encrypted;
+    DepositPayload encrypted;
     uint128 minVaultAssets;
     uint128 minVaultShares;
     uint128 minOutputAmount;

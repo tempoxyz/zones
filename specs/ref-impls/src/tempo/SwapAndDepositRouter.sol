@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
@@ -58,7 +58,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// @param data ABI-encoded callbackData (see format below)
     /// @return selector The function selector to confirm successful handling
     ///
-    /// Format: (address tokenOut, address targetPortal, uint256 keyIndex, EncryptedDepositPayload encrypted, address tempoRefundRecipient, uint128 minAmountOut)
+    /// Format: (address tokenOut, address targetPortal, uint256 keyIndex, DepositPayload encrypted, address tempoRefundRecipient, uint128 minAmountOut)
     ///
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
@@ -85,10 +85,10 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             address tokenOut,
             address targetPortal,
             uint256 keyIndex,
-            EncryptedDepositPayload memory encrypted,
+            DepositPayload memory encrypted,
             address tempoRefundRecipient,
             uint128 minAmountOut
-        ) = abi.decode(data, (address, address, uint256, EncryptedDepositPayload, address, uint128));
+        ) = abi.decode(data, (address, address, uint256, DepositPayload, address, uint128));
 
         _validateTarget(targetPortal, tokenOut);
 

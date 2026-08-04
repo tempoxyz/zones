@@ -1,7 +1,7 @@
 //! `ZonePortal` — deployed on Tempo L1.
 
 pub use ZonePortal::{
-    BlockTransition, DepositQueueTransition, EncryptedDeposit, EncryptedDepositPayload, Withdrawal,
+    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, Withdrawal,
     ZonePortalErrors as ZonePortalError,
 };
 
@@ -32,8 +32,8 @@ crate::sol! {
             bytes encryptedSender;
         }
 
-        /// Encrypted deposit payload (ECIES encrypted recipient and memo)
-        struct EncryptedDepositPayload {
+        /// Deposit payload (ECIES-encrypted recipient and memo).
+        struct DepositPayload {
             bytes32 ephemeralPubkeyX;
             uint8 ephemeralPubkeyYParity;
             bytes ciphertext;
@@ -41,14 +41,14 @@ crate::sol! {
             bytes16 tag;
         }
 
-        /// Encrypted deposit stored in the queue
-        struct EncryptedDeposit {
+        /// User deposit stored in the queue.
+        struct Deposit {
             address token;
             address sender;
             uint128 amount;
             address tempoRefundRecipient;
             uint256 keyIndex;
-            EncryptedDepositPayload encrypted;
+            DepositPayload encrypted;
         }
 
         struct EncryptionKeyEntry {
@@ -71,7 +71,7 @@ crate::sol! {
 
         // -- Events --
 
-        event EncryptedDepositMade(
+        event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed sender,
             address token,
@@ -260,7 +260,7 @@ crate::sol! {
             address token,
             uint128 amount,
             uint256 keyIndex,
-            EncryptedDepositPayload calldata encrypted,
+            DepositPayload calldata encrypted,
             address tempoRefundRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
@@ -268,7 +268,7 @@ crate::sol! {
             address token,
             uint128 amount,
             uint256 keyIndex,
-            EncryptedDepositPayload calldata encrypted,
+            DepositPayload calldata encrypted,
             address tempoRefundRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
@@ -442,15 +442,15 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     }
 }
 
-impl EncryptedDeposit {
-    /// Build the event emitted after a successful encrypted deposit.
+impl Deposit {
+    /// Build the event emitted after a successfully processed deposit.
     pub fn processed_event(
         &self,
         deposit_hash: B256,
         recipient: Address,
         memo: B256,
     ) -> ZoneInboxEvent {
-        ZoneInboxEvent::encrypted_deposit_processed(
+        ZoneInboxEvent::deposit_processed(
             deposit_hash,
             self.sender,
             recipient,
@@ -460,9 +460,9 @@ impl EncryptedDeposit {
         )
     }
 
-    /// Build the event emitted after a failed encrypted deposit.
+    /// Build the event emitted after a failed deposit.
     pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::encrypted_deposit_failed(deposit_hash, self.sender, self.token, self.amount)
+        ZoneInboxEvent::deposit_failed(deposit_hash, self.sender, self.token, self.amount)
     }
 }
 

@@ -24,8 +24,8 @@ pub(crate) struct L1SubscriberMetrics {
     /// Number of withdrawal bounce-back entries observed on L1.
     pub withdrawal_bounce_back_events: Counter,
 
-    /// Number of encrypted deposit events observed on L1.
-    pub encrypted_deposit_events: Counter,
+    /// Number of user deposit events observed on L1.
+    pub deposit_events: Counter,
 
     /// Number of `TokenEnabled` events observed on L1.
     pub token_enabled_events: Counter,

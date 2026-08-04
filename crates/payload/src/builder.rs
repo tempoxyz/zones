@@ -853,7 +853,7 @@ mod tests {
     /// Verify calldata for an internal withdrawal bounce-back followed by an
     /// encrypted user deposit.
     #[test]
-    fn test_build_advance_tempo_tx_with_encrypted_deposit() {
+    fn test_build_advance_tempo_tx_with_deposit() {
         let token = address!("0x0000000000000000000000000000000000001000");
         let sender = address!("0x0000000000000000000000000000000000001234");
         let header = TempoHeader {
@@ -870,9 +870,9 @@ mod tests {
             header: SealedHeader::seal_slow(header),
             queued_deposits: vec![
                 abi::QueuedDeposit {
-                    depositType: DepositType::Regular,
+                    depositType: DepositType::WithdrawalBounceBack,
                     depositData: alloy_primitives::Bytes::from(
-                        alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
+                        alloy_sol_types::SolValue::abi_encode(&abi::WithdrawalBounceBackDeposit {
                             token,
                             sender,
                             to: Address::with_last_byte(1),
@@ -883,15 +883,15 @@ mod tests {
                     ),
                 },
                 abi::QueuedDeposit {
-                    depositType: DepositType::Encrypted,
+                    depositType: DepositType::Deposit,
                     depositData: alloy_primitives::Bytes::from(
-                        alloy_sol_types::SolValue::abi_encode(&abi::EncryptedDeposit {
+                        alloy_sol_types::SolValue::abi_encode(&abi::Deposit {
                             token,
                             sender,
                             amount: 300_000,
                             tempoRefundRecipient: sender,
                             keyIndex: U256::ZERO,
-                            encrypted: abi::EncryptedDepositPayload {
+                            encrypted: abi::DepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),
                                 ephemeralPubkeyYParity: 0x02,
                                 ciphertext: vec![0xAA; 64].into(),
@@ -927,17 +927,17 @@ mod tests {
         // Should have 2 queued deposits
         assert_eq!(decoded.deposits.len(), 2, "should have 2 queued deposits");
 
-        // The internal withdrawal bounce-back keeps the Regular discriminator.
+        // The internal withdrawal bounce-back keeps its dedicated discriminator.
         assert_eq!(
             decoded.deposits[0].depositType,
-            DepositType::Regular,
+            DepositType::WithdrawalBounceBack,
             "first entry should be a withdrawal bounce-back"
         );
 
         // Second should be Encrypted
         assert_eq!(
             decoded.deposits[1].depositType,
-            DepositType::Encrypted,
+            DepositType::Deposit,
             "second deposit should be Encrypted"
         );
 

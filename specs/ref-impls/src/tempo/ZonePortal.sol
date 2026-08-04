@@ -4,11 +4,10 @@ pragma solidity ^0.8.13;
 import {
     BlockTransition,
     Deposit,
+    DepositPayload,
     DepositQueueTransition,
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
-    EncryptedDeposit,
-    EncryptedDepositPayload,
     EncryptionKeyEntry,
     IVerifier,
     IZoneMessenger,
@@ -18,6 +17,7 @@ import {
     Role,
     TokenConfig,
     Withdrawal,
+    WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
@@ -800,13 +800,13 @@ contract ZonePortal is IZonePortal {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        return _depositEncrypted(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
+        return depositEncrypted(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
     /// @notice Deposit with encrypted recipient and memo
@@ -823,20 +823,20 @@ contract ZonePortal is IZonePortal {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
-        external
+        public
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        return _depositEncrypted(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
+        return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
-    function _depositEncrypted(
+    function _deposit(
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         internal
@@ -885,8 +885,8 @@ contract ZonePortal is IZonePortal {
 
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
-        // Build encrypted deposit struct
-        EncryptedDeposit memory depositData = EncryptedDeposit({
+        // Build the queued deposit.
+        Deposit memory depositData = Deposit({
             token: _token,
             sender: msg.sender,
             amount: netAmount,
@@ -895,14 +895,14 @@ contract ZonePortal is IZonePortal {
             encrypted: encrypted
         });
 
-        // Insert encrypted deposit into queue
+        // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
-            DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
+            DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
         uint64 thisDeposit = _recordDeposit(
             newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
         );
 
-        emit EncryptedDepositMade(
+        emit DepositMade(
             newCurrentDepositQueueHash,
             msg.sender,
             _token,
@@ -1096,7 +1096,7 @@ contract ZonePortal is IZonePortal {
     /// @param amount The amount to bounce back
     /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
     function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
-        Deposit memory depositData = Deposit({
+        WithdrawalBounceBackDeposit memory depositData = WithdrawalBounceBackDeposit({
             token: _token,
             sender: address(this),
             to: address(uint160(fallbackNonce)),

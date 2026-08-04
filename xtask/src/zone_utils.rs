@@ -185,7 +185,7 @@ pub(crate) async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
     Err(eyre!("timeout waiting for TokenEnabled event on L2"))
 }
 
-pub(crate) async fn wait_for_encrypted_deposit_processed<P: Provider<TempoNetwork>>(
+pub(crate) async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     l2: &P,
     from_block: u64,
     sender: Address,
@@ -194,13 +194,13 @@ pub(crate) async fn wait_for_encrypted_deposit_processed<P: Provider<TempoNetwor
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
         .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(IZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
+        .event_signature(IZoneInbox::DepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
 
     for _ in 0..DEFAULT_WAIT_ATTEMPTS {
         let logs = l2.get_logs(&filter).await.unwrap_or_default();
         for log in &logs {
-            if let Ok(event) = IZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
+            if let Ok(event) = IZoneInbox::DepositProcessed::decode_log(&log.inner)
                 && event.data.sender == sender
                 && event.data.to == to
                 && event.data.token == token
@@ -211,7 +211,7 @@ pub(crate) async fn wait_for_encrypted_deposit_processed<P: Provider<TempoNetwor
         tokio::time::sleep(DEFAULT_WAIT_POLL).await;
     }
 
-    Err(eyre!("timeout waiting for EncryptedDepositProcessed"))
+    Err(eyre!("timeout waiting for DepositProcessed"))
 }
 
 pub(crate) async fn wait_for_balance<P: Provider<TempoNetwork>>(

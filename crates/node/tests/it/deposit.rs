@@ -5,7 +5,7 @@ use alloy::{
 };
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::{EncryptedDepositPayload, ZonePortal};
+use tempo_zone_contracts::{DepositPayload, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
 use crate::utils::{DEFAULT_POLL, ZoneTestNode, poll_until};
@@ -99,7 +99,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
             l1_token_address,
             deposit_amount,
             key_index,
-            EncryptedDepositPayload {
+            DepositPayload {
                 ephemeralPubkeyX: encrypted.eph_pub_x,
                 ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
                 ciphertext: Bytes::from(encrypted.ciphertext),

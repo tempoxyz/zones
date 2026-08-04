@@ -3,7 +3,7 @@ use super::*;
 /// Events extracted from the ZonePortal in a single L1 block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct L1PortalEvents {
-    /// Encrypted user deposits and internal withdrawal bounce-backs.
+    /// User deposits and internal withdrawal bounce-backs.
     pub deposits: Vec<L1Deposit>,
     /// Tokens newly enabled for bridging in this block, with metadata.
     pub enabled_tokens: Vec<EnabledToken>,
@@ -71,7 +71,7 @@ impl EnabledToken {
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
     const SIGNATURE_HASHES: [B256; 5] = [
-        EncryptedDepositMade::SIGNATURE_HASH,
+        DepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerEncryptionKeyUpdated::SIGNATURE_HASH,
@@ -137,16 +137,16 @@ impl L1PortalEvents {
             return Ok(());
         }
         match ZonePortalEvents::decode_log(&log.inner)?.data {
-            ZonePortalEvents::EncryptedDepositMade(event) => {
+            ZonePortalEvents::DepositMade(event) => {
                 info!(
                     l1_block = block_number,
                     token = %event.token,
                     sender = %event.sender,
                     amount = %event.netAmount,
-                    "🔒 Encrypted deposit from L1"
+                    "🔒 Deposit from L1"
                 );
                 self.deposits
-                    .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(event)));
+                    .push(L1Deposit::Deposit(Deposit::from_event(event)));
             }
             ZonePortalEvents::WithdrawalBounceBack(event) => {
                 info!(
@@ -156,11 +156,9 @@ impl L1PortalEvents {
                     amount = %event.amount,
                     "↩️ Bounce-back deposit from L1"
                 );
-                self.deposits
-                    .push(L1Deposit::Regular(Deposit::from_bounce_back(
-                        event,
-                        log.address(),
-                    )));
+                self.deposits.push(L1Deposit::WithdrawalBounceBack(
+                    WithdrawalBounceBackDeposit::from_bounce_back(event, log.address()),
+                ));
             }
             ZonePortalEvents::TokenEnabled(event) => {
                 info!(

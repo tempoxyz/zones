@@ -93,7 +93,7 @@ max-approve-portal token="0x20C0000000000000000000000000000000000000":
     echo "Approved!"
 
 [group('zone')]
-[doc('Sends an encrypted deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
+[doc('Sends a deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
 send-deposit amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
@@ -103,7 +103,7 @@ send-deposit amount="1000000" to="" memo="0x000000000000000000000000000000000000
         TO=$(cast wallet address "$PK")
     fi
     ARGS="--amount {{amount}} --token {{token}} --memo {{memo}} --to $TO --zone-rpc-url {{rpc}}"
-    cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
+    cargo run -p tempo-xtask -- deposit --private-key "$PK" $ARGS
 
 [group('zone')]
 [doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...). Set ZONE_FACTORY to override the Moderato default.')]
@@ -205,7 +205,7 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         --stablecoin-dex "{{dex}}"
 
 [group('zone')]
-[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone via an encrypted deposit. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
 demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
@@ -902,7 +902,7 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
                       --sequencer-key "$SEQUENCER_KEY"
 
 [group('zone')]
-[doc('Spam encrypted deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000')]
+[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000')]
 spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" lead-time="3":
     #!/bin/bash
     set -euo pipefail

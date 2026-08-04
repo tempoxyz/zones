@@ -1,6 +1,6 @@
 [
   {
-    "type":"event", "name":"EncryptedDepositProcessed", "anonymous":false,
+    "type":"event", "name":"DepositProcessed", "anonymous":false,
     "inputs":[
       {"name":"depositHash","type":"bytes32","indexed":true},
       {"name":"sender","type":"address","indexed":true},

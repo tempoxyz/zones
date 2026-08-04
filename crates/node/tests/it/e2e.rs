@@ -758,12 +758,12 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     );
 
     // Query encrypted deposit events
-    let deposit_processed_filter = zone_inbox.EncryptedDepositProcessed_filter().from_block(0);
+    let deposit_processed_filter = zone_inbox.DepositProcessed_filter().from_block(0);
     let deposit_processed_events = deposit_processed_filter.query().await?;
 
     assert!(
         !deposit_processed_events.is_empty(),
-        "should have at least one EncryptedDepositProcessed event"
+        "should have at least one DepositProcessed event"
     );
 
     // Verify the deposit event details

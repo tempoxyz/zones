@@ -67,8 +67,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
-    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
+    Deposit, DepositQueue, EnabledToken, L1BlockTracker, L1Deposit, L1PortalEvents, L1StateCache,
+    state::EnabledTokenRegistry,
 };
 use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
@@ -111,7 +111,7 @@ pub(crate) const TIP20_TX_GAS: u64 = 500_000;
 /// Gas limit for `ZoneOutbox.requestWithdrawal` test transactions.
 ///
 /// The current Tempo fork schedule needs enough headroom for `transferFrom`, the subsequent
-/// `burn`, and storage writes for the encrypted callback payloads exercised by router-based
+/// `burn`, and storage writes for the callback payloads exercised by router-based
 /// withdrawals.
 pub(crate) const WITHDRAWAL_TX_GAS: u64 = 10_000_000;
 
@@ -2316,7 +2316,7 @@ impl L1TestNode {
         portal_address: Address,
         recipient: Address,
         memo: B256,
-    ) -> eyre::Result<(U256, tempo_zone_contracts::EncryptedDepositPayload)> {
+    ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
         use tempo_zone_contracts::ZonePortal;
         use zone_precompiles::ecies;
 
@@ -2341,7 +2341,7 @@ impl L1TestNode {
 
         Ok((
             key_index,
-            tempo_zone_contracts::EncryptedDepositPayload {
+            tempo_zone_contracts::DepositPayload {
                 ephemeralPubkeyX: enc.eph_pub_x,
                 ephemeralPubkeyYParity: enc.eph_pub_y_parity,
                 ciphertext: enc.ciphertext.into(),
@@ -2737,7 +2737,7 @@ pub(crate) struct WithdrawalArgs {
     pub reveal_to: alloy_primitives::Bytes,
 }
 
-pub(crate) struct RouterCallbackArgs {
+pub(crate) struct RouterDepositArgs {
     pub amount: u128,
     pub router: Address,
     pub token_out: Address,
@@ -2748,13 +2748,13 @@ pub(crate) struct RouterCallbackArgs {
     pub min_amount_out: u128,
 }
 
-pub(crate) struct EncryptedRouterCallbackArgs {
+pub(crate) struct RouterCallbackArgs {
     pub amount: u128,
     pub router: Address,
     pub token_out: Address,
     pub target_portal: Address,
     pub key_index: U256,
-    pub encrypted: tempo_zone_contracts::EncryptedDepositPayload,
+    pub encrypted: tempo_zone_contracts::DepositPayload,
     pub tempo_refund_recipient: Address,
     pub min_amount_out: u128,
 }
@@ -2776,13 +2776,13 @@ impl WithdrawalArgs {
     /// Encrypt a router callback for the target portal.
     pub(crate) async fn swap_and_deposit_via_router(
         l1: &L1TestNode,
-        args: RouterCallbackArgs,
+        args: RouterDepositArgs,
     ) -> eyre::Result<Self> {
         let (key_index, encrypted) = l1
             .encrypt_deposit_for_portal(args.target_portal, args.recipient, args.memo)
             .await?;
-        Ok(Self::swap_and_deposit_encrypted_via_router(
-            EncryptedRouterCallbackArgs {
+        Ok(Self::swap_and_deposit_via_router_callback(
+            RouterCallbackArgs {
                 amount: args.amount,
                 router: args.router,
                 token_out: args.token_out,
@@ -2795,9 +2795,9 @@ impl WithdrawalArgs {
         ))
     }
 
-    /// Encrypted router callback: optionally swap, then deposit encrypted into `target_portal`.
-    pub(crate) fn swap_and_deposit_encrypted_via_router(args: EncryptedRouterCallbackArgs) -> Self {
-        let callback_data = tempo_zone_contracts::SwapAndDepositRouterEncryptedCallback {
+    /// Prepared router callback: optionally swap, then deposit into `target_portal`.
+    pub(crate) fn swap_and_deposit_via_router_callback(args: RouterCallbackArgs) -> Self {
+        let callback_data = tempo_zone_contracts::SwapAndDepositRouterCallback {
             token_out: args.token_out,
             target_portal: args.target_portal,
             key_index: args.key_index,
@@ -2834,7 +2834,7 @@ impl WithdrawalArgs {
     ) -> eyre::Result<Self> {
         Self::swap_and_deposit_via_router(
             l1,
-            RouterCallbackArgs {
+            RouterDepositArgs {
                 amount,
                 router,
                 token_out: token,
@@ -2972,9 +2972,7 @@ impl ZoneAccount {
         use tempo_precompiles::PATH_USD_ADDRESS;
         use tempo_zone_contracts::ZonePortal;
 
-        let (key_index, encrypted) = self
-            .prepare_encrypted_deposit(recipient, B256::ZERO)
-            .await?;
+        let (key_index, encrypted) = self.prepare_deposit(recipient, B256::ZERO).await?;
 
         ZonePortal::new(self.portal_address, &self.l1_provider)
             .deposit(
@@ -3014,7 +3012,7 @@ impl ZoneAccount {
         timeout: Duration,
         zone: &ZoneTestNode,
     ) -> eyre::Result<(u64, U256)> {
-        self.deposit_encrypted_with_block(amount, recipient, B256::ZERO, timeout, zone)
+        self.deposit_with_memo_and_block(amount, recipient, B256::ZERO, timeout, zone)
             .await
     }
 
@@ -3047,9 +3045,7 @@ impl ZoneAccount {
 
         // Snapshot balance before deposit so we wait for the expected increase
         let balance_before = zone.balance_of(l2_token, self.address).await?;
-        let (key_index, encrypted) = self
-            .prepare_encrypted_deposit(self.address, B256::ZERO)
-            .await?;
+        let (key_index, encrypted) = self.prepare_deposit(self.address, B256::ZERO).await?;
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
@@ -3077,7 +3073,7 @@ impl ZoneAccount {
     /// 3. ECDH → HKDF → AES-256-GCM encrypt (to, memo)
     /// 4. Call `deposit` on the portal
     /// 5. Wait for the zone to mint tokens to the decrypted recipient
-    pub(crate) async fn deposit_encrypted(
+    pub(crate) async fn deposit_with_memo(
         &mut self,
         amount: u128,
         recipient: Address,
@@ -3086,14 +3082,14 @@ impl ZoneAccount {
         zone: &ZoneTestNode,
     ) -> eyre::Result<U256> {
         Ok(self
-            .deposit_encrypted_with_block(amount, recipient, memo, timeout, zone)
+            .deposit_with_memo_and_block(amount, recipient, memo, timeout, zone)
             .await?
             .1)
     }
 
-    /// Same as [`deposit_encrypted`](Self::deposit_encrypted), but also returns the
+    /// Same as [`deposit_with_memo`](Self::deposit_with_memo), but also returns the
     /// L1 block number that included the encrypted deposit transaction.
-    pub(crate) async fn deposit_encrypted_with_block(
+    pub(crate) async fn deposit_with_memo_and_block(
         &mut self,
         amount: u128,
         recipient: Address,
@@ -3119,7 +3115,7 @@ impl ZoneAccount {
         }
 
         let portal = ZonePortal::new(portal_address, &self.l1_provider);
-        let (key_index, encrypted) = self.prepare_encrypted_deposit(recipient, memo).await?;
+        let (key_index, encrypted) = self.prepare_deposit(recipient, memo).await?;
 
         // Snapshot balance before deposit
         let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, recipient).await?;
@@ -3150,12 +3146,12 @@ impl ZoneAccount {
         Ok((block_number, balance))
     }
 
-    async fn prepare_encrypted_deposit(
+    async fn prepare_deposit(
         &self,
         recipient: Address,
         memo: B256,
-    ) -> eyre::Result<(U256, tempo_zone_contracts::EncryptedDepositPayload)> {
-        use tempo_zone_contracts::{EncryptedDepositPayload, ZonePortal};
+    ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
+        use tempo_zone_contracts::{DepositPayload, ZonePortal};
         use zone_precompiles::ecies;
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
@@ -3178,7 +3174,7 @@ impl ZoneAccount {
 
         Ok((
             key_index,
-            EncryptedDepositPayload {
+            DepositPayload {
                 ephemeralPubkeyX: enc.eph_pub_x,
                 ephemeralPubkeyYParity: enc.eph_pub_y_parity,
                 ciphertext: enc.ciphertext.into(),
@@ -3389,7 +3385,7 @@ impl P2pCluster {
     /// Inject one L1 block into every node, simulating each node's finalized subscriber:
     /// the anchor is recorded in every tracker and the block enqueued in every deposit
     /// queue. Returns the anchor.
-    pub(crate) fn inject_block(&mut self, deposits: Vec<Deposit>) -> eyre::Result<NumHash> {
+    pub(crate) fn inject_block(&mut self, deposits: Vec<DepositFixture>) -> eyre::Result<NumHash> {
         let all: Vec<usize> = (0..self.nodes.len()).collect();
         self.inject_block_observed_by(deposits, &all)
     }
@@ -3399,7 +3395,7 @@ impl P2pCluster {
     /// zone block (or produce it) until [`Self::record_anchor`] delivers it.
     pub(crate) fn inject_block_observed_by(
         &mut self,
-        deposits: Vec<Deposit>,
+        deposits: Vec<DepositFixture>,
         observers: &[usize],
     ) -> eyre::Result<NumHash> {
         let block = self.fixture.next_block();
@@ -3422,7 +3418,7 @@ impl P2pCluster {
         &self,
         index: usize,
         anchor: NumHash,
-        deposits: Vec<Deposit>,
+        deposits: Vec<DepositFixture>,
     ) -> eyre::Result<()> {
         let events = self.fixture.portal_events_from_deposits(&deposits);
         self.nodes[index]
@@ -4266,6 +4262,16 @@ async fn start_zone_with_redacted_rpc_l1_inner() -> eyre::Result<RedactedRpcL1Te
     })
 }
 
+/// Cleartext input used to construct encrypted deposit events in injection tests.
+#[derive(Clone)]
+pub(crate) struct DepositFixture {
+    pub token: Address,
+    pub sender: Address,
+    pub to: Address,
+    pub amount: u128,
+    pub memo: B256,
+}
+
 /// A synthetic L1 block produced by [`L1Fixture`].
 ///
 /// Clonable so the same block can be enqueued into multiple zone deposit queues,
@@ -4313,9 +4319,9 @@ impl L1Fixture {
         k256::SecretKey::from_slice(&[0x01; 32]).expect("valid fixture encryption key")
     }
 
-    fn encrypt_fixture_deposit(&self, deposit: &Deposit) -> EncryptedDeposit {
+    fn encrypt_fixture_deposit(&self, deposit: &DepositFixture) -> Deposit {
         let public_key = Self::encryption_key().public_key();
-        self.make_real_encrypted_deposit(
+        self.make_real_deposit(
             public_key.as_affine(),
             Address::ZERO,
             U256::ZERO,
@@ -4327,11 +4333,14 @@ impl L1Fixture {
         )
     }
 
-    pub(crate) fn portal_events_from_deposits(&self, deposits: &[Deposit]) -> L1PortalEvents {
+    pub(crate) fn portal_events_from_deposits(
+        &self,
+        deposits: &[DepositFixture],
+    ) -> L1PortalEvents {
         L1PortalEvents::from_deposits(
             deposits
                 .iter()
-                .map(|deposit| L1Deposit::Encrypted(self.encrypt_fixture_deposit(deposit)))
+                .map(|deposit| L1Deposit::Deposit(self.encrypt_fixture_deposit(deposit)))
                 .collect(),
         )
     }
@@ -4486,7 +4495,7 @@ impl L1Fixture {
         Ok(())
     }
 
-    fn seed_fixture_deposit_policy_state(&self, block_number: u64, deposits: &[Deposit]) {
+    fn seed_fixture_deposit_policy_state(&self, block_number: u64, deposits: &[DepositFixture]) {
         for deposit in deposits {
             self.seed_no_receive_policy_at(block_number, deposit.to)
                 .expect("deposit receive-policy fixture seed must be admitted");
@@ -4567,7 +4576,7 @@ impl L1Fixture {
         &self,
         block: &FixtureBlock,
         queue: &DepositQueue,
-        deposits: Vec<Deposit>,
+        deposits: Vec<DepositFixture>,
     ) {
         self.seed_fixture_deposit_policy_state(block.header.inner.number, &deposits);
         let events = self.portal_events_from_deposits(&deposits);
@@ -4586,11 +4595,11 @@ impl L1Fixture {
         self.apply_enabled_token_events(&events.enabled_tokens);
         for deposit in &events.deposits {
             match deposit {
-                L1Deposit::Regular(deposit) => {
+                L1Deposit::WithdrawalBounceBack(deposit) => {
                     self.seed_no_receive_policy_at(block_number, deposit.to)
                         .expect("event receive-policy fixture seed must be admitted");
                 }
-                L1Deposit::Encrypted(deposit) => {
+                L1Deposit::Deposit(deposit) => {
                     if let Some(decrypted) = zone_precompiles::ecies::decrypt_deposit(
                         &Self::encryption_key(),
                         &deposit.ephemeral_pubkey_x,
@@ -4610,20 +4619,18 @@ impl L1Fixture {
         queue.enqueue(block.header.clone(), events);
     }
 
-    /// Create a [`Deposit`] for a specific L1 block.
+    /// Create a [`DepositFixture`] for a specific L1 block.
     pub(crate) fn make_deposit_for_block(
         token: Address,
         sender: Address,
         to: Address,
         amount: u128,
-    ) -> Deposit {
-        Deposit {
+    ) -> DepositFixture {
+        DepositFixture {
             token,
             sender,
             to,
             amount,
-            fee: 0,
-            tempo_refund_recipient: sender,
             memo: B256::ZERO,
         }
     }
@@ -4665,7 +4672,7 @@ impl L1Fixture {
     pub(crate) fn inject_deposits(
         &mut self,
         queue: &DepositQueue,
-        deposits: Vec<Deposit>,
+        deposits: Vec<DepositFixture>,
     ) -> NumHash {
         let header = self.next_header();
         self.seed_fixture_deposit_policy_state(header.inner.number, &deposits);
@@ -4683,15 +4690,15 @@ impl L1Fixture {
         queue.enqueue(header, events);
     }
 
-    /// Create an [`EncryptedDeposit`] for testing with dummy ECIES parameters.
+    /// Create an [`Deposit`] for testing with dummy ECIES parameters.
     #[allow(dead_code)]
-    pub(crate) fn make_encrypted_deposit(
+    pub(crate) fn make_dummy_deposit(
         &self,
         token: Address,
         sender: Address,
         amount: u128,
-    ) -> EncryptedDeposit {
-        EncryptedDeposit {
+    ) -> Deposit {
+        Deposit {
             token,
             sender,
             amount,
@@ -4706,32 +4713,30 @@ impl L1Fixture {
         }
     }
 
-    /// Create a [`Deposit`] for testing.
+    /// Create a [`DepositFixture`] for testing.
     pub(crate) fn make_deposit(
         &self,
         token: Address,
         sender: Address,
         to: Address,
         amount: u128,
-    ) -> Deposit {
-        Deposit {
+    ) -> DepositFixture {
+        DepositFixture {
             token,
             sender,
             to,
             amount,
-            fee: 0,
-            tempo_refund_recipient: sender,
             memo: B256::ZERO,
         }
     }
 
-    /// Create an [`EncryptedDeposit`] with proper ECIES encryption against the
+    /// Create an [`Deposit`] with proper ECIES encryption against the
     /// sequencer's real public key.
     ///
     /// Uses a deterministic ephemeral key for reproducibility.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)]
-    pub(crate) fn make_real_encrypted_deposit(
+    pub(crate) fn make_real_deposit(
         &self,
         sequencer_pub: &k256::AffinePoint,
         portal_address: Address,
@@ -4741,7 +4746,7 @@ impl L1Fixture {
         recipient: Address,
         amount: u128,
         memo: B256,
-    ) -> EncryptedDeposit {
+    ) -> Deposit {
         use k256::{ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
         use sha2::{Digest, Sha256};
         use zone_precompiles::ecies::{
@@ -4772,7 +4777,7 @@ impl L1Fixture {
         let plaintext = build_plaintext(&recipient, &memo);
         let (ciphertext, nonce, tag) = encrypt_plaintext(&aes_key, &plaintext);
 
-        EncryptedDeposit {
+        Deposit {
             token,
             sender,
             amount,

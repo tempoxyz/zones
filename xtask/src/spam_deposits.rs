@@ -20,7 +20,7 @@ use tempo_primitives::{
     TempoSignature,
     transaction::{Call, PrimitiveSignature},
 };
-use tempo_zone_contracts::{EncryptedDepositPayload, ZonePortal};
+use tempo_zone_contracts::{DepositPayload, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
@@ -284,7 +284,7 @@ impl SpamDeposits {
         Ok(())
     }
 
-    /// Build the calldata for a single encrypted deposit.
+    /// Build the calldata for a single deposit.
     fn build_deposit_calldata(
         &self,
         recipient: Address,
@@ -301,7 +301,7 @@ impl SpamDeposits {
         )
         .ok_or_else(|| eyre!("ECIES encryption failed"))?;
 
-        let payload = EncryptedDepositPayload {
+        let payload = DepositPayload {
             ephemeralPubkeyX: encrypted.eph_pub_x,
             ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
             ciphertext: Bytes::from(encrypted.ciphertext),

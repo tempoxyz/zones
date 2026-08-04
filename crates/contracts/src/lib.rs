@@ -57,8 +57,8 @@ mod tests {
     use alloy_sol_types::{SolCall, SolValue};
 
     #[test]
-    fn test_deposit_abi_encode_vs_params() {
-        let d = Deposit {
+    fn test_withdrawal_bounce_back_abi_encode_vs_params() {
+        let d = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
@@ -81,8 +81,8 @@ mod tests {
     }
 
     #[test]
-    fn test_queued_deposit_encoding() {
-        let deposit = Deposit {
+    fn test_queued_withdrawal_bounce_back_encoding() {
+        let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
@@ -94,13 +94,13 @@ mod tests {
         let deposit_data = Bytes::from(deposit.abi_encode());
 
         let qd = QueuedDeposit {
-            depositType: DepositType::Regular,
+            depositType: DepositType::WithdrawalBounceBack,
             depositData: deposit_data,
         };
 
         println!(
-            "DepositType::Regular abi_encode: {}",
-            const_hex::encode(DepositType::Regular.abi_encode())
+            "DepositType::WithdrawalBounceBack abi_encode: {}",
+            const_hex::encode(DepositType::WithdrawalBounceBack.abi_encode())
         );
         println!(
             "deposit.abi_encode() length: {}",
@@ -141,8 +141,8 @@ mod tests {
     }
 
     #[test]
-    fn test_deposit_hash_chain_matches_solidity() {
-        let deposit = Deposit {
+    fn test_withdrawal_bounce_back_hash_chain_matches_solidity() {
+        let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
@@ -152,14 +152,22 @@ mod tests {
         };
         let prev_hash = B256::ZERO;
 
-        let solidity_encoding = (DepositType::Regular, deposit.clone(), prev_hash).abi_encode();
+        let solidity_encoding = (
+            DepositType::WithdrawalBounceBack,
+            deposit.clone(),
+            prev_hash,
+        )
+            .abi_encode();
         let solidity_hash = keccak256(&solidity_encoding);
 
-        let rust_encoding = (DepositType::Regular, deposit, prev_hash).abi_encode();
+        let rust_encoding = (DepositType::WithdrawalBounceBack, deposit, prev_hash).abi_encode();
         let rust_hash = keccak256(&rust_encoding);
 
         assert_eq!(solidity_encoding, rust_encoding, "ABI encodings must match");
-        assert_eq!(solidity_hash, rust_hash, "Deposit hash chains must match");
+        assert_eq!(
+            solidity_hash, rust_hash,
+            "WithdrawalBounceBackDeposit hash chains must match"
+        );
     }
 
     #[test]
@@ -216,15 +224,15 @@ mod tests {
     }
 
     #[test]
-    fn test_router_encrypted_callback_encoding_matches_tuple() {
-        let encrypted = EncryptedDepositPayload {
+    fn test_router_callback_encoding_matches_tuple() {
+        let encrypted = DepositPayload {
             ephemeralPubkeyX: B256::from([0x22; 32]),
             ephemeralPubkeyYParity: 0x02,
             ciphertext: Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]),
             nonce: [0x33; 12].into(),
             tag: [0x44; 16].into(),
         };
-        let callback = SwapAndDepositRouterEncryptedCallback {
+        let callback = SwapAndDepositRouterCallback {
             token_out: address!("0x0000000000000000000000000000000000001002"),
             target_portal: address!("0x0000000000000000000000000000000000002002"),
             key_index: U256::from(7),

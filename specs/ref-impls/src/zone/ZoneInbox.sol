@@ -8,7 +8,6 @@ import {
     Deposit,
     DepositType,
     EnabledToken,
-    EncryptedDeposit,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
     ITempoState,
@@ -20,6 +19,7 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
+    WithdrawalBounceBackDeposit,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
 import {
@@ -196,13 +196,13 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system transaction
     /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes encrypted deposits and internal withdrawal bounce-backs
+    ///      2. Processes user deposits and internal withdrawal bounce-backs
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///      The proof validates contiguity (ancestor check) rather than exact equality.
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
-    /// @param decryptions Decryption data for valid encrypted deposits, in order
+    /// @param decryptions Decryption data for valid user deposits, in order
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
@@ -236,9 +236,11 @@ contract ZoneInbox is IZoneInbox {
         for (uint256 i = 0; i < deposits.length; i++) {
             QueuedDeposit calldata qd = deposits[i];
 
-            if (qd.depositType == DepositType.Regular) {
-                Deposit memory d = abi.decode(qd.depositData, (Deposit));
-                currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
+            if (qd.depositType == DepositType.WithdrawalBounceBack) {
+                WithdrawalBounceBackDeposit memory d =
+                    abi.decode(qd.depositData, (WithdrawalBounceBackDeposit));
+                currentHash =
+                    keccak256(abi.encode(DepositType.WithdrawalBounceBack, d, currentHash));
                 if (
                     d.sender != tempoPortal || d.tempoRefundRecipient != address(0)
                         || d.memo != bytes32(0) || qd.rejected
@@ -247,13 +249,13 @@ contract ZoneInbox is IZoneInbox {
                 }
                 _processWithdrawalBounceBack(d);
             } else {
-                EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
-                currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
+                Deposit memory ed = abi.decode(qd.depositData, (Deposit));
+                currentHash = keccak256(abi.encode(DepositType.Deposit, ed, currentHash));
 
                 if (qd.rejected) {
                     _rejectDeposit(
                         currentHash,
-                        DepositType.Encrypted,
+                        DepositType.Deposit,
                         ed.sender,
                         ed.token,
                         ed.amount,
@@ -262,7 +264,7 @@ contract ZoneInbox is IZoneInbox {
                     continue;
                 }
 
-                // Sequencer must provide decryption for this encrypted deposit
+                // The sequencer must provide decryption data for this deposit.
                 if (decryptionIndex >= decryptions.length) {
                     revert MissingDecryptionData();
                 }
@@ -313,18 +315,18 @@ contract ZoneInbox is IZoneInbox {
                 // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
                 // and must be exactly ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE (64) bytes.
                 if (!valid || decryptedPlaintext.length != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-                    _failEncryptedDeposit(currentHash, ed);
+                    _failDeposit(currentHash, ed);
                     continue;
                 }
                 (address decryptedTo, bytes32 decryptedMemo) =
                     EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
 
                 try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
-                    emit EncryptedDepositProcessed(
+                    emit DepositProcessed(
                         currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
                     );
                 } catch {
-                    _failEncryptedDeposit(currentHash, ed);
+                    _failDeposit(currentHash, ed);
                 }
             }
         }
@@ -374,9 +376,9 @@ contract ZoneInbox is IZoneInbox {
         emit DepositRejected(currentHash, sender, depositType, token, amount, tempoRefundRecipient);
     }
 
-    function _failEncryptedDeposit(bytes32 currentHash, EncryptedDeposit memory ed) internal {
+    function _failDeposit(bytes32 currentHash, Deposit memory ed) internal {
         _enqueueDepositBounceBack(ed.token, ed.amount, ed.tempoRefundRecipient);
-        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+        emit DepositFailed(currentHash, ed.sender, ed.token, ed.amount);
     }
 
     function _enqueueDepositBounceBack(
@@ -394,7 +396,7 @@ contract ZoneInbox is IZoneInbox {
         return uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)) != 0;
     }
 
-    function _processWithdrawalBounceBack(Deposit memory d) internal {
+    function _processWithdrawalBounceBack(WithdrawalBounceBackDeposit memory d) internal {
         uint64 fallbackNonce = uint64(uint160(d.to));
         address zoneFallbackRecipient =
             IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);

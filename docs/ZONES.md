@@ -42,7 +42,7 @@ ADDR=$(cast wallet address "$PRIVATE_KEY")
 # Fund the wallet on L1 (testnet faucet)
 cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 
-# Approve the portal and make an encrypted deposit to the zone
+# Approve the portal and make a deposit to the zone
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
 just send-deposit 1000000
@@ -259,7 +259,7 @@ cargo run -p tempo-xtask -- set-encryption-key \
   --portal "$L1_PORTAL_ADDRESS" \
   --private-key "$SEQUENCER_KEY"
 
-# Send an encrypted deposit
+# Send a deposit
 just send-deposit 1000000                       # to your own address
 just send-deposit 1000000 <recipient-address>   # to a specific address
 ```
@@ -297,7 +297,7 @@ The sequencer includes the withdrawal in the next batch submission to L1 and pro
 
 #### Router Swap + Deposit Demo (Same Zone)
 
-This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone via an encrypted deposit. The routed callback payload includes a public `tempoRefundRecipient` for the downstream portal deposit; set `ROUTER_BOUNCEBACK_RECIPIENT` to a refund-specific burner or stealth address you control if you do not want a later refund to point at the encrypted zone recipient. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
+This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone. The routed callback payload includes a public `tempoRefundRecipient` for the downstream portal deposit; set `ROUTER_BOUNCEBACK_RECIPIENT` to a refund-specific burner or stealth address you control if you do not want a later refund to point at the encrypted zone recipient. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
 
 Prerequisites:
 - A running zone with an active sequencer
@@ -529,9 +529,9 @@ The demo walks through 9 steps, printing every transaction with an explorer link
 3. **Enable on zone** — portal admin calls `enableToken` on the portal (uses `ADMIN_KEY`, or auto-discovers the matching `generated/<name>/zone.json` and reads `adminKey` with `sequencerKey` as a legacy fallback)
 4. **Deposit** — plain deposit so the `PRIVATE_KEY` wallet has L2 funds
 5. **Blacklist** — creates a TIP-403 blacklist policy, adds a fresh target wallet, assigns the policy to the token
-6. **Encrypted deposit → bounce** — sends an encrypted deposit to the blacklisted target; zone rejects it and returns funds to sender
+6. **Deposit → bounce** — sends a deposit to the blacklisted target; zone rejects it and returns funds to sender
 7. **Unblacklist** — removes the target from the blacklist on L1
-8. **Encrypted deposit → success** — same encrypted deposit now goes through
+8. **Deposit → success** — the same deposit now goes through
 9. **Withdraw** — target withdraws tokens from zone back to L1
 
 Prerequisites: a running zone with the sequencer producing blocks, the `PRIVATE_KEY` wallet funded with pathUSD on L1, and portal admin authority available via `ADMIN_KEY` or a saved `adminKey` in the matching `generated/<name>/zone.json` (the demo deposits a small amount to the target for L2 gas fees).

@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::EncryptionKeyRotation;
 
-/// Private keys available for decrypting finalized encrypted deposits.
+/// Private keys available for decrypting finalized deposits.
 ///
 /// Keys are configured by their private material and bound to Portal indexes when the
 /// corresponding finalized registration is observed. The Portal remains authoritative for key

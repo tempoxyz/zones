@@ -19,27 +19,27 @@ use tempo_primitives::{TempoReceipt, TempoTxType};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EncryptedDepositHashFixture {
+struct DepositHashFixture {
     previous_hash: String,
     expected_hash: String,
     single_value_tuple_hash: String,
-    deposit: EncryptedDepositFixture,
+    deposit: DepositFixture,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EncryptedDepositFixture {
+struct DepositFixture {
     token: String,
     sender: String,
     amount: u128,
     tempo_refund_recipient: String,
     key_index: u64,
-    encrypted: EncryptedDepositPayloadFixture,
+    encrypted: DepositPayloadFixture,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct EncryptedDepositPayloadFixture {
+struct DepositPayloadFixture {
     ephemeral_pubkey_x: String,
     ephemeral_pubkey_y_parity: u8,
     ciphertext: String,
@@ -58,12 +58,12 @@ struct MalformedTempoHeadersFixture {
     extra_data_long_length_below_short_threshold: String,
 }
 
-fn encrypted_deposit_hash_fixture() -> EncryptedDepositHashFixture {
+fn deposit_hash_fixture() -> DepositHashFixture {
     serde_json::from_str(include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../specs/ref-impls/test/fixtures/encryptedDepositHashChain.json"
+        "/../../specs/ref-impls/test/fixtures/depositHashChain.json"
     )))
-    .expect("encrypted deposit hash fixture JSON should decode")
+    .expect("deposit hash fixture JSON should decode")
 }
 
 fn malformed_tempo_headers_fixture() -> MalformedTempoHeadersFixture {
@@ -99,9 +99,9 @@ fn parse_fixture_fixed<const N: usize>(value: &str, name: &str) -> [u8; N] {
     out
 }
 
-impl EncryptedDepositFixture {
-    fn to_l1_deposit(&self) -> EncryptedDeposit {
-        EncryptedDeposit {
+impl DepositFixture {
+    fn to_l1_deposit(&self) -> Deposit {
+        Deposit {
             token: parse_fixture_address(&self.token),
             sender: parse_fixture_address(&self.sender),
             amount: self.amount,
@@ -118,7 +118,7 @@ impl EncryptedDepositFixture {
 }
 
 fn make_withdrawal_bounce_back(amount: u128) -> L1Deposit {
-    L1Deposit::Regular(Deposit {
+    L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
         sender: address!("0x0000000000000000000000000000000000000001"),
         to: address!("0x0000000000000000000000000000000000000002"),
@@ -877,7 +877,7 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
 }
 
 #[test]
-fn test_push_log_decodes_bounce_back_as_regular_deposit() {
+fn test_push_log_decodes_withdrawal_bounce_back() {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
     let fallback_nonce = 0xF1;
     let encoded_fallback_nonce = address!("0x00000000000000000000000000000000000000F1");
@@ -909,8 +909,8 @@ fn test_push_log_decodes_bounce_back_as_regular_deposit() {
         .expect("bounce-back should decode");
 
     assert_eq!(events.deposits.len(), 1, "should enqueue one deposit");
-    let L1Deposit::Regular(deposit) = &events.deposits[0] else {
-        panic!("bounce-back should be mapped to a regular deposit");
+    let L1Deposit::WithdrawalBounceBack(deposit) = &events.deposits[0] else {
+        panic!("bounce-back should be mapped to a withdrawal bounce-back entry");
     };
     assert_eq!(deposit.token, token);
     assert_eq!(deposit.sender, portal_address);
@@ -947,7 +947,7 @@ fn confirmed_token_enabled_event_updates_registry() {
 fn test_drain_returns_block_grouped_deposits() {
     let mut queue = PendingDeposits::default();
 
-    let d1 = L1Deposit::Regular(Deposit {
+    let d1 = L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
         sender: address!("0x0000000000000000000000000000000000000001"),
         to: address!("0x0000000000000000000000000000000000000002"),
@@ -957,7 +957,7 @@ fn test_drain_returns_block_grouped_deposits() {
         memo: B256::ZERO,
     });
 
-    let d2 = L1Deposit::Regular(Deposit {
+    let d2 = L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
         sender: address!("0x0000000000000000000000000000000000000003"),
         to: address!("0x0000000000000000000000000000000000000004"),
@@ -987,20 +987,20 @@ fn test_drain_returns_block_grouped_deposits() {
 }
 
 #[test]
-fn test_encrypted_deposit_hash_chain() {
-    let fixture = encrypted_deposit_hash_fixture();
+fn test_deposit_hash_chain() {
+    let fixture = deposit_hash_fixture();
     let encrypted = fixture.deposit.to_l1_deposit();
     let previous_hash = parse_fixture_b256(&fixture.previous_hash);
 
-    let next_hash = deposit_hash_chain(previous_hash, &[L1Deposit::Encrypted(encrypted.clone())]);
+    let next_hash = deposit_hash_chain(previous_hash, &[L1Deposit::Deposit(encrypted.clone())]);
 
-    let abi_encrypted = abi::EncryptedDeposit {
+    let abi_deposit = abi::Deposit {
         token: encrypted.token,
         sender: encrypted.sender,
         amount: encrypted.amount,
         tempoRefundRecipient: encrypted.tempo_refund_recipient,
         keyIndex: encrypted.key_index,
-        encrypted: abi::EncryptedDepositPayload {
+        encrypted: abi::DepositPayload {
             ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
             ephemeralPubkeyYParity: encrypted.ephemeral_pubkey_y_parity,
             ciphertext: encrypted.ciphertext.clone().into(),
@@ -1010,12 +1010,12 @@ fn test_encrypted_deposit_hash_chain() {
     };
     let expected = parse_fixture_b256(&fixture.expected_hash);
     let tuple_value_hash =
-        keccak256((DepositType::Encrypted, abi_encrypted, previous_hash).abi_encode());
+        keccak256((DepositType::Deposit, abi_deposit, previous_hash).abi_encode());
     let single_value_tuple_hash = parse_fixture_b256(&fixture.single_value_tuple_hash);
 
     assert_eq!(
         next_hash, expected,
-        "encrypted deposit hash chain must match Solidity DepositQueueLib.enqueueEncrypted"
+        "deposit hash chain must match Solidity DepositQueueLib.enqueueDeposit"
     );
     assert_eq!(
         tuple_value_hash, single_value_tuple_hash,
@@ -1023,18 +1023,18 @@ fn test_encrypted_deposit_hash_chain() {
     );
     assert_ne!(
         expected, tuple_value_hash,
-        "single-value tuple encoding should not match Solidity abi.encode(...) for dynamic encrypted deposits"
+        "single-value tuple encoding should not match Solidity abi.encode(...) for dynamic deposits"
     );
     assert_ne!(next_hash, B256::ZERO, "hash should be non-zero");
 }
 
 #[test]
-fn test_withdrawal_bounce_back_and_encrypted_deposit_hash_chain() {
+fn test_withdrawal_bounce_back_and_deposit_hash_chain() {
     let token = address!("0x0000000000000000000000000000000000001000");
     let sender = address!("0x0000000000000000000000000000000000001111");
     let recipient = address!("0x000000000000000000000000000000000000A11C");
 
-    let bounce_back = Deposit {
+    let bounce_back = WithdrawalBounceBackDeposit {
         token,
         sender,
         to: recipient,
@@ -1044,7 +1044,7 @@ fn test_withdrawal_bounce_back_and_encrypted_deposit_hash_chain() {
         memo: B256::ZERO,
     };
 
-    let encrypted = EncryptedDeposit {
+    let encrypted = Deposit {
         token,
         sender,
         amount: 300_000,
@@ -1059,8 +1059,8 @@ fn test_withdrawal_bounce_back_and_encrypted_deposit_hash_chain() {
     };
 
     let deposits = vec![
-        L1Deposit::Regular(bounce_back.clone()),
-        L1Deposit::Encrypted(encrypted.clone()),
+        L1Deposit::WithdrawalBounceBack(bounce_back.clone()),
+        L1Deposit::Deposit(encrypted.clone()),
     ];
 
     let next_hash = deposit_hash_chain(B256::ZERO, &deposits);
@@ -1068,8 +1068,8 @@ fn test_withdrawal_bounce_back_and_encrypted_deposit_hash_chain() {
     // Manually compute expected chain
     let hash_1 = keccak256(
         (
-            DepositType::Regular,
-            abi::Deposit {
+            DepositType::WithdrawalBounceBack,
+            abi::WithdrawalBounceBackDeposit {
                 token: bounce_back.token,
                 sender: bounce_back.sender,
                 to: bounce_back.to,
@@ -1084,14 +1084,14 @@ fn test_withdrawal_bounce_back_and_encrypted_deposit_hash_chain() {
 
     let hash_2 = keccak256(
         (
-            DepositType::Encrypted,
-            abi::EncryptedDeposit {
+            DepositType::Deposit,
+            abi::Deposit {
                 token: encrypted.token,
                 sender: encrypted.sender,
                 amount: encrypted.amount,
                 tempoRefundRecipient: encrypted.tempo_refund_recipient,
                 keyIndex: encrypted.key_index,
-                encrypted: abi::EncryptedDepositPayload {
+                encrypted: abi::DepositPayload {
                     ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
                     ephemeralPubkeyYParity: encrypted.ephemeral_pubkey_y_parity,
                     ciphertext: encrypted.ciphertext.into(),
@@ -1143,7 +1143,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
 
     let block = L1BlockDeposits {
         header: seal(make_test_header(block_number)),
-        events: L1PortalEvents::from_deposits(vec![L1Deposit::Encrypted(EncryptedDeposit {
+        events: L1PortalEvents::from_deposits(vec![L1Deposit::Deposit(Deposit {
             token,
             sender,
             amount: 1_000_000,
@@ -1166,7 +1166,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
     assert_eq!(prepared.queued_deposits.len(), 1);
     assert_eq!(
         prepared.queued_deposits[0].depositType,
-        DepositType::Encrypted
+        DepositType::Deposit
     );
     assert_eq!(
         prepared.decryptions.len(),
@@ -1176,7 +1176,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
 }
 
 #[tokio::test]
-async fn encrypted_deposits_select_the_private_key_by_portal_index() {
+async fn deposits_select_the_private_key_by_portal_index() {
     let token = address!("0x0000000000000000000000000000000000001000");
     let sender = address!("0x0000000000000000000000000000000000001234");
     let portal = address!("0x0000000000000000000000000000000000000ABC");
@@ -1229,7 +1229,7 @@ async fn encrypted_deposits_select_the_private_key_by_portal_index() {
         )
         .unwrap();
         expected_shared_secrets.push(decrypted.proof.shared_secret);
-        deposits.push(L1Deposit::Encrypted(EncryptedDeposit {
+        deposits.push(L1Deposit::Deposit(Deposit {
             token,
             sender,
             amount: 1_000_000,

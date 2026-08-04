@@ -8,11 +8,10 @@ import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 import {
     BlockTransition,
     Deposit,
+    DepositPayload,
     DepositQueueTransition,
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
-    EncryptedDeposit,
-    EncryptedDepositPayload,
     EncryptionKeyEntry,
     IVerifier,
     IWithdrawalReceiver,
@@ -30,6 +29,7 @@ import {
     PORTAL_ROLE_SLOT,
     Role,
     Withdrawal,
+    WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
     ZONE_MESSENGER_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS,
@@ -1525,7 +1525,7 @@ contract ZonePortalTest is BaseTest {
         for (uint256 i; i < maximumPublicDeposits - 1; ++i) {
             _deposit(portal, address(pathUSD), bob, amount, bytes32(i), bob);
         }
-        portal.deposit(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), amount, 0, _makeDepositPayload(), alice);
 
         bytes32 queueHashAtCapacity = portal.currentDepositQueueHash();
         uint256 aliceBalanceAtCapacity = pathUSD.balanceOf(alice);
@@ -2359,7 +2359,7 @@ contract ZonePortalTest is BaseTest {
                 flow: flow,
                 outputToken: address(pathUSD),
                 keyIndex: 0,
-                encrypted: _makeEncryptedPayload(),
+                encrypted: _makeDepositPayload(),
                 minVaultAssets: 0,
                 minVaultShares: 0,
                 minOutputAmount: minOutputAmount,
@@ -3583,8 +3583,8 @@ contract ZonePortalTest is BaseTest {
         assertTrue(newDepositHash != depositHashBefore);
 
         // The bounce-back deposit should be:
-        // Deposit { sender: portal, to: bob, amount: 500e6, fee: 0, memo: 0 }
-        Deposit memory expectedBounceBack = Deposit({
+        // WithdrawalBounceBackDeposit { sender: portal, to: bob, amount: 500e6, fee: 0, memo: 0 }
+        WithdrawalBounceBackDeposit memory expectedBounceBack = WithdrawalBounceBackDeposit({
             token: address(pathUSD),
             sender: address(portal),
             to: bob,
@@ -3592,8 +3592,9 @@ contract ZonePortalTest is BaseTest {
             tempoRefundRecipient: address(0),
             memo: bytes32(0)
         });
-        bytes32 expectedHash =
-            keccak256(abi.encode(DepositType.Regular, expectedBounceBack, depositHashBefore));
+        bytes32 expectedHash = keccak256(
+            abi.encode(DepositType.WithdrawalBounceBack, expectedBounceBack, depositHashBefore)
+        );
         assertEq(newDepositHash, expectedHash);
     }
 
@@ -3980,8 +3981,8 @@ contract ZonePortalTest is BaseTest {
                        ENCRYPTED DEPOSIT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function _makeEncryptedPayload() internal pure returns (EncryptedDepositPayload memory) {
-        return EncryptedDepositPayload({
+    function _makeDepositPayload() internal pure returns (DepositPayload memory) {
+        return DepositPayload({
             ephemeralPubkeyX: VALID_SECP256K1_X,
             ephemeralPubkeyYParity: 0x02,
             ciphertext: new bytes(64),
@@ -3994,7 +3995,7 @@ contract ZonePortalTest is BaseTest {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
-        EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
+        DepositPayload memory encrypted = _makeDepositPayload();
 
         vm.prank(alice);
         pathUSD.approve(address(portal), depositAmount);
@@ -4048,7 +4049,7 @@ contract ZonePortalTest is BaseTest {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
         bytes32 hash =
-            portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+            portal.deposit(address(pathUSD), depositAmount, 0, _makeDepositPayload(), alice);
         vm.stopPrank();
 
         assertEq(portal.currentDepositQueueHash(), hash);
@@ -4062,7 +4063,7 @@ contract ZonePortalTest is BaseTest {
         uint128 fee = portal.calculateDepositFee();
         uint128 netAmount = depositAmount - fee;
 
-        EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
+        DepositPayload memory encrypted = _makeDepositPayload();
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
@@ -4070,7 +4071,7 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         // Reconstruct expected hash using the same encoding as DepositQueueLib
-        EncryptedDeposit memory ed = EncryptedDeposit({
+        Deposit memory ed = Deposit({
             token: address(pathUSD),
             sender: alice,
             amount: netAmount,
@@ -4078,7 +4079,7 @@ contract ZonePortalTest is BaseTest {
             keyIndex: 0,
             encrypted: encrypted
         });
-        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Deposit, ed, bytes32(0)));
         assertEq(hash, expectedHash);
     }
 
@@ -4093,7 +4094,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 h1 = _deposit(portal, address(pathUSD), alice, amount, bytes32("memo"), alice);
 
         // Encrypted deposit from alice
-        bytes32 h2 = portal.deposit(address(pathUSD), amount, 0, _makeEncryptedPayload(), alice);
+        bytes32 h2 = portal.deposit(address(pathUSD), amount, 0, _makeDepositPayload(), alice);
         vm.stopPrank();
 
         // Both should update the same queue
@@ -4114,7 +4115,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, _makeDepositPayload(), alice);
         vm.stopPrank();
 
         assertEq(pathUSD.balanceOf(alice), aliceBefore - depositAmount);
@@ -4122,20 +4123,20 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), portalBefore + depositAmount - expectedFee);
     }
 
-    function test_deposit_emitsEncryptedEvent() public {
+    function test_deposit_emitsDepositMade() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
         uint128 netAmount = depositAmount - fee;
 
-        EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
+        DepositPayload memory encrypted = _makeDepositPayload();
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
 
         // Build expected hash
-        EncryptedDeposit memory ed = EncryptedDeposit({
+        Deposit memory ed = Deposit({
             token: address(pathUSD),
             sender: alice,
             amount: netAmount,
@@ -4143,10 +4144,10 @@ contract ZonePortalTest is BaseTest {
             keyIndex: 0,
             encrypted: encrypted
         });
-        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Deposit, ed, bytes32(0)));
 
         vm.expectEmit(true, true, false, true);
-        emit IZonePortal.EncryptedDepositMade(
+        emit IZonePortal.DepositMade(
             expectedHash,
             alice,
             address(pathUSD),
@@ -4182,7 +4183,7 @@ contract ZonePortalTest is BaseTest {
 
         // Should revert with EncryptionKeyExpired for key index 0
         vm.expectRevert();
-        portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, _makeDepositPayload(), alice);
         vm.stopPrank();
     }
 
@@ -4193,7 +4194,7 @@ contract ZonePortalTest is BaseTest {
 
         // No keys set, index 0 is invalid
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidEncryptionKeyIndex.selector, 0));
-        portal.deposit(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), depositAmount, 0, _makeDepositPayload(), alice);
         vm.stopPrank();
     }
 
@@ -4204,7 +4205,7 @@ contract ZonePortalTest is BaseTest {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
 
-        EncryptedDepositPayload memory encrypted = EncryptedDepositPayload({
+        DepositPayload memory encrypted = DepositPayload({
             ephemeralPubkeyX: VALID_SECP256K1_X,
             ephemeralPubkeyYParity: 0x04, // Invalid
             ciphertext: new bytes(64),
@@ -4224,7 +4225,7 @@ contract ZonePortalTest is BaseTest {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
 
-        EncryptedDepositPayload memory encrypted = EncryptedDepositPayload({
+        DepositPayload memory encrypted = DepositPayload({
             ephemeralPubkeyX: bytes32(0), // Invalid: zero
             ephemeralPubkeyYParity: 0x02,
             ciphertext: new bytes(64),
@@ -4245,14 +4246,14 @@ contract ZonePortalTest is BaseTest {
         pathUSD.approve(address(portal), 99_999);
 
         vm.expectRevert(IZonePortal.DepositTooSmall.selector);
-        portal.deposit(address(pathUSD), 99_999, 0, _makeEncryptedPayload(), alice);
+        portal.deposit(address(pathUSD), 99_999, 0, _makeDepositPayload(), alice);
         vm.stopPrank();
     }
 
     function test_deposit_revertsOnCiphertextTooShort() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
-        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        DepositPayload memory payload = _makeDepositPayload();
         payload.ciphertext = new bytes(63); // one byte too short
 
         vm.startPrank(alice);
@@ -4268,7 +4269,7 @@ contract ZonePortalTest is BaseTest {
     function test_deposit_revertsOnCiphertextTooLong() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
-        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        DepositPayload memory payload = _makeDepositPayload();
         payload.ciphertext = new bytes(65); // one byte too long
 
         vm.startPrank(alice);
@@ -4284,7 +4285,7 @@ contract ZonePortalTest is BaseTest {
     function test_deposit_revertsOnEmptyCiphertext() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
-        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        DepositPayload memory payload = _makeDepositPayload();
         payload.ciphertext = new bytes(0);
 
         vm.startPrank(alice);
@@ -4298,7 +4299,7 @@ contract ZonePortalTest is BaseTest {
     function test_deposit_revertsOnOversizedCiphertext() public {
         _setEncKeyWithPoP(ENC_KEY_1);
 
-        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        DepositPayload memory payload = _makeDepositPayload();
         payload.ciphertext = new bytes(1024); // large ciphertext (DoS vector)
 
         vm.startPrank(alice);
@@ -4875,15 +4876,15 @@ contract ZonePortalTest is BaseTest {
         } else {
             bytes32 depositHash =
                 _deposit(portal, address(pathUSD), bob, amount, bytes32("memo"), bob);
-            EncryptedDeposit memory depositData = EncryptedDeposit({
+            Deposit memory depositData = Deposit({
                 token: address(pathUSD),
                 sender: alice,
                 amount: amount - portal.calculateDepositFee(),
                 tempoRefundRecipient: bob,
                 keyIndex: portal.encryptionKeyCount() - 1,
-                encrypted: _encryptedDepositPayload(bob, bytes32("memo"))
+                encrypted: _depositPayload(bob, bytes32("memo"))
             });
-            assertEq(depositHash, DepositQueueLib.enqueueEncrypted(bytes32(0), depositData));
+            assertEq(depositHash, DepositQueueLib.enqueueDeposit(bytes32(0), depositData));
         }
         vm.stopPrank();
     }
@@ -4899,15 +4900,15 @@ contract ZonePortalTest is BaseTest {
         for (uint256 i = 0; i < iterations; i++) {
             bytes32 memo = bytes32(i);
             bytes32 actualHash = _deposit(portal, address(pathUSD), bob, amount, memo, bob);
-            EncryptedDeposit memory depositData = EncryptedDeposit({
+            Deposit memory depositData = Deposit({
                 token: address(pathUSD),
                 sender: alice,
                 amount: amount - portal.calculateDepositFee(),
                 tempoRefundRecipient: bob,
                 keyIndex: portal.encryptionKeyCount() - 1,
-                encrypted: _encryptedDepositPayload(bob, memo)
+                encrypted: _depositPayload(bob, memo)
             });
-            expectedHash = DepositQueueLib.enqueueEncrypted(expectedHash, depositData);
+            expectedHash = DepositQueueLib.enqueueDeposit(expectedHash, depositData);
             assertEq(actualHash, expectedHash);
         }
         vm.stopPrank();

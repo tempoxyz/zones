@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IZoneOutbox,
     IZonePortal,
     LastBatch,
@@ -146,7 +146,7 @@ contract ZoneOutboxTest is Test {
                 flow: flow,
                 outputToken: address(zoneToken),
                 keyIndex: 0,
-                encrypted: EncryptedDepositPayload({
+                encrypted: DepositPayload({
                     ephemeralPubkeyX: bytes32(uint256(1)),
                     ephemeralPubkeyYParity: 0x02,
                     ciphertext: new bytes(64),

@@ -1,4 +1,4 @@
-//! Sends an encrypted deposit to the ZonePortal on Tempo L1.
+//! Sends a deposit to the ZonePortal on Tempo L1.
 //!
 //! Encrypts `(to, memo)` using the sequencer's ECIES public key so the
 //! recipient and memo are hidden from on-chain observers.
@@ -13,11 +13,11 @@ use alloy::{
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
-use tempo_zone_contracts::{EncryptedDepositPayload, IZoneInbox, ZonePortal};
+use tempo_zone_contracts::{DepositPayload, IZoneInbox, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
-pub(crate) struct EncryptedDeposit {
+pub(crate) struct Deposit {
     /// Tempo L1 RPC URL.
     #[arg(long, env = "L1_RPC_URL")]
     l1_rpc_url: String,
@@ -51,7 +51,7 @@ pub(crate) struct EncryptedDeposit {
     zone_rpc_url: Option<String>,
 }
 
-impl EncryptedDeposit {
+impl Deposit {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         let key_str = self
             .private_key
@@ -105,7 +105,7 @@ impl EncryptedDeposit {
         )
         .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
 
-        let payload = EncryptedDepositPayload {
+        let payload = DepositPayload {
             ephemeralPubkeyX: enc.eph_pub_x,
             ephemeralPubkeyYParity: enc.eph_pub_y_parity,
             ciphertext: Bytes::from(enc.ciphertext),
@@ -113,7 +113,7 @@ impl EncryptedDeposit {
             tag: enc.tag.into(),
         };
 
-        println!("Sending encrypted deposit of {} to {to}...", self.amount);
+        println!("Sending deposit of {} to {to}...", self.amount);
         let receipt = portal
             .deposit(self.token, self.amount, key_index, payload, sender)
             .send_sync()
@@ -126,7 +126,7 @@ impl EncryptedDeposit {
             return Err(eyre!("deposit reverted (tx: {tx_hash})"));
         }
 
-        println!("Encrypted deposit sent! (block {block_number})");
+        println!("Deposit sent! (block {block_number})");
         println!("Explorer: https://explore.moderato.tempo.xyz/tx/{tx_hash}");
 
         // Wait for L2 processing if zone RPC is provided
@@ -138,7 +138,7 @@ impl EncryptedDeposit {
         Ok(())
     }
 
-    /// Poll the zone L2 for the encrypted deposit terminal event.
+    /// Poll the zone L2 for the deposit terminal event.
     async fn wait_for_l2_processing(
         &self,
         zone_rpc: &str,
@@ -148,29 +148,29 @@ impl EncryptedDeposit {
     ) -> eyre::Result<()> {
         use tempo_zone_contracts::ZONE_INBOX_ADDRESS;
 
-        println!("Waiting for encrypted deposit to be processed on L2...");
+        println!("Waiting for deposit to be processed on L2...");
         let l2 = ProviderBuilder::new().connect(zone_rpc).await?;
 
         let processed_filter = Filter::new()
             .address(ZONE_INBOX_ADDRESS)
-            .event_signature(IZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
+            .event_signature(IZoneInbox::DepositProcessed::SIGNATURE_HASH)
             .from_block(from_block);
         let failed_filter = Filter::new()
             .address(ZONE_INBOX_ADDRESS)
-            .event_signature(IZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
+            .event_signature(IZoneInbox::DepositFailed::SIGNATURE_HASH)
             .from_block(from_block);
 
         loop {
             let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
             for log in &logs {
-                if let Ok(event) = IZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
+                if let Ok(event) = IZoneInbox::DepositProcessed::decode_log(&log.inner)
                     && event.data.sender == sender
                     && event.data.to == to
                     && event.data.token == self.token
                     && event.data.amount == self.amount
                 {
                     let block = log.block_number.unwrap_or(0);
-                    println!("Encrypted deposit processed on L2! (block {block})");
+                    println!("Deposit processed on L2! (block {block})");
                     println!("  Token:  {}", event.data.token);
                     println!("  Sender: {}", event.data.sender);
                     println!("  To:     {}", event.data.to);
@@ -182,14 +182,14 @@ impl EncryptedDeposit {
 
             let logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
             for log in &logs {
-                if let Ok(event) = IZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
+                if let Ok(event) = IZoneInbox::DepositFailed::decode_log(&log.inner)
                     && event.data.sender == sender
                     && event.data.token == self.token
                     && event.data.amount == self.amount
                 {
                     let block = log.block_number.unwrap_or(0);
                     println!(
-                        "WARNING: Encrypted deposit FAILED on L2 (block {block}). \
+                        "WARNING: Deposit FAILED on L2 (block {block}). \
                          Funds returned to sender."
                     );
                     println!("  Token:  {}", event.data.token);

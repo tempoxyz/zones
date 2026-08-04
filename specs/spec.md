@@ -23,7 +23,7 @@
   - [Deposits](#deposits)
     - [Deposit Fees](#deposit-fees)
     - [Deposit Queue](#deposit-queue)
-    - [Encrypted Deposits](#encrypted-deposits)
+    - [Deposits](#deposits)
     - [Onchain Decryption Verification](#onchain-decryption-verification)
     - [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)
   - [Withdrawals](#withdrawals)
@@ -146,7 +146,7 @@ sequenceDiagram
     T->>T: lock tokens, append to deposit queue
 
     Note over Z: Process deposit
-    Z-->>T: observe EncryptedDepositMade
+    Z-->>T: observe DepositMade
     Z->>Z: ZoneInbox.advanceTempo()
     Z->>Z: mint tokens to recipient
 
@@ -188,7 +188,7 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Are configured at creation as a nonempty set of at most eight unique addresses and a nonzero threshold no greater than the set size.
 - May be replaced atomically by the admin together with the threshold. The configuration nonce starts at `0`; each later replacement increments `sequencerSetVersion` and invalidates certificates from earlier configurations.
 - Any active sequencer may perform a sequencer-authorized portal operation. Batch settlement additionally requires a threshold certificate.
-- Hold the encryption private keys used to decrypt [encrypted deposits](#encrypted-deposits).
+- Hold the encryption private keys used to decrypt [deposits](#deposits).
 
 A zone MAY include its admin in the sequencer set. The protocol still treats each privileged call as belonging to its role.
 
@@ -343,7 +343,7 @@ The sequencer can also configure `maxWithdrawalsPerBlock` via `ZoneOutbox.setMax
 
 ### Encryption Key Management
 
-The sequencer publishes a secp256k1 encryption public key used for [encrypted deposits](#encrypted-deposits) and for deterministic authenticated-withdrawal sender reveals. The key is set via `setSequencerEncryptionKey(x, yParity, popV, popR, popS)` on the portal, which requires a proof of possession (an ECDSA signature proving control of the corresponding private key).
+The sequencer publishes a secp256k1 encryption public key used for [deposits](#deposits) and for deterministic authenticated-withdrawal sender reveals. The key is set via `setSequencerEncryptionKey(x, yParity, popV, popR, popS)` on the portal, which requires a proof of possession (an ECDSA signature proving control of the corresponding private key).
 
 The portal stores all historical encryption keys in an append-only list. Users specify a `keyIndex` when making encrypted deposits, referencing which key they encrypted to. This avoids a race condition where a key rotates between transaction signing and block inclusion.
 
@@ -375,7 +375,7 @@ Until `acceptAdmin()` is called the current admin retains all governance powers,
 
 Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, the portal locks the tokens and appends the deposit to a hash chain, and the sequencer mints equivalent tokens on the zone.
 
-The user-facing deposit ABI is encrypted-only. `deposit(...)` is an exact alias of `depositEncrypted(...)` with the same encrypted arguments, validation, queue encoding, and `EncryptedDepositMade` event; first-party clients use `deposit`. `DepositType.Regular` remains solely as the internal encoding for withdrawal bounce-backs. This is a breaking protocol boundary: zones created against a plaintext-deposit implementation are not migrated or backfilled and must be recreated.
+The user-facing deposit ABI is encrypted-only. `deposit(...)` is an exact alias of `depositEncrypted(...)` with the same encrypted arguments, validation, queue encoding, and `DepositMade` event; first-party clients use `deposit`. `DepositType.WithdrawalBounceBack` remains solely as the internal encoding for withdrawal bounce-backs. This is a breaking protocol boundary: zones created against a plaintext-deposit implementation are not migrated or backfilled and must be recreated.
 
 ### Deposit Fees
 
@@ -398,7 +398,7 @@ The two fees are conceptually independent because their work happens on differen
 Deposits flow from Tempo to the zone through a hash chain. The portal tracks a single `currentDepositQueueHash` representing the head of the chain. Each new deposit wraps the existing hash:
 
 ```
-currentDepositQueueHash = keccak256(abi.encode(DepositType.Encrypted, deposit, currentDepositQueueHash))
+currentDepositQueueHash = keccak256(abi.encode(DepositType.Deposit, deposit, currentDepositQueueHash))
 ```
 
 The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` and `processedDepositNumber` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo L1 at the zone's finalized checkpoint.
@@ -407,9 +407,9 @@ Each portal accepts at most `MAX_DEPOSITS_PER_TEMPO_BLOCK` deposits in one Tempo
 
 `advanceTempo()` reads the portal's `currentDepositQueueHash` from Tempo L1 at the zone's finalized checkpoint. The call must process deposits through the current queue head: after rebuilding the hash chain, the resulting `processedDepositQueueHash` must equal the portal's `currentDepositQueueHash`.
 
-After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced, and updates `lastProcessedDepositNumber` from the proven `DepositQueueTransition`. Users should track deposit inclusion by deposit number: `EncryptedDepositMade` emits `depositNumber`, `ZoneInbox.TempoAdvanced` emits the inbox's `lastProcessedDepositNumber`, and `ZonePortal.BatchSubmitted` emits the accepted portal value. A deposit with number `N` is processed once `lastProcessedDepositNumber >= N`.
+After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced, and updates `lastProcessedDepositNumber` from the proven `DepositQueueTransition`. Users should track deposit inclusion by deposit number: `DepositMade` emits `depositNumber`, `ZoneInbox.TempoAdvanced` emits the inbox's `lastProcessedDepositNumber`, and `ZonePortal.BatchSubmitted` emits the accepted portal value. A deposit with number `N` is processed once `lastProcessedDepositNumber >= N`.
 
-### Encrypted Deposits
+### Deposits
 
 Users can encrypt the recipient and memo of a deposit so that only the sequencer can see who received the funds. The token, sender, and amount remain public (required for onchain accounting), but the `to` address and `memo` are encrypted.
 
@@ -422,16 +422,16 @@ The encryption scheme is ECIES with secp256k1:
 
 Before queue insertion, the portal also validates encrypted-payload shape. `deposit` reverts `InvalidEphemeralPubkey` if the ephemeral public key parity is not `0x02` or `0x03`, or if the X coordinate is not a valid secp256k1 X coordinate. It reverts `InvalidCiphertextLength(actual, expected)` unless `ciphertext.length == 64`, the fixed plaintext size for `(to, memo, padding)`. These are Tempo-side deposit-time reverts: no queue entry is created and no zone-side bounce-back is needed.
 
-The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`, including `tempoRefundRecipient`. The sequencer provides the ECDH shared secret and proof when processing the deposit on the zone via `advanceTempo()`; the zone decrypts `(to, memo)` from the ciphertext onchain.
+The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `DepositMade`, including `tempoRefundRecipient`. The sequencer provides the ECDH shared secret and proof when processing the deposit on the zone via `advanceTempo()`; the zone decrypts `(to, memo)` from the ciphertext onchain.
 
 Encrypted user deposits and internal withdrawal bounce-backs share a single ordered queue with a type discriminator in the hash:
 
 ```
-keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
-keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
+keccak256(abi.encode(DepositType.WithdrawalBounceBack, deposit, prevHash))
+keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
 ```
 
-`DepositType.Regular` is reserved for portal-created withdrawal bounce-backs; it is not a user deposit API. Entries are processed in their exact queue order.
+`DepositType.WithdrawalBounceBack` is reserved for portal-created withdrawal bounce-backs; it is not a user deposit API. Entries are processed in their exact queue order.
 
 | Field | Visibility | Reason |
 |-------|------------|--------|
@@ -467,22 +467,22 @@ sequenceDiagram
     U->>T: ZonePortal.deposit(..., tempoRefundRecipient)
     Note over T: require tempoRefundRecipient != address(0)
     T->>T: append to depositQueue
-    Note over T: emit EncryptedDepositMade
-    Z-->>T: observe EncryptedDepositMade
+    Note over T: emit DepositMade
+    Z-->>T: observe DepositMade
     Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit)
     Z->>Z: onchain decryption (Chaum-Pedersen + AES-GCM)
     alt verification succeeds
         Z->>Z: try TIP20.mint(decryptedTo, amount)
         alt mint succeeds
-            Note over Z: emit EncryptedDepositProcessed
+            Note over Z: emit DepositProcessed
         else mint reverts (including TIP-403)
             Z->>T: bounce back to tempoRefundRecipient via withdrawal queue
-            Note over Z: emit EncryptedDepositFailed
+            Note over Z: emit DepositFailed
         end
     else verification fails
         Note over Z: no zone-side mint attempted
         Z->>T: bounce back to tempoRefundRecipient via withdrawal queue
-        Note over Z: emit EncryptedDepositFailed
+        Note over Z: emit DepositFailed
     end
 ```
 
@@ -503,7 +503,7 @@ Because the deposit entry point requires a non-zero `tempoRefundRecipient`, ever
 The portal's internal withdrawal-bounce-back deposits are the only entries with `tempoRefundRecipient == address(0)`. They are introduced by `_enqueueWithdrawalBounceBack` after a withdrawal callback fails, and their zone-side mint failure path is the symmetric refund-registry described in [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back), preserving the terminal-bounce invariant.
 
 
-**Zone-side handling.** When an encrypted deposit fails, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. Invalid encryption skips the mint; a mint revert is caught; and a sequencer-rejected encrypted deposit skips both verification and minting. `enqueueDepositBounceBack` records a zero-callback, zero-`fallbackNonce` withdrawal in the outbox's pending list with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `EncryptedDepositFailed` for verification or mint failure, or `DepositRejected` for a sequencer rejection. The deposit queue hash chain advances normally; no retries are performed on the zone.
+**Zone-side handling.** When an encrypted deposit fails, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. Invalid encryption skips the mint; a mint revert is caught; and a sequencer-rejected encrypted deposit skips both verification and minting. `enqueueDepositBounceBack` records a zero-callback, zero-`fallbackNonce` withdrawal in the outbox's pending list with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `DepositFailed` for verification or mint failure, or `DepositRejected` for a sequencer rejection. The deposit queue hash chain advances normally; no retries are performed on the zone.
 
 
 **Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawals` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fallbackNonce == 0`), it computes `bouncebackFee = min(ceil(bouncebackGas * block.basefee / 1e12), amount)`, attempts to pay it to the portal admin, and attempts `ITIP20.transfer(tempoRefundRecipient, amount - bouncebackFee)` from the portal's escrow, wrapped in `try/catch`.
@@ -512,14 +512,14 @@ If the refund transfer succeeds, the portal emits `DepositBounceBack(tempoRefund
 
 In the case of a failed bounceback, the recipient can claim the parked funds by calling `ZonePortal.claimRefund(token)` on Tempo. The portal zeroes `_refunds[token][msg.sender]` and calls `ITIP20.transfer(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
-- A deposit created by the portal as a bounce-back from a failed _withdrawal_ (`_enqueueWithdrawalBounceBack`) always sets `tempoRefundRecipient = address(0)`. This internal sentinel distinguishes the only valid `DepositType.Regular` entry. The zone-side mint is attempted with the standard `mint`, and on failure the funds land in a refund registry on `ZoneInbox` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)) rather than re-bouncing.
+- A deposit created by the portal as a bounce-back from a failed _withdrawal_ (`_enqueueWithdrawalBounceBack`) always sets `tempoRefundRecipient = address(0)`. This internal sentinel distinguishes the only valid `DepositType.WithdrawalBounceBack` entry. The zone-side mint is attempted with the standard `mint`, and on failure the funds land in a refund registry on `ZoneInbox` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)) rather than re-bouncing.
 - A withdrawal created by the zone as a bounce-back from a failed _deposit_ (`enqueueDepositBounceBack`) always sets `gasLimit = 0`, `callbackData = ""`, and `fallbackNonce = 0`. The Tempo-side fee transfer and refund transfer are wrapped in `try/catch`: the portal admin receives `bouncebackFee` only if the fee transfer succeeds, and the user receives `amount - bouncebackFee` directly only if the refund transfer succeeds. If the refund transfer fails, the same value is parked in the portal's refund registry. `bouncebackFee` is computed on Tempo at processing time from `block.basefee` and capped at `amount`.
 
 **Events summary.**
 
 | Event | Emitted by | When |
 |-------|------------|------|
-| `EncryptedDepositFailed` | `ZoneInbox` | Encrypted deposit failed — either invalid encryption, or valid decryption with a mint that reverted; funds queued for bounce-back |
+| `DepositFailed` | `ZoneInbox` | Encrypted deposit failed — either invalid encryption, or valid decryption with a mint that reverted; funds queued for bounce-back |
 | `DepositBounceBack` | `ZonePortal` | Bounce-back withdrawal processed on Tempo and the refund transfer to `tempoRefundRecipient` succeeded |
 | `DepositBounceBackPending` | `ZonePortal` | Bounce-back transfer reverted on Tempo (e.g. TIP-403 forbids `tempoRefundRecipient`); funds parked in the portal's refund registry, claimable via `claimRefund(token)` |
 | `RefundClaimed` | `ZonePortal` | Recipient claimed an outstanding deposit-bounce-back refund |
@@ -534,15 +534,15 @@ sequenceDiagram
     U->>T: ZonePortal.deposit(..., tempoRefundRecipient)
     Note over T: require tempoRefundRecipient != address(0)
     T->>T: append to depositQueue
-    Note over T: emit EncryptedDepositMade
-    Z-->>T: observe EncryptedDepositMade
+    Note over T: emit DepositMade
+    Z-->>T: observe DepositMade
     Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit)
     Z->>Z: verify/decrypt, then try TIP20.mint(decryptedTo, amount)
     alt mint succeeds
-        Note over Z: emit EncryptedDepositProcessed
+        Note over Z: emit DepositProcessed
     else mint reverts (including TIP-403)
         Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
-        Note over Z: emit EncryptedDepositFailed
+        Note over Z: emit DepositFailed
     end
     Z->>T: ZoneOutbox.finalizeWithdrawalBatch + submitBatch
     T->>T: ZonePortal.processWithdrawals (zero-callback)
@@ -683,10 +683,10 @@ To make sure that all of these cases can be handled without loss of user funds, 
 **Triggering conditions.** A failed plain transfer or callback causes `ZonePortal` to enqueue a bounce-back. This constructs an internal `Deposit` with `to = address(uint160(fallbackNonce))`, `tempoRefundRecipient = address(0)`, and appends it to the deposit queue:
 
 ```
-currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDeposit, currentDepositQueueHash))
+currentDepositQueueHash = keccak256(abi.encode(DepositType.WithdrawalBounceBack, bounceBackDeposit, currentDepositQueueHash))
 ```
 
-**Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `Regular` deposit with `tempoRefundRecipient == address(0)`, decodes `fallbackNonce` from `to`, and calls `ZoneOutbox.consumeFallbackRecipient(fallbackNonce)`. The outbox returns and deletes the mapped recipient, after which the inbox attempts `IZoneToken.mint(zoneFallbackRecipient, amount)` wrapped in `try/catch`.
+**Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `WithdrawalBounceBack` entry with `tempoRefundRecipient == address(0)`, decodes `fallbackNonce` from `to`, and calls `ZoneOutbox.consumeFallbackRecipient(fallbackNonce)`. The outbox returns and deletes the mapped recipient, after which the inbox attempts `IZoneToken.mint(zoneFallbackRecipient, amount)` wrapped in `try/catch`.
 
 If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(zoneFallbackRecipient, token, amount)`. If it reverts, the inbox credits the Zone-local refund registry and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
 
@@ -1039,9 +1039,9 @@ flowchart TB
                     direction TB
                     D["Deposit<br/>token<br/>sender<br/>to<br/>amount<br/>tempoRefundRecipient<br/>memo"]
 
-                    ED["EncryptedDeposit<br/>token<br/>sender<br/>amount<br/>tempoRefundRecipient<br/>keyIndex<br/>encrypted"]
+                    ED["Deposit<br/>token<br/>sender<br/>amount<br/>tempoRefundRecipient<br/>keyIndex<br/>encrypted"]
 
-                    EDP["EncryptedDepositPayload<br/>ephemeralPubkeyX<br/>ephemeralPubkeyYParity<br/>ciphertext<br/>nonce<br/>tag"]
+                    EDP["DepositPayload<br/>ephemeralPubkeyX<br/>ephemeralPubkeyYParity<br/>ciphertext<br/>nonce<br/>tag"]
 
                     D ~~~ ED
                     ED ~~~ EDP
@@ -1184,12 +1184,12 @@ pub struct ZoneBlock {
 /// Mirrors the Solidity `QueuedDeposit` struct from IZone.sol
 pub struct QueuedDeposit {
     pub deposit_type: DepositType,
-    pub deposit_data: Vec<u8>, // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    pub deposit_data: Vec<u8>, // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
 }
 
 pub enum DepositType {
-    Regular,
-    Encrypted,
+    WithdrawalBounceBack,
+    Deposit,
 }
 
 /// Mirrors the Solidity `EnabledToken` struct from IZone.sol
@@ -1504,7 +1504,7 @@ This section lists the key types and contract interfaces referenced throughout t
 ### Common Types
 
 ```solidity
-struct Deposit {
+struct WithdrawalBounceBackDeposit {
     address token;
     address sender;
     address to;
@@ -1525,16 +1525,16 @@ struct Withdrawal {
     bytes encryptedSender;      // ECDH-encrypted (sender, txHash), or empty
 }
 
-struct EncryptedDeposit {
+struct Deposit {
     address token;
     address sender;
     uint128 amount;
     address tempoRefundRecipient;
     uint256 keyIndex;
-    EncryptedDepositPayload encrypted;
+    DepositPayload encrypted;
 }
 
-struct EncryptedDepositPayload {
+struct DepositPayload {
     bytes32 ephemeralPubkeyX;
     uint8 ephemeralPubkeyYParity;
     bytes ciphertext;
@@ -1543,13 +1543,13 @@ struct EncryptedDepositPayload {
 }
 
 enum DepositType {
-    Regular,
-    Encrypted
+    WithdrawalBounceBack,
+    Deposit
 }
 
 struct QueuedDeposit {
     DepositType depositType;
-    bytes depositData;  // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bytes depositData;  // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
 }
 
 struct DecryptionData {
@@ -1647,7 +1647,7 @@ interface IZoneFactory {
 ```solidity
 interface IZonePortal {
     // Events
-    event EncryptedDepositMade(
+    event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address token,
@@ -1764,11 +1764,11 @@ interface IZonePortal {
     ///      The encrypted zone recipient need not be an allowed Tempo account.
     function deposit(
         address token, uint128 amount, uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted, address tempoRefundRecipient
+        DepositPayload calldata encrypted, address tempoRefundRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);
     function depositEncrypted(
         address token, uint128 amount, uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted, address tempoRefundRecipient
+        DepositPayload calldata encrypted, address tempoRefundRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);
     function calculateDepositFee() external view returns (uint128 fee);
     function calculateBouncebackFee() external view returns (uint128 fee);
@@ -1889,11 +1889,11 @@ Address: `0x1c00000000000000000000000000000000000001`
 ```solidity
 interface IZoneInbox {
     /// @notice A canonical deposit queued by the portal for processing on the zone.
-    /// @dev Regular entries are internal withdrawal bounce-backs. Every encrypted
-    ///      entry consumes one DecryptionData item and performs onchain verification.
+    /// @dev WithdrawalBounceBack entries are internal. Every Deposit entry consumes
+    ///      one DecryptionData item and performs onchain verification.
     struct QueuedDeposit {
         DepositType depositType;
-        bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+        bytes depositData; // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
     }
 
     event TempoAdvanced(
@@ -1901,11 +1901,11 @@ interface IZoneInbox {
         uint256 depositsProcessed, bytes32 newProcessedDepositQueueHash,
         uint64 lastProcessedDepositNumber
     );
-    event EncryptedDepositProcessed(
+    event DepositProcessed(
         bytes32 indexed depositHash, address indexed sender, address indexed to,
         address token, uint128 amount, bytes32 memo
     );
-    event EncryptedDepositFailed(
+    event DepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
     /// @notice Emitted when a withdrawal-bounce-back deposit (synthesized by the portal

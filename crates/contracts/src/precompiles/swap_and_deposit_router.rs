@@ -1,6 +1,6 @@
 //! `SwapAndDepositRouter` — deployed on Tempo L1.
 
-use crate::EncryptedDepositPayload;
+use crate::DepositPayload;
 use alloc::vec::Vec;
 use alloy_primitives::{Address, U256};
 use alloy_sol_types::SolValue;
@@ -19,22 +19,22 @@ crate::sol! {
     }
 }
 
-/// Encrypted callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
+/// Callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
 ///
 /// This payload tells the router to optionally swap the withdrawn token on L1
 /// and then call `ZonePortal.deposit(...)` with an ECIES-encrypted
 /// `(recipient, memo)` payload.
 #[derive(Debug, Clone)]
-pub struct SwapAndDepositRouterEncryptedCallback {
+pub struct SwapAndDepositRouterCallback {
     /// Token that should be deposited after the optional L1 swap.
     pub token_out: Address,
-    /// Target zone portal that receives the downstream encrypted deposit.
+    /// Target zone portal that receives the downstream deposit.
     pub target_portal: Address,
     /// Portal encryption key index used to build [`Self::encrypted`].
     pub key_index: U256,
     /// ECIES-encrypted `(recipient, memo)` payload for `deposit`.
-    pub encrypted: EncryptedDepositPayload,
-    /// Tempo refund recipient if the downstream encrypted deposit later bounces.
+    pub encrypted: DepositPayload,
+    /// Tempo refund recipient if the downstream deposit later bounces.
     pub tempo_refund_recipient: Address,
     /// Minimum acceptable output from the optional swap.
     ///
@@ -42,7 +42,7 @@ pub struct SwapAndDepositRouterEncryptedCallback {
     pub min_amount_out: u128,
 }
 
-impl SwapAndDepositRouterEncryptedCallback {
+impl SwapAndDepositRouterCallback {
     /// ABI-encode the router callback data expected by the Solidity router.
     pub fn abi_encode(&self) -> Vec<u8> {
         (
