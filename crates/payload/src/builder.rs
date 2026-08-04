@@ -37,14 +37,15 @@ use reth_transaction_pool::{
     ValidPoolTransaction, error::InvalidPoolTransactionError,
 };
 use std::{error::Error, sync::Arc, time::Instant};
-use tempo_evm::TempoNextBlockEnvAttributes;
+use tempo_evm::{TempoNextBlockEnvAttributes, TempoTxResult};
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::{
-    TempoTransactionPool, transaction::TempoPooledTransaction, validator::ConfigureTempoPoolEvm,
+    StateAwareBestTransactions, TempoTransactionPool, transaction::TempoPooledTransaction,
+    validator::ConfigureTempoPoolEvm,
 };
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
@@ -120,6 +121,7 @@ where
         > + 'static,
     <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
         EvmFactory<Tx = tempo_revm::TempoTxEnv>,
+    EvmConfig::BlockExecutorFactory: BlockExecutorFactory<TxExecutionResult = TempoTxResult>,
     BlockEnvFor<EvmConfig>: RevmBlock,
 {
     type PayloadBuilder = ZonePayloadBuilder<Node::Provider, EvmConfig>;
@@ -165,6 +167,7 @@ where
         > + 'static,
     <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
         EvmFactory<Tx = tempo_revm::TempoTxEnv>,
+    EvmConfig::BlockExecutorFactory: BlockExecutorFactory<TxExecutionResult = TempoTxResult>,
     BlockEnvFor<EvmConfig>: RevmBlock,
 {
     type Attributes = ZonePayloadAttributes;
@@ -271,11 +274,18 @@ where
         // the size budget
         // The block executor owns gas-capacity accounting.
         let pool_tx_size_budget = MAX_RLP_BLOCK_SIZE - BLOCK_SIZE_SAFETY_MARGIN;
-        let mut best_txs = self
+        let raw_best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
+        let mut best_txs = StateAwareBestTransactions::new(raw_best_txs);
         if execute_pool_transactions(
-            |tx| builder.execute_transaction(tx).map(|_| ()),
+            |tx, best_txs| {
+                builder
+                    .execute_transaction_with_result_closure(tx, |result| {
+                        best_txs.on_new_result(result);
+                    })
+                    .map(|_| ())
+            },
             &mut best_txs,
             &cancel,
             pool_tx_size_budget,
@@ -455,6 +465,7 @@ where
     T: BestTransactions<Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
     F: FnMut(
         WithTxEnv<tempo_revm::TempoTxEnv, Recovered<TempoTxEnvelope>>,
+        &mut T,
     ) -> Result<(), reth_evm::block::BlockExecutionError>,
 {
     let mut packed_tx_bytes = 0usize;
@@ -477,7 +488,7 @@ where
         }
 
         let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-        match execute_tx(tx_with_env) {
+        match execute_tx(tx_with_env, best_txs) {
             Ok(_) => packed_tx_bytes = packed_bytes_with_tx,
             Err(reth_evm::block::BlockExecutionError::Validation(
                 reth_evm::block::BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
@@ -833,7 +844,7 @@ mod tests {
         let cancel = CancelOnDrop::default();
 
         let outcome = super::execute_pool_transactions(
-            |_tx| -> Result<(), reth_evm::block::BlockExecutionError> {
+            |_tx, _best_txs| -> Result<(), reth_evm::block::BlockExecutionError> {
                 executed += 1;
                 Ok(())
             },
@@ -848,6 +859,66 @@ mod tests {
         // Only the transactions that fit were executed; the rest were rejected for size.
         assert_eq!(executed, expected_fit);
         assert_eq!(best_txs.oversized_marked, total - expected_fit);
+    }
+
+    /// Execution feedback must be applied before selecting the next candidate so a state-aware
+    /// iterator can filter transactions invalidated by the transaction that just committed.
+    #[test]
+    fn pool_transactions_apply_execution_feedback_before_advancing() {
+        struct FeedbackAwareBestTransactions {
+            queue: VecDeque<Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
+            state_changed: bool,
+            filtered: usize,
+        }
+
+        impl Iterator for FeedbackAwareBestTransactions {
+            type Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                loop {
+                    let tx = self.queue.pop_front()?;
+                    if self.state_changed {
+                        self.filtered += 1;
+                        continue;
+                    }
+                    return Some(tx);
+                }
+            }
+        }
+
+        impl BestTransactions for FeedbackAwareBestTransactions {
+            fn mark_invalid(&mut self, _tx: &Self::Item, _kind: InvalidPoolTransactionError) {}
+
+            fn no_updates(&mut self) {}
+
+            fn set_skip_blobs(&mut self, _skip_blobs: bool) {}
+        }
+
+        let total = 4usize;
+        let mut best_txs = FeedbackAwareBestTransactions {
+            queue: (0..total)
+                .map(|nonce| pool_tx_with_calldata(0, nonce as u64))
+                .collect(),
+            state_changed: false,
+            filtered: 0,
+        };
+        let mut executed = 0usize;
+
+        let outcome = super::execute_pool_transactions(
+            |_tx, best_txs| -> Result<(), reth_evm::block::BlockExecutionError> {
+                executed += 1;
+                best_txs.state_changed = true;
+                Ok(())
+            },
+            &mut best_txs,
+            &CancelOnDrop::default(),
+            usize::MAX,
+        )
+        .expect("pool execution should not error");
+
+        assert_eq!(outcome, super::PoolExecutionOutcome::Complete);
+        assert_eq!(executed, 1);
+        assert_eq!(best_txs.filtered, total - 1);
     }
 
     /// Verify calldata for an internal withdrawal bounce-back followed by an
