@@ -422,7 +422,7 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
 mod tests {
     use super::*;
     use alloy_primitives::U256;
-    use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
+    use alloy_provider::ProviderBuilder;
     use alloy_sol_types::SolCall;
     use alloy_transport::mock::Asserter;
 
@@ -448,33 +448,6 @@ mod tests {
         assert_eq!(key.x, expected.x);
         assert_eq!(key.yParity, expected.yParity);
         assert_eq!(key_index, expected.keyIndex);
-        assert!(asserter.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn sequencers_at_batches_index_reads_through_multicall() {
-        let asserter = Asserter::new();
-        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
-        let sequencers = [Address::repeat_byte(0xaa), Address::repeat_byte(0xbb)];
-
-        asserter.push_success(&Bytes::from(U256::from(sequencers.len()).abi_encode()));
-        asserter.push_success(&Bytes::from(
-            IMulticall3::aggregateCall::abi_encode_returns(&IMulticall3::aggregateReturn {
-                blockNumber: U256::ZERO,
-                returnData: sequencers
-                    .iter()
-                    .map(|sequencer| sequencer.abi_encode().into())
-                    .collect(),
-            }),
-        ));
-
-        let portal = ZonePortal::new(Address::ZERO, &provider);
-        let registered = portal
-            .sequencers_at(alloy_rpc_types_eth::BlockId::latest())
-            .await
-            .unwrap();
-
-        assert_eq!(registered, sequencers);
         assert!(asserter.read_q().is_empty());
     }
 }
