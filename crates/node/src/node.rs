@@ -1562,7 +1562,6 @@ where
                 .disable_balance_check()
                 .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
                 .with_custom_tx_type(TempoTxType::AA as u8)
-                .no_eip7702()
                 .no_eip4844()
                 .build::<TempoPooledTransaction, _>(blob_store.clone());
 

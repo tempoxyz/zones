@@ -105,6 +105,22 @@ where
         &mut self,
         tx: TempoTxEnv,
     ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
+        let has_eip7702_authorizations = !tx.inner.authorization_list.is_empty();
+        let has_tempo_authorizations = tx
+            .tempo_tx_env
+            .as_ref()
+            .is_some_and(|env| !env.tempo_authorization_list.is_empty());
+        if has_eip7702_authorizations || has_tempo_authorizations {
+            self.clear_l1_overlay_state();
+            return (
+                Err(EVMError::Transaction(
+                    TempoInvalidTransaction::CallsValidation(
+                        "authorization lists are not supported",
+                    ),
+                )),
+                tx,
+            );
+        }
         if let Err(err) = contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)
         {
             self.clear_l1_overlay_state();
