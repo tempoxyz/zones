@@ -709,17 +709,10 @@ where
         reward_percentiles: Option<Vec<f64>>,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Avoid loading private block bodies to calculate reward percentiles.
-            let mut history = EthFees::fee_history(&self.eth.api, block_count, newest_block, None)
-                .await
-                .map_err(internal)?;
-            if let Some(reward_percentiles) = reward_percentiles.as_deref() {
-                history.reward = Some(vec![
-                    vec![0; reward_percentiles.len()];
-                    history.gas_used_ratio.len()
-                ]);
-            }
-
+            let mut history =
+                EthFees::fee_history(&self.eth.api, block_count, newest_block, reward_percentiles)
+                    .await
+                    .map_err(internal)?;
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
             redact_fee_history(&mut history);
             to_raw(&history)
@@ -1264,7 +1257,7 @@ fn redact_header(header: &mut TempoHeaderResponse) {
     inner.withdrawals_root = inner.withdrawals_root.map(|_| B256::ZERO);
 }
 
-/// Clear gas-related fields that leak the size (and therefore tx counts).
+/// Clear gas related fields that leak the size (and therefore tx counts)
 fn redact_fee_history(history: &mut FeeHistory) {
     history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
     history.gas_used_ratio.fill(0.0);
