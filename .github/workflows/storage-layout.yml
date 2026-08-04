@@ -31,6 +31,32 @@ jobs:
       - name: Check storage layout
         working-directory: specs/ref-impls
         run: |
+          normalize_layout() {
+            # Foundry's storage-layout JSON contains compiler-generated AST and
+            # type-reference IDs. They are not part of the deployed layout and
+            # can change when an imported interface changes.
+            jq -S '
+              def normalize_type_refs:
+                gsub("t_(struct|enum)\\(([^)]*)\\)[0-9]+(_storage)?"; "t_\\1(\\2)\\3");
+              walk(
+                if type == "object" then
+                  del(.astId)
+                  | with_entries(
+                      .key |= normalize_type_refs
+                      | if (.value | type) == "string"
+                        then .value |= normalize_type_refs
+                        else .
+                        end
+                    )
+                else .
+                end
+              )
+            '
+          }
+
           forge inspect ZonePortal storage-layout --json \
-            | jq . > storage-layouts/ZonePortal.json
-          git diff --exit-code -- storage-layouts/ZonePortal.json
+            | normalize_layout > /tmp/ZonePortal.generated.json
+          normalize_layout < storage-layouts/ZonePortal.json \
+            > /tmp/ZonePortal.expected.json
+          diff --unified=0 \
+            /tmp/ZonePortal.expected.json /tmp/ZonePortal.generated.json
