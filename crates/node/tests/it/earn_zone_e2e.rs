@@ -314,10 +314,6 @@ impl EarnZoneFixture {
         let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal).await?;
         zone.wait_for_l2_tempo_finalized(0, E2E_TIMEOUT).await?;
 
-        let encryption_key = k256::SecretKey::from(l1.dev_signer().credential());
-        l1.set_sequencer_encryption_key(portal, &encryption_key)
-            .await?;
-
         let messenger = EarnZonePortalView::new(portal, l1.provider())
             .messenger()
             .call()

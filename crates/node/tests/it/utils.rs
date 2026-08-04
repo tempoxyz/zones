@@ -67,8 +67,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
-    Deposit, DepositQueue, EnabledToken, L1BlockTracker, L1Deposit, L1PortalEvents, L1StateCache,
-    state::EnabledTokenRegistry,
+    Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
+    L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
 };
 use zone_node::{ZoneNode, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
@@ -1245,6 +1245,10 @@ impl ZoneTestNode {
             std::iter::once(SecretKey::from(sequencer_signer.credential()))
                 .chain(additional_decryption_keys),
         );
+        if portal_address.is_zero() {
+            zone_node = zone_node
+                .with_deposit_decryption_keys(std::iter::once(L1Fixture::encryption_key()));
+        }
         if is_local_dummy_l1 {
             zone_node = zone_node
                 .with_l1_chain_id(1337)
@@ -1317,6 +1321,19 @@ impl ZoneTestNode {
         let deposit_decryption_keys = zone_node
             .deposit_decryption_keys()
             .expect("test sequencer configures deposit decryption keys");
+        if portal_address.is_zero() {
+            // Synthetic fixtures expose this key as Portal index 0 in the seeded L1 cache.
+            // Direct queue injection bypasses the subscriber that normally observes and binds
+            // SequencerEncryptionKeyUpdated, so mirror that binding before starting the engine.
+            let fixture_key = L1Fixture::encryption_key();
+            let encoded = fixture_key.public_key().to_encoded_point(true);
+            deposit_decryption_keys.apply_rotation(&EncryptionKeyRotation {
+                x: B256::from_slice(encoded.x().expect("compressed fixture key has x")),
+                y_parity: encoded.as_bytes()[0],
+                key_index: U256::ZERO,
+                activation_block: 0,
+            })?;
+        }
         if is_local_dummy_l1 {
             let mut cache = l1_state_cache.lock();
             seed_raw_tip403_token_policy(&mut cache, 0, PATH_USD_ADDRESS, ALLOW_ALL_POLICY_ID);
@@ -1889,7 +1906,8 @@ impl L1TestNode {
     /// `createZone()` with pathUSD as the token, a distinct [`admin_address`] as
     /// the portal admin, and the dev account as the sequencer. This exercises the
     /// admin/sequencer role separation. The admin account is funded with pathUSD
-    /// for gas so admin-only portal calls (e.g. `enableToken`) can be made.
+    /// for gas so admin-only portal calls (e.g. `enableToken`) can be made, and the dev
+    /// sequencer's encryption key is registered so the portal can accept deposits immediately.
     ///
     /// [`admin_address`]: Self::admin_address
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
@@ -1909,6 +1927,9 @@ impl L1TestNode {
         // The admin is not pre-funded; give it pathUSD to pay for gas on
         // admin-only portal calls.
         self.fund_user(self.admin_address(), 10_000_000).await?;
+        let encryption_key = k256::SecretKey::from(self.dev_signer().credential());
+        self.set_sequencer_encryption_key(portal, &encryption_key)
+            .await?;
         Ok(portal)
     }
 
@@ -2022,6 +2043,12 @@ impl L1TestNode {
                 sequencer_b.address(),
                 ZoneCreationConfig::open(),
             )
+            .await?;
+        let encryption_key_a = k256::SecretKey::from(sequencer_a.credential());
+        self.set_sequencer_encryption_key_with_signer(portal_a, &encryption_key_a, sequencer_a)
+            .await?;
+        let encryption_key_b = k256::SecretKey::from(sequencer_b.credential());
+        self.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key_b, sequencer_b)
             .await?;
         let router = self.deploy_router(factory).await?;
 
@@ -4228,10 +4255,6 @@ async fn start_zone_with_redacted_rpc_l1_inner() -> eyre::Result<RedactedRpcL1Te
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
 
     zone.wait_for_l2_tempo_finalized(0, DEFAULT_TIMEOUT).await?;
-
-    let key = k256::SecretKey::from(l1.dev_signer().credential());
-    l1.set_sequencer_encryption_key(portal_address, &key)
-        .await?;
 
     let chain_id = zone_chain_id(&zone).await?;
 
