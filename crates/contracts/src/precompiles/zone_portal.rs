@@ -310,8 +310,8 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
 {
     /// Returns all token addresses currently enabled for bridging on this [`ZonePortal`].
     ///
-    /// Calls [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) followed by a Multicall3
-    /// batch of [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) reads.
+    /// Equivalent to [`enabled_tokens_at`](Self::enabled_tokens_at) pinned to the `latest`
+    /// block tag.
     pub async fn enabled_tokens(
         &self,
     ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
@@ -325,8 +325,16 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     /// should use this instead of [`enabled_tokens`](Self::enabled_tokens), so
     /// future `TokenEnabled` events are not mixed into older state snapshots.
     ///
-    /// The index reads go through Multicall3 so they execute in a single EVM call and observe
-    /// one state snapshot even when `block_id` is a moving tag like `latest`.
+    /// Issues two RPC requests regardless of registry size: an
+    /// [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) read, then one Multicall3
+    /// `aggregate` batching an [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) call per
+    /// index. The batch executes as a single EVM call, so all index reads observe the same
+    /// state snapshot; only the count read can race the batch when `block_id` is a moving tag
+    /// like `latest`. If any index read reverts, the whole call errors.
+    ///
+    /// Requires Multicall3 at the canonical
+    /// [`MULTICALL3_ADDRESS`](alloy_provider::MULTICALL3_ADDRESS) on the portal's chain; all
+    /// Tempo networks predeploy it at genesis.
     pub async fn enabled_tokens_at(
         &self,
         block_id: alloy_rpc_types_eth::BlockId,
