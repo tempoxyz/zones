@@ -1,4 +1,4 @@
-//! JSON-RPC types for the private zone RPC.
+//! JSON-RPC types for the redacted zone RPC.
 
 use std::{future::Future, pin::Pin};
 
@@ -122,7 +122,7 @@ impl JsonRpcError {
         }
     }
 
-    /// Transaction rejected — sender mismatch (-32003).
+    /// Transaction rejected (-32003).
     pub fn transaction_rejected() -> Self {
         Self {
             code: -32003,
@@ -175,70 +175,154 @@ pub struct AuthorizationTokenInfoResponse {
 pub struct ZoneInfoResponse {
     /// The zone's numeric identifier.
     pub zone_id: U64,
+    /// Whether account allowlist enforcement is enabled.
+    pub is_access_enforced: bool,
+    /// Whether callback gateway registration enforcement is disabled.
+    pub is_gateway_open: bool,
     /// The enabled zone token contract addresses.
     pub zone_tokens: Vec<Address>,
-    /// The active sequencer address.
-    pub sequencer: Address,
+    /// The active sequencer addresses.
+    pub sequencers: Vec<Address>,
     /// The zone chain ID.
     pub chain_id: U64,
-}
-
-/// Response payload for `zone_getDepositStatus`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DepositStatusResponse {
-    /// The Tempo block number queried by the caller.
+    /// The latest Tempo block imported into the zone.
     pub tempo_block_number: U64,
-    /// The latest Tempo block number processed on the zone.
-    pub zone_processed_through: U64,
-    /// Whether every relevant deposit for `tempo_block_number` has reached a terminal state.
-    pub processed: bool,
-    /// Deposits relevant to the authenticated caller.
-    pub deposits: Vec<DepositStatusEntry>,
 }
 
-/// Per-deposit status entry returned by `zone_getDepositStatus`.
+/// Local view of one sequencer node for `zone_getSequencerInfo`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DepositStatusEntry {
-    /// The deposit queue hash used to correlate portal and inbox events.
-    pub deposit_hash: B256,
-    /// Whether the deposit is regular or encrypted.
-    pub kind: DepositKind,
-    /// The deposited token address.
-    pub token: Address,
-    /// The L1 sender who initiated the deposit.
-    pub sender: Address,
-    /// The revealed recipient, if visible to the caller.
-    pub recipient: Option<Address>,
-    /// The deposited amount.
-    pub amount: U256,
-    /// The revealed memo, if visible to the caller.
-    pub memo: Option<B256>,
-    /// The current terminal or pending state of the deposit.
-    pub status: DepositState,
+pub struct LocalSequencerInfo {
+    /// Manifest node name.
+    pub name: String,
+    /// Individual secp256k1 address. Absent on an `rpc_only` node, which holds no
+    /// individual key and is not registered with `ZonePortal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
+    /// Hex-encoded Ed25519 Commonware public key.
+    pub p2p_public_key: String,
+    /// Current role: `leader`, `follower`, or `fenced`.
+    pub role: String,
 }
 
-/// Deposit kind returned by `zone_getDepositStatus`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DepositKind {
-    /// A plaintext deposit emitted by the portal.
-    Regular,
-    /// A deposit whose recipient and memo remain hidden until revealed on L2.
-    Encrypted,
+/// Active finalized leader for `zone_getSequencerInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveLeaderInfo {
+    /// Manifest node name, when the leader maps to a manifest member.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Individual secp256k1 address registered on the portal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
+    /// Hex-encoded Ed25519 Commonware public key.
+    pub p2p_public_key: String,
+    /// Leadership epoch.
+    pub epoch: U64,
+    /// Tempo block at which this leader's authorization begins.
+    pub activation_tempo_block: U64,
 }
 
-/// Processing state returned by `zone_getDepositStatus`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DepositState {
-    /// The deposit has not yet reached a terminal L2 inbox event.
-    Pending,
-    /// The deposit was processed successfully on L2.
-    Processed,
-    /// The encrypted deposit reached an explicit failure event on L2.
-    Failed,
+/// A configured peer with its most recently advertised tip evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequencerPeerInfo {
+    /// Manifest node name.
+    pub name: String,
+    /// Individual secp256k1 address. Absent for an `rpc_only` peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
+    /// Whether this peer replicates without joining the on-chain settlement quorum.
+    pub rpc_only: bool,
+    /// Whether this entry describes the local node.
+    pub is_local: bool,
+    /// Most recent hash-carrying tip evidence, when observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tip: Option<PeerTipInfo>,
+}
+
+/// Hash-carrying tip evidence advertised by a peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeerTipInfo {
+    /// Height of the peer's canonical zone head.
+    pub zone_height: U64,
+    /// Hash of the peer's canonical zone head.
+    pub zone_hash: B256,
+    /// Tempo anchor embedded in that head.
+    pub tempo_block_number: U64,
+    /// Hash of that Tempo anchor.
+    pub tempo_block_hash: B256,
+}
+
+/// Consumption and observation progress for `zone_getSequencerInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequencerProgress {
+    /// Local canonical zone height.
+    pub zone_height: U64,
+    /// Local canonical Tempo checkpoint.
+    pub tempo_block_number: U64,
+    /// Highest leadership epoch finalized L1 has shown this node.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_observed_leadership_epoch: Option<U64>,
+    /// Epoch whose activation boundary local consumption has crossed (observability only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locally_applied_leadership_epoch: Option<U64>,
+    /// Observed transitions whose activation boundary is still ahead of local consumption.
+    pub pending_transitions: U64,
+}
+
+/// Promotion-readiness snapshot for `zone_getSequencerInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequencerReadiness {
+    /// Whether the promotion barrier is currently satisfied.
+    pub ready_for_promotion: bool,
+    /// Unsatisfied readiness reasons (empty when ready).
+    pub reasons: Vec<String>,
+}
+
+/// Response payload for `zone_getSequencerInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SequencerInfoResponse {
+    /// `multi` in manifest mode, `single` otherwise.
+    pub mode: String,
+    /// ZonePortal address on Tempo L1.
+    pub portal: Address,
+    /// Local node identity and role (multi-sequencer mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local: Option<LocalSequencerInfo>,
+    /// Active finalized leader (multi-sequencer mode only, once observed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_leader: Option<ActiveLeaderInfo>,
+    /// Exact local canonical tip usable as a forced-recovery point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_tip: Option<PeerTipInfo>,
+    /// All configured manifest members with observed tip evidence.
+    pub peers: Vec<SequencerPeerInfo>,
+    /// Consumption and observation progress (multi-sequencer mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<SequencerProgress>,
+    /// Promotion-readiness snapshot (multi-sequencer mode only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<SequencerReadiness>,
+}
+
+/// Response payload for `zone_setLeader`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetLeaderResponse {
+    /// `submitted` when a transaction was relayed, `alreadyActive` for a finalized no-op.
+    pub status: String,
+    /// Hash of the relayed L1 transaction, when one was submitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tx_hash: Option<B256>,
+    /// Individual sequencer address that relayed the transaction.
+    pub relayer: Address,
+    /// The requested leader's individual sequencer address.
+    pub requested_leader: Address,
 }
 
 /// Method access tier.
@@ -248,7 +332,7 @@ pub enum MethodTier {
     Public,
     /// Only available to the sequencer.
     Restricted,
-    /// Disabled on the private RPC.
+    /// Disabled on the redacted RPC.
     Disabled,
 }
 
@@ -277,7 +361,7 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "web3_sha3"
         | "zone_getAuthorizationTokenInfo"
         | "zone_getZoneInfo"
-        | "zone_getDepositStatus" => Some(MethodTier::Public),
+        | "zone_getEncryptionKey" => Some(MethodTier::Public),
 
         // Fetch-then-check: public but redacted based on caller identity
         "eth_getTransactionByHash"

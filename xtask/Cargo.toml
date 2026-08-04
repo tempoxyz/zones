@@ -38,6 +38,7 @@ alloy = { workspace = true, features = [
 ] }
 alloy-eips.workspace = true
 alloy-rlp.workspace = true
+alloy-rpc-types-eth.workspace = true
 clap = { version = "4.5.45", features = ["derive", "env"] }
 commonware-codec.workspace = true
 commonware-cryptography.workspace = true
@@ -49,6 +50,7 @@ rand.workspace = true
 reth-evm.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
 
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

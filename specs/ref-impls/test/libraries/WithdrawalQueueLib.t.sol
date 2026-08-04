@@ -466,7 +466,6 @@ contract WithdrawalQueueLibTest is Test {
             senderTag: keccak256(abi.encodePacked(sender)),
             to: to,
             amount: amount,
-            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackNonce: uint64(uint160(sender)),

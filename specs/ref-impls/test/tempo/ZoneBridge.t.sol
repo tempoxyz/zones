@@ -21,23 +21,24 @@ import {
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
     Withdrawal,
     ZONE_INBOX,
+    ZONE_MESSENGER_ADDRESS,
     ZONE_OUTBOX,
-    ZoneInfo,
-    ZoneParams
+    ZONE_VERIFIER_ADDRESS,
+    ZoneInfo
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
+import { GatewayCallbackData, GatewayFlow } from "../mocks/MockZoneGateway.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -88,8 +89,8 @@ contract MockZoneFactoryForBridgeMessenger {
         _zones[zoneId].portal = portal;
     }
 
-    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
-        return _zones[zoneId];
+    function zones(uint32 id) external view returns (ZoneInfo memory) {
+        return _zones[id];
     }
 
 }
@@ -103,7 +104,6 @@ contract ZoneBridgeTest is BaseTest {
                               L1 CONTRACTS
     //////////////////////////////////////////////////////////////*/
 
-    ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
 
     /*//////////////////////////////////////////////////////////////
@@ -112,7 +112,6 @@ contract ZoneBridgeTest is BaseTest {
 
     MockZoneToken public l2ZoneToken;
     MockTempoState public l2TempoState;
-    ZoneConfig public l2Config;
     ZoneInbox public l2Inbox;
     ZoneOutbox public l2Outbox;
 
@@ -152,7 +151,7 @@ contract ZoneBridgeTest is BaseTest {
         super.setUp();
 
         // === Deploy L1 Contracts ===
-        l1Factory = _deployZoneFactory(); // Keep factory for verifier only
+        _installSharedZoneRuntimes();
         withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Deploy zone token FIRST (used for both L1 escrow and zone-side operations).
@@ -166,51 +165,84 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.mint(bob, 100_000e6);
         l2ZoneToken.setMinter(address(this), false);
 
+        _mockTokenPolicyMigration(address(l2ZoneToken), true);
+
         // Record genesis block number for Tempo
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Deploy portal directly (bypass factory to avoid TIP20 prefix check), but use a
-        // mock factory registry so the shared messenger can authenticate the source portal.
-        MockZoneFactoryForBridgeMessenger messengerFactory = new MockZoneFactoryForBridgeMessenger();
-        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
+        // Deploy portal directly (bypass factory to avoid TIP20 prefix check).
+        address[] memory bridgeAccounts = new address[](8);
+        bridgeAccounts[0] = address(this);
+        bridgeAccounts[1] = admin;
+        bridgeAccounts[2] = alice;
+        bridgeAccounts[3] = bob;
+        bridgeAccounts[4] = charlie;
+        bridgeAccounts[5] = address(0x600);
+        bridgeAccounts[6] = address(0x700);
+        bridgeAccounts[7] = address(0x800);
+
+        ZoneMessenger messengerContract = ZoneMessenger(ZONE_MESSENGER_ADDRESS);
         l1Portal = new ZonePortal();
-        address verifier = l1Factory.verifier();
+        address[] memory sequencers = new address[](1);
+        sequencers[0] = sequencer;
         vm.prank(_ZONE_FACTORY);
         l1Portal.initialize(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
+            true,
+            true,
+            bridgeAccounts,
+            _zoneGateways(),
             address(messengerContract),
             admin, // admin
-            sequencer, // sequencer
-            verifier,
-            GENESIS_BLOCK_HASH,
-            genesisTempoBlockNumber,
+            sequencers,
+            1,
+            ZONE_VERIFIER_ADDRESS,
             ""
         );
         zoneId = 1;
-        messengerFactory.setPortal(zoneId, address(l1Portal));
+        vm.mockCall(
+            _ZONE_FACTORY,
+            abi.encodeWithSelector(IZoneFactory.zones.selector, zoneId),
+            abi.encode(
+                ZoneInfo({
+                    zoneId: zoneId,
+                    portal: address(l1Portal),
+                    accessMode: true,
+                    gatewayMode: true,
+                    admin: admin,
+                    sequencers: sequencers,
+                    threshold: 1,
+                    verifier: ZONE_VERIFIER_ADDRESS,
+                    rpcUrl: ""
+                })
+            )
+        );
 
         // === Deploy zone contracts ===
         // TempoState mock for testing
         l2TempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
 
-        // Zone config (reads sequencer from L1 portal via Tempo state)
-        l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
-            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+            address(l1Portal),
+            keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
+            bytes32(uint256(1))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
+        for (uint256 i; i < bridgeAccounts.length; ++i) {
+            l2TempoState.setMockAccountAllowed(address(l1Portal), bridgeAccounts[i], true);
+        }
+        l2TempoState.setMockZoneGateway(address(l1Portal), address(zoneGateway), true);
 
         // Zone inbox (advances Tempo state and processes deposits)
-        ZoneInbox inboxImpl =
-            new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
+        ZoneInbox inboxImpl = new ZoneInbox(address(l1Portal), address(l2TempoState));
         vm.etch(ZONE_INBOX, address(inboxImpl).code);
         l2Inbox = ZoneInbox(ZONE_INBOX);
         l2ZoneToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
-        ZoneOutbox outboxImpl = new ZoneOutbox(address(l2Config));
+        ZoneOutbox outboxImpl = new ZoneOutbox(address(l1Portal), address(l2TempoState));
         vm.etch(ZONE_OUTBOX, address(outboxImpl).code);
         l2Outbox = ZoneOutbox(ZONE_OUTBOX);
         l2ZoneToken.setBurner(address(l2Outbox), true);
@@ -230,7 +262,7 @@ contract ZoneBridgeTest is BaseTest {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory callbackData
     )
         internal
@@ -242,7 +274,6 @@ contract ZoneBridgeTest is BaseTest {
             senderTag: _senderTag(sender, txSequence),
             to: to,
             amount: amount,
-            fee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackNonce: uint64(txSequence),
@@ -291,7 +322,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: sender,
             to: to,
             amount: amount,
-            bouncebackRecipient: to,
+            tempoRefundRecipient: to,
             memo: memo
         });
 
@@ -323,9 +354,9 @@ contract ZoneBridgeTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, newProcessedHash
         );
 
-        // Process on zone via advanceTempo (sequencer-only call)
+        // Process on zone via the advanceTempo system call.
         // Empty header since MockTempoState just advances block number
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo(
             "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
@@ -360,7 +391,7 @@ contract ZoneBridgeTest is BaseTest {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory data
     )
         internal
@@ -369,7 +400,14 @@ contract ZoneBridgeTest is BaseTest {
             ObservedWithdrawal({
                 index: index,
                 withdrawal: _withdrawal(
-                    uint256(index) + 1, sender, to, amount, memo, gasLimit, fallbackRecipient, data
+                    uint256(index) + 1,
+                    sender,
+                    to,
+                    amount,
+                    memo,
+                    gasLimit,
+                    zoneFallbackRecipient,
+                    data
                 )
             })
         );
@@ -400,7 +438,8 @@ contract ZoneBridgeTest is BaseTest {
         vm.roll(block.number + 1);
 
         // Submit to Tempo
-        l1Portal.submitBatch(
+        _submitBatch(
+            l1Portal,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),
@@ -502,7 +541,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // === STEP 8: Sequencer processes withdrawal on L1 ===
         uint256 aliceL1BalanceBefore = l2ZoneToken.balanceOf(alice);
-        l1Portal.processWithdrawal(w, bytes32(0)); // 0 = last item in slot
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0)); // 0 = last item in slot
 
         // Verify Alice received funds on L1
         assertEq(l2ZoneToken.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
@@ -567,10 +606,10 @@ contract ZoneBridgeTest is BaseTest {
         uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
         uint256 bobBefore = l2ZoneToken.balanceOf(bob);
 
-        l1Portal.processWithdrawal(w0, innerHash);
+        l1Portal.processWithdrawals(_singleWithdrawal(w0), innerHash);
         assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 500e6);
 
-        l1Portal.processWithdrawal(w1, bytes32(0)); // 0 = last item in slot
+        l1Portal.processWithdrawals(_singleWithdrawal(w1), bytes32(0)); // 0 = last item in slot
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
     }
 
@@ -584,56 +623,42 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
         bytes32 processedHash = _sequencerRelayDepositsToL2();
         _sequencerSubmitBatch(processedHash);
+        _setEncKeyOnL1(ENC_KEY_1);
+        bytes memory callbackData = _callbackData(GatewayFlow.Deposit);
 
         // Request withdrawal with callback
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 500e6);
         l2Outbox.requestWithdrawal(
             address(l2ZoneToken),
-            address(withdrawalReceiver), // to: receiver contract
+            address(zoneGateway),
             500e6,
             bytes32(0), // memo
             5_000_000, // gasLimit for callback
-            alice, // fallbackRecipient on zone
-            "callback_data"
+            alice, // zoneFallbackRecipient on zone
+            callbackData
         );
         vm.stopPrank();
 
         // Sequencer observes and submits
         _sequencerObserveWithdrawal(
-            0,
-            alice,
-            address(withdrawalReceiver),
-            500e6,
-            bytes32(0),
-            5_000_000,
-            alice,
-            "callback_data"
+            0, alice, address(zoneGateway), 500e6, bytes32(0), 5_000_000, alice, callbackData
         );
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "callback_withdrawal"));
         _sequencerSubmitBatch(processedHash);
 
         // Process withdrawal
         Withdrawal memory w = _withdrawal(
-            1,
-            alice,
-            address(withdrawalReceiver),
-            500e6,
-            bytes32(0),
-            5_000_000,
-            alice,
-            "callback_data"
+            1, alice, address(zoneGateway), 500e6, bytes32(0), 5_000_000, alice, callbackData
         );
-        l1Portal.processWithdrawal(w, bytes32(0));
+        bytes32 depositHashBefore = l1Portal.currentDepositQueueHash();
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
-        // Verify callback was executed
-        assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 500e6);
-        assertEq(withdrawalReceiver.lastSenderTag(), _senderTag(alice, 1));
-        assertEq(withdrawalReceiver.lastAmount(), 500e6);
-        assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
+        assertNotEq(l1Portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(l2ZoneToken.balanceOf(address(zoneGateway)), 0);
     }
 
-    function test_fullFlow_bounceBackOnCallbackFailure() public {
+    function test_fullFlow_callbackFailureBouncesAndAdvancesQueue() public {
         // Setup: deposit to zone
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 1000e6);
@@ -643,42 +668,41 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
         bytes32 processedHash = _sequencerRelayDepositsToL2();
         _sequencerSubmitBatch(processedHash);
+        _setEncKeyOnL1(ENC_KEY_1);
+        bytes memory callbackData = _callbackData(GatewayFlow.Redeem);
 
-        // Request withdrawal with callback that will fail
-        withdrawalReceiver.setShouldAccept(false);
+        // Request a callback withdrawal, then make the mock omit its return deposit.
+        zoneGateway.setReturnToZone(false);
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 500e6);
         l2Outbox.requestWithdrawal(
             address(l2ZoneToken),
-            address(withdrawalReceiver),
+            address(zoneGateway),
             500e6,
             bytes32(0), // memo
             5_000_000,
             alice, // fallback recipient
-            ""
+            callbackData
         );
         vm.stopPrank();
 
         // Sequencer observes and submits
         _sequencerObserveWithdrawal(
-            0, alice, address(withdrawalReceiver), 500e6, bytes32(0), 5_000_000, alice, ""
+            0, alice, address(zoneGateway), 500e6, bytes32(0), 5_000_000, alice, callbackData
         );
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "failing_callback"));
         _sequencerSubmitBatch(processedHash);
 
         bytes32 depositHashBefore = l1Portal.currentDepositQueueHash();
 
-        // Process withdrawal - callback will fail, triggering bounce-back
         Withdrawal memory w = _withdrawal(
-            1, alice, address(withdrawalReceiver), 500e6, bytes32(0), 5_000_000, alice, ""
+            1, alice, address(zoneGateway), 500e6, bytes32(0), 5_000_000, alice, callbackData
         );
-        l1Portal.processWithdrawal(w, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
-        // Verify receiver did NOT get funds (transfer reverted)
-        assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 0);
-
-        // Verify bounce-back deposit was created
-        assertTrue(l1Portal.currentDepositQueueHash() != depositHashBefore);
+        assertNotEq(l1Portal.currentDepositQueueHash(), depositHashBefore);
+        assertEq(l1Portal.withdrawalQueueHead(), l1Portal.withdrawalQueueTail());
+        assertEq(l2ZoneToken.balanceOf(address(zoneGateway)), 0);
     }
 
     function test_fullFlow_transferOnL2() public {
@@ -764,7 +788,7 @@ contract ZoneBridgeTest is BaseTest {
         deposits[0] = pendingDeposits[0].deposit;
 
         // Should succeed — proof validates ancestor contiguity, not exact match
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo(
             "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
@@ -794,30 +818,6 @@ contract ZoneBridgeTest is BaseTest {
             ""
         );
         vm.stopPrank();
-    }
-
-    function test_l2_onlySequencerCanAdvanceTempo() public {
-        vm.startPrank(alice);
-        l2ZoneToken.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""), alice);
-        vm.stopPrank();
-
-        _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
-
-        bytes32 expectedHash = pendingDeposits[0].newCurrentDepositQueueHash;
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
-
-        Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = pendingDeposits[0].deposit;
-
-        // Non-sequencer tries to advance
-        vm.prank(alice);
-        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
-        l2Inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
-        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -890,6 +890,22 @@ contract ZoneBridgeTest is BaseTest {
         });
     }
 
+    function _callbackData(GatewayFlow flow) internal view returns (bytes memory) {
+        return abi.encode(
+            GatewayCallbackData({
+                flow: flow,
+                outputToken: address(l2ZoneToken),
+                keyIndex: 0,
+                encrypted: _makeEncryptedPayload(),
+                minVaultAssets: 0,
+                minVaultShares: 0,
+                minOutputAmount: 0,
+                actionId: bytes32(0),
+                tempoRefundRecipient: alice
+            })
+        );
+    }
+
     /// @notice Simulate sequencer observing an encrypted deposit event on L1
     function _sequencerObserveEncryptedDeposit(
         address sender,
@@ -904,7 +920,7 @@ contract ZoneBridgeTest is BaseTest {
             token: address(l2ZoneToken),
             sender: sender,
             amount: netAmount,
-            bouncebackRecipient: sender,
+            tempoRefundRecipient: sender,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -1033,7 +1049,7 @@ contract ZoneBridgeTest is BaseTest {
         }
 
         // Process on zone via advanceTempo
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // Clear pending
@@ -1161,7 +1177,6 @@ contract ZoneBridgeTest is BaseTest {
             senderTag: keccak256(abi.encodePacked(address(0), bytes32(0))),
             to: alice,
             amount: netAmount,
-            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackNonce: 0,
@@ -1171,7 +1186,7 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 expectedQueueHash = keccak256(abi.encode(bounce, EMPTY_SENTINEL));
         assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
 
-        l1Portal.processWithdrawal(bounce, bytes32(0));
+        l1Portal.processWithdrawals(_singleWithdrawal(bounce), bytes32(0));
         assertEq(l2ZoneToken.balanceOf(alice), aliceBeforeRefund + netAmount - bouncebackFee);
         assertEq(l2ZoneToken.balanceOf(address(l1Portal)), portalBeforeRefund - netAmount);
     }
@@ -1222,7 +1237,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             to: alice,
             amount: depositAmount,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             memo: bytes32("regular")
         });
         bytes32 prevHash = l2Inbox.processedDepositQueueHash();
@@ -1234,7 +1249,7 @@ contract ZoneBridgeTest is BaseTest {
             token: address(l2ZoneToken),
             sender: bob,
             amount: netAmount,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             keyIndex: 0,
             encrypted: payload
         });
@@ -1247,7 +1262,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: carol,
             to: carol,
             amount: depositAmount,
-            bouncebackRecipient: carol,
+            tempoRefundRecipient: carol,
             memo: bytes32("carol")
         });
         bytes32 hash3 = keccak256(abi.encode(DepositType.Regular, d3, hash2));
@@ -1282,7 +1297,7 @@ contract ZoneBridgeTest is BaseTest {
         _setupEncryptionKeyMockOnZone(0, encKeyX, encKeyYParity);
         _setupPrecompileMocksSuccess(decryptedTo, decryptedMemo);
 
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify all balances ===
@@ -1354,7 +1369,7 @@ contract ZoneBridgeTest is BaseTest {
             token: address(l2ZoneToken),
             sender: alice,
             amount: netAmount,
-            bouncebackRecipient: alice,
+            tempoRefundRecipient: alice,
             keyIndex: 0,
             encrypted: payload1
         });
@@ -1365,7 +1380,7 @@ contract ZoneBridgeTest is BaseTest {
             token: address(l2ZoneToken),
             sender: bob,
             amount: netAmount,
-            bouncebackRecipient: bob,
+            tempoRefundRecipient: bob,
             keyIndex: 1,
             encrypted: payload2
         });
@@ -1426,7 +1441,7 @@ contract ZoneBridgeTest is BaseTest {
             abi.encode(plaintext, true)
         );
 
-        vm.prank(sequencer);
+        vm.prank(address(0));
         l2Inbox.advanceTempo("", queued, decs, new EnabledToken[](0));
 
         // === STEP 7: Verify ===

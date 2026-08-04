@@ -2,24 +2,29 @@
 
 pub use ZonePortal::{
     BlockTransition, DepositQueueTransition, EncryptedDeposit, EncryptedDepositPayload, Withdrawal,
+    ZonePortalErrors as ZonePortalError,
 };
 
-use crate::ZoneOutbox;
+use crate::{IZoneOutbox, ZoneInboxEvent};
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_sol_types::SolValue;
 use zone_primitives::constants::EMPTY_SENTINEL;
 
 crate::sol! {
-    #[derive(Debug)]
+    #[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
     contract ZonePortal {
         // -- Shared types --
+        enum Role {
+            None,
+            Account,
+            CallbackGateway
+        }
 
         struct Withdrawal {
             address token;
             bytes32 senderTag;
             address to;
             uint128 amount;
-            uint128 fee;
             bytes32 memo;
             uint64 gasLimit;
             uint64 fallbackNonce;
@@ -41,9 +46,15 @@ crate::sol! {
             address token;
             address sender;
             uint128 amount;
-            address bouncebackRecipient;
+            address tempoRefundRecipient;
             uint256 keyIndex;
             EncryptedDepositPayload encrypted;
+        }
+
+        struct EncryptionKeyEntry {
+            bytes32 x;
+            uint8 yParity;
+            uint64 activationBlock;
         }
 
         struct BlockTransition {
@@ -68,7 +79,7 @@ crate::sol! {
             uint128 netAmount,
             uint128 fee,
             bytes32 memo,
-            address bouncebackRecipient,
+            address tempoRefundRecipient,
             uint64 depositNumber
         );
 
@@ -84,13 +95,20 @@ crate::sol! {
             bytes ciphertext,
             bytes12 nonce,
             bytes16 tag,
-            address bouncebackRecipient,
+            address tempoRefundRecipient,
             uint64 depositNumber
         );
 
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
+        event SequencerEncryptionKeyUpdated(
+            bytes32 x,
+            uint8 yParity,
+            uint256 keyIndex,
+            uint64 activationBlock
+        );
 
         /// `withdrawalQueueIndex` is the logical withdrawal queue index the batch's hash
         /// chain was enqueued under, or `NO_QUEUE_INDEX` when the batch
@@ -121,14 +139,14 @@ crate::sol! {
         );
 
         event DepositBounceBack(
-            address indexed bouncebackRecipient,
+            address indexed tempoRefundRecipient,
             address token,
             uint128 amount,
             uint128 bouncebackFee
         );
 
         event DepositBounceBackPending(
-            address indexed bouncebackRecipient,
+            address indexed tempoRefundRecipient,
             address token,
             uint128 amount,
             uint128 bouncebackFee
@@ -136,17 +154,9 @@ crate::sol! {
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
+        event ZoneGasRateUpdated(uint128 zoneGasRate);
+        event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
         event BouncebackGasUpdated(uint64 bouncebackGas);
-
-        event SequencerTransferStarted(
-            address indexed currentSequencer,
-            address indexed pendingSequencer
-        );
-
-        event SequencerTransferred(
-            address indexed previousSequencer,
-            address indexed newSequencer
-        );
 
         event AdminTransferStarted(
             address indexed currentAdmin,
@@ -158,24 +168,62 @@ crate::sol! {
             address indexed newAdmin
         );
 
+        event RoleUpdated(address indexed account, Role prev, Role next);
+        event EnforcementModesUpdated(bool accessMode, bool gatewayMode);
+        event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
+
+        /// Emitted when block-production leadership transitions to a new sequencer.
+        /// Zone nodes derive leadership exclusively from finalized observations of this event.
+        event LeaderUpdated(
+            address indexed previousLeader,
+            address indexed newLeader,
+            uint64 indexed epoch,
+            uint64 activationTempoBlock
+        );
+
         // -- Errors --
 
         error NotSequencer();
         error NotAdmin();
-        error NotPendingSequencer();
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
         error PolicyForbids();
         error InvalidBouncebackRecipient();
+        error TokenNotEnabled();
+        error DepositBlockCapacityExceeded(uint64 maximum);
+        error InvalidCallbackTarget();
+        error AccountNotAllowed(address account);
+        error InvalidLeader();
+        error ActiveLeaderRemoved();
+        error LeaderAlreadyUpdatedThisBlock();
+        error StaleLeadershipEpoch(uint64 expected, uint64 actual);
 
         // -- View functions --
 
         function zoneId() external view returns (uint32);
         function admin() external view returns (address);
-        function sequencer() external view returns (address);
+        function messenger() external view returns (address);
+        function isAccessEnforced() external view returns (bool);
+        function setAccessMode(bool enforced) external;
+        function isGatewayOpen() external view returns (bool);
+        function setGatewayMode(bool enforced) external;
+        function role(address account) external view returns (Role);
+        function setRole(address account, Role role) external;
+        function setAllowedAccount(address account, bool allowed) external;
+        function setGateway(address account, bool allowed) external;
+        function setSequencerSet(address[] calldata newSequencers, uint8 newThreshold) external;
         function verifier() external view returns (address);
-        function sequencerPubkey() external view returns (bytes32);
+        function sequencerSetVersion() external view returns (uint64);
+        function sequencerThreshold() external view returns (uint8);
+        function zoneHeight() external view returns (uint256);
+        function isSequencer(address account) external view returns (bool);
+        function sequencerCount() external view returns (uint256);
+        function sequencerAt(uint256 index) external view returns (address);
+        function leader() external view returns (address);
+        function leaderEpoch() external view returns (uint64);
+        function leaderActivationTempoBlock() external view returns (uint64);
+        function setLeader(address newLeader, uint64 expectedEpoch) external;
         function withdrawalBatchIndex() external view returns (uint64);
         function blockHash() external view returns (bytes32);
         function currentDepositQueueHash() external view returns (bytes32);
@@ -183,11 +231,11 @@ crate::sol! {
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
         function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
-        function genesisTempoBlockNumber() external view returns (uint64);
         function calculateDepositFee() external view returns (uint128 fee);
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
         function lastProcessedDepositNumber() external view returns (uint64);
+        function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
         // -- State-changing functions --
@@ -197,12 +245,12 @@ crate::sol! {
             address to,
             uint128 amount,
             bytes32 memo,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         )
             external
             returns (bytes32 newCurrentDepositQueueHash);
 
-        function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+        function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
         function submitBatch(
             uint64 tempoBlockNumber,
@@ -211,15 +259,17 @@ crate::sol! {
             DepositQueueTransition calldata depositQueueTransition,
             bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
-            bytes calldata proof
+            bytes calldata proof,
+            uint256 nextZoneHeight,
+            bytes[] calldata signatures
         ) external;
 
         function enableToken(address token) external;
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
 
-        function transferSequencer(address newSequencer) external;
-        function acceptSequencer() external;
+        function setZoneGasRate(uint128 newZoneGasRate) external;
+        function setMaxTempoGasRate(uint128 newMaxTempoGasRate) external;
         function setBouncebackGas(uint64 newBouncebackGas) external;
 
         function transferAdmin(address newAdmin) external;
@@ -233,7 +283,7 @@ crate::sol! {
             uint128 amount,
             uint256 keyIndex,
             EncryptedDepositPayload calldata encrypted,
-            address bouncebackRecipient
+            address tempoRefundRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
         function setSequencerEncryptionKey(
@@ -250,14 +300,20 @@ crate::sol! {
         function enabledTokenCount() external view returns (uint256);
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
+        function maxTempoGasRate() external view returns (uint128);
         function bouncebackGas() external view returns (uint64);
-        function pendingSequencer() external view returns (address);
         function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
 
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAt(uint256 index)
+            external view returns (EncryptionKeyEntry memory entry);
+        function isEncryptionKeyValid(uint256 keyIndex)
+            external view returns (bool valid, uint64 expiresAtBlock);
+        function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+            external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
     }
 }
@@ -298,8 +354,11 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         futures::future::try_join_all(futs).await
     }
 
-    /// Fetches the active sequencer encryption key and its index.
+    /// Fetches the active sequencer encryption key and its index from one L1 snapshot.
     ///
+    /// Reads the current L1 block number, then pins an atomic
+    /// [`encryptionKeyAtBlock`](ZonePortal::encryptionKeyAtBlockCall) call to that block so a key
+    /// rotation cannot pair a key with an index from a different state snapshot.
     /// Returns `(key, key_index)` where `key` is the
     /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
     /// `key_index` is the zero-based index of the current key.
@@ -312,11 +371,53 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         ),
         alloy_contract::Error,
     > {
-        let key_call = self.sequencerEncryptionKey();
-        let count_call = self.encryptionKeyCount();
-        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
-        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
-        Ok((key, key_index))
+        let block_number = self.provider().get_block_number().await?;
+        let key = self
+            .encryptionKeyAtBlock(block_number)
+            .block(alloy_rpc_types_eth::BlockId::number(block_number))
+            .call()
+            .await?;
+        Ok((
+            ZonePortal::sequencerEncryptionKeyReturn {
+                x: key.x,
+                yParity: key.yParity,
+            },
+            key.keyIndex,
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "rpc"))]
+mod tests {
+    use super::*;
+    use alloy_primitives::U256;
+    use alloy_provider::ProviderBuilder;
+    use alloy_sol_types::SolCall;
+    use alloy_transport::mock::Asserter;
+
+    #[tokio::test]
+    async fn encryption_key_reads_key_and_index_from_one_snapshot() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let block_number = 42_u64;
+        let expected = ZonePortal::encryptionKeyAtBlockReturn {
+            x: B256::repeat_byte(0x11),
+            yParity: 1,
+            keyIndex: U256::from(7),
+        };
+
+        asserter.push_success(&block_number);
+        asserter.push_success(&Bytes::from(
+            ZonePortal::encryptionKeyAtBlockCall::abi_encode_returns(&expected),
+        ));
+
+        let portal = ZonePortal::new(Address::ZERO, &provider);
+        let (key, key_index) = portal.encryption_key().await.unwrap();
+
+        assert_eq!(key.x, expected.x);
+        assert_eq!(key.yParity, expected.yParity);
+        assert_eq!(key_index, expected.keyIndex);
+        assert!(asserter.read_q().is_empty());
     }
 }
 
@@ -338,13 +439,44 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
-            Self::NotPendingSequencer(_) => f.write_str("NotPendingSequencer"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
+            Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
+            Self::DepositBlockCapacityExceeded(_) => f.write_str("DepositBlockCapacityExceeded"),
+            Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
+            Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
+            Self::InvalidLeader(_) => f.write_str("InvalidLeader"),
+            Self::ActiveLeaderRemoved(_) => f.write_str("ActiveLeaderRemoved"),
+            Self::LeaderAlreadyUpdatedThisBlock(_) => f.write_str("LeaderAlreadyUpdatedThisBlock"),
+            Self::StaleLeadershipEpoch(_) => f.write_str("StaleLeadershipEpoch"),
         }
+    }
+}
+
+impl EncryptedDeposit {
+    /// Build the event emitted after a successful encrypted deposit.
+    pub fn processed_event(
+        &self,
+        deposit_hash: B256,
+        recipient: Address,
+        memo: B256,
+    ) -> ZoneInboxEvent {
+        ZoneInboxEvent::encrypted_deposit_processed(
+            deposit_hash,
+            self.sender,
+            recipient,
+            self.token,
+            self.amount,
+            memo,
+        )
+    }
+
+    /// Build the event emitted after a failed encrypted deposit.
+    pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
+        ZoneInboxEvent::encrypted_deposit_failed(deposit_hash, self.sender, self.token, self.amount)
     }
 }
 
@@ -364,7 +496,7 @@ impl Withdrawal {
 
     /// Reconstruct the public L1-facing withdrawal from a zone-side withdrawal request event.
     pub fn from_requested_event(
-        event: &ZoneOutbox::WithdrawalRequested,
+        event: &IZoneOutbox::WithdrawalRequested,
         tx_hash: B256,
         encrypted_sender: Bytes,
     ) -> Self {
@@ -379,13 +511,17 @@ impl Withdrawal {
             senderTag: sender_tag,
             to: event.to,
             amount: event.amount,
-            fee: event.fee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackNonce: event.fallbackNonce,
             callbackData: event.data.clone(),
             encryptedSender: encrypted_sender,
         }
+    }
+
+    /// Hash this withdrawal as one link in a withdrawal queue.
+    pub fn hash_with_tail(&self, tail: B256) -> B256 {
+        keccak256((self.clone(), tail).abi_encode_params())
     }
 
     /// Compute the withdrawal queue hash for a slice of withdrawals.
@@ -404,8 +540,8 @@ impl Withdrawal {
         }
 
         let mut hash = EMPTY_SENTINEL;
-        for w in withdrawals.iter().rev() {
-            hash = keccak256((w.clone(), hash).abi_encode_params());
+        for withdrawal in withdrawals.iter().rev() {
+            hash = withdrawal.hash_with_tail(hash);
         }
         hash
     }

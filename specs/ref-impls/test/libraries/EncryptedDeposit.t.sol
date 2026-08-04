@@ -112,7 +112,7 @@ contract EncryptedDepositLibTest is Test {
             token: address(0x1000),
             sender: address(0x200),
             amount: amount,
-            bouncebackRecipient: address(0x300),
+            tempoRefundRecipient: address(0x300),
             keyIndex: 1,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: seed,

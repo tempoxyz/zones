@@ -47,6 +47,7 @@ tracing = { version = "0.1.41", default-features = false }
 
 [dev-dependencies]
 const-hex.workspace = true
+eyre.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 
 [features]

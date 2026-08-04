@@ -3,21 +3,18 @@
 //! Registered at [`AES_GCM_DECRYPT_ADDRESS`] (`0x1C00...0101`).
 //!
 //! Decrypts ECIES ciphertext and verifies the GCM authentication tag,
-//! enabling the [`ZoneInbox`] contract to process encrypted deposits.
+//! enabling the `ZoneInbox` contract to process encrypted deposits.
 //!
-//! Uses the NCC-audited [`aes-gcm`] crate (v0.10.3).
+//! Uses the NCC-audited `aes-gcm` crate (v0.10.3).
 
 use alloc::vec::Vec;
 
-use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, Payload},
-};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, Tag, aead::AeadInPlace};
 mod dispatch;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
-use revm::precompile::PrecompileId;
+use tempo_precompiles::{Precompile as _, error::TempoPrecompileError, storage::StorageCtx};
 
 /// AES-256-GCM Decrypt precompile address on Zone L2.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
@@ -51,99 +48,57 @@ pub use IAesGcmDecrypt::{decryptCall, decryptReturn};
 pub struct AesGcmDecrypt;
 
 impl AesGcmDecrypt {
-    /// Wrap this precompile in a [`DynPrecompile`] with the Tempo storage context
-    /// required by the upstream dispatch macro.
-    pub fn create(
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-    ) -> DynPrecompile {
-        use tempo_precompiles::{
-            Precompile as _,
-            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-        };
-
-        let spec = cfg.spec;
-        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
-        let gas_params = cfg.gas_params.clone();
-        DynPrecompile::new_stateful(PrecompileId::Custom("AesGcmDecrypt".into()), move |input| {
-            let mut storage = EvmPrecompileStorageProvider::new(
-                input.internals,
-                input.gas,
-                input.reservoir,
-                spec,
-                amsterdam_eip8037_enabled,
-                input.is_static,
-                gas_params.clone(),
-            );
-
-            StorageCtx::enter(&mut storage, || {
-                let mut precompile = Self;
-                precompile.call(input.data, input.caller)
-            })
-        })
+    /// Creates the AES-GCM precompile with the shared zone execution environment.
+    pub fn create(env: &crate::ZonePrecompileEnv) -> DynPrecompile {
+        crate::execution::create_precompile(
+            "AesGcmDecrypt",
+            env,
+            crate::execution::NoCallRules,
+            |data, caller| Self.call(data, caller),
+        )
     }
-}
 
-/// Decrypt AES-256-GCM ciphertext with tag verification.
-///
-/// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
-/// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
-pub fn decrypt_aes_gcm(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    ciphertext: &[u8],
-    aad: &[u8],
-    tag: &[u8; 16],
-) -> (Vec<u8>, bool) {
-    let cipher = Aes256Gcm::new(key.into());
-    let gcm_nonce = Nonce::from_slice(nonce);
+    /// Charge the native gas cost for AES-GCM authenticated input.
+    pub fn charge_gas(ciphertext_len: usize, aad_len: usize) -> tempo_precompiles::Result<()> {
+        let len = u64::try_from(ciphertext_len.saturating_add(aad_len)).unwrap_or(u64::MAX);
+        let gas = AES_GCM_BASE_GAS
+            .checked_add(AES_GCM_PER_BYTE_GAS.saturating_mul(len))
+            .ok_or_else(TempoPrecompileError::under_overflow)?;
+        StorageCtx::default().deduct_gas(gas)
+    }
 
-    // AES-GCM expects ciphertext || tag concatenated
-    let mut ct_with_tag = Vec::with_capacity(ciphertext.len() + 16);
-    ct_with_tag.extend_from_slice(ciphertext);
-    ct_with_tag.extend_from_slice(tag);
+    /// Decrypt AES-256-GCM ciphertext with tag verification.
+    ///
+    /// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
+    /// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
+    pub fn decrypt(
+        key: &[u8; 32],
+        nonce: &[u8; 12],
+        ciphertext: &[u8],
+        aad: &[u8],
+        tag: &[u8; 16],
+    ) -> (Vec<u8>, bool) {
+        let cipher = Aes256Gcm::new(key.into());
+        let gcm_nonce = Nonce::from_slice(nonce);
+        let mut plaintext = ciphertext.to_vec();
 
-    match cipher.decrypt(
-        gcm_nonce,
-        Payload {
-            msg: &ct_with_tag,
-            aad,
-        },
-    ) {
-        Ok(plaintext) => (plaintext, true),
-        Err(_) => (Vec::new(), false),
+        match cipher.decrypt_in_place_detached(gcm_nonce, aad, &mut plaintext, Tag::from_slice(tag))
+        {
+            Ok(()) => (plaintext, true),
+            Err(_) => (Vec::new(), false),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_evm::{
-        EvmInternals,
-        precompiles::{Precompile, PrecompileInput},
-    };
-    use alloy_primitives::{Bytes, U256};
+    use crate::test_utils::{test_context, test_env, test_storage_provider};
+    use aes_gcm::aead::{Aead, Payload};
+    use alloy_primitives::Bytes;
     use alloy_sol_types::SolCall;
-    use revm::{
-        Context,
-        database::{CacheDB, EmptyDB},
-        precompile::PrecompileOutput,
-    };
-    use tempo_chainspec::hardfork::TempoHardfork;
-    use tempo_precompiles::{
-        charge_input_cost,
-        storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-    };
-
-    type TestContext = Context<
-        revm::context::BlockEnv,
-        revm::context::TxEnv,
-        revm::context::CfgEnv<TempoHardfork>,
-        CacheDB<EmptyDB>,
-    >;
-
-    fn test_context() -> TestContext {
-        Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
-    }
+    use revm::precompile::PrecompileOutput;
+    use tempo_precompiles::{charge_input_cost, storage::StorageCtx};
 
     fn encrypt(plaintext: &[u8], aad: &[u8]) -> decryptCall {
         let key = [0x42u8; 32];
@@ -173,34 +128,23 @@ mod tests {
 
     fn call_precompile(calldata: Bytes) -> PrecompileOutput {
         let mut ctx = test_context();
-        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        AesGcmDecrypt::create(&cfg)
-            .call(PrecompileInput {
-                data: &calldata,
-                gas: u64::MAX,
-                reservoir: 0,
-                caller: Address::ZERO,
-                value: U256::ZERO,
-                target_address: AES_GCM_DECRYPT_ADDRESS,
-                is_static: true,
-                bytecode_address: AES_GCM_DECRYPT_ADDRESS,
-                internals: EvmInternals::from_context(&mut ctx),
-            })
-            .expect("precompile call succeeds")
+        let precompile = AesGcmDecrypt::create(&test_env(&ctx));
+        crate::test_utils::call_precompile(
+            &mut ctx,
+            &precompile,
+            Address::ZERO,
+            &calldata,
+            u64::MAX,
+            true,
+            AES_GCM_DECRYPT_ADDRESS,
+            AES_GCM_DECRYPT_ADDRESS,
+        )
+        .expect("precompile call succeeds")
     }
 
     fn charged_input_gas(calldata: &[u8]) -> u64 {
         let mut ctx = test_context();
-        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
-        let mut provider = EvmPrecompileStorageProvider::new(
-            EvmInternals::from_context(&mut ctx),
-            u64::MAX,
-            0,
-            cfg.spec,
-            cfg.enable_amsterdam_eip8037,
-            true,
-            cfg.gas_params,
-        );
+        let mut provider = test_storage_provider(&mut ctx, u64::MAX, true);
         StorageCtx::enter(&mut provider, || {
             let mut storage = StorageCtx::default();
             let gas_before = storage.gas_used();
@@ -222,7 +166,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &tag);
         assert!(valid);
         assert_eq!(decrypted, plaintext);
     }
@@ -240,7 +184,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let bad_tag = [0xFFu8; 16];
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &bad_tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &bad_tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -267,7 +211,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, aad, &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, aad, &tag);
         assert!(valid);
         assert_eq!(decrypted, plaintext);
     }
@@ -331,7 +275,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, b"wrong", &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, b"wrong", &tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -358,7 +302,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -378,7 +322,7 @@ mod tests {
 
         ct[0] ^= 0x01;
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, &ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, &ct, &[], &tag);
         assert!(!valid);
         assert!(decrypted.is_empty());
     }
@@ -396,7 +340,7 @@ mod tests {
         let ct = &encrypted[..encrypted.len() - 16];
         let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-        let (decrypted, valid) = decrypt_aes_gcm(&key, &nonce_bytes, ct, &[], &tag);
+        let (decrypted, valid) = AesGcmDecrypt::decrypt(&key, &nonce_bytes, ct, &[], &tag);
         assert!(valid);
         assert!(decrypted.is_empty());
     }

@@ -14,15 +14,11 @@ workspace = true
 # zones
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-precompiles = { workspace = true, features = ["std"] }
-zone-primitives = { workspace = true, features = ["std", "serde"] }
 
 # tempo
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
-tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
-tempo-revm.workspace = true
-tempo-transaction-pool.workspace = true
 
 # reth
 reth-metrics.workspace = true
@@ -30,7 +26,6 @@ reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-storage-api.workspace = true
 reth-tasks.workspace = true
-reth-transaction-pool.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -43,9 +38,6 @@ alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
 
-# revm
-revm.workspace = true
-
 # misc
 derive_more = { workspace = true, features = ["deref"] }
 eyre.workspace = true
@@ -53,6 +45,7 @@ futures.workspace = true
 k256.workspace = true
 metrics.workspace = true
 parking_lot.workspace = true
+schnellru.workspace = true
 serde = { workspace = true, features = ["derive"] }
 tokio.workspace = true
 tracing.workspace = true

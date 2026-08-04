@@ -9,16 +9,14 @@ import { Test } from "forge-std/Test.sol";
 ///      derived slot arithmetic is identical.
 contract EncryptionKeyLayoutHarness {
 
-    // Slots 0-6: padding to match ZonePortal layout
+    // Slots 0-4: padding to match ZonePortal layout
     uint256 private _pad0;
     uint256 private _pad1;
     uint256 private _pad2;
     uint256 private _pad3;
     uint256 private _pad4;
-    uint256 private _pad5;
-    uint256 private _pad6;
 
-    // Slot 7: _encryptionKeys — must be at PORTAL_ENCRYPTION_KEYS_SLOT
+    // Slot 5: _encryptionKeys — must be at PORTAL_ENCRYPTION_KEYS_SLOT
     EncryptionKeyEntry[] internal _encryptionKeys;
 
     function push(bytes32 x, uint8 yParity, uint64 activationBlock) external {
@@ -39,7 +37,7 @@ contract EncryptionKeyLayoutHarness {
 
 /// @title EncryptionKeyLayoutTest
 /// @notice Storage layout regression test for EncryptionKeyEntry.
-///         ZoneInbox._readEncryptionKey() and ZoneConfig.sequencerEncryptionKey()
+///         ZoneInbox._readEncryptionKey()
 ///         read raw storage slots and assume yParity is packed in the lowest byte
 ///         of the meta slot. If the struct field order ever changes, these tests fail.
 contract EncryptionKeyLayoutTest is Test {
@@ -78,7 +76,7 @@ contract EncryptionKeyLayoutTest is Test {
         bytes32 rawMeta = vm.load(address(harness), bytes32(slotMeta));
 
         // yParity must be extractable from the lowest byte — this is exactly what
-        // ZoneInbox._readEncryptionKey() and ZoneConfig.sequencerEncryptionKey() do
+        // ZoneInbox._readEncryptionKey() do
         uint8 extractedYParity = uint8(uint256(rawMeta) & 0xff);
         assertEq(extractedYParity, yParity, "yParity must be in lowest byte of meta slot");
 

@@ -1,0 +1,36 @@
+name: Storage Layout
+
+on:
+  pull_request:
+    paths:
+      - "specs/ref-impls/src/tempo/ZonePortal.sol"
+      - "specs/ref-impls/src/interfaces/IZone.sol"
+      - "specs/ref-impls/foundry.toml"
+      - "specs/ref-impls/storage-layouts/ZonePortal.json"
+      - ".github/workflows/storage-layout.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  zone-portal:
+    name: ZonePortal layout unchanged
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Foundry
+        uses: tempoxyz/gh-actions/actions/setup-foundry@98b1081dcf34361b576aca2ab3041772708582ef
+        with:
+          version: nightly
+
+      - name: Check storage layout
+        working-directory: specs/ref-impls
+        run: |
+          forge inspect ZonePortal storage-layout --json \
+            | jq . > storage-layouts/ZonePortal.json
+          git diff --exit-code -- storage-layouts/ZonePortal.json

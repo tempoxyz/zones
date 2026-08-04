@@ -5,6 +5,9 @@ import {
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
+    IZonePortal,
+    Role,
+    ZONE_FACTORY_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
@@ -13,18 +16,15 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 /// @notice Shared withdrawal callback sender for all zones created by one ZoneFactory.
 contract ZoneMessenger is IZoneMessenger {
 
-    IZoneFactory public immutable zoneFactory;
+    IZoneFactory public constant zoneFactory = IZoneFactory(ZONE_FACTORY_ADDRESS);
 
     uint256 internal _relayReentrancyStatus;
 
     error UnauthorizedPortal();
     error TransferFailed();
     error CallbackRejected();
+    error InvalidCallbackTarget();
     error ReentrantRelay();
-
-    constructor(address _zoneFactory) {
-        zoneFactory = IZoneFactory(_zoneFactory);
-    }
 
     modifier nonReentrantRelay() {
         if (_relayReentrancyStatus != 0) revert ReentrantRelay();
@@ -48,15 +48,29 @@ contract ZoneMessenger is IZoneMessenger {
         ZoneInfo memory zone = zoneFactory.zones(zoneId);
         if (zone.portal != msg.sender) revert UnauthorizedPortal();
 
+        if (
+            !IZonePortal(msg.sender).isGatewayOpen()
+                && IZonePortal(msg.sender).role(target) != Role.CallbackGateway
+        ) {
+            revert InvalidCallbackTarget();
+        }
+
+        // Raw call is fine: `enableToken` only accepts native TIP-20s, which revert small.
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();
         }
 
-        bytes4 selector = IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
+        // The target is untrusted, so the empty `catch` drops its revert data. Copying it would
+        // cost quadratic memory gas here and again in the portal, well past `gasLimit`.
+        try IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
             zoneId, msg.sender, senderTag, token, amount, data
-        );
-
-        if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
+        ) returns (
+            bytes4 selector
+        ) {
+            if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
+                revert CallbackRejected();
+            }
+        } catch {
             revert CallbackRejected();
         }
     }

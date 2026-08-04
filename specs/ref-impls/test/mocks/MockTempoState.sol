@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { PORTAL_TOKEN_CONFIGS_SLOT } from "../../src/interfaces/IZone.sol";
+import {
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT,
+    Role
+} from "../../src/interfaces/IZone.sol";
 
 /// @title MockTempoState
 /// @notice Mock TempoState for testing ZoneInbox
@@ -34,12 +39,27 @@ contract MockTempoState {
         mockStorageValues[account][slot] = value;
     }
 
+    function setMockMaxTempoGasRate(address portal, uint128 rate) external {
+        mockStorageValues[portal][PORTAL_MAX_TEMPO_GAS_RATE_SLOT] = bytes32(uint256(rate));
+    }
+
     /// @notice Set the mocked ZonePortal TokenConfig.enabled field.
     function setMockTokenEnabled(address portal, address token, bool enabled) external {
         bytes32 configSlot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
         uint256 raw = uint256(mockStorageValues[portal][configSlot]);
         raw = (raw & ~uint256(0xff)) | (enabled ? 1 : 0);
         mockStorageValues[portal][configSlot] = bytes32(raw);
+    }
+
+    function setMockAccountAllowed(address portal, address account, bool allowed) external {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_ROLE_SLOT));
+        mockStorageValues[portal][slot] = allowed ? bytes32(uint256(Role.Account)) : bytes32(0);
+    }
+
+    function setMockZoneGateway(address portal, address gateway, bool enabled) external {
+        bytes32 gatewaySlot = keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT));
+        mockStorageValues[portal][gatewaySlot] =
+            enabled ? bytes32(uint256(Role.CallbackGateway)) : bytes32(0);
     }
 
     /// @notice Mock finalizeTempo - just advances block number

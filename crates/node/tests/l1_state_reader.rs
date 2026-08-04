@@ -4,8 +4,6 @@
 //!
 //! Requires `L1_RPC_URL` env var or defaults to moderato RPC.
 
-use std::collections::HashSet;
-
 use alloy_primitives::{Address, B256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use tempo_alloy::TempoNetwork;
@@ -24,7 +22,7 @@ async fn make_provider() -> L1StateProvider {
         portal_address: ZONE_PORTAL,
         ..Default::default()
     };
-    let cache = L1StateCache::new(HashSet::from([ZONE_PORTAL]));
+    let cache = L1StateCache::new();
     let rt = tokio::runtime::Handle::current();
     L1StateProvider::new(config, cache, rt)
         .await
@@ -80,7 +78,7 @@ async fn l1_provider_caches_result() {
 
     assert_eq!(v1, v2, "cached and fresh values must match");
 
-    let cached = provider.cache().read().get(ZONE_PORTAL, B256::ZERO, block);
+    let cached = provider.cache().lock().get(ZONE_PORTAL, B256::ZERO, block);
     assert_eq!(cached, Some(v1), "value should be in cache after read");
     println!("Cache hit verified for slot 0 at block {block}: {v1}");
 }
@@ -111,7 +109,7 @@ async fn l1_provider_reads_multiple_slots() {
     }
 
     // Slot 0 should be non-zero (contains init data)
-    let v0 = provider.cache().read().get(ZONE_PORTAL, B256::ZERO, block);
+    let v0 = provider.cache().lock().get(ZONE_PORTAL, B256::ZERO, block);
     assert!(
         v0.is_some_and(|v| v != B256::ZERO),
         "slot 0 should be non-zero"

@@ -11,16 +11,15 @@ import {
     EncryptedDeposit,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
-    ITIP20ZoneFactory,
     ITempoState,
-    IZoneConfig,
     IZoneInbox,
     IZoneOutbox,
     IZoneToken,
+    PATH_USD_ADDRESS,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
     QueuedDeposit,
-    TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
 } from "../interfaces/IZone.sol";
 import {
@@ -31,16 +30,13 @@ import { TempoState } from "../tempo/TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
-/// @dev Called by sequencer. Combines Tempo header advancement
+/// @dev Called by the block executor as a system transaction. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Zone configuration (reads sequencer from L1)
-    IZoneConfig public immutable config;
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     address public immutable tempoPortal;
@@ -55,21 +51,41 @@ contract ZoneInbox is IZoneInbox {
     uint64 public processedDepositNumber;
 
     /// @notice Refunds parked after a withdrawal-bounce-back mint reverts on the zone.
-    mapping(address token => mapping(address owner => uint128 amount)) public refunds;
+    mapping(address token => mapping(address owner => uint128 amount)) private _refunds;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _tempoPortalAddr, address _tempoStateAddr) {
-        config = IZoneConfig(_config);
+    constructor(address _tempoPortalAddr, address _tempoStateAddr) {
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
+    }
+
+    modifier onlyRefundOwnerOrSequencer(address owner) {
+        if (msg.sender != owner && !_isSequencer(msg.sender)) {
+            revert Unauthorized();
+        }
+        _;
     }
 
     /// @notice The TempoState predeploy address
     function tempoState() external view returns (ITempoState) {
         return _tempoState;
+    }
+
+    /// @notice Return a parked refund to its owner or an active sequencer.
+    /// @dev Authorization is enforced here so internal calls cannot bypass RPC policy.
+    function refunds(
+        address token,
+        address owner
+    )
+        external
+        view
+        onlyRefundOwnerOrSequencer(owner)
+        returns (uint128)
+    {
+        return _refunds[token][owner];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -195,18 +211,21 @@ contract ZoneInbox is IZoneInbox {
     )
         external
     {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) {
-            revert OnlySequencer();
-        }
+        if (msg.sender != address(0)) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
 
-        // Enable new tokens
+        // Activate new tokens directly in the Inbox.
         for (uint256 i = 0; i < enabledTokens.length; i++) {
             EnabledToken calldata t = enabledTokens[i];
-            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS)
-                .enableToken(t.token, t.name, t.symbol, t.currency);
+            IZoneToken token = IZoneToken(t.token);
+            token.initialize(
+                address(this), t.name, t.symbol, t.currency, PATH_USD_ADDRESS, address(this)
+            );
+            bytes32 issuerRole = token.ISSUER_ROLE();
+            token.grantRole(issuerRole, address(this));
+            token.grantRole(issuerRole, ZONE_OUTBOX);
             emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
         }
 
@@ -221,7 +240,7 @@ contract ZoneInbox is IZoneInbox {
                 Deposit memory d = abi.decode(qd.depositData, (Deposit));
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-                if (d.bouncebackRecipient == address(0)) {
+                if (d.tempoRefundRecipient == address(0)) {
                     _processWithdrawalBounceBack(d);
                 } else if (qd.rejected) {
                     _rejectDeposit(
@@ -230,7 +249,7 @@ contract ZoneInbox is IZoneInbox {
                         d.sender,
                         d.token,
                         d.amount,
-                        d.bouncebackRecipient
+                        d.tempoRefundRecipient
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
@@ -238,9 +257,9 @@ contract ZoneInbox is IZoneInbox {
                             currentHash, d.sender, d.to, d.token, d.amount, d.memo
                         );
                     } catch {
-                        _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+                        _enqueueDepositBounceBack(d.token, d.amount, d.tempoRefundRecipient);
                         emit DepositFailed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
+                            currentHash, d.sender, d.to, d.token, d.amount, d.tempoRefundRecipient
                         );
                     }
                 }
@@ -255,7 +274,7 @@ contract ZoneInbox is IZoneInbox {
                         ed.sender,
                         ed.token,
                         ed.amount,
-                        ed.bouncebackRecipient
+                        ed.tempoRefundRecipient
                     );
                     continue;
                 }
@@ -364,43 +383,49 @@ contract ZoneInbox is IZoneInbox {
         address sender,
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         internal
     {
-        _enqueueDepositBounceBack(token, amount, bouncebackRecipient);
-        emit DepositRejected(currentHash, sender, depositType, token, amount, bouncebackRecipient);
+        _enqueueDepositBounceBack(token, amount, tempoRefundRecipient);
+        emit DepositRejected(currentHash, sender, depositType, token, amount, tempoRefundRecipient);
     }
 
     function _failEncryptedDeposit(bytes32 currentHash, EncryptedDeposit memory ed) internal {
-        _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+        _enqueueDepositBounceBack(ed.token, ed.amount, ed.tempoRefundRecipient);
         emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
     }
 
     function _enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         internal
     {
-        IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, bouncebackRecipient);
+        IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, tempoRefundRecipient);
+    }
+
+    function _isSequencer(address account) internal view returns (bool) {
+        bytes32 slot = keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT));
+        return uint256(_tempoState.readTempoStorageSlot(tempoPortal, slot)) != 0;
     }
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
         uint64 fallbackNonce = uint64(uint160(d.to));
-        address fallbackRecipient = IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
-        try IZoneToken(d.token).mint(fallbackRecipient, d.amount) {
-            emit WithdrawalBounceBackProcessed(fallbackRecipient, d.token, d.amount);
+        address zoneFallbackRecipient =
+            IZoneOutbox(ZONE_OUTBOX).consumeFallbackRecipient(fallbackNonce);
+        try IZoneToken(d.token).mint(zoneFallbackRecipient, d.amount) {
+            emit WithdrawalBounceBackProcessed(zoneFallbackRecipient, d.token, d.amount);
         } catch {
-            refunds[d.token][fallbackRecipient] += d.amount;
-            emit WithdrawalBounceBackPending(fallbackRecipient, d.token, d.amount);
+            _refunds[d.token][zoneFallbackRecipient] += d.amount;
+            emit WithdrawalBounceBackPending(zoneFallbackRecipient, d.token, d.amount);
         }
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
-        amount = refunds[token][msg.sender];
-        refunds[token][msg.sender] = 0;
+        amount = _refunds[token][msg.sender];
+        _refunds[token][msg.sender] = 0;
 
         IZoneToken(token).mint(msg.sender, amount);
         emit RefundClaimed(msg.sender, token, amount);

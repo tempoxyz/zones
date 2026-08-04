@@ -24,6 +24,10 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  TEMPO_FOUNDRY_REF: 18a5d71d6ab621433145e5ea86dfe3dbace0763a
+  # Keep the custom forge cache stable and the build reproducible. This is the
+  # Foundry revision used by the successful baseline run on 2026-07-22.
+  FOUNDRY_REF: 6902a96211da7bcc3d9c4d8e97910ac5c9d5d2c6
 
 jobs:
   build:
@@ -42,6 +46,20 @@ jobs:
 
       - name: Show Forge version
         run: forge --version
+
+      - name: Resolve Solidity cache key
+        id: solidity-key
+        run: |
+          echo "forge-sha=$(forge --version | sed -n 's/^Commit SHA: //p')" >> "$GITHUB_OUTPUT"
+          echo "specs-tree=$(git rev-parse HEAD:specs/ref-impls)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Solidity artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            specs/ref-impls/cache
+            specs/ref-impls/out
+          key: forge-${{ runner.os }}-${{ steps.solidity-key.outputs.forge-sha }}-${{ steps.solidity-key.outputs.specs-tree }}
 
       - name: Run Forge build
         working-directory: specs/ref-impls
@@ -82,7 +100,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/tempo
-          ref: 18a5d71d6ab621433145e5ea86dfe3dbace0763a
+          ref: ${{ env.TEMPO_FOUNDRY_REF }}
           path: tempo
           persist-credentials: false
 
@@ -90,27 +108,58 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: foundry-rs/foundry
-          ref: master
+          ref: ${{ env.FOUNDRY_REF }}
           path: foundry
           persist-credentials: false
 
+      - name: Resolve Foundry revision
+        id: foundry-ref
+        working-directory: foundry
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      # sccache cannot cache the final forge executable. Cache that link output
+      # against the exact Foundry and Tempo revisions so most runs can skip the
+      # Rust setup, dependency restore, patch, and eight-minute link entirely.
+      - name: Restore Tempo-capable forge
+        id: forge-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: foundry/target/release/forge
+          key: tempo-forge-v1-${{ runner.os }}-${{ steps.foundry-ref.outputs.sha }}-${{ env.TEMPO_FOUNDRY_REF }}
+
       - name: Setup Rust
+        if: steps.forge-cache.outputs.cache-hit != 'true'
         uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.forge-cache.outputs.cache-hit != 'true'
         with:
           workspaces: foundry
 
       - name: Patch foundry to use pinned Tempo crates
+        if: steps.forge-cache.outputs.cache-hit != 'true'
         run: tempo/scripts/foundry-patch.sh "$GITHUB_WORKSPACE/tempo" "$GITHUB_WORKSPACE/foundry"
 
       - name: Build Tempo-capable forge
+        if: steps.forge-cache.outputs.cache-hit != 'true'
         working-directory: foundry
         run: cargo build --bin forge --profile release --no-default-features
 
       - name: Install z3 (symbolic solver)
         run: sudo apt-get update && sudo apt-get install -y z3
+
+      - name: Resolve Specs cache key
+        id: specs-key
+        run: echo "tree=$(git rev-parse HEAD:specs/ref-impls)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore Tempo Forge Solidity artifacts
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            specs/ref-impls/cache
+            specs/ref-impls/out
+          key: tempo-forge-specs-v1-${{ runner.os }}-${{ steps.foundry-ref.outputs.sha }}-${{ env.TEMPO_FOUNDRY_REF }}-${{ steps.specs-key.outputs.tree }}
 
       - name: Run Forge tests (zone specs)
         working-directory: specs/ref-impls

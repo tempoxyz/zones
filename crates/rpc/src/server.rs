@@ -1,4 +1,4 @@
-//! Private zone RPC server.
+//! Redacted zone RPC server.
 //!
 //! An axum HTTP server backed by the zone node's EthApi, with
 //! authentication and privacy redactions applied per-method.
@@ -28,10 +28,10 @@ use tracing::info;
 
 use crate::{
     auth::{self, AuthContext},
-    config::PrivateRpcConfig,
+    config::RedactedRpcConfig,
     error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
-    metrics::{PrivateRpcAuthMetrics, PrivateRpcCallMetrics},
+    metrics::{RedactedRpcAuthMetrics, RedactedRpcCallMetrics},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
     ws::handle_ws_upgrade,
 };
@@ -39,30 +39,30 @@ use crate::{
 /// Maximum number of requests in a single JSON-RPC batch.
 pub(crate) const MAX_BATCH_SIZE: usize = 100;
 
-/// Shared state for the private RPC server.
+/// Shared state for the redacted RPC server.
 #[derive(Clone)]
 pub struct RpcState {
     /// Server configuration.
-    pub config: PrivateRpcConfig,
+    pub config: RedactedRpcConfig,
     /// Type-erased EthApi for handling RPC methods.
     pub api: Arc<dyn ZoneRpcApi>,
-    /// Authentication failure metric for the private RPC.
-    auth_metrics: PrivateRpcAuthMetrics,
+    /// Authentication failure metric for the redacted RPC.
+    auth_metrics: RedactedRpcAuthMetrics,
 }
 
-/// Start the private zone RPC server.
+/// Start the redacted zone RPC server.
 ///
 /// The `api` argument provides the underlying EthApi methods (obtained from
 /// the zone node's launched handle).
-pub async fn start_private_rpc(
-    config: PrivateRpcConfig,
+pub async fn start_redacted_rpc(
+    config: RedactedRpcConfig,
     api: Arc<dyn ZoneRpcApi>,
 ) -> eyre::Result<std::net::SocketAddr> {
     let listen_addr = config.listen_addr;
     let state = Arc::new(RpcState {
         config,
         api,
-        auth_metrics: PrivateRpcAuthMetrics::default(),
+        auth_metrics: RedactedRpcAuthMetrics::default(),
     });
 
     let app = Router::new()
@@ -73,11 +73,11 @@ pub async fn start_private_rpc(
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let local_addr = listener.local_addr()?;
 
-    info!(target: "zone::rpc", %local_addr, "Starting private zone RPC server");
+    info!(target: "zone::rpc", %local_addr, "Starting redacted zone RPC server");
 
     tokio::spawn(async move {
         if let Err(err) = axum::serve(listener, app).await {
-            tracing::error!(target: "zone::rpc", %err, "Private RPC server failed");
+            tracing::error!(target: "zone::rpc", %err, "Redacted RPC server failed");
         }
     });
 
@@ -151,7 +151,7 @@ pub(crate) async fn dispatch_request(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    let metrics = PrivateRpcCallMetrics::new_for(&req.method);
+    let metrics = RedactedRpcCallMetrics::new_for(&req.method);
     let started_at = Instant::now();
 
     metrics.started_total.increment(1);
@@ -201,7 +201,7 @@ async fn handle_rpc(
 /// Authenticate the request using the `X-Authorization-Token` header.
 async fn authenticate(
     headers: &HeaderMap,
-    config: &PrivateRpcConfig,
+    config: &RedactedRpcConfig,
     api: &dyn ZoneRpcApi,
 ) -> Result<AuthContext, AuthenticateError> {
     let header_value = headers
@@ -215,7 +215,7 @@ async fn authenticate(
 /// Authenticate using a raw token string (shared by HTTP and WebSocket paths).
 pub(crate) async fn authenticate_token(
     token_value: &str,
-    config: &PrivateRpcConfig,
+    config: &RedactedRpcConfig,
     api: &dyn ZoneRpcApi,
 ) -> Result<AuthContext, AuthenticateError> {
     let token = auth::parse_auth_header(token_value)?;
@@ -300,7 +300,7 @@ pub(crate) fn now_unix_seconds() -> u64 {
 mod tests {
     use super::authenticate_token;
     use crate::{
-        PrivateRpcConfig,
+        RedactedRpcConfig,
         auth::build_token_fields,
         error::AuthenticateError,
         handlers::ZoneRpcApi,
@@ -396,11 +396,11 @@ mod tests {
         stub!(uninstall_filter, _a: alloy_rpc_types_eth::FilterId, _c: crate::auth::AuthContext);
         stub!(zone_get_authorization_token_info, _c: crate::auth::AuthContext);
         stub!(zone_get_zone_info, _c: crate::auth::AuthContext);
-        stub!(zone_get_deposit_status, _a: u64, _c: crate::auth::AuthContext);
+        stub!(zone_get_encryption_key, _c: crate::auth::AuthContext);
     }
 
-    fn test_config() -> PrivateRpcConfig {
-        PrivateRpcConfig {
+    fn test_config() -> RedactedRpcConfig {
+        RedactedRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
             l1_rpc_url: "http://127.0.0.1:1".to_string(),
             zone_rpc_url: "http://127.0.0.1:1".to_string(),

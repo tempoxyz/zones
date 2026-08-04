@@ -89,7 +89,9 @@ pub(crate) fn sign_keychain_signature(
     let signing_hash = match version {
         0x03 => digest,
         0x04 => KeychainSignature::signing_hash(digest, root_account),
-        _ => eyre::bail!("unsupported keychain version"),
+        _ => {
+            eyre::bail!("unsupported keychain version");
+        }
     };
     let primitive = match sign_p256_signature(signing_hash, signing_key)? {
         TempoSignature::Primitive(primitive) => primitive,

@@ -11,9 +11,15 @@ pub const NO_QUEUE_INDEX: U256 = U256::MAX;
 
 /// Maximum callback gas a withdrawal may request.
 ///
-/// The L1 processor adds fixed overhead plus an EIP-150 cushion, so this value
-/// keeps the outer `processWithdrawal` transaction well below a 30M gas block.
+/// The L1 processor adds fixed overhead, so this value keeps the outer
+/// keeps the outer `processWithdrawals` transaction well below a 30M gas block.
 pub const MAX_WITHDRAWAL_GAS_LIMIT: u64 = 10_000_000;
+
+/// Maximum RLP-encoded block size.
+///
+/// This follows EIP-7934's `MAX_BLOCK_SIZE - SAFETY_MARGIN` and matches
+/// `reth_consensus_common::validation::MAX_RLP_BLOCK_SIZE`.
+pub const MAX_RLP_BLOCK_SIZE: usize = 8_388_608;
 
 /// TempoState predeploy address on Zone L2.
 pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -23,9 +29,6 @@ pub const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000
 
 /// ZoneOutbox predeploy address on Zone L2.
 pub const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
-
-/// ZoneConfig predeploy address on Zone L2.
-pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 /// Protocol-level contract deployers permitted to create contracts on Zones.
 ///
@@ -42,29 +45,45 @@ pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
 /// AES-GCM decryption precompile address.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
 
-/// TIP-20 zone token factory precompile address.
-pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
-    address!("0x20Fc000000000000000000000000000000000000");
+/// Zone-native fee manager precompile address.
+///
+/// This is adjacent to, but distinct from, Tempo L1's fee manager at `0xfeec...0000`.
+pub const ZONE_FEE_MANAGER_ADDRESS: Address =
+    address!("0xfeec000000000000000000000000000000000001");
 
 /// Default zone token address (pathUSD TIP-20).
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
-/// ZonePortal storage slot 0: `sequencer` (address).
-pub const PORTAL_SEQUENCER_SLOT: B256 = B256::ZERO;
+/// ZonePortal storage slot 0: `admin` (address).
+pub const PORTAL_ADMIN_SLOT: B256 = B256::ZERO;
 
-/// ZonePortal storage slot 1: `admin` (address).
-pub const PORTAL_ADMIN_SLOT: B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 1;
-    B256::new(bytes)
-};
+/// ZonePortal storage slot 3: `currentDepositQueueHash` (bytes32).
+pub const PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT: B256 = B256::with_last_byte(3);
 
-/// ZonePortal storage slot 2: `pendingSequencer` (address).
-pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 2;
-    B256::new(bytes)
-};
+/// ZonePortal storage slot 5: `_encryptionKeys` dynamic array.
+pub const PORTAL_ENCRYPTION_KEYS_SLOT: B256 = B256::with_last_byte(5);
+
+/// ZonePortal storage slot 6: `_tokenConfigs` mapping.
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = B256::with_last_byte(6);
+
+/// ZonePortal storage slot 19: `isSequencer` (mapping(address => bool)).
+pub const PORTAL_IS_SEQUENCER_SLOT: B256 = B256::with_last_byte(19);
+
+/// ZonePortal storage slot immediately following Tempo's exported `isSequencer` slot:
+/// `role` (mapping(address => Role)).
+pub const PORTAL_ROLE_SLOT: B256 = B256::with_last_byte(20);
+
+/// ZonePortal slot following `role`: packed account and gateway enforcement booleans.
+pub const PORTAL_ENFORCEMENT_MODES_SLOT: B256 = B256::with_last_byte(21);
+
+/// ZonePortal storage slot 22: `maxTempoGasRate` (uint128).
+pub const PORTAL_MAX_TEMPO_GAS_RATE_SLOT: B256 = B256::with_last_byte(22);
+
+/// Alias used by consumers reading account allowlist enforcement.
+pub const PORTAL_ACCESS_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
+
+/// Alias used by consumers reading callback gateway enforcement.
+pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
@@ -72,23 +91,6 @@ pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
 
 /// ZoneInbox storage slot 0: `processedDepositQueueHash` (bytes32).
 pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
-
-/// ZoneOutbox storage slot 1: `_lastBatch.withdrawalQueueHash` (bytes32).
-///
-/// Slot 0 is packed `(tempoGasRate, nextWithdrawalIndex, withdrawalBatchIndex)`.
-/// The `_lastBatch` struct starts at slot 1 with `withdrawalQueueHash` occupying the full slot.
-pub const ZONE_OUTBOX_LAST_BATCH_HASH_SLOT: U256 = {
-    let mut le = [0u8; 32];
-    le[0] = 1;
-    U256::from_le_bytes(le)
-};
-
-/// ZoneOutbox storage slot 2: `_lastBatch.withdrawalBatchIndex` (uint64, lower 8 bytes).
-pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
-    let mut le = [0u8; 32];
-    le[0] = 2;
-    U256::from_le_bytes(le)
-};
 
 /// Base offset for deriving **mainnet** zone chain IDs.
 ///

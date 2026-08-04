@@ -2,7 +2,7 @@
 //!
 //! Tempo's 2D nonce system allows each account to maintain independent nonce
 //! counters ("lanes") keyed by a `U256` nonce key. Each sequencer operation
-//! type uses a dedicated lane so that `submitBatch`, `processWithdrawal`, and
+//! type uses a dedicated lane so that `submitBatch`, `processWithdrawals`, and
 //! admin transactions can be submitted concurrently without nonce contention.
 //!
 //! Nonce management is handled by [`NonceKeyFiller`](tempo_alloy::fillers::NonceKeyFiller)
@@ -14,10 +14,10 @@ use alloy_primitives::{U256, uint};
 /// Nonce key for `submitBatch` calls (highest throughput, one per batch cycle).
 pub const SUBMIT_BATCH_NONCE_KEY: U256 = uint!(1_U256);
 
-/// Nonce key for `processWithdrawal` calls (high throughput, N per batch).
+/// Nonce key for `processWithdrawals` calls (high throughput, N per batch).
 pub const PROCESS_WITHDRAWAL_NONCE_KEY: U256 = uint!(2_U256);
 
-/// Nonce key for admin operations (`enableToken`, `setZoneGasRate`,
-/// `setSequencerEncryptionKey`, `pauseDeposits`, `resumeDeposits`,
-/// `transferSequencer`). Low frequency, shared key.
+/// Nonce key for admin operations (`enableToken`, `setZoneGasRate`, `setMaxTempoGasRate`,
+/// `setBouncebackGas`, `setSequencerEncryptionKey`, `pauseDeposits`, `resumeDeposits`). Low
+/// frequency, shared key.
 pub const ADMIN_OPS_NONCE_KEY: U256 = uint!(3_U256);

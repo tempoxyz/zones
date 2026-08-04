@@ -7,7 +7,8 @@
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes `LastBatch` state for proof generation.
 //! - **ZoneInbox**, **TempoState**, **ZoneTxContext** — Zone L2 predeploys.
-//! - **ZoneFactory**, **SwapAndDepositRouter** — deployed on Tempo L1.
+//! - **ZoneFactory** — native TIP-1091 precompile on Tempo L1.
+//! - **SwapAndDepositRouter** — deployed on Tempo L1.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
@@ -62,7 +63,7 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            bouncebackRecipient: address!("0x0000000000000000000000000000000000000001"),
+            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         };
 
@@ -86,7 +87,7 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            bouncebackRecipient: address!("0x0000000000000000000000000000000000000001"),
+            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         };
 
@@ -95,7 +96,6 @@ mod tests {
         let qd = QueuedDeposit {
             depositType: DepositType::Regular,
             depositData: deposit_data,
-            rejected: false,
         };
 
         println!(
@@ -121,7 +121,7 @@ mod tests {
 
         // Now test the full advanceTempo call encoding
         let header_bytes = Bytes::from(vec![0xc0]); // minimal RLP empty list
-        let calldata = ZoneInbox::advanceTempoCall {
+        let calldata = IZoneInbox::advanceTempoCall {
             header: header_bytes,
             deposits: vec![qd],
             decryptions: vec![],
@@ -147,7 +147,7 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            bouncebackRecipient: address!("0x0000000000000000000000000000000000000001"),
+            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         };
         let prev_hash = B256::ZERO;
@@ -207,7 +207,7 @@ mod tests {
             token_out: address!("0x0000000000000000000000000000000000001001"),
             target_portal: address!("0x0000000000000000000000000000000000002001"),
             recipient: address!("0x0000000000000000000000000000000000003001"),
-            bounceback_recipient: address!("0x0000000000000000000000000000000000004001"),
+            tempo_refund_recipient: address!("0x0000000000000000000000000000000000004001"),
             memo: B256::from([0x11; 32]),
             min_amount_out: 1234,
         };
@@ -217,7 +217,7 @@ mod tests {
             callback.token_out,
             callback.target_portal,
             callback.recipient,
-            callback.bounceback_recipient,
+            callback.tempo_refund_recipient,
             callback.memo,
             callback.min_amount_out,
         )
@@ -254,7 +254,7 @@ mod tests {
             target_portal: address!("0x0000000000000000000000000000000000002002"),
             key_index: U256::from(7),
             encrypted: encrypted.clone(),
-            bounceback_recipient: address!("0x0000000000000000000000000000000000004002"),
+            tempo_refund_recipient: address!("0x0000000000000000000000000000000000004002"),
             min_amount_out: 5678,
         };
 
@@ -264,7 +264,7 @@ mod tests {
             callback.target_portal,
             callback.key_index,
             encrypted,
-            callback.bounceback_recipient,
+            callback.tempo_refund_recipient,
             callback.min_amount_out,
         )
             .abi_encode_params();

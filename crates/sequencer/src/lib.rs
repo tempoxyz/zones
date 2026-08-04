@@ -9,13 +9,17 @@ use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_transport::TransportResult;
+use reth_chain_state::CanonStateSubscriptions;
+use reth_storage_api::BlockReader;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 use tokio::sync::Notify;
 
 pub mod abi {
     pub use tempo_zone_contracts::*;
 }
 
+pub mod attestation;
 mod encryption_key;
 mod metrics;
 pub mod monitor;
@@ -24,12 +28,57 @@ mod rpc;
 pub mod settlement;
 pub mod withdrawals;
 
+pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
-pub use monitor::{ZoneMonitorConfig, spawn_zone_monitor};
+pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
 pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
-pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
+pub use withdrawals::{
+    DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
+    MAX_WITHDRAWAL_BATCH_GAS, SharedWithdrawalStore, WithdrawalBatchLimits,
+    WithdrawalProcessorConfig, WithdrawalStore,
+};
 
 use crate::rpc::rpc_connection_config;
+
+/// Native Zone node provider capabilities required by sequencer components.
+///
+/// This is a zero-method convenience trait over Reth's storage and canonical-state
+/// interfaces. Keeping the bounds here lets sequencer components use native Tempo
+/// blocks and receipts without depending on an RPC representation.
+pub trait ZoneSequencerProvider:
+    BlockReader<
+        Block = Block,
+        Header = TempoHeader,
+        Transaction = TempoTxEnvelope,
+        Receipt = TempoReceipt,
+    > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+    + Clone
+    + Send
+    + Sync
+    + 'static
+{
+}
+
+impl<T> ZoneSequencerProvider for T where
+    T: BlockReader<
+            Block = Block,
+            Header = TempoHeader,
+            Transaction = TempoTxEnvelope,
+            Receipt = TempoReceipt,
+        > + CanonStateSubscriptions<Primitives = TempoPrimitives>
+        + Clone
+        + Send
+        + Sync
+        + 'static
+{
+}
+
+/// Conservative Tempo L1 fee cap for sequencer transactions.
+///
+/// T1's fixed base fee is above both T0's fixed fee and T7's dynamic base-fee cap, so setting it
+/// explicitly avoids an `eth_feeHistory` request while remaining valid across those regimes.
+pub(crate) const TEMPO_L1_MAX_FEE_PER_GAS: u128 =
+    tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128;
 
 /// Configuration for all zone sequencer background tasks.
 #[derive(Debug, Clone)]
@@ -40,22 +89,22 @@ pub struct ZoneSequencerConfig {
     pub l1_rpc_url: String,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
+    /// Fallback interval for reconciling the canonical Zone head.
+    ///
+    /// Canonical-state notifications normally trigger reconciliation immediately.
+    pub zone_poll_interval: Duration,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
+    /// Gas and concurrency limits for withdrawal processing transactions.
+    pub withdrawal_batch_limits: WithdrawalBatchLimits,
     /// ZoneOutbox contract address on Zone L2.
     pub outbox_address: Address,
     /// ZoneInbox contract address on Zone L2.
     pub inbox_address: Address,
-    /// TempoState predeploy address on Zone L2.
-    pub tempo_state_address: Address,
-    /// Zone L2 RPC URL.
-    pub zone_rpc_url: String,
-    /// How often the zone monitor polls for new L2 blocks.
-    pub zone_poll_interval: Duration,
-    /// Number of zone blocks between empty withdrawal batch boundaries / L1 submissions.
-    pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
+    /// Shared P2P attestation store used for quorum batch submission.
+    pub attestation_store: Option<AttestationStore>,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -69,25 +118,35 @@ pub struct ZoneSequencerHandle {
 /// Spawn all zone sequencer background tasks.
 ///
 /// This is the top-level POC entrypoint that starts:
-/// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
-///   shared store, builds [`crate::BatchData`], and submits each batch synchronously to the
-///   ZonePortal on Tempo L1. Local state only advances on successful submission.
+/// - **Zone monitor** — consumes native canonical Zone blocks and receipts, extracts withdrawal
+///   events into the shared store, builds [`crate::BatchData`], and submits each batch
+///   synchronously to the ZonePortal on Tempo L1. Local state only advances on successful
+///   submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
-///   `processWithdrawal` for each pending withdrawal.
+///   `processWithdrawals` for each pending withdrawal.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
-pub async fn spawn_zone_sequencer(
+///
+/// `shutdown` stops both tasks gracefully: it is observed at their poll boundaries, so an
+/// in-flight L1 transaction resolves before teardown.
+pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
+    zone_provider: P,
+    shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
+    let sequencer_address = signer.address();
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
-    let l1_provider =
-        connect_l1_provider(&config.l1_rpc_url, config.retry_connection_interval, signer)
-            .await
-            .expect("valid L1 RPC URL");
+    let l1_provider = connect_l1_provider(
+        &config.l1_rpc_url,
+        config.retry_connection_interval,
+        signer.clone(),
+    )
+    .await
+    .expect("valid L1 RPC URL");
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
@@ -97,18 +156,17 @@ pub async fn spawn_zone_sequencer(
         portal_address: config.portal_address,
         l1_rpc_url: config.l1_rpc_url.clone(),
         fallback_poll_interval: config.withdrawal_poll_interval,
+        sequencer_address,
+        batch_limits: config.withdrawal_batch_limits,
     };
 
     let monitor_config = ZoneMonitorConfig {
         outbox_address: config.outbox_address,
         inbox_address: config.inbox_address,
-        tempo_state_address: config.tempo_state_address,
-        zone_rpc_url: config.zone_rpc_url,
-        retry_connection_interval: config.retry_connection_interval,
         poll_interval: config.zone_poll_interval,
-        batch_interval_blocks: config.batch_interval_blocks,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
+        attestation_store: config.attestation_store,
     };
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
@@ -117,13 +175,20 @@ pub async fn spawn_zone_sequencer(
         withdrawal_store.clone(),
         withdrawal_notify.clone(),
         withdrawal_repair_notify.clone(),
+        shutdown.clone(),
     );
-    let monitor_handle = spawn_zone_monitor(
-        monitor_config,
-        l1_provider,
+    let monitor_shared_state = ZoneMonitorSharedState::new(
         withdrawal_store,
         withdrawal_notify,
         withdrawal_repair_notify,
+    );
+    let monitor_handle = spawn_zone_monitor(
+        monitor_config,
+        zone_provider,
+        l1_provider,
+        signer,
+        monitor_shared_state,
+        shutdown,
     );
 
     ZoneSequencerHandle {

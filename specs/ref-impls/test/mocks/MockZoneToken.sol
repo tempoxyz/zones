@@ -12,6 +12,7 @@ contract MockZoneToken is IZoneToken {
     string public symbol;
     string public currency;
     uint8 public constant decimals = 6;
+    bytes32 public constant ISSUER_ROLE = keccak256("ISSUER_ROLE");
 
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
@@ -40,6 +41,28 @@ contract MockZoneToken is IZoneToken {
         symbol = _symbol;
         currency = "USD";
         admin = msg.sender;
+    }
+
+    function initialize(
+        address _admin,
+        string calldata _name,
+        string calldata _symbol,
+        string calldata _currency,
+        address,
+        address
+    )
+        external
+    {
+        admin = _admin;
+        name = _name;
+        symbol = _symbol;
+        currency = _currency;
+    }
+
+    function grantRole(bytes32 role, address account) external {
+        require(msg.sender == admin, "only admin");
+        require(role == ISSUER_ROLE, "unsupported role");
+        minters[account] = true;
     }
 
     function setMinter(address minter, bool authorized) external {

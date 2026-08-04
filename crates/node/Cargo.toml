@@ -15,6 +15,7 @@ workspace = true
 tempo-chainspec.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
+tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy.workspace = true
@@ -31,6 +32,7 @@ zone-rpc.workspace = true
 zone-sequencer.workspace = true
 
 # reth
+reth-chain-state.workspace = true
 reth-chainspec.workspace = true
 reth-consensus = { workspace = true, optional = true }
 reth-eth-wire-types.workspace = true
@@ -55,10 +57,12 @@ reth-transaction-pool.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider = { workspace = true, features = ["ws"] }
+alloy-rlp.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -68,14 +72,20 @@ alloy-sol-types.workspace = true
 # misc
 clap = { workspace = true, optional = true }
 eyre.workspace = true
+tokio-util = { workspace = true, features = ["rt"] }
 futures.workspace = true
+jsonrpsee.workspace = true
 k256.workspace = true
+metrics.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-url = "2"
+url = { version = "2", optional = true }
+zeroize = { workspace = true, optional = true }
 
 [dev-dependencies]
+zone-node = { path = ".", features = ["test-utils"] }
+
 alloy = { workspace = true, features = [
   "full",
   "genesis",
@@ -86,12 +96,12 @@ alloy = { workspace = true, features = [
   "rpc-types",
 ] }
 alloy-contract.workspace = true
-alloy-eips.workspace = true
 alloy-evm.workspace = true
-alloy-rlp.workspace = true
 alloy-signer.workspace = true
 base64.workspace = true
 const-hex.workspace = true
+commonware-codec.workspace = true
+commonware-cryptography.workspace = true
 p256.workspace = true
 rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
@@ -107,6 +117,7 @@ tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
+url = "2"
 
 [features]
 default = []
@@ -115,6 +126,8 @@ cli = [
   "dep:reth-consensus",
   "dep:reth-ethereum",
   "dep:reth-tracing",
+  "dep:url",
+  "dep:zeroize",
   "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]

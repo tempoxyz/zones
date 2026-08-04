@@ -1,4 +1,4 @@
-//! Client provider for the private zone RPC.
+//! Client provider for the redacted zone RPC.
 //!
 //! [`ZoneProvider`] wraps an alloy provider and automatically generates
 //! fresh authorization tokens, rebuilding the HTTP client when the
@@ -37,7 +37,7 @@ pub struct ZoneProviderConfig {
     /// Must not exceed the server's configured maximum validity window
     /// (default protocol limit: 2592000s / 30 days).
     pub token_ttl: Duration,
-    /// The private zone RPC URL.
+    /// The redacted zone RPC URL.
     pub rpc_url: url::Url,
 }
 

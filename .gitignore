@@ -15,6 +15,7 @@ profile.json.gz
 !.envrc
 localnet/**
 generated/
+/earn/
 
 .claude/
 !docs/.claude/
@@ -26,6 +27,7 @@ docs/node_modules
 docs/.vocs-cache/
 specs/ref-impls/cache/
 specs/ref-impls/out/
+specs/ref-impls/benchmark-out/
 specs/ref-impls/*.log
 specs/ref-impls/soljson-latest.js
 docs/.vercel

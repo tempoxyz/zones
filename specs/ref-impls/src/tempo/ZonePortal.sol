@@ -15,15 +15,21 @@ import {
     IZonePortal,
     MAX_WITHDRAWAL_CALLBACK_GAS,
     QueuedDeposit,
+    Role,
     TokenConfig,
     Withdrawal,
-    ZONE_FACTORY_ADDRESS
+    ZONE_FACTORY_ADDRESS,
+    ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
 import { getBlockHash } from "../libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../libraries/DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "../libraries/EncryptedDeposit.sol";
 import { Secp256k1Lib } from "../libraries/Secp256k1Lib.sol";
-import { WithdrawalQueue, WithdrawalQueueLib } from "../libraries/WithdrawalQueueLib.sol";
+import {
+    EMPTY_SENTINEL,
+    WithdrawalQueue,
+    WithdrawalQueueLib
+} from "../libraries/WithdrawalQueueLib.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
@@ -45,32 +51,48 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
-    ///      This provides a stable pricing basis for deposits while allowing sequencer
-    ///      flexibility to adjust the zoneGasRate based on operational costs.
+    ///      This provides a stable pricing basis for deposits while allowing the admin
+    ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
+
+    /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
+    /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
+    ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
+    ///      below the buffered 200,000,000 gas ceiling.
+    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 230;
+
+    /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
+    ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
+    uint64 internal constant WITHDRAWAL_BOUNCEBACK_RESERVE = 20;
 
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
     /// @notice Maximum gas a withdrawal callback may request
-    /// @dev Over-cap legacy withdrawals are dequeued and bounced back in `processWithdrawal`.
+    /// @dev Over-cap legacy withdrawals are dequeued and bounced back in `processWithdrawals`.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @notice Maximum number of independently countable settlement signers.
+    /// @dev Matches the creation and replacement bound fixed by TIP-1091.
+    uint256 public constant MAX_SEQUENCERS = 8;
+
+    bytes32 internal constant EIP712_DOMAIN_TYPEHASH = keccak256(
+        "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+    );
+    bytes32 internal constant NAME_HASH = keccak256("ZonePortal");
+    bytes32 internal constant VERSION_HASH = keccak256("1");
+    bytes32 internal constant SETTLEMENT_ATTESTATION_TYPEHASH = keccak256(
+        "SettlementAttestation(uint32 zoneId,uint64 sequencerSetVersion,uint256 zoneHeight,uint256 withdrawalBatchIndex,address verifier,uint64 tempoBlockNumber,uint64 anchorBlockNumber,bytes32 anchorBlockHash,bytes32 blockTransitionHash,bytes32 depositQueueTransitionHash,bytes32 withdrawalQueueHash,bytes32 verifierConfigHash)"
+    );
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Current sequencer address
-    address public sequencer;
-
     /// @notice Governance admin address
     address public admin;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
 
     /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
@@ -96,19 +118,19 @@ contract ZonePortal is IZonePortal {
     uint64 public lastSyncedTempoBlockNumber;
 
     /// @notice Gas amount used to price a failed-deposit bounce-back on Tempo.
-    /// @dev Packed into the unused bytes in slot 6. Defaults to zero.
+    /// @dev Packed into the unused bytes in slot 4. Defaults to zero.
     uint64 public bouncebackGas;
 
     /// @notice Historical encryption keys with activation blocks
     /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
-    ///      Stored at slot 7 in the ZonePortal storage layout.
+    ///      Stored at slot 5 in the ZonePortal storage layout.
     EncryptionKeyEntry[] internal _encryptionKeys;
 
-    /// @notice Per-token configuration (stored at slot 8)
+    /// @notice Per-token configuration (stored at slot 6)
     /// @dev TokenConfig.enabled is permanent (write-once true); depositsActive can be toggled.
     mapping(address => TokenConfig) internal _tokenConfigs;
 
-    /// @notice Append-only list of enabled tokens (stored at slot 9)
+    /// @notice Append-only list of enabled tokens (stored at slot 7)
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
@@ -118,7 +140,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
-    /// @notice Public RPC endpoint for the zone
+    /// @notice Operator RPC endpoint for the zone
     string public rpcUrl;
 
     /// @notice Pending admin for two-step admin transfer
@@ -131,10 +153,46 @@ contract ZonePortal is IZonePortal {
     /// @dev These values must remain in account storage so each delegatecall proxy observes its
     ///      own metadata. Keep them after the established slots read directly by zone contracts.
     uint32 public zoneId;
+    /// @notice Fixed callback messenger assigned during initialization.
     address public messenger;
     address public verifier;
-    uint64 public genesisTempoBlockNumber;
     bool internal _initialized;
+
+    /// @notice Configuration nonce for the active sequencer set and threshold.
+    uint64 public sequencerSetVersion;
+    uint8 public sequencerThreshold;
+    uint256 public zoneHeight;
+    address[] internal _sequencers;
+    mapping(address => bool) public isSequencer;
+    mapping(address => Role) public role;
+
+    /// @dev Solidity packs both enforcement booleans into slot 21.
+    bool internal _isAccessEnforced;
+    bool internal _isGatewayEnforced;
+
+    /// @dev Reserve the remainder of slot 21 so the cross-domain fee cap has a dedicated slot.
+    uint240 private _enforcementModesPadding;
+
+    /// @notice Maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
+    /// @dev Defaults to zero and is read from finalized Tempo state by zone system contracts.
+    uint128 public maxTempoGasRate;
+
+    /// @notice Individual sequencer address of the active block-producing leader.
+    /// @dev Appended after maxTempoGasRate; do not reorder existing storage. Zone nodes derive
+    ///      leadership exclusively from finalized reads of these fields and the LeaderUpdated
+    ///      event. Reads as zero for portals initialized before leadership landed; the first
+    ///      setLeader from that state bootstraps epoch 1.
+    address public leader;
+
+    /// @notice Monotonic fencing epoch, incremented exactly once per real leader change.
+    uint64 public leaderEpoch;
+
+    /// @notice Tempo block number that recorded the most recent leader transition.
+    uint64 public leaderActivationTempoBlock;
+
+    /// @dev Per-Tempo-block deposit admission counter. Appended for upgrade-safe storage layout.
+    uint64 internal _depositCountBlock;
+    uint64 internal _depositsInCurrentBlock;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -143,15 +201,19 @@ contract ZonePortal is IZonePortal {
     function initialize(
         uint32 _zoneId,
         address _initialToken,
+        bool accessEnforced,
+        bool gatewayEnforced,
+        address[] calldata _allowedAccounts,
+        address[] calldata _zoneGateways,
         address _messenger,
         address _admin,
-        address _sequencer,
+        address[] calldata initialSequencers,
+        uint8 _threshold,
         address _verifier,
-        bytes32 _genesisBlockHash,
-        uint64 _genesisTempoBlockNumber,
         string calldata _rpcUrl
     )
         external
+        onlyDelegateCall
     {
         if (msg.sender != ZONE_FACTORY_ADDRESS) revert NotFactory();
         if (_initialized) revert AlreadyInitialized();
@@ -160,11 +222,24 @@ contract ZonePortal is IZonePortal {
         zoneId = _zoneId;
         messenger = _messenger;
         admin = _admin;
-        sequencer = _sequencer;
         verifier = _verifier;
-        blockHash = _genesisBlockHash;
-        genesisTempoBlockNumber = _genesisTempoBlockNumber;
+        _isAccessEnforced = accessEnforced;
+        _isGatewayEnforced = gatewayEnforced;
         rpcUrl = _rpcUrl;
+        emit EnforcementModesUpdated(accessEnforced, gatewayEnforced);
+
+        _replaceSequencerSet(initialSequencers, _threshold, false);
+        // The first sequencer bootstraps leadership so a fresh zone has a producer without a
+        // separate setLeader call. The creation block is replayed by every zone node because
+        // zone genesis anchors before createZone.
+        _setLeader(initialSequencers[0]);
+
+        for (uint256 i; i < _zoneGateways.length; ++i) {
+            _setRole(_zoneGateways[i], Role.CallbackGateway);
+        }
+        for (uint256 i; i < _allowedAccounts.length; ++i) {
+            _setRole(_allowedAccounts[i], Role.Account);
+        }
 
         // Enable the initial token
         _enableTokenInternal(_initialToken);
@@ -174,8 +249,14 @@ contract ZonePortal is IZonePortal {
                                MODIFIERS
     //////////////////////////////////////////////////////////////*/
 
+    /// @dev Initialization is valid only in a portal proxy's storage context.
+    modifier onlyDelegateCall() {
+        if (address(this) == ZONE_PORTAL_IMPL_ADDRESS) revert MustDelegateCall();
+        _;
+    }
+
     modifier onlySequencer() {
-        if (msg.sender != sequencer) revert NotSequencer();
+        if (!isSequencer[msg.sender]) revert NotSequencer();
         _;
     }
 
@@ -196,44 +277,131 @@ contract ZonePortal is IZonePortal {
         _withdrawalReentrancyStatus = 0;
     }
 
-    /*//////////////////////////////////////////////////////////////
-                           SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    /// @param newSequencer The address that will become sequencer after accepting.
-    function transferSequencer(address newSequencer) external onlySequencer {
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
+    /// @inheritdoc IZonePortal
+    function setSequencerSet(
+        address[] calldata newSequencers,
+        uint8 newThreshold
+    )
+        external
+        onlyAdmin
+    {
+        _replaceSequencerSet(newSequencers, newThreshold, true);
     }
 
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    /// @dev The explicit `pendingSequencer == address(0)` check because it is technically
-    ///      possible to make a system tx on L1 with msg.sender == 0.
-    ///      The Sequencer key can only be rotated, never renounced.
-    function acceptSequencer() external {
-        if (pendingSequencer == address(0) || msg.sender != pendingSequencer) {
-            revert NotPendingSequencer();
+    function _replaceSequencerSet(
+        address[] calldata newSequencers,
+        uint8 newThreshold,
+        bool rejectUnchanged
+    )
+        internal
+    {
+        uint256 length = newSequencers.length;
+        if (length == 0 || length > MAX_SEQUENCERS || newThreshold == 0 || newThreshold > length) {
+            revert InvalidSequencerSet();
         }
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
+
+        for (uint256 i = 0; i < length; ++i) {
+            address signer = newSequencers[i];
+            if (signer == address(0)) revert InvalidSequencerSet();
+
+            for (uint256 j = 0; j < i; ++j) {
+                if (newSequencers[j] == signer) revert InvalidSequencerSet();
+            }
+        }
+
+        bool membersUnchanged = length == _sequencers.length;
+        if (membersUnchanged) {
+            for (uint256 i = 0; i < length; ++i) {
+                if (!isSequencer[newSequencers[i]]) {
+                    membersUnchanged = false;
+                    break;
+                }
+            }
+        }
+        if (rejectUnchanged && membersUnchanged && newThreshold == sequencerThreshold) {
+            revert SequencerConfigurationUnchanged();
+        }
+
+        for (uint256 i = 0; i < _sequencers.length; ++i) {
+            isSequencer[_sequencers[i]] = false;
+        }
+        delete _sequencers;
+        for (uint256 i = 0; i < length; ++i) {
+            address signer = newSequencers[i];
+            _sequencers.push(signer);
+            isSequencer[signer] = true;
+        }
+        // Rotating out the active leader would strand block production: transfer leadership
+        // first (add the replacement, setLeader, then remove the old member).
+        if (leader != address(0) && !isSequencer[leader]) revert ActiveLeaderRemoved();
+
+        sequencerThreshold = newThreshold;
+        uint64 nonce = sequencerSetVersion;
+        if (rejectUnchanged) nonce = ++sequencerSetVersion;
+        emit SequencerSetUpdated(nonce, newThreshold, newSequencers);
     }
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
-    /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
-    ///      If actual zone gas is higher, sequencer covers the difference.
-    ///      If actual zone gas is lower, sequencer keeps the surplus.
+    /// @inheritdoc IZonePortal
+    function sequencerCount() external view returns (uint256) {
+        return _sequencers.length;
+    }
+
+    /// @inheritdoc IZonePortal
+    function sequencerAt(uint256 index) external view returns (address) {
+        return _sequencers[index];
+    }
+
+    /// @inheritdoc IZonePortal
+    function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencer {
+        if (!isSequencer[newLeader]) revert InvalidLeader();
+        // Idempotent fanout: every node relays the same target, only the first call transitions.
+        if (newLeader == leader) return;
+        // Compare-and-set: a delayed duplicate carrying a pre-handoff epoch cannot roll
+        // leadership back after a later transition.
+        if (leaderEpoch != expectedEpoch) {
+            revert StaleLeadershipEpoch(expectedEpoch, leaderEpoch);
+        }
+        // One distinct leader per Tempo block keeps exactly one authorized producer for the
+        // corresponding zone block.
+        if (leaderActivationTempoBlock == uint64(block.number)) {
+            revert LeaderAlreadyUpdatedThisBlock();
+        }
+
+        _setLeader(newLeader);
+    }
+
+    /// @dev Single write path for a leadership transition: assign, bump the fencing epoch,
+    ///      stamp the activation block, emit. `crates/l1` decodes `LeaderUpdated` to drive
+    ///      node roles, so every transition must go through here to stay consistent.
+    function _setLeader(address newLeader) private {
+        address previous = leader;
+        leader = newLeader;
+        leaderEpoch += 1;
+        uint64 activationTempoBlock = uint64(block.number);
+        leaderActivationTempoBlock = activationTempoBlock;
+        emit LeaderUpdated(previous, newLeader, leaderEpoch, activationTempoBlock);
+    }
+
+    /// @notice Set zone gas rate. Only callable by admin.
+    /// @dev The admin publishes the operational rate and receives collected deposit fees.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
-    function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
+    function setZoneGasRate(uint128 _zoneGasRate) external onlyAdmin {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
     }
 
+    /// @notice Set the maximum Tempo gas rate a sequencer may configure on the zone-side outbox.
+    function setMaxTempoGasRate(uint128 _maxTempoGasRate) external onlyAdmin {
+        if (_maxTempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        maxTempoGasRate = _maxTempoGasRate;
+        emit MaxTempoGasRateUpdated(_maxTempoGasRate);
+    }
+
     /// @notice Set the gas amount used to price failed-deposit bounce-backs on Tempo.
-    function setBouncebackGas(uint64 _bouncebackGas) external onlySequencer {
+    /// @dev Only the admin can change the amount because it determines the fee deducted from a
+    ///      failed deposit at processing time.
+    function setBouncebackGas(uint64 _bouncebackGas) external onlyAdmin {
         bouncebackGas = _bouncebackGas;
         emit BouncebackGasUpdated(_bouncebackGas);
     }
@@ -262,6 +430,50 @@ contract ZonePortal is IZonePortal {
         admin = pendingAdmin;
         pendingAdmin = address(0);
         emit AdminTransferred(previousAdmin, admin);
+    }
+
+    /// @notice Enable or disable account allowlist enforcement without discarding membership.
+    function setAccessMode(bool enforced) external onlyAdmin {
+        _isAccessEnforced = enforced;
+        emit EnforcementModesUpdated(enforced, _isGatewayEnforced);
+    }
+
+    /// @notice Enable or disable callback gateway registration enforcement.
+    function setGatewayMode(bool enforced) external onlyAdmin {
+        _isGatewayEnforced = enforced;
+        emit EnforcementModesUpdated(_isAccessEnforced, enforced);
+    }
+
+    /// @notice Return whether account allowlist enforcement is enabled.
+    function isAccessEnforced() public view returns (bool) {
+        return _isAccessEnforced;
+    }
+
+    /// @notice Return whether callback gateway registration enforcement is disabled.
+    function isGatewayOpen() public view returns (bool) {
+        return !_isGatewayEnforced;
+    }
+
+    /// @notice Add or remove an account from closed-loop portal flows.
+    function setAllowedAccount(address account, bool allowed) external onlyAdmin {
+        _setRole(account, allowed ? Role.Account : Role.None);
+    }
+
+    /// @notice Add or remove a callback gateway.
+    function setGateway(address account, bool allowed) external onlyAdmin {
+        _setRole(account, allowed ? Role.CallbackGateway : Role.None);
+    }
+
+    /// @notice Assign an account's role across portal flows without changing enforcement modes.
+    function setRole(address account, Role next) external onlyAdmin {
+        _setRole(account, next);
+    }
+
+    function _setRole(address account, Role next) internal {
+        if (next == Role.Account && account == messenger) revert InvalidAllowedAccount();
+        Role prev = role[account];
+        role[account] = next;
+        emit RoleUpdated(account, prev, next);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -311,8 +523,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
-    /// @dev Irreversible: once enabled, a token cannot be disabled (non-custodial guarantee).
-    ///      Validates the token is a TIP-20.
+    /// @dev Irreversible: once enabled, a token cannot be disabled.
     function enableToken(address _token) external onlyAdmin {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
@@ -338,6 +549,18 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
+        address[] memory tokens = new address[](1);
+        tokens[0] = _token;
+
+        (bool isSet,) = TIP403_REGISTRY.tokenTransferPolicyId(_token);
+        if (!isSet) {
+            TIP403_REGISTRY.migrateTransferPolicyIds(tokens);
+            (isSet,) = TIP403_REGISTRY.tokenTransferPolicyId(_token);
+        }
+        if (!isSet) {
+            revert TokenTransferPolicyNotSet();
+        }
+
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
         _enabledTokens.push(_token);
 
@@ -349,7 +572,7 @@ contract ZonePortal is IZonePortal {
         emit TokenEnabled(_token, name, symbol, currency);
     }
 
-    /// @notice Update the zone's public RPC endpoint.
+    /// @notice Update the zone's operator RPC endpoint.
     /// @param _rpcUrl The new RPC url
     function setRpcUrl(string calldata _rpcUrl) external onlySequencer {
         rpcUrl = _rpcUrl;
@@ -514,10 +737,26 @@ contract ZonePortal is IZonePortal {
         if (!cfg.depositsActive) revert DepositsNotActive();
     }
 
+    function _requireAllowed(address account) internal view {
+        if (!_isAllowed(account)) revert AccountNotAllowed(account);
+    }
+
+    function _requireAllowedDepositor(address account) internal view {
+        if (!_isAccessEnforced) return;
+        if (_isGatewayEnforced && role[account] == Role.CallbackGateway) {
+            return;
+        }
+        if (role[account] != Role.Account) revert AccountNotAllowed(account);
+    }
+
+    function _isAllowed(address account) internal view returns (bool) {
+        return !_isAccessEnforced || role[account] == Role.Account;
+    }
+
     function _validateDepositPolicy(
         address _token,
         address to,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         internal
         view
@@ -529,7 +768,7 @@ contract ZonePortal is IZonePortal {
         if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
             revert ITIP20.PolicyForbids();
         }
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, tempoRefundRecipient)) {
             revert ITIP20.PolicyForbids();
         }
     }
@@ -549,20 +788,35 @@ contract ZonePortal is IZonePortal {
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         if (fee > 0) {
-            ITIP20(_token).transfer(sequencer, fee);
+            ITIP20(_token).transfer(admin, fee);
         }
     }
 
-    function _recordDeposit(bytes32 newCurrentDepositQueueHash)
+    function _recordDeposit(
+        bytes32 newCurrentDepositQueueHash,
+        uint64 maximum
+    )
         internal
         returns (uint64 thisDeposit)
     {
+        uint64 currentBlock = uint64(block.number);
+        if (_depositCountBlock != currentBlock) {
+            _depositCountBlock = currentBlock;
+            _depositsInCurrentBlock = 0;
+        }
+        if (_depositsInCurrentBlock >= maximum) {
+            revert DepositBlockCapacityExceeded(maximum);
+        }
+        unchecked {
+            ++_depositsInCurrentBlock;
+        }
+
         currentDepositQueueHash = newCurrentDepositQueueHash;
         thisDeposit = ++depositCount;
     }
 
     /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
-    /// @dev Fee is deducted from amount and paid to sequencer in the same token.
+    /// @dev Fee is deducted from amount and paid to the admin in the same token.
     ///      The token must be enabled and deposits must be active.
     /// @param _token The TIP-20 token to deposit
     /// @param to Recipient address on the zone
@@ -574,30 +828,35 @@ contract ZonePortal is IZonePortal {
         address to,
         uint128 amount,
         bytes32 memo,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (bouncebackRecipient == address(0)) revert InvalidBouncebackRecipient();
+        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        // An enforced, registered gateway is independently authorized to return callback funds.
+        _requireAllowedDepositor(msg.sender);
+        _requireAllowed(tempoRefundRecipient);
 
         _validateDepositsActive(_token);
-        _validateDepositPolicy(_token, to, bouncebackRecipient);
+        _validateDepositPolicy(_token, to, tempoRefundRecipient);
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
-        // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
+        // Build deposit struct with net amount (fee already paid to the admin on Tempo)
         Deposit memory depositData = Deposit({
             token: _token,
             sender: msg.sender,
             to: to,
             amount: netAmount,
-            bouncebackRecipient: bouncebackRecipient,
+            tempoRefundRecipient: tempoRefundRecipient,
             memo: memo
         });
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
+        uint64 thisDeposit = _recordDeposit(
+            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+        );
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -607,7 +866,7 @@ contract ZonePortal is IZonePortal {
             netAmount,
             fee,
             memo,
-            bouncebackRecipient,
+            tempoRefundRecipient,
             thisDeposit
         );
     }
@@ -627,17 +886,20 @@ contract ZonePortal is IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (bouncebackRecipient == address(0)) revert InvalidBouncebackRecipient();
+        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        // Enforced gateways may deposit callback returns without also being allowed accounts.
+        _requireAllowedDepositor(msg.sender);
+        _requireAllowed(tempoRefundRecipient);
 
         _validateDepositsActive(_token);
 
         uint64 policyId = ITIP20(_token).transferPolicyId();
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, tempoRefundRecipient)) {
             revert ITIP20.PolicyForbids();
         }
 
@@ -677,7 +939,7 @@ contract ZonePortal is IZonePortal {
             token: _token,
             sender: msg.sender,
             amount: netAmount,
-            bouncebackRecipient: bouncebackRecipient,
+            tempoRefundRecipient: tempoRefundRecipient,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -685,7 +947,9 @@ contract ZonePortal is IZonePortal {
         // Insert encrypted deposit into queue
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
+        uint64 thisDeposit = _recordDeposit(
+            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+        );
 
         emit EncryptedDepositMade(
             newCurrentDepositQueueHash,
@@ -699,7 +963,7 @@ contract ZonePortal is IZonePortal {
             encrypted.ciphertext,
             encrypted.nonce,
             encrypted.tag,
-            bouncebackRecipient,
+            tempoRefundRecipient,
             thisDeposit
         );
     }
@@ -708,18 +972,33 @@ contract ZonePortal is IZonePortal {
                              WITHDRAWALS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    /// @dev Fee transfer to the sequencer is best-effort.
-    ///      On withdrawal failure, only the amount (not fee) is bounced back.
-    ///      The token to transfer is read from the withdrawal struct.
-    function processWithdrawal(
-        Withdrawal calldata withdrawal,
+    /// @notice Process multiple withdrawals from the queue in a single transaction.
+    /// @dev Withdrawals must be supplied in queue order. `remainingQueue` is the queue suffix
+    ///      after the last supplied withdrawal, or zero if the batch exhausts the current slot.
+    ///      Plain-transfer and callback failures bounce back without blocking the FIFO.
+    function processWithdrawals(
+        Withdrawal[] calldata withdrawals,
         bytes32 remainingQueue
     )
         external
         onlySequencer
         nonReentrantWithdrawal
     {
+        bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
+        bytes32 nextQueue = remainingQueue;
+
+        for (uint256 i = withdrawals.length; i > 0; --i) {
+            remainingQueues[i - 1] = nextQueue;
+            bytes32 encodedQueue = nextQueue == bytes32(0) ? EMPTY_SENTINEL : nextQueue;
+            nextQueue = keccak256(abi.encode(withdrawals[i - 1], encodedQueue));
+        }
+
+        for (uint256 i; i < withdrawals.length; ++i) {
+            _processWithdrawal(withdrawals[i], remainingQueues[i]);
+        }
+    }
+
+    function _processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) internal {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
@@ -728,13 +1007,6 @@ contract ZonePortal is IZonePortal {
         if (withdrawal.fallbackNonce == 0) {
             _processDepositBounceBack(withdrawal);
             return;
-        }
-
-        // Transfer fee to sequencer.
-        if (withdrawal.fee > 0) {
-            // Fee transfer can fail for e.g. TIP-403 blacklist. The sequencer
-            // forgoes the fee so the withdrawal itself does not stall.
-            _tryTransfer(_token, sequencer, withdrawal.fee);
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
@@ -747,8 +1019,13 @@ contract ZonePortal is IZonePortal {
 
         bool success;
         if (withdrawal.gasLimit == 0) {
-            success = _tryTransfer(_token, withdrawal.to, withdrawal.amount);
+            // Re-check current roles without reverting so an in-flight withdrawal to a revoked
+            // account or newly registered gateway bounces without blocking the FIFO.
+            success = (!_isGatewayEnforced || role[withdrawal.to] != Role.CallbackGateway)
+                && _isAllowed(withdrawal.to)
+                && _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
+            // Isolate callback effects so failure can be caught without reverting the dequeue.
             try this.deliverWithdrawal(
                 _token,
                 withdrawal.to,
@@ -764,7 +1041,6 @@ contract ZonePortal is IZonePortal {
         }
 
         if (!success) {
-            // Callback failed: bounce back to zone (only amount, not fee)
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackNonce);
         }
         emit WithdrawalProcessed(
@@ -773,10 +1049,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Deliver a callback withdrawal in a revertable self-call frame.
-    /// @dev Only callable by this portal. It transfers only the current withdrawal amount to
-    ///      the shared messenger, then asks the messenger to call the target. If delivery
-    ///      fails, this call reverts and rolls back the transfer to the messenger. The outer
-    ///      processWithdrawal catches the revert and records a bounce-back.
+    /// @dev Only callable by this portal. processWithdrawals catches failures and bounces back.
     function deliverWithdrawal(
         address token,
         address target,
@@ -788,12 +1061,27 @@ contract ZonePortal is IZonePortal {
         external
         onlySelf
     {
+        if (_isGatewayEnforced && role[target] != Role.CallbackGateway) {
+            revert InvalidCallbackTarget();
+        }
         if (!ITIP20(token).transfer(messenger, amount)) {
             revert TransferFailed();
         }
 
+        bytes32 depositQueueHashBefore = currentDepositQueueHash;
+
+        // We copy whatever the messenger reverts with, so keep its errors small.
         IZoneMessenger(messenger)
             .relayMessage(zoneId, token, senderTag, target, amount, gasLimit, data);
+
+        // In closed access, this proves only that some deposit was appended to this portal; it does
+        // not bind that deposit to the callback's token, amount, or recipient. Callback data is
+        // opaque, so an enforced gateway is trusted to constrain the operation and return the
+        // intended result. Open access imposes no source-deposit invariant: callback value may go
+        // to another zone or leave the zone system entirely.
+        if (_isAccessEnforced && currentDepositQueueHash == depositQueueHashBefore) {
+            revert CallbackDidNotReturnToZone();
+        }
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
@@ -805,12 +1093,12 @@ contract ZonePortal is IZonePortal {
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
-            // If the fee transfer fails, (e.g. TIP-403 blacklist), the sequencer
-            // forgoes the fee so the bounce-back itself does not stall.
-            _tryTransfer(_token, sequencer, bouncebackFee); // ignore failure
+            // A recipient-policy failure must not block deposits or withdrawals.
+            _tryTransfer(_token, admin, bouncebackFee);
         }
 
-        bool success = _tryTransfer(_token, withdrawal.to, refundAmount);
+        bool success =
+            _isAllowed(withdrawal.to) && _tryTransfer(_token, withdrawal.to, refundAmount);
 
         if (success) {
             emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);
@@ -821,6 +1109,7 @@ contract ZonePortal is IZonePortal {
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
+        _requireAllowed(msg.sender);
         amount = refunds[token][msg.sender];
         refunds[token][msg.sender] = 0;
 
@@ -861,14 +1150,14 @@ contract ZonePortal is IZonePortal {
             sender: address(this),
             to: address(uint160(fallbackNonce)),
             amount: amount,
-            bouncebackRecipient: address(0),
+            tempoRefundRecipient: address(0),
             memo: bytes32(0)
         });
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        currentDepositQueueHash = newCurrentDepositQueueHash;
-        uint64 thisDeposit = ++depositCount;
+        uint64 thisDeposit =
+            _recordDeposit(newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK);
 
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
@@ -879,9 +1168,7 @@ contract ZonePortal is IZonePortal {
                            BATCH SUBMISSION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
-    /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
-    /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
+    /// @inheritdoc IZonePortal
     function submitBatch(
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
@@ -889,18 +1176,15 @@ contract ZonePortal is IZonePortal {
         DepositQueueTransition calldata depositQueueTransition,
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
-        bytes calldata proof
+        bytes calldata proof,
+        uint256 nextZoneHeight,
+        bytes[] calldata signatures
     )
         external
         onlySequencer
     {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
-        }
-
-        // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
-        if (tempoBlockNumber < genesisTempoBlockNumber) {
-            revert InvalidTempoBlockNumber();
         }
 
         // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
@@ -930,6 +1214,21 @@ contract ZonePortal is IZonePortal {
 
         if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
+        // The certificate binds every value that affects settlement, rather than only the
+        // zone block hash. A leader therefore cannot reuse signatures for this block with a
+        // different withdrawal root, deposit transition, Tempo anchor, or verifier config.
+        if (!_verifySettlement(
+                nextZoneHeight,
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                blockTransition,
+                depositQueueTransition,
+                withdrawalQueueHash,
+                verifierConfig,
+                signatures
+            )) revert InvalidQuorumCertificate();
+
         // These are strictly not necessary, but we'll assert them here since they are cheap while
         // the prover doesn't (yet) enforce them.
         //   - continuity:  prevDepositNumber must equal where we last left off
@@ -952,7 +1251,6 @@ contract ZonePortal is IZonePortal {
                 anchorBlockNumber,
                 anchorBlockHash,
                 withdrawalBatchIndex + 1,
-                sequencer,
                 blockTransition,
                 depositQueueTransition,
                 withdrawalQueueHash,
@@ -966,6 +1264,7 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
+        zoneHeight = nextZoneHeight;
 
         uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
@@ -977,6 +1276,77 @@ contract ZonePortal is IZonePortal {
             blockHash,
             withdrawalQueueHash,
             lastProcessedDepositNumber
+        );
+    }
+
+    function _verifySettlement(
+        uint256 nextZoneHeight,
+        uint64 tempoBlockNumber,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        bytes32 withdrawalQueueHash,
+        bytes calldata verifierConfig,
+        bytes[] memory signatures
+    )
+        internal
+        view
+        returns (bool)
+    {
+        uint256 threshold = sequencerThreshold;
+        if (
+            nextZoneHeight <= zoneHeight || signatures.length < threshold
+                || signatures.length > _sequencers.length
+        ) return false;
+
+        bytes32 structHash = keccak256(
+            abi.encode(
+                SETTLEMENT_ATTESTATION_TYPEHASH,
+                zoneId,
+                sequencerSetVersion,
+                nextZoneHeight,
+                withdrawalBatchIndex + 1,
+                verifier,
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                keccak256(abi.encode(blockTransition)),
+                keccak256(abi.encode(depositQueueTransition)),
+                withdrawalQueueHash,
+                keccak256(verifierConfig)
+            )
+        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        address[] memory recovered = new address[](signatures.length);
+
+        for (uint256 i = 0; i < signatures.length; ++i) {
+            bytes memory signature = signatures[i];
+            address signer;
+            // The shared TIP-1020 verifier owns signature-format and canonicality checks.
+            // Convert its reverts into `false` so the public verifier remains non-reverting.
+            try StdPrecompiles.SIGNATURE_VERIFIER.recover(digest, signature) returns (
+                address recoveredSigner
+            ) {
+                signer = recoveredSigner;
+            } catch {
+                return false;
+            }
+            if (signer == address(0) || !isSequencer[signer]) return false;
+            for (uint256 j = 0; j < i; ++j) {
+                if (recovered[j] == signer) return false;
+            }
+            recovered[i] = signer;
+        }
+
+        return signatures.length >= threshold;
+    }
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                EIP712_DOMAIN_TYPEHASH, NAME_HASH, VERSION_HASH, block.chainid, address(this)
+            )
         );
     }
 

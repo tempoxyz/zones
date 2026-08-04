@@ -35,8 +35,9 @@ pub struct ZonePayloadAttributes {
     pub timestamp_millis_part: u64,
 
     /// Prepared L1 block to process in this zone block. Every zone block
-    /// processes exactly one L1 block via `advanceTempo`. Decryption and
-    /// TIP-403 policy checks have already been performed by the engine.
+    /// processes exactly one L1 block via `advanceTempo`. Decryption and ABI
+    /// encoding have already been performed by the engine; TIP-403 policy is
+    /// enforced during `advanceTempo` when the deposits mint TIP-20 tokens.
     pub l1_block: PreparedL1Block,
 }
 

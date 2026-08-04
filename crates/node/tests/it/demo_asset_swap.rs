@@ -27,7 +27,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///   |<-- withdraw BetaUSD ------------|  ✓ BetaUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiasset_deposit_and_withdraw() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

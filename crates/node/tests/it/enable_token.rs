@@ -5,19 +5,21 @@
 //! tokens are correctly minted.
 
 use alloy::primitives::{U256, address};
+use alloy_network::ReceiptResponse;
 use zone_l1::{EnabledToken, L1Deposit, L1PortalEvents};
 
-use crate::utils::{DEFAULT_TIMEOUT, L1Fixture, start_local_zone_with_fixture};
+use crate::utils::{
+    DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, local_dev_tempo_zone_account,
+    start_local_zone_with_fixture,
+};
 
 // Imports for real-L1 tests
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::B256;
-use alloy_provider::{Provider, ProviderBuilder};
-use alloy_rpc_types_eth::BlockId;
-use tempo_alloy::TempoNetwork;
-use tempo_precompiles::PATH_USD_ADDRESS;
-use tempo_zone_contracts::ZonePortal;
-use zone_l1::PolicyCache;
+use alloy_provider::Provider;
+use tempo_alloy::rpc::TempoCallBuilderExt;
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_contracts::precompiles::ITIP20;
 
 /// Enable a new token (AlphaUSD) via a `TokenEnabled` event, then deposit it
 /// and verify the recipient receives the minted balance.
@@ -92,7 +94,8 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     let events = L1PortalEvents {
         deposits: vec![L1Deposit::Regular(deposit)],
         enabled_tokens: vec![enabled],
-        ..Default::default()
+        encryption_key_rotations: vec![],
+        leader_transitions: vec![],
     };
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
 
@@ -114,102 +117,102 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Longer timeout for real L1 tests — the L1 dev node produces blocks every
-/// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
-const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
-
+/// Pool validation must observe the same L1-anchored policy state as execution.
+///
+/// The enabled token is used for direct fee collection. The regression assertion checks that pool
+/// admission accepts its anchored policy without requiring FeeAMM liquidity.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_startup_discovers_enabled_tokens_at_local_l1_height() -> eyre::Result<()> {
+async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let l1 = L1TestNode::start().await?;
-    let portal_address = l1.deploy_zone().await?;
-    let seed_block = l1.provider().get_block_number().await?;
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let (provider, sender) = local_dev_tempo_zone_account(&zone)?;
+    let recipient = address!("0x000000000000000000000000000000000000B0B0");
+    let token_address = address!("0x20C0000000000000000000000000000000CC0001");
+    let deposit_amount = 1_000_000u128;
+    let transfer_amount = 100_000u128;
 
-    let future_salt = B256::new([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 42,
-    ]);
-    let future_token = l1.create_tip20("FutureUSD", "fUSD", future_salt).await?;
-    l1.enable_token_on_portal(portal_address, future_token)
-        .await?;
-
-    let portal = ZonePortal::new(portal_address, l1.provider());
-    let latest_tokens = portal.enabled_tokens().await?;
-    assert!(
-        latest_tokens.contains(&future_token),
-        "latest portal state should include the newly-enabled token"
+    let block = fixture.next_block();
+    let deposit = L1Fixture::make_deposit_for_block(token_address, sender, sender, deposit_amount);
+    fixture.enqueue_events(
+        &block,
+        zone.deposit_queue(),
+        L1PortalEvents {
+            deposits: vec![L1Deposit::Regular(deposit)],
+            leader_transitions: vec![],
+            enabled_tokens: vec![EnabledToken {
+                token: token_address,
+                name: "PoolPolicyUSD".to_string(),
+                symbol: "ppUSD".to_string(),
+                currency: "USD".to_string(),
+            }],
+            encryption_key_rotations: vec![],
+        },
     );
 
-    let historical_tokens = portal
-        .enabled_tokens_at(BlockId::number(seed_block))
-        .await?;
+    zone.wait_for_balance(
+        token_address,
+        sender,
+        U256::from(deposit_amount),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    fixture.seed_no_receive_policy(recipient)?;
+
+    let token = ITIP20::new(token_address, &provider);
     assert_eq!(
-        historical_tokens,
-        vec![PATH_USD_ADDRESS],
-        "startup should discover only tokens enabled at the local L1 height"
+        token.transferPolicyId().call().await?,
+        1,
+        "execution should observe the anchored allow-all policy"
     );
 
-    let tempo_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .connect_http(l1.http_url().clone())
-        .erased();
+    // Stateful RPC simulation uses ZoneEvmConfig and therefore the L1 overlay.
+    let simulated = token
+        .transfer(recipient, U256::from(transfer_amount))
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
+        .gas(TIP20_TX_GAS)
+        .call()
+        .await?;
+    assert!(simulated, "the anchored policy should allow execution");
 
-    let latest_seed_cache = PolicyCache::default();
-    latest_seed_cache.set_last_l1_block(seed_block);
-    let err = latest_seed_cache
-        .seed_token_policies(portal_address, &latest_tokens, &tempo_provider)
-        .await
-        .expect_err("latest token discovery should include a future uninitialized token");
+    let pending = token
+        .transfer(recipient, U256::from(transfer_amount))
+        .fee_token(token_address)
+        .max_fee_per_gas(TEMPO_T0_BASE_FEE as u128)
+        .max_priority_fee_per_gas(0)
+        .gas(TIP20_TX_GAS)
+        .send()
+        .await?;
+
+    fixture.inject_empty_block(zone.deposit_queue());
+    let receipt = pending.get_receipt().await?;
     assert!(
-        err.to_string().contains("Uninitialized"),
-        "expected uninitialized future token error, got {err}"
+        receipt.status(),
+        "transfer should succeed without FeeAMM liquidity"
     );
-
-    let historical_seed_cache = PolicyCache::default();
-    historical_seed_cache.set_last_l1_block(seed_block);
-    historical_seed_cache
-        .seed_token_policies(portal_address, &historical_tokens, &tempo_provider)
-        .await?;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn test_startup_policy_seed_errors_do_not_abort_launch() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let l1 = L1TestNode::start().await?;
-    let portal_address = l1.deploy_zone().await?;
-    let seed_block = l1.provider().get_block_number().await?;
-
-    let future_salt = B256::new([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 43,
-    ]);
-    let future_token = l1
-        .create_tip20("FutureSeedUSD", "fsUSD", future_salt)
-        .await?;
-    l1.enable_token_on_portal(portal_address, future_token)
-        .await?;
-
-    let _zone = ZoneTestNode::start_from_l1_at_block_with_initial_tokens(
-        l1.http_url(),
-        l1.ws_url(),
-        portal_address,
-        seed_block,
-        Some(vec![future_token]),
+    zone.wait_for_balance(
+        token_address,
+        recipient,
+        U256::from(transfer_amount),
+        DEFAULT_TIMEOUT,
     )
     .await?;
 
     Ok(())
 }
 
+/// Longer timeout for real L1 tests — the L1 dev node produces blocks every
+/// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
+const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Full TokenEnabled pipeline with a real in-process L1 node:
 ///
 ///  1. Start L1 dev node.
 ///  2. Create a second TIP-20 token ("AlphaUSD" / "aUSD") on L1.
 ///  3. Mint AlphaUSD to the dev account.
-///  4. Deploy ZoneFactory + create zone.
+///  4. Create a zone through the native ZoneFactory.
 ///  5. Start zone node connected to L1.
 ///  6. Enable AlphaUSD on the portal (emits `TokenEnabled` event) — must
 ///     happen AFTER zone startup so the live L1 subscriber picks it up
@@ -229,7 +232,7 @@ async fn test_startup_policy_seed_errors_do_not_abort_launch() -> eyre::Result<(
 ///    |<-- withdraw AlphaUSD -----------|  ✓ AlphaUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for shared runtime artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 use alloy_primitives::Address as EthereumAddress;
 use commonware_cryptography::ed25519::{PrivateKey, PublicKey};
@@ -9,10 +9,23 @@ use eyre::WrapErr as _;
 
 use crate::ZoneManifest;
 
-/// The final block/ack/tx/backfill protocol reserves channel IDs 0 through 3.
-pub(crate) const CONTROL_CHANNEL: u64 = 4;
-pub(crate) const CONTROL_BACKLOG: usize = 128;
-pub(crate) const MAX_MESSAGE_SIZE: u32 = 10 * 1024 * 1024;
+/// Leader-to-follower sealed block replication channel.
+pub(crate) const BLOCK_CHANNEL: u64 = 0;
+/// Catch-up range requests sent by a lagging node to eligible peers.
+pub(crate) const BACKFILL_REQUEST_CHANNEL: u64 = 1;
+/// Ordered block and completion frames returned for a catch-up request.
+pub(crate) const BACKFILL_RESPONSE_CHANNEL: u64 = 2;
+/// Raw transaction propagation channel into the sequencer quorum.
+pub(crate) const TRANSACTION_CHANNEL: u64 = 3;
+/// Leader-to-follower proposed settlement statement channel.
+pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
+/// Follower-to-leader settlement signature channel.
+pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
+pub(crate) const BLOCK_BACKLOG: usize = 128;
+pub(crate) const TRANSACTION_BACKLOG: usize = 1_024;
+
+// At 30M gas, calldata is bounded below 7.5 MiB; leave headroom for block overhead.
+pub(crate) const MAX_MESSAGE_SIZE: u32 = 20 * 1024 * 1024;
 
 /// Version of the Tempo Zone P2P wire protocol.
 pub(crate) const WIRE_PROTOCOL_VERSION: u8 = 0;
@@ -38,6 +51,43 @@ impl P2pNetworkId {
 pub(crate) type Network = lookup::Network<commonware_runtime::tokio::Context, PrivateKey>;
 pub(crate) type Oracle = lookup::Oracle<PublicKey>;
 
+/// Builds the synchronized Commonware configuration for the Zone's small, trusted peer set.
+///
+/// Start from Commonware's production defaults and override only the settings required by the
+/// Zone's controlled 3-5 sequencer topology.
+fn setup_commonware_config(
+    ed25519_private_key: PrivateKey,
+    namespace: &[u8],
+    listen: SocketAddr,
+    bypass_ip_check: bool,
+) -> lookup::Config<PrivateKey> {
+    let mut config =
+        lookup::Config::recommended(ed25519_private_key, namespace, listen, MAX_MESSAGE_SIZE);
+
+    // Sequencers communicate over private pod or VPC addresses in a multi-AZ deployment.
+    config.allow_private_ips = true;
+    // Stable DNS names allow sequencer addresses to survive pod and node replacement.
+    config.allow_dns = true;
+    // DNS peers lack fixed egress IPs; network policy must restrict access to the P2P port.
+    config.bypass_ip_check = bypass_ip_check;
+    // Five seconds is ample cross-AZ while bounding unauthenticated resource use.
+    config.handshake_timeout = Duration::from_secs(5);
+    // Trusted peers retry quickly instead of waiting Commonware's 60-second public default.
+    config.peer_connection_cooldown = Duration::from_secs(1);
+    // At most four legitimate remote peers are expected, so 32 leaves generous rollout headroom.
+    config.max_concurrent_handshakes = NZU32!(32);
+    // Eight attempts per second permits fast restarts while limiting a single source IP.
+    config.allowed_handshake_rate_per_ip = Quota::per_second(NZU32!(8));
+    // Thirty-two attempts per second handles the whole small peer set restarting together.
+    config.allowed_handshake_rate_per_subnet = Quota::per_second(NZU32!(32));
+    // Ten-second pings detect idle broken connections with negligible overhead.
+    config.ping_frequency = Duration::from_secs(10);
+    // One dial per 250 ms reconnects a full five-node mesh in about one second per node.
+    config.dial_frequency = Duration::from_millis(250);
+
+    config
+}
+
 pub(crate) fn instantiate(
     context: commonware_runtime::tokio::Context,
     manifest: &ZoneManifest,
@@ -47,18 +97,11 @@ pub(crate) fn instantiate(
     network_id: P2pNetworkId,
 ) -> eyre::Result<(Network, Oracle, Map<PublicKey, Address>)> {
     let namespace = namespace(manifest.zone_id(), network_id);
-    let mut config = if listen.ip().is_loopback() {
-        lookup::Config::local(ed25519_private_key, &namespace, listen, MAX_MESSAGE_SIZE)
-    } else {
-        lookup::Config::recommended(ed25519_private_key, &namespace, listen, MAX_MESSAGE_SIZE)
-    };
-
-    // Zone P2P peers commonly use pod/private addresses. Membership remains
-    // authenticated by the Ed25519 identities in the manifest.
-    config.allow_private_ips = true;
-    // This is a network-wide Commonware setting, so it must be an explicit
-    // operator choice.
-    config.bypass_ip_check = bypass_ip_check;
+    // Logged, not bound into the namespace: a mismatch between nodes stalls settlement loudly at
+    // the next batch boundary, and making it a handshake failure would turn every membership edit
+    // into a coordinated fleet restart. Compare this across nodes to diagnose one.
+    tracing::info!(target: "zone::p2p", membership_digest = %manifest.membership_digest(), "Zone P2P membership");
+    let config = setup_commonware_config(ed25519_private_key, &namespace, listen, bypass_ip_check);
 
     let peers = manifest
         .nodes()
@@ -76,9 +119,9 @@ pub(crate) fn instantiate(
 }
 
 fn namespace(zone_id: u32, network_id: P2pNetworkId) -> Vec<u8> {
-    // Include both the protocol version and immutable L1 deployment identity so keys or
-    // endpoints accidentally reused across local, test, and production environments cannot
-    // authenticate into one another's P2P network.
+    // The protocol version and immutable L1 deployment identity keep keys or endpoints
+    // accidentally reused across local, test, and production environments from authenticating
+    // into one another's network.
     let mut namespace = Vec::with_capacity(
         NETWORK_NAMESPACE_PREFIX.len() + 1 + 8 + EthereumAddress::len_bytes() + 4,
     );
@@ -90,8 +133,25 @@ fn namespace(zone_id: u32, network_id: P2pNetworkId) -> Vec<u8> {
     namespace
 }
 
-pub(crate) fn control_quota() -> Quota {
-    Quota::per_second(NZU32!(4))
+pub(crate) fn block_quota() -> Quota {
+    Quota::per_second(NZU32!(128))
+}
+
+pub(crate) fn backfill_request_quota() -> Quota {
+    Quota::per_second(NZU32!(1))
+}
+
+pub(crate) fn backfill_response_quota() -> Quota {
+    Quota::per_second(NZU32!(128))
+}
+
+pub(crate) fn transaction_quota() -> Quota {
+    Quota::per_second(NZU32!(1024))
+}
+
+/// ACKs are small fixed-shape EIP-712 statements plus one secp256k1 signature.
+pub(crate) fn settlement_quota() -> Quota {
+    Quota::per_second(NZU32!(8))
 }
 
 #[cfg(test)]
@@ -112,6 +172,10 @@ mod tests {
         assert_ne!(
             namespace(7, P2pNetworkId::new(1, portal_a)),
             namespace(7, P2pNetworkId::new(1, portal_b)),
+        );
+        assert_ne!(
+            namespace(7, P2pNetworkId::new(1, portal_a)),
+            namespace(8, P2pNetworkId::new(1, portal_a)),
         );
 
         let namespace = namespace(7, P2pNetworkId::new(1, portal_a));

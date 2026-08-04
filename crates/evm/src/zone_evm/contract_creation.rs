@@ -73,7 +73,7 @@ fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ZoneEvm;
+    use crate::{L1OverlayDB, ZoneEvm};
     use alloy_evm::{Evm, EvmEnv};
     use alloy_primitives::{Address, Bytes, TxKind, U256, bytes};
     use revm::{
@@ -86,21 +86,23 @@ mod tests {
         inspector::NoOpInspector,
         state::AccountInfo,
     };
-    use tempo_evm::{TempoBlockEnv, TempoHaltReason};
+    use tempo_evm::{TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm};
     use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
+    use zone_precompiles::test_utils::MockL1Reader as TestL1;
 
     type TestDb = CacheDB<EmptyDB>;
+    type TestAdaptedDb = L1OverlayDB<TestDb, TestL1>;
 
     const TEST_DEPLOYER: Address = Address::new([0x42; 20]);
 
     fn test_create<const IS_CREATE2: bool>(
-        context: ZoneInstructionCtx<'_, TestDb>,
+        context: ZoneInstructionCtx<'_, TestAdaptedDb>,
     ) -> Result<(), InstructionResult> {
-        create::<IS_CREATE2, TestDb>(context, &[TEST_DEPLOYER])
+        create::<IS_CREATE2, TestAdaptedDb>(context, &[TEST_DEPLOYER])
     }
 
-    fn enable_test_deployer<I>(evm: &mut ZoneEvm<TestDb, I>) {
+    fn enable_test_deployer<I>(evm: &mut ZoneEvm<TestDb, I, TestL1>) {
         let instructions = &mut evm.inner.inner_mut().inner.instruction;
         instructions.insert_instruction(CREATE, Instruction::new(test_create::<false>), 0);
         instructions.insert_instruction(CREATE2, Instruction::new(test_create::<true>), 0);
@@ -122,13 +124,17 @@ mod tests {
         db
     }
 
-    fn evm_with_contract(addr: Address, code: &[u8]) -> ZoneEvm<TestDb, NoOpInspector> {
-        let input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv> =
-            EvmEnv::default();
-        ZoneEvm::new(TempoEvm::new(
-            test_db([(addr, Bytes::copy_from_slice(code))]),
-            input,
-        ))
+    fn test_evm(
+        db: TestDb,
+        input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv>,
+    ) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
+        let db = L1OverlayDB::new(db, TestL1::default(), Address::ZERO);
+        ZoneEvm::new(TempoEvm::new(db, input))
+    }
+
+    fn evm_with_contract(addr: Address, code: &[u8]) -> ZoneEvm<TestDb, NoOpInspector, TestL1> {
+        let input = EvmEnv::default();
+        test_evm(test_db([(addr, Bytes::copy_from_slice(code))]), input)
     }
 
     fn call_tx(caller: Address, contract: Address) -> TempoTxEnv {
@@ -174,6 +180,26 @@ mod tests {
         assert!(matches!(
             err,
             EVMError::Transaction(TempoInvalidTransaction::CallsValidation(..))
+        ));
+    }
+
+    #[test]
+    fn pool_validation_rejects_top_level_create_before_tempo_checks() {
+        let mut evm = evm_with_contract(Address::ZERO, &[]);
+        let (result, _) = evm.validate_pool_transaction(TempoTxEnv {
+            inner: TxEnv {
+                caller: Address::repeat_byte(0x01),
+                kind: TxKind::Create,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            Err(EVMError::Transaction(
+                TempoInvalidTransaction::CallsValidation("contract creation is not supported")
+            ))
         ));
     }
 
@@ -247,13 +273,13 @@ mod tests {
 
         let input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv> =
             EvmEnv::default();
-        let mut evm = ZoneEvm::new(TempoEvm::new(
+        let mut evm = test_evm(
             test_db([
                 (proxy, Bytes::from(proxy_code)),
                 (TEST_DEPLOYER, bytes!("0x5f5f5ff000")),
             ]),
             input,
-        ));
+        );
         enable_test_deployer(&mut evm);
 
         let result = evm

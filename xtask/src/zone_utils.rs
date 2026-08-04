@@ -13,7 +13,7 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use tempo_zone_contracts::{ZoneInbox, ZonePortal};
+use tempo_zone_contracts::{IZoneInbox, ZONE_FACTORY_ADDRESS, ZonePortal};
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// Shared Moderato ZoneFactory.
@@ -21,9 +21,8 @@ pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// `create-zone`, `deploy-router`, and `zone-info` use this as their default
 /// factory unless the caller overrides `--zone-factory` or `ZONE_FACTORY`, or
 /// `zone.json` already provides a zone-specific value.
-/// Explorer: https://explore.moderato.tempo.xyz/address/0xd97052545B978cc79Dd083912C72CA62f889dFaF
-pub(crate) const MODERATO_ZONE_FACTORY: Address =
-    address!("0xd97052545B978cc79Dd083912C72CA62f889dFaF");
+/// Explorer: https://explore.moderato.tempo.xyz/address/0x5aF2000000000000000000000000000000000000
+pub(crate) const MODERATO_ZONE_FACTORY: Address = ZONE_FACTORY_ADDRESS;
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
@@ -168,13 +167,13 @@ pub(crate) async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
         .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(ZoneInbox::TokenEnabled::SIGNATURE_HASH)
+        .event_signature(IZoneInbox::TokenEnabled::SIGNATURE_HASH)
         .from_block(from_block);
 
     for _ in 0..DEFAULT_WAIT_ATTEMPTS {
         let logs = l2.get_logs(&filter).await.unwrap_or_default();
         for log in &logs {
-            if let Ok(event) = ZoneInbox::TokenEnabled::decode_log(&log.inner)
+            if let Ok(event) = IZoneInbox::TokenEnabled::decode_log(&log.inner)
                 && event.data.token == token
             {
                 return Ok(log.block_number.unwrap_or(0));
@@ -195,13 +194,13 @@ pub(crate) async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
         .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
-        .event_signature(ZoneInbox::DepositProcessed::SIGNATURE_HASH)
+        .event_signature(IZoneInbox::DepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
 
     for _ in 0..DEFAULT_WAIT_ATTEMPTS {
         let logs = l2.get_logs(&filter).await.unwrap_or_default();
         for log in &logs {
-            if let Ok(event) = ZoneInbox::DepositProcessed::decode_log(&log.inner)
+            if let Ok(event) = IZoneInbox::DepositProcessed::decode_log(&log.inner)
                 && event.data.sender == sender
                 && event.data.to == to
                 && event.data.token == token

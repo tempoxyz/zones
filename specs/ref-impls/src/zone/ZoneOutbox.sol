@@ -2,14 +2,21 @@
 pragma solidity ^0.8.13;
 
 import {
-    IZoneConfig,
+    ITempoState,
     IZoneOutbox,
     IZonePortal,
     IZoneToken,
     IZoneTxContext,
     LastBatch,
     MAX_WITHDRAWAL_CALLBACK_GAS,
+    PORTAL_ACCESS_MODE_SLOT,
+    PORTAL_GATEWAY_MODE_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT,
     PendingWithdrawal,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_TX_CONTEXT
@@ -33,16 +40,11 @@ contract ZoneOutbox is IZoneOutbox {
     uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
 
     /// @notice Maximum gas a withdrawal callback may request
-    /// @dev The L1 processor adds overhead and an EIP-150 cushion around this value.
+    /// @dev The L1 processor adds fixed overhead around this value.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
-    /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
-    /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
-    ///      Any practical fee rate would be orders of magnitude lower.
-    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
-
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
-    /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
+    /// @dev Covers processWithdrawals overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
 
     /// @notice Length of a compressed secp256k1 public key
@@ -56,8 +58,8 @@ contract ZoneOutbox is IZoneOutbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Zone configuration (reads sequencer from L1)
-    IZoneConfig public immutable config;
+    address public immutable tempoPortal;
+    ITempoState public immutable tempoState;
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
@@ -67,16 +69,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
-    /// @notice Current withdrawal batch index (monotonically increasing)
-    uint64 public withdrawalBatchIndex;
+    /// @notice Last finalized withdrawal queue hash (slot 1, for proof access via state root)
+    bytes32 internal _withdrawalQueueHash;
 
-    /// @notice Last finalized batch parameters (for proof access via state root)
-    /// @dev Written on each finalizeWithdrawalBatch() call so proofs can read from state
-    ///      instead of parsing event logs
-    LastBatch internal _lastBatch;
-
-    /// @notice Pending withdrawals waiting to be batched
-    PendingWithdrawal[] internal _pendingWithdrawals;
+    /// @notice Current withdrawal batch index (lower 8 bytes of slot 2, for proof access)
+    uint64 internal _withdrawalBatchIndex;
 
     /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
     /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
@@ -93,11 +90,14 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Timestamp of the latest withdrawal batch finalization.
     uint64 public lastFinalizedTimestamp;
 
+    /// @notice Pending withdrawals waiting to be batched
+    PendingWithdrawal[] internal _pendingWithdrawals;
+
     /// @notice Last nonce assigned to a user withdrawal fallback recipient
     uint64 public lastFallbackNonce;
 
     /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
-    mapping(uint64 fallbackNonce => address recipient) internal _fallbackRecipients;
+    mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -112,6 +112,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error ZeroAmountWithdrawal();
     error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
@@ -122,8 +123,9 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config) {
-        config = IZoneConfig(_config);
+    constructor(address _tempoPortal, address _tempoState) {
+        tempoPortal = _tempoPortal;
+        tempoState = ITempoState(_tempoState);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -134,10 +136,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
     ///      If actual Tempo gas is higher, sequencer covers the difference.
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
+    ///      The portal admin bounds this rate through maxTempoGasRate.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
+        if (_tempoGasRate > _maxTempoGasRate()) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }
@@ -146,7 +149,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
     function setMaxWithdrawalsPerBlock(uint32 maxWithdrawals) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         maxWithdrawalsPerBlock = maxWithdrawals;
         emit MaxWithdrawalsPerBlockUpdated(maxWithdrawals);
     }
@@ -176,7 +179,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     function requestWithdrawal(
         address token,
@@ -184,12 +187,12 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, "");
+        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, "");
     }
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -203,7 +206,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function requestWithdrawal(
@@ -212,13 +215,13 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo);
+        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo);
     }
 
     /// @notice Shared implementation for withdrawal requests with optional sender reveal
@@ -230,7 +233,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit L1 callback gas limit (0 = no callback)
-    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param zoneFallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function _requestWithdrawal(
@@ -239,26 +242,37 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
-        address fallbackRecipient,
+        address zoneFallbackRecipient,
         bytes memory data,
         bytes memory revealTo
     )
         internal
     {
         // Always require a valid fallback recipient
-        if (fallbackRecipient == address(0)) {
+        if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
+        if (amount == 0) revert ZeroAmountWithdrawal();
 
-        if (!config.isEnabledToken(token)) {
+        if (!_isEnabledToken(token)) {
             revert IZonePortal.TokenNotEnabled();
         }
 
-        _validateGasLimit(gasLimit);
-
-        // Limit callback data size to prevent storage bloat and hash computation abuse
+        // Bound callback data before queueing.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        if (gasLimit == 0) {
+            if (!_isGatewayOpen() && _isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
+            if (!_isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
+        } else {
+            _validateGasLimit(gasLimit);
+            if (!_isGatewayOpen() && !_isZoneGateway(to)) {
+                revert IZonePortal.InvalidCallbackTarget();
+            }
         }
 
         _validateRevealTo(revealTo);
@@ -290,13 +304,12 @@ contract ZoneOutbox is IZoneOutbox {
             revert TransferFailed();
         }
 
-        // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
-        // Amount goes to recipient, fee goes to sequencer
+        // Burn the tokens (they'll be released on Tempo when withdrawal is processed).
         zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
         uint64 fallbackNonce = ++lastFallbackNonce;
-        _fallbackRecipients[fallbackNonce] = fallbackRecipient;
+        _zoneFallbackRecipients[fallbackNonce] = zoneFallbackRecipient;
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -304,7 +317,6 @@ contract ZoneOutbox is IZoneOutbox {
                 txHash: txHash,
                 to: to,
                 amount: amount,
-                fee: fee,
                 memo: memo,
                 gasLimit: gasLimit,
                 fallbackNonce: fallbackNonce,
@@ -326,7 +338,7 @@ contract ZoneOutbox is IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address tempoRefundRecipient
     )
         external
     {
@@ -337,9 +349,8 @@ contract ZoneOutbox is IZoneOutbox {
                 token: token,
                 sender: address(0),
                 txHash: bytes32(0),
-                to: bouncebackRecipient,
+                to: tempoRefundRecipient,
                 amount: amount,
-                fee: 0,
                 memo: bytes32(0),
                 gasLimit: 0,
                 fallbackNonce: 0,
@@ -350,18 +361,21 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint64 index = nextWithdrawalIndex++;
         emit WithdrawalRequested(
-            index, address(0), token, bouncebackRecipient, amount, 0, bytes32(0), 0, 0, "", ""
+            index, address(0), token, tempoRefundRecipient, amount, 0, bytes32(0), 0, 0, "", ""
         );
     }
 
     /// @notice Resolve and delete the recipient for a failed L1 withdrawal.
     /// @dev The nonce is committed to the L1 withdrawal while the recipient remains private
     ///      in zone state. Only ZoneInbox may consume a mapping entry.
-    function consumeFallbackRecipient(uint64 fallbackNonce) external returns (address recipient) {
+    function consumeFallbackRecipient(uint64 fallbackNonce)
+        external
+        returns (address zoneFallbackRecipient)
+    {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
-        recipient = _fallbackRecipients[fallbackNonce];
-        if (recipient == address(0)) revert InvalidFallbackRecipient();
-        delete _fallbackRecipients[fallbackNonce];
+        zoneFallbackRecipient = _zoneFallbackRecipients[fallbackNonce];
+        if (zoneFallbackRecipient == address(0)) revert InvalidFallbackRecipient();
+        delete _zoneFallbackRecipients[fallbackNonce];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -397,7 +411,7 @@ contract ZoneOutbox is IZoneOutbox {
         internal
         returns (bytes32 withdrawalQueueHash)
     {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
         uint256 pending = _pendingWithdrawals.length;
@@ -426,7 +440,6 @@ contract ZoneOutbox is IZoneOutbox {
                     ),
                     to: pendingWithdrawal.to,
                     amount: pendingWithdrawal.amount,
-                    fee: pendingWithdrawal.fee,
                     memo: pendingWithdrawal.memo,
                     gasLimit: pendingWithdrawal.gasLimit,
                     fallbackNonce: pendingWithdrawal.fallbackNonce,
@@ -444,14 +457,11 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Increment withdrawal batch index (matches Tempo portal's next expected withdrawal batch index)
-        withdrawalBatchIndex += 1;
-        uint64 currentWithdrawalBatchIndex = withdrawalBatchIndex;
+        _withdrawalBatchIndex += 1;
+        uint64 currentWithdrawalBatchIndex = _withdrawalBatchIndex;
 
-        // Write withdrawal batch parameters to state (for proof access via state root)
-        _lastBatch = LastBatch({
-            withdrawalQueueHash: withdrawalQueueHash,
-            withdrawalBatchIndex: currentWithdrawalBatchIndex
-        });
+        // Write the proof-facing queue hash; the index is already stored in packed slot 2.
+        _withdrawalQueueHash = withdrawalQueueHash;
         lastFinalizedTimestamp = uint64(block.timestamp);
 
         // Emit event for observability (proof reads from state, not events)
@@ -460,11 +470,13 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         return _pendingWithdrawals.length;
     }
 
     /// @notice Pending withdrawals in FIFO order.
     function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         uint256 count = _pendingWithdrawals.length;
         pending = new PendingWithdrawal[](count);
         for (uint256 i = 0; i < count;) {
@@ -477,7 +489,9 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory) {
-        return _lastBatch;
+        return LastBatch({
+            withdrawalQueueHash: _withdrawalQueueHash, withdrawalBatchIndex: _withdrawalBatchIndex
+        });
     }
 
     /// @notice Revert if a withdrawal callback gas limit exceeds the protocol cap
@@ -524,6 +538,39 @@ contract ZoneOutbox is IZoneOutbox {
         if (encryptedSender.length != expectedLength) {
             revert InvalidEncryptedSenderLength(encryptedSender.length, expectedLength);
         }
+    }
+
+    function _readPortal(bytes32 slot) internal view returns (bytes32) {
+        return tempoState.readTempoStorageSlot(tempoPortal, slot);
+    }
+
+    function _isSequencer(address account) internal view returns (bool) {
+        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT)))) != 0;
+    }
+
+    function _isEnabledToken(address token) internal view returns (bool) {
+        return
+            uint8(uint256(_readPortal(keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT)))))
+                != 0;
+    }
+
+    function _maxTempoGasRate() internal view returns (uint128) {
+        return uint128(uint256(_readPortal(PORTAL_MAX_TEMPO_GAS_RATE_SLOT)));
+    }
+
+    function _isGatewayOpen() internal view returns (bool) {
+        return uint8(uint256(_readPortal(PORTAL_GATEWAY_MODE_SLOT)) >> 8) == 0;
+    }
+
+    function _isAllowedAccount(address account) internal view returns (bool) {
+        if (uint8(uint256(_readPortal(PORTAL_ACCESS_MODE_SLOT))) == 0) return true;
+        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_ROLE_SLOT))))
+            == uint256(Role.Account);
+    }
+
+    function _isZoneGateway(address gateway) internal view returns (bool) {
+        return uint256(_readPortal(keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT))))
+            == uint256(Role.CallbackGateway);
     }
 
 }
