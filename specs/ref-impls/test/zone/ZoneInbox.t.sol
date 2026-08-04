@@ -271,7 +271,7 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo(new bytes[](1), batch2, _makeDecryptions(1), new EnabledToken[](0));
 
         assertEq(inbox.processedDepositQueueHash(), h3);
-        assertEq(zoneToken.balanceOf(bob), 1100e6);
+        assertEq(zoneToken.balanceOf(bob), 800e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -669,10 +669,11 @@ contract ZoneInboxTest is Test {
         );
 
         // Build encrypted deposit
-        (QueuedDeposit memory qd,) = _makeDeposit(alice, amount, 0);
+        (QueuedDeposit memory qd, Deposit memory deposit) = _makeDeposit(alice, amount, 0);
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Deposit, deposit, bytes32(0)));
 
         tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
         );
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
