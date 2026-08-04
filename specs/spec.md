@@ -1244,7 +1244,7 @@ pub struct ZoneStateWitness {
     /// Deduplicated pool of all zone-state MPT nodes
     pub node_pool: Vec<Vec<u8>>,
 
-    /// Deduplicated raw bytecode preimages, indexed by keccak256(bytecode).
+    /// Deduplicated raw bytecode preimages.
     /// An account's code hash is decoded from its trie leaf.
     pub bytecodes: Vec<Vec<u8>>,
 }
