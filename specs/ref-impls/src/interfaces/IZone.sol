@@ -355,7 +355,8 @@ interface IZoneTxContext {
 //   slot 22: maxTempoGasRate (uint128)
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
 //   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
-//            + _depositsInCurrentBlock (uint64) [packed]
+//            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
+//   slot 25: _tokensEnabledInCurrentBlock (uint64)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -624,6 +625,10 @@ interface IZonePortal {
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error DepositBlockCapacityExceeded(uint64 maximum);
+    error TokenEnablementBlockCapacityExceeded(uint64 maximum);
+    error TokenNameTooLong(uint256 actual, uint256 maximum);
+    error TokenSymbolTooLong(uint256 actual, uint256 maximum);
+    error TokenCurrencyTooLong(uint256 actual, uint256 maximum);
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -667,6 +672,18 @@ interface IZonePortal {
 
     /// @notice Maximum deposits accepted by this portal in one Tempo block.
     function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+
+    /// @notice Maximum tokens enabled by this portal in one Tempo block.
+    function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+
+    /// @notice Maximum byte length accepted for a bridged token name.
+    function MAX_TOKEN_NAME_BYTES() external view returns (uint256);
+
+    /// @notice Maximum byte length accepted for a bridged token symbol.
+    function MAX_TOKEN_SYMBOL_BYTES() external view returns (uint256);
+
+    /// @notice Maximum byte length accepted for a bridged token currency.
+    function MAX_TOKEN_CURRENCY_BYTES() external view returns (uint256);
 
     /// @notice Maximum callback gas accepted for withdrawals
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);

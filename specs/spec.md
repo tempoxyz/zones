@@ -323,7 +323,7 @@ The admin manages which TIP-20 tokens are available on the zone (see [Access Con
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The admin can halt deposits but cannot disable withdrawals for an enabled token. To keep the mandatory zone-side `advanceTempo()` call within its fixed system gas budget, each portal accepts at most `MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK` (8) token enablements in one Tempo block, including the initial token enabled during portal creation. Metadata copied into the zone is bounded by encoded byte length: 64 bytes for `name` and 31 bytes each for `symbol` and `currency`. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Gas Rate Configuration
 
@@ -1675,6 +1675,11 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
+    error DepositBlockCapacityExceeded(uint64 maximum);
+    error TokenEnablementBlockCapacityExceeded(uint64 maximum);
+    error TokenNameTooLong(uint256 actual, uint256 maximum);
+    error TokenSymbolTooLong(uint256 actual, uint256 maximum);
+    error TokenCurrencyTooLong(uint256 actual, uint256 maximum);
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -1686,6 +1691,11 @@ interface IZonePortal {
     error InvalidQuorumCertificate();
 
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
+    function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+    function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+    function MAX_TOKEN_NAME_BYTES() external view returns (uint256);
+    function MAX_TOKEN_SYMBOL_BYTES() external view returns (uint256);
+    function MAX_TOKEN_CURRENCY_BYTES() external view returns (uint256);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
     function MAX_GAS_FEE_RATE() external view returns (uint128);
 
@@ -1898,7 +1908,7 @@ interface IZoneInbox {
 }
 ```
 
-`EnabledToken` carries token metadata (`token`, `name`, `symbol`, `currency`) for direct activation of zone-side TIP-20 precompiles by `ZoneInbox`.
+`EnabledToken` carries token metadata (`token`, `name`, `symbol`, `currency`) for direct activation of zone-side TIP-20 precompiles by `ZoneInbox`. `ZonePortal` admits at most 8 such activations per Tempo block and rejects metadata whose encoded byte length exceeds 64 bytes for `name` or 31 bytes for `symbol` or `currency`.
 
 ### IZoneOutbox
 

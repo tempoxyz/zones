@@ -555,6 +555,29 @@ contract ZonePortalTest is BaseTest {
         return keccak256(abi.encodePacked(sender));
     }
 
+    function _stringOfLength(uint256 length) internal pure returns (string memory value) {
+        bytes memory data = new bytes(length);
+        for (uint256 i; i < length; ++i) {
+            data[i] = "x";
+        }
+        return string(data);
+    }
+
+    function _createEnablementToken(
+        string memory name,
+        string memory symbol,
+        string memory currency,
+        bytes32 salt
+    )
+        internal
+        returns (address token)
+    {
+        token = address(
+            factory.createToken(name, symbol, currency, ITIP20(_PATH_USD), sequencer, salt)
+        );
+        _mockTokenPolicyMigration(token, true);
+    }
+
     function _sequencerSet() internal returns (address[] memory signers) {
         signers = new address[](3);
         signers[0] = vm.addr(SIGNER_A_KEY);
@@ -1119,6 +1142,94 @@ contract ZonePortalTest is BaseTest {
         vm.prank(admin);
         vm.expectRevert(IZonePortal.TokenTransferPolicyNotSet.selector);
         portal.enableToken(token);
+    }
+
+    function test_enableToken_acceptsMaximumMetadataLengths() public {
+        address token = _createEnablementToken(
+            _stringOfLength(portal.MAX_TOKEN_NAME_BYTES()),
+            _stringOfLength(portal.MAX_TOKEN_SYMBOL_BYTES()),
+            _stringOfLength(portal.MAX_TOKEN_CURRENCY_BYTES()),
+            bytes32("max metadata")
+        );
+
+        vm.prank(admin);
+        portal.enableToken(token);
+
+        assertTrue(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_rejectsOversizedName() public {
+        uint256 maximum = portal.MAX_TOKEN_NAME_BYTES();
+        address token = _createEnablementToken(
+            _stringOfLength(maximum + 1), "T", "USD", bytes32("long name")
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.TokenNameTooLong.selector, maximum + 1, maximum)
+        );
+        portal.enableToken(token);
+
+        assertFalse(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_rejectsOversizedSymbol() public {
+        uint256 maximum = portal.MAX_TOKEN_SYMBOL_BYTES();
+        address token = _createEnablementToken(
+            "Token", _stringOfLength(maximum + 1), "USD", bytes32("long symbol")
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.TokenSymbolTooLong.selector, maximum + 1, maximum)
+        );
+        portal.enableToken(token);
+
+        assertFalse(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_rejectsOversizedCurrency() public {
+        uint256 maximum = portal.MAX_TOKEN_CURRENCY_BYTES();
+        address token = _createEnablementToken(
+            "Token", "T", _stringOfLength(maximum + 1), bytes32("long currency")
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.TokenCurrencyTooLong.selector, maximum + 1, maximum)
+        );
+        portal.enableToken(token);
+
+        assertFalse(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_enforcesPerTempoBlockCapAndResets() public {
+        uint64 maximum = portal.MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK();
+        assertEq(maximum, 8);
+        assertEq(portal.enabledTokenCount(), 1, "initializer must consume one enablement");
+
+        for (uint256 i = 1; i < maximum; ++i) {
+            address token = _createEnablementToken("Token", "T", "USD", bytes32(uint256(1000 + i)));
+            vm.prank(admin);
+            portal.enableToken(token);
+        }
+        assertEq(portal.enabledTokenCount(), maximum);
+
+        address overflowToken =
+            _createEnablementToken("Overflow", "OVER", "USD", bytes32("overflow"));
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.TokenEnablementBlockCapacityExceeded.selector, maximum
+            )
+        );
+        portal.enableToken(overflowToken);
+        assertFalse(portal.isTokenEnabled(overflowToken));
+
+        vm.roll(block.number + 1);
+        vm.prank(admin);
+        portal.enableToken(overflowToken);
+        assertTrue(portal.isTokenEnabled(overflowToken));
     }
 
     function test_sequencerGovernance_revertsIfAdmin() public {
