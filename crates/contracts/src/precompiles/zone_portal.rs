@@ -340,6 +340,51 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         futures::future::try_join_all(futs).await
     }
 
+    /// Returns all sequencer addresses currently registered on this [`ZonePortal`].
+    ///
+    /// Calls [`sequencerCount`](ZonePortal::sequencerCountCall) followed by a Multicall3
+    /// batch of [`sequencerAt`](ZonePortal::sequencerAtCall) reads.
+    pub async fn sequencers(
+        &self,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        self.sequencers_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+    }
+
+    /// Returns all sequencer addresses registered at `block_id`.
+    ///
+    /// The index reads go through Multicall3 so they execute in a single EVM call and observe
+    /// one state snapshot even when `block_id` is a moving tag like `latest`.
+    pub async fn sequencers_at(
+        &self,
+        block_id: alloy_rpc_types_eth::BlockId,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self
+            .sequencerCount()
+            .block(block_id)
+            .call()
+            .await?
+            .to::<u64>();
+        if count == 0 {
+            return Ok(alloc::vec::Vec::new());
+        }
+        let mut multicall = self
+            .provider()
+            .multicall()
+            .dynamic::<ZonePortal::sequencerAtCall>()
+            .block(block_id);
+        for i in 0..count {
+            multicall = multicall.add_dynamic(self.sequencerAt(alloy_primitives::U256::from(i)));
+        }
+        multicall.aggregate().await.map_err(|err| match err {
+            alloy_provider::MulticallError::TransportError(err) => err.into(),
+            alloy_provider::MulticallError::DecodeError(err) => err.into(),
+            err => {
+                alloy_provider::transport::TransportErrorKind::custom_str(&err.to_string()).into()
+            }
+        })
+    }
+
     /// Fetches the active sequencer encryption key and its index from one L1 snapshot.
     ///
     /// Reads the current L1 block number, then pins an atomic
@@ -377,7 +422,7 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
 mod tests {
     use super::*;
     use alloy_primitives::U256;
-    use alloy_provider::ProviderBuilder;
+    use alloy_provider::{ProviderBuilder, bindings::IMulticall3};
     use alloy_sol_types::SolCall;
     use alloy_transport::mock::Asserter;
 
@@ -403,6 +448,33 @@ mod tests {
         assert_eq!(key.x, expected.x);
         assert_eq!(key.yParity, expected.yParity);
         assert_eq!(key_index, expected.keyIndex);
+        assert!(asserter.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sequencers_at_batches_index_reads_through_multicall() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let sequencers = [Address::repeat_byte(0xaa), Address::repeat_byte(0xbb)];
+
+        asserter.push_success(&Bytes::from(U256::from(sequencers.len()).abi_encode()));
+        asserter.push_success(&Bytes::from(
+            IMulticall3::aggregateCall::abi_encode_returns(&IMulticall3::aggregateReturn {
+                blockNumber: U256::ZERO,
+                returnData: sequencers
+                    .iter()
+                    .map(|sequencer| sequencer.abi_encode().into())
+                    .collect(),
+            }),
+        ));
+
+        let portal = ZonePortal::new(Address::ZERO, &provider);
+        let registered = portal
+            .sequencers_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+            .unwrap();
+
+        assert_eq!(registered, sequencers);
         assert!(asserter.read_q().is_empty());
     }
 }
