@@ -508,7 +508,12 @@ where
             Err(reth_evm::block::BlockExecutionError::Internal(
                 reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
             )) if is_l1_storage_unavailable(error.as_ref()) => {
-                warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+                warn!(
+                    target: "zone::payload",
+                    %error,
+                    tx_hash = %pool_tx.hash(),
+                    "skipping pool tx due to transient RPC error"
+                );
             }
             Err(err) => return Err(PayloadBuilderError::evm(err)),
         }
