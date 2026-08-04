@@ -709,10 +709,17 @@ where
         reward_percentiles: Option<Vec<f64>>,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            let mut history =
-                EthFees::fee_history(&self.eth.api, block_count, newest_block, reward_percentiles)
-                    .await
-                    .map_err(internal)?;
+            // Avoid loading private block bodies to calculate reward percentiles.
+            let mut history = EthFees::fee_history(&self.eth.api, block_count, newest_block, None)
+                .await
+                .map_err(internal)?;
+            if let Some(reward_percentiles) = reward_percentiles.as_deref() {
+                history.reward = Some(vec![
+                    vec![0; reward_percentiles.len()];
+                    history.gas_used_ratio.len()
+                ]);
+            }
+
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
             redact_fee_history(&mut history);
             to_raw(&history)
@@ -1257,17 +1264,12 @@ fn redact_header(header: &mut TempoHeaderResponse) {
     inner.withdrawals_root = inner.withdrawals_root.map(|_| B256::ZERO);
 }
 
-/// Clear gas related fields that leak the size (and therefore tx counts)
+/// Clear gas-related fields that leak the size (and therefore tx counts).
 fn redact_fee_history(history: &mut FeeHistory) {
     history.base_fee_per_gas.fill(u128::from(TEMPO_T0_BASE_FEE));
     history.gas_used_ratio.fill(0.0);
     history.base_fee_per_blob_gas.fill(0);
     history.blob_gas_used_ratio.fill(0.0);
-    if let Some(rewards) = &mut history.reward {
-        for block_rewards in rewards {
-            block_rewards.fill(0);
-        }
-    }
 }
 
 /// Prefill missing transaction fee fields with public, deterministic values before calling reth's
@@ -1412,7 +1414,7 @@ mod tests {
         assert_eq!(history.gas_used_ratio, vec![0.0; 2]);
         assert_eq!(history.base_fee_per_blob_gas, vec![0; 3]);
         assert_eq!(history.blob_gas_used_ratio, vec![0.0; 2]);
-        assert_eq!(history.reward, Some(vec![vec![0, 0], vec![0, 0]]));
+        assert_eq!(history.reward, Some(vec![vec![7, 8], vec![9, 10]]));
     }
 
     #[test]
