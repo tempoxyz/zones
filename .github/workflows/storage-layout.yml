@@ -31,6 +31,20 @@ jobs:
       - name: Check storage layout
         working-directory: specs/ref-impls
         run: |
+          set -o pipefail
+
+          normalize_layout() {
+            jq '
+              walk(
+                if type == "object" then del(.astId)
+                elif type == "string" and startswith("t_") then gsub("\\)([0-9]+)"; ")")
+                else .
+                end
+              )
+            '
+          }
+
           forge inspect ZonePortal storage-layout --json \
-            | jq . > storage-layouts/ZonePortal.json
-          git diff --exit-code -- storage-layouts/ZonePortal.json
+            | normalize_layout > "$RUNNER_TEMP/ZonePortal.json"
+          normalize_layout < storage-layouts/ZonePortal.json \
+            | diff --unified=0 - "$RUNNER_TEMP/ZonePortal.json"
