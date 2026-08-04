@@ -1273,11 +1273,6 @@ fn redact_fee_history(history: &mut FeeHistory) {
     history.gas_used_ratio.fill(0.0);
     history.base_fee_per_blob_gas.fill(0);
     history.blob_gas_used_ratio.fill(0.0);
-    if let Some(rewards) = &mut history.reward {
-        for block_rewards in rewards {
-            block_rewards.fill(0);
-        }
-    }
 }
 
 /// Prefill missing transaction fee fields with public, deterministic values before calling reth's
@@ -1422,7 +1417,7 @@ mod tests {
         assert_eq!(history.gas_used_ratio, vec![0.0; 2]);
         assert_eq!(history.base_fee_per_blob_gas, vec![0; 3]);
         assert_eq!(history.blob_gas_used_ratio, vec![0.0; 2]);
-        assert_eq!(history.reward, Some(vec![vec![0, 0], vec![0, 0]]));
+        assert_eq!(history.reward, Some(vec![vec![7, 8], vec![9, 10]]));
     }
 
     #[test]
