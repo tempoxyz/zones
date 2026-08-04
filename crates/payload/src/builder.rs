@@ -9,10 +9,7 @@ use crate::{
 };
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
-use alloy_evm::{
-    Evm, EvmFactory, block::BlockExecutorFactory,
-    revm::context_interface::block::Block as RevmBlock,
-};
+use alloy_evm::Evm;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
@@ -22,7 +19,7 @@ use reth_basic_payload_builder::{
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
-    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes,
+    ConfigureEvm, Database, NextBlockEnvAttributes,
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput, WithTxEnv},
 };
 use reth_node_api::{FullNodeTypes, NodeTypes};
@@ -37,7 +34,7 @@ use reth_transaction_pool::{
     ValidPoolTransaction, error::InvalidPoolTransactionError,
 };
 use std::{error::Error, sync::Arc, time::Instant};
-use tempo_evm::{TempoNextBlockEnvAttributes, TempoTxResult};
+use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
@@ -45,10 +42,10 @@ use tempo_primitives::{
 };
 use tempo_transaction_pool::{
     StateAwareBestTransactions, TempoTransactionPool, transaction::TempoPooledTransaction,
-    validator::ConfigureTempoPoolEvm,
 };
 use tracing::{error, info, warn};
 use zone_chainspec::ZoneChainSpec;
+use zone_evm::ZoneEvmConfig;
 use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
@@ -104,8 +101,8 @@ impl Default for ZonePayloadFactory {
     }
 }
 
-impl<Node, EvmConfig>
-    PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider, EvmConfig>, EvmConfig>
+impl<Node>
+    PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider, ZoneEvmConfig>, ZoneEvmConfig>
     for ZonePayloadFactory
 where
     Node: FullNodeTypes,
@@ -114,23 +111,14 @@ where
             ChainSpec = ZoneChainSpec,
             Payload = ZonePayloadTypes,
         >,
-    EvmConfig: ConfigureTempoPoolEvm
-        + ConfigureEvm<
-            Primitives = tempo_primitives::TempoPrimitives,
-            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
-    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
-        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
-    EvmConfig::BlockExecutorFactory: BlockExecutorFactory<TxExecutionResult = TempoTxResult>,
-    BlockEnvFor<EvmConfig>: RevmBlock,
 {
-    type PayloadBuilder = ZonePayloadBuilder<Node::Provider, EvmConfig>;
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
 
     async fn build_payload_builder(
         self,
         ctx: &BuilderContext<Node>,
-        pool: TempoTransactionPool<Node::Provider, EvmConfig>,
-        evm_config: EvmConfig,
+        pool: TempoTransactionPool<Node::Provider, ZoneEvmConfig>,
+        evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
         Ok(ZonePayloadBuilder {
             pool,
@@ -144,31 +132,22 @@ where
 
 /// Zone payload builder that executes `advanceTempo` system txs + pool txs.
 #[derive(Debug, Clone)]
-pub struct ZonePayloadBuilder<Provider, EvmConfig> {
+pub struct ZonePayloadBuilder<Provider> {
     /// Transaction pool for selecting pool txs to include in the block.
-    pool: TempoTransactionPool<Provider, EvmConfig>,
+    pool: TempoTransactionPool<Provider, ZoneEvmConfig>,
     /// State provider for reading chain state during block building.
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
-    evm_config: EvmConfig,
+    evm_config: ZoneEvmConfig,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data for batch finalization.
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
 
-impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
+impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>
 where
     Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = ZoneChainSpec> + Clone + 'static,
-    EvmConfig: ConfigureTempoPoolEvm
-        + ConfigureEvm<
-            Primitives = tempo_primitives::TempoPrimitives,
-            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
-        > + 'static,
-    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
-        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
-    EvmConfig::BlockExecutorFactory: BlockExecutorFactory<TxExecutionResult = TempoTxResult>,
-    BlockEnvFor<EvmConfig>: RevmBlock,
 {
     type Attributes = ZonePayloadAttributes;
     type BuiltPayload = TempoBuiltPayload;
@@ -242,11 +221,11 @@ where
             .evm_config
             .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
             .map_err(PayloadBuilderError::other)?;
-        let base_fee = builder.evm().block().basefee();
+        let base_fee = builder.evm().block().basefee;
         let block_number: u64 = builder
             .evm()
             .block()
-            .number()
+            .number
             .try_into()
             .expect("block number fits u64");
 
