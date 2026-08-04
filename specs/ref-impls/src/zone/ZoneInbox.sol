@@ -201,7 +201,8 @@ contract ZoneInbox is IZoneInbox {
     ///      The proof and system call require exact equality with the final queue head.
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param headers Ordered RLP-encoded Tempo block headers; only the final
-    ///        header's state root is used for Tempo reads in this call
+    ///        header's state root is used for every Tempo read in this call, including
+    ///        TIP-403 policy resolution for every deposit; no per-header policy snapshots exist
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid encrypted deposits, in order
     function advanceTempo(
