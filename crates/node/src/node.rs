@@ -1585,14 +1585,6 @@ where
                 .no_eip4844()
                 .build::<TempoPooledTransaction, _>(blob_store.clone());
 
-        validator.set_additional_stateless_validation(|_origin, tx| {
-            zone_evm::validate_transaction(
-                tx.tx_env(),
-                zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST,
-            )
-            .map_err(|err| InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(err)))
-        });
-
         let provider = ctx.provider().clone();
         let enabled_tokens = self.enabled_tokens;
         validator.set_additional_stateful_validation(move |_origin, tx, _account_state| {
