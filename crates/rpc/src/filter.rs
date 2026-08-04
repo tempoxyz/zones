@@ -106,14 +106,6 @@ fn is_transfer_blocked_caller_eligible(log: &Log, caller: &Address) -> bool {
         return false;
     };
 
-    // Refuse malformed or inconsistent witnesses even if one field happens to name the caller.
-    if event.token != receipt.token
-        || event.blockedNonce != receipt.blockedNonce
-        || event.receiptVersion != receipt.version
-    {
-        return false;
-    }
-
     *caller == event.receiver
         || *caller == receipt.originator
         || (receipt.recoveryAuthority != Address::ZERO && *caller == receipt.recoveryAuthority)
