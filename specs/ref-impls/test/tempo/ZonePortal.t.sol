@@ -384,6 +384,15 @@ contract ZonePortalProxyStorageTest is Test {
         address[] memory tokens = new address[](1);
         tokens[0] = initialToken;
         vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.symbol.selector), abi.encode("INITIAL")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
+        );
+        vm.mockCall(
             StdPrecompiles.TIP403_REGISTRY_ADDRESS,
             abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
             abi.encode(0)
