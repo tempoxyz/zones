@@ -7,7 +7,7 @@
 //!
 //! The module is split into:
 //! - [`subscriber`] — the [`L1Subscriber`] background task and its config.
-//! - [`deposit`] — deposit value types ([`Deposit`], [`EncryptedDeposit`],
+//! - [`deposit`] — deposit value types ([`WithdrawalBounceBackDeposit`], [`Deposit`],
 //!   [`L1Deposit`]).
 //! - [`event`] — portal event types extracted per L1 block.
 //! - [`block`] — per-block deposit grouping and prepared payload types.
@@ -67,10 +67,10 @@ pub(crate) mod rpc {
 }
 
 use crate::abi::{
-    EncryptedDeposit as AbiEncryptedDeposit, EncryptedDepositPayload as AbiEncryptedDepositPayload,
+    Deposit as AbiDeposit, DepositPayload as AbiDepositPayload,
     ZonePortal::{
-        DepositMade, EncryptedDepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated,
-        TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
+        DepositMade, LeaderUpdated, SequencerEncryptionKeyUpdated, TokenEnabled,
+        WithdrawalBounceBack, ZonePortalEvents,
     },
 };
 
@@ -85,7 +85,7 @@ mod subscriber;
 mod tests;
 
 pub use block::{L1BlockDeposits, PreparedL1Block};
-pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
+pub use deposit::{Deposit, L1Deposit, WithdrawalBounceBackDeposit};
 pub use encryption_keys::EncryptionKeyRing;
 pub use event::{EnabledToken, EncryptionKeyRotation, L1PortalEvents, LeaderTransition};
 pub use ext::{ChainTempoStateExt, TempoStateExt};

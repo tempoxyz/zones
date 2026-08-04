@@ -6,12 +6,12 @@
 use crate::{
     ZoneEngine,
     replication::{
-        AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, BackfillRequest, PeerTipRegistry,
-        serve_backfill_requests,
+        AttestationContext, BACKFILL_SERVE_QUEUE_CAPACITY, PeerTipRegistry, serve_backfill_requests,
     },
     role::{
         EventSinks, LeaderSequencerDeps, RoleControllerContext, SharedRoleStatus,
-        route_events_to_generations, run_role_controller,
+        route_backfill_requests, route_backfill_responses, route_events_to_generations,
+        run_role_controller,
     },
     rpc::{
         OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
@@ -78,7 +78,8 @@ use zone_l1::{
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
-    LeadershipSchedule, LeadershipState, P2pConfig, P2pNetworkId, ZoneManifest, spawn_p2p,
+    BackfillCommand, BackfillRequest, LeadershipSchedule, LeadershipState, P2pConfig, P2pNetworkId,
+    ZoneManifest, spawn_p2p,
 };
 use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
@@ -623,7 +624,7 @@ where
             // task (spawned once the provider exists) buffer instead of dropping.
             let (backfill_requests_tx, backfill_requests_rx) =
                 tokio::sync::mpsc::channel(BACKFILL_SERVE_QUEUE_CAPACITY);
-            let (sinks, commands) =
+            let (sinks, commands, backfill_commands) =
                 Self::launch_p2p_network(config, network_id, &task_executor, backfill_requests_tx)?;
 
             // Operator RPC handles: every quorum member holds a wallet-backed L1 provider
@@ -662,6 +663,7 @@ where
             p2p_runtime = Some((
                 sinks,
                 commands,
+                backfill_commands,
                 attestation,
                 schedule,
                 local_ed25519_public_key,
@@ -719,6 +721,7 @@ where
         if let Some((
             sinks,
             commands,
+            backfill_commands,
             attestation,
             schedule,
             local_ed25519_public_key,
@@ -732,7 +735,11 @@ where
             // can never drop an accepted request.
             task_executor.spawn_critical_task(
                 "zone-backfill-server",
-                serve_backfill_requests(provider.clone(), commands.clone(), backfill_requests_rx),
+                serve_backfill_requests(
+                    provider.clone(),
+                    backfill_commands.clone(),
+                    backfill_requests_rx,
+                ),
             );
             let sequencer = match self.sequencer_config.take() {
                 Some(config) => Some(Self::build_leader_sequencer_deps(
@@ -757,6 +764,7 @@ where
                 // Follower-only nodes have no private keys and never construct an engine.
                 encryption_keys: self.l1_config.encryption_keys.clone().unwrap_or_default(),
                 commands,
+                backfill_commands,
                 attestation,
                 portal_address: self.portal_address,
                 sequencer,
@@ -978,14 +986,18 @@ where
 {
     /// Start the Commonware network and the long-lived P2P event demultiplexer.
     ///
-    /// Role-specific consumers are attached later by the role controller through the
-    /// returned [`EventSinks`]; the network and the router live for the process lifetime.
+    /// Role-specific consumers are attached later by the role controller through the returned
+    /// [`EventSinks`]. Generic events and typed backfill ports are routed for the process lifetime.
     fn launch_p2p_network(
         config: P2pConfig,
         network_id: P2pNetworkId,
         task_executor: &reth_tasks::TaskExecutor,
         backfill_requests: tokio::sync::mpsc::Sender<BackfillRequest>,
-    ) -> eyre::Result<(EventSinks, tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>)> {
+    ) -> eyre::Result<(
+        EventSinks,
+        tokio::sync::mpsc::Sender<zone_p2p::P2pCommand>,
+        tokio::sync::mpsc::Sender<BackfillCommand>,
+    )> {
         let handle = spawn_p2p(config, network_id)?;
         let zone_p2p::P2pHandleParts {
             shutdown: shutdown_token,
@@ -993,13 +1005,23 @@ where
             thread,
             commands,
             events,
+            backfill,
         } = handle.into_parts();
 
         let sinks = EventSinks::default();
         task_executor.spawn_critical_task(
             "zone-p2p-event-router",
-            route_events_to_generations(events, sinks.clone(), backfill_requests),
+            route_events_to_generations(events, sinks.clone()),
         );
+        task_executor.spawn_critical_task(
+            "zone-p2p-backfill-request-router",
+            route_backfill_requests(backfill.requests, backfill_requests),
+        );
+        task_executor.spawn_critical_task(
+            "zone-p2p-backfill-response-router",
+            route_backfill_responses(backfill.responses, sinks.clone()),
+        );
+
         task_executor.spawn_critical_with_graceful_shutdown_signal(
             "zone-p2p",
             |shutdown| async move {
@@ -1034,7 +1056,7 @@ where
                 }
             },
         );
-        Ok((sinks, commands))
+        Ok((sinks, commands, backfill.commands))
     }
 
     /// Build the leader-generation sequencer dependencies (activated only while leader).
@@ -1562,17 +1584,8 @@ where
                 .disable_balance_check()
                 .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
                 .with_custom_tx_type(TempoTxType::AA as u8)
-                .no_eip7702()
                 .no_eip4844()
                 .build::<TempoPooledTransaction, _>(blob_store.clone());
-
-        validator.set_additional_stateless_validation(|_origin, tx| {
-            zone_evm::validate_transaction(
-                tx.tx_env(),
-                zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST,
-            )
-            .map_err(|err| InvalidPoolTransactionError::other(TempoPoolTransactionError::Evm(err)))
-        });
 
         let provider = ctx.provider().clone();
         let enabled_tokens = self.enabled_tokens;

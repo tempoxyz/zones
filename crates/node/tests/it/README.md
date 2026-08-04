@@ -16,7 +16,7 @@ The harness provides two independent testing paths:
 │           │                 │     │           │                  │
 │           ▼                 │     │           ▼                  │
 │  DepositQueue.enqueue()     │     │  L1Subscriber (WS + HTTP)    │
-│  + seed_l1_cache()          │     │  parses DepositMade logs     │
+│  + seed_l1_cache()          │     │  parses encrypted deposits   │
 │                             │     │           │                  │
 └───────────┬─────────────────┘     └───────────┬──────────────────┘
             │                                   │

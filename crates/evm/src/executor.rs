@@ -182,6 +182,16 @@ where
     type Result = ZoneTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        if self
+            .inner
+            .ctx
+            .withdrawals
+            .as_ref()
+            .is_some_and(|withdrawals| !withdrawals.is_empty())
+        {
+            return Err(BlockValidationError::msg("withdrawals are not permitted").into());
+        }
+
         self.inner.apply_pre_execution_changes()
     }
 

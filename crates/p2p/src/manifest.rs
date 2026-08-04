@@ -55,10 +55,12 @@ pub struct LeadershipState {
     pub activation_tempo_block: u64,
 }
 
-/// Dynamic leadership authority captured atomically from one schedule read.
+/// Dynamic leadership authority captured from one schedule read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct AuthoritySnapshot {
+    /// Leaders retained by the observed portal schedule or forced recovery directive.
     pub(crate) retained_leaders: BTreeSet<PublicKey>,
+    /// Authority governing the next anchor this node will consume.
     pub(crate) next_anchor_record: Option<LeadershipState>,
 }
 
@@ -166,6 +168,16 @@ struct LeadershipScheduleState {
 }
 
 impl LeadershipScheduleState {
+    fn is_retained_leader(&self, peer: &PublicKey) -> bool {
+        self.transitions
+            .values()
+            .any(|record| &record.leader == peer)
+            || self
+                .forced_recovery
+                .as_ref()
+                .is_some_and(|recovery| &recovery.leader == peer)
+    }
+
     fn leader_for(&self, tempo_anchor: u64) -> Option<LeadershipState> {
         let scheduled = self
             .transitions
@@ -377,15 +389,19 @@ impl LeadershipSchedule {
         self.inner.read().expect("poisoned").next_anchor_record()
     }
 
-    /// Captures the retained leaders and next-anchor authority from one schedule read.
+    /// Captures routing authority from one atomic schedule read.
     pub(crate) fn authority_snapshot(&self) -> AuthoritySnapshot {
         let state = self.inner.read().expect("poisoned");
+        let mut retained_leaders = state
+            .transitions
+            .values()
+            .map(|record| record.leader.clone())
+            .collect::<BTreeSet<_>>();
+        if let Some(recovery) = state.forced_recovery.as_ref() {
+            retained_leaders.insert(recovery.leader.clone());
+        }
         AuthoritySnapshot {
-            retained_leaders: state
-                .transitions
-                .values()
-                .map(|record| record.leader.clone())
-                .collect(),
+            retained_leaders,
             next_anchor_record: state.next_anchor_record(),
         }
     }
@@ -565,14 +581,7 @@ impl LeadershipSchedule {
     /// observed. The exact per-anchor fence lives in the import path.
     pub fn is_scheduled_leader(&self, ed25519_public_key: &PublicKey) -> bool {
         let state = self.inner.read().expect("poisoned");
-        state
-            .transitions
-            .values()
-            .any(|record| &record.leader == ed25519_public_key)
-            || state
-                .forced_recovery
-                .as_ref()
-                .is_some_and(|recovery| &recovery.leader == ed25519_public_key)
+        state.is_retained_leader(ed25519_public_key)
     }
 }
 
@@ -1965,6 +1974,18 @@ mod tests {
 
     #[test]
     fn rejects_invalid_topologies_and_node_assertions() {
+        let too_small = manifest(
+            1,
+            &[
+                (1, "leader", "127.0.0.1:9200"),
+                (2, "follower", "127.0.0.1:9201"),
+            ],
+        );
+        assert!(matches!(
+            ZoneManifest::parse(&too_small),
+            Err(ManifestError::TooFewQuorumNodes(2))
+        ));
+
         let duplicate = manifest(
             1,
             &[

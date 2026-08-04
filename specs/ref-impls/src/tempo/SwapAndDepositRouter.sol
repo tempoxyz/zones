@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
@@ -16,7 +16,6 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 /// @notice Router contract for cross-zone transfers with optional token swap
 /// @dev Receives withdrawal callbacks, swaps tokens if needed via StablecoinDEX, and deposits to target zone.
 ///      Handles both same-token (no swap) and different-token (swap) cross-zone transfers.
-///      Supports both plaintext and encrypted deposits.
 ///      On any failure (swap or deposit), the entire callback reverts, causing the withdrawal
 ///      to bounce back to the zoneFallbackRecipient on the source zone.
 contract SwapAndDepositRouter is IWithdrawalReceiver {
@@ -59,8 +58,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// @param data ABI-encoded callbackData (see format below)
     /// @return selector The function selector to confirm successful handling
     ///
-    /// Plaintext format: (bool isEncrypted=false, address tokenOut, address targetPortal, address recipient, address tempoRefundRecipient, bytes32 memo, uint128 minAmountOut)
-    /// Encrypted format: (bool isEncrypted=true, address tokenOut, address targetPortal, uint256 keyIndex, EncryptedDepositPayload encrypted, address tempoRefundRecipient, uint128 minAmountOut)
+    /// Format: (address tokenOut, address targetPortal, uint256 keyIndex, DepositPayload encrypted, address tempoRefundRecipient, uint128 minAmountOut)
     ///
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
@@ -83,45 +81,22 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             revert InvalidSourcePortal();
         }
 
-        bool isEncrypted = abi.decode(data, (bool));
+        (
+            address tokenOut,
+            address targetPortal,
+            uint256 keyIndex,
+            DepositPayload memory encrypted,
+            address tempoRefundRecipient,
+            uint128 minAmountOut
+        ) = abi.decode(data, (address, address, uint256, DepositPayload, address, uint128));
 
-        if (isEncrypted) {
-            (, // skip isEncrypted
-                address tokenOut,
-                address targetPortal,
-                uint256 keyIndex,
-                EncryptedDepositPayload memory encrypted,
-                address tempoRefundRecipient,
-                uint128 minAmountOut
-            ) = abi.decode(
-                data, (bool, address, address, uint256, EncryptedDepositPayload, address, uint128)
-            );
+        _validateTarget(targetPortal, tokenOut);
 
-            _validateTarget(targetPortal, tokenOut);
+        uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
-            uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
-
-            ITIP20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal)
-                .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, tempoRefundRecipient);
-        } else {
-            (, // skip isEncrypted
-                address tokenOut,
-                address targetPortal,
-                address recipient,
-                address tempoRefundRecipient,
-                bytes32 memo,
-                uint128 minAmountOut
-            ) = abi.decode(data, (bool, address, address, address, address, bytes32, uint128));
-
-            _validateTarget(targetPortal, tokenOut);
-
-            uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
-
-            ITIP20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal)
-                .deposit(tokenOut, recipient, amountOut, memo, tempoRefundRecipient);
-        }
+        ITIP20(tokenOut).approve(targetPortal, amountOut);
+        IZonePortal(targetPortal)
+            .deposit(tokenOut, amountOut, keyIndex, encrypted, tempoRefundRecipient);
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }

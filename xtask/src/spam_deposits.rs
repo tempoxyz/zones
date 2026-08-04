@@ -20,7 +20,7 @@ use tempo_primitives::{
     TempoSignature,
     transaction::{Call, PrimitiveSignature},
 };
-use tempo_zone_contracts::{EncryptedDepositPayload, ZonePortal};
+use tempo_zone_contracts::{DepositPayload, ZonePortal};
 use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
@@ -52,10 +52,6 @@ pub(crate) struct SpamDeposits {
     /// TIP-20 token address to deposit.
     #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
     token: Address,
-
-    /// Use encrypted deposits (ECIES).
-    #[arg(long)]
-    encrypted: bool,
 
     /// Seconds into the future for the valid_after timestamp.
     #[arg(long, default_value_t = 3)]
@@ -138,26 +134,21 @@ impl SpamDeposits {
                 .wrap_err_with(|| format!("failed to approve for signer {i}"))?;
         }
 
-        // Fetch encryption key if needed: (pub_x, y_parity, key_index)
-        let enc_setup = if self.encrypted {
-            let (key, key_index) = portal
-                .encryption_key()
-                .await
-                .wrap_err("failed to fetch encryption key — is one set?")?;
-            let y_parity = key.normalized_y_parity().ok_or_else(|| {
-                eyre!(
-                    "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
-                    key.yParity
-                )
-            })?;
-            println!(
-                "Encryption key index: {key_index}, x: {}, parity: {y_parity:#x}",
-                key.x
-            );
-            Some((key.x, y_parity, key_index))
-        } else {
-            None
-        };
+        let (key, key_index) = portal
+            .encryption_key()
+            .await
+            .wrap_err("failed to fetch encryption key — is one set?")?;
+        let y_parity = key.normalized_y_parity().ok_or_else(|| {
+            eyre!(
+                "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
+                key.yParity
+            )
+        })?;
+        println!(
+            "Encryption key index: {key_index}, x: {}, parity: {y_parity:#x}",
+            key.x
+        );
+        let enc_setup = (key.x, y_parity, key_index);
 
         let setup_elapsed = start.elapsed();
         println!("Setup complete in {:.1}s\n", setup_elapsed.as_secs_f64());
@@ -190,7 +181,7 @@ impl SpamDeposits {
             );
 
             // Build and sign all deposits (pure computation, no IO)
-            let calldata = self.build_deposit_calldata(whale_addr, enc_setup.as_ref())?;
+            let calldata = self.build_deposit_calldata(whale_addr, &enc_setup)?;
             let mut encoded_txs = Vec::with_capacity(batch_size);
             for signer in signers.iter().take(batch_size) {
                 let nonce_key = U256::from(rand::random::<u128>());
@@ -293,48 +284,38 @@ impl SpamDeposits {
         Ok(())
     }
 
-    /// Build the calldata for a single deposit (plain or encrypted).
+    /// Build the calldata for a single deposit.
     fn build_deposit_calldata(
         &self,
         recipient: Address,
-        enc_setup: Option<&(B256, u8, U256)>,
+        enc_setup: &(B256, u8, U256),
     ) -> eyre::Result<Vec<u8>> {
-        if let Some(&(pub_x, y_parity, key_index)) = enc_setup {
-            let encrypted = encrypt_deposit(
-                &pub_x,
-                y_parity,
-                recipient,
-                B256::ZERO,
-                self.portal,
-                key_index,
-            )
-            .ok_or_else(|| eyre!("ECIES encryption failed"))?;
+        let &(pub_x, y_parity, key_index) = enc_setup;
+        let encrypted = encrypt_deposit(
+            &pub_x,
+            y_parity,
+            recipient,
+            B256::ZERO,
+            self.portal,
+            key_index,
+        )
+        .ok_or_else(|| eyre!("ECIES encryption failed"))?;
 
-            let payload = EncryptedDepositPayload {
-                ephemeralPubkeyX: encrypted.eph_pub_x,
-                ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
-                ciphertext: Bytes::from(encrypted.ciphertext),
-                nonce: encrypted.nonce.into(),
-                tag: encrypted.tag.into(),
-            };
+        let payload = DepositPayload {
+            ephemeralPubkeyX: encrypted.eph_pub_x,
+            ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
+            ciphertext: Bytes::from(encrypted.ciphertext),
+            nonce: encrypted.nonce.into(),
+            tag: encrypted.tag.into(),
+        };
 
-            Ok(ZonePortal::depositEncryptedCall {
-                token: self.token,
-                amount: self.amount,
-                keyIndex: key_index,
-                encrypted: payload,
-                tempoRefundRecipient: recipient,
-            }
-            .abi_encode())
-        } else {
-            Ok(ZonePortal::depositCall {
-                token: self.token,
-                to: recipient,
-                amount: self.amount,
-                memo: B256::ZERO,
-                tempoRefundRecipient: recipient,
-            }
-            .abi_encode())
+        Ok(ZonePortal::depositCall {
+            token: self.token,
+            amount: self.amount,
+            keyIndex: key_index,
+            encrypted: payload,
+            tempoRefundRecipient: recipient,
         }
+        .abi_encode())
     }
 }
