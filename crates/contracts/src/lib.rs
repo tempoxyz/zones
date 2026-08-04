@@ -60,11 +60,8 @@ mod tests {
     fn test_withdrawal_bounce_back_abi_encode_vs_params() {
         let d = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
-            memo: B256::ZERO,
         };
 
         let encoded = d.abi_encode();
@@ -84,11 +81,8 @@ mod tests {
     fn test_queued_withdrawal_bounce_back_encoding() {
         let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
-            memo: B256::ZERO,
         };
 
         let deposit_data = Bytes::from(deposit.abi_encode());
@@ -144,11 +138,8 @@ mod tests {
     fn test_withdrawal_bounce_back_hash_chain_matches_solidity() {
         let deposit = WithdrawalBounceBackDeposit {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
-            tempoRefundRecipient: address!("0x0000000000000000000000000000000000000001"),
-            memo: B256::ZERO,
         };
         let prev_hash = B256::ZERO;
 

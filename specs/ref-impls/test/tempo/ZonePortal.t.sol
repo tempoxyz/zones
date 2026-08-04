@@ -3583,15 +3583,9 @@ contract ZonePortalTest is BaseTest {
         assertTrue(newDepositHash != depositHashBefore);
 
         // The bounce-back deposit should be:
-        // WithdrawalBounceBackDeposit { sender: portal, to: bob, amount: 500e6, fee: 0, memo: 0 }
-        WithdrawalBounceBackDeposit memory expectedBounceBack = WithdrawalBounceBackDeposit({
-            token: address(pathUSD),
-            sender: address(portal),
-            to: bob,
-            amount: 500e6,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
-        });
+        // WithdrawalBounceBackDeposit { token: pathUSD, to: bob, amount: 500e6 }
+        WithdrawalBounceBackDeposit memory expectedBounceBack =
+            WithdrawalBounceBackDeposit({ token: address(pathUSD), to: bob, amount: 500e6 });
         bytes32 expectedHash = keccak256(
             abi.encode(DepositType.WithdrawalBounceBack, expectedBounceBack, depositHashBefore)
         );

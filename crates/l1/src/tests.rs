@@ -120,12 +120,9 @@ impl DepositFixture {
 fn make_withdrawal_bounce_back(amount: u128) -> L1Deposit {
     L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
-        sender: address!("0x0000000000000000000000000000000000000001"),
         to: address!("0x0000000000000000000000000000000000000002"),
         amount,
         fee: 0,
-        tempo_refund_recipient: Address::ZERO,
-        memo: B256::ZERO,
     })
 }
 
@@ -913,15 +910,9 @@ fn test_push_log_decodes_withdrawal_bounce_back() {
         panic!("bounce-back should be mapped to a withdrawal bounce-back entry");
     };
     assert_eq!(deposit.token, token);
-    assert_eq!(deposit.sender, portal_address);
     assert_eq!(deposit.to, encoded_fallback_nonce);
     assert_eq!(deposit.amount, event.amount);
     assert_eq!(deposit.fee, 0, "bounce-back deposits should be fee-free");
-    assert_eq!(
-        deposit.memo,
-        B256::ZERO,
-        "bounce-back deposits should clear memo"
-    );
 }
 
 #[test]
@@ -949,22 +940,16 @@ fn test_drain_returns_block_grouped_deposits() {
 
     let d1 = L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
-        sender: address!("0x0000000000000000000000000000000000000001"),
         to: address!("0x0000000000000000000000000000000000000002"),
         amount: 100,
         fee: 0,
-        tempo_refund_recipient: Address::ZERO,
-        memo: B256::ZERO,
     });
 
     let d2 = L1Deposit::WithdrawalBounceBack(WithdrawalBounceBackDeposit {
         token: address!("0x0000000000000000000000000000000000001000"),
-        sender: address!("0x0000000000000000000000000000000000000003"),
         to: address!("0x0000000000000000000000000000000000000004"),
         amount: 200,
         fee: 0,
-        tempo_refund_recipient: Address::ZERO,
-        memo: B256::ZERO,
     });
 
     let h10 = make_test_header(10);
@@ -1036,12 +1021,9 @@ fn test_withdrawal_bounce_back_and_deposit_hash_chain() {
 
     let bounce_back = WithdrawalBounceBackDeposit {
         token,
-        sender,
         to: recipient,
         amount: 500_000,
         fee: 0,
-        tempo_refund_recipient: Address::ZERO,
-        memo: B256::ZERO,
     };
 
     let encrypted = Deposit {
@@ -1071,11 +1053,8 @@ fn test_withdrawal_bounce_back_and_deposit_hash_chain() {
             DepositType::WithdrawalBounceBack,
             abi::WithdrawalBounceBackDeposit {
                 token: bounce_back.token,
-                sender: bounce_back.sender,
                 to: bounce_back.to,
                 amount: bounce_back.amount,
-                tempoRefundRecipient: bounce_back.tempo_refund_recipient,
-                memo: bounce_back.memo,
             },
             B256::ZERO,
         )

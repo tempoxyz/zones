@@ -88,11 +88,8 @@ enum DepositType {
 
 struct WithdrawalBounceBackDeposit {
     address token; // TIP-20 token being deposited
-    address sender;
     address to;
     uint128 amount;
-    address tempoRefundRecipient;
-    bytes32 memo;
 }
 
 /*//////////////////////////////////////////////////////////////

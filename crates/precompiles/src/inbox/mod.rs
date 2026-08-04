@@ -108,7 +108,7 @@ impl ZoneInbox {
 
             match queued {
                 DecodedQueuedDeposit::WithdrawalBounceBack(deposit) => {
-                    self.process_withdrawal_bounce_back(&mut outbox, portal, deposit)
+                    self.process_withdrawal_bounce_back(&mut outbox, deposit)
                 }
                 DecodedQueuedDeposit::Deposit(deposit) => {
                     let Some(decryption) = decryptions.next() else {
@@ -234,15 +234,8 @@ impl ZoneInbox {
     fn process_withdrawal_bounce_back(
         &mut self,
         outbox: &mut ZoneOutbox,
-        portal: Address,
         deposit: WithdrawalBounceBackDeposit,
     ) -> ZoneResult<()> {
-        if deposit.sender != portal
-            || !deposit.tempoRefundRecipient.is_zero()
-            || !deposit.memo.is_zero()
-        {
-            return Err(ZoneInboxError::invalid_withdrawal_bounce_back().into());
-        }
         let fallback_nonce = u64::from_be_bytes(
             deposit.to.as_slice()[12..]
                 .try_into()

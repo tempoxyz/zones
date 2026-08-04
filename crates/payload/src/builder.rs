@@ -874,11 +874,8 @@ mod tests {
                     depositData: alloy_primitives::Bytes::from(
                         alloy_sol_types::SolValue::abi_encode(&abi::WithdrawalBounceBackDeposit {
                             token,
-                            sender,
                             to: Address::with_last_byte(1),
                             amount: 500_000,
-                            tempoRefundRecipient: Address::ZERO,
-                            memo: B256::ZERO,
                         }),
                     ),
                 },

@@ -15,11 +15,8 @@ crate::sol! {
 
         struct WithdrawalBounceBackDeposit {
             address token;
-            address sender;
             address to;
             uint128 amount;
-            address tempoRefundRecipient;
-            bytes32 memo;
         }
 
         /// A TIP-20 token enabled on L1 for bridging to the zone.

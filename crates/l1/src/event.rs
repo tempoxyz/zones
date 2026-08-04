@@ -157,7 +157,7 @@ impl L1PortalEvents {
                     "↩️ Bounce-back deposit from L1"
                 );
                 self.deposits.push(L1Deposit::WithdrawalBounceBack(
-                    WithdrawalBounceBackDeposit::from_bounce_back(event, log.address()),
+                    WithdrawalBounceBackDeposit::from_bounce_back(event),
                 ));
             }
             ZonePortalEvents::TokenEnabled(event) => {

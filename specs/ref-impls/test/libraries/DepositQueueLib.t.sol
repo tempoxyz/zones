@@ -40,12 +40,7 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_singleDeposit() public pure {
         WithdrawalBounceBackDeposit memory d = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("memo")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
 
         bytes32 newHash = DepositQueueLib.enqueue(bytes32(0), d);
@@ -57,28 +52,13 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_multipleDeposits() public pure {
         WithdrawalBounceBackDeposit memory d1 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("d1")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
         WithdrawalBounceBackDeposit memory d2 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x300),
-            to: address(0x200),
-            amount: 200e6,
-            tempoRefundRecipient: address(0x200),
-            memo: bytes32("d2")
+            token: address(0x1000), to: address(0x200), amount: 200e6
         });
         WithdrawalBounceBackDeposit memory d3 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x200),
-            amount: 300e6,
-            tempoRefundRecipient: address(0x200),
-            memo: bytes32("d3")
+            token: address(0x1000), to: address(0x200), amount: 300e6
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -98,20 +78,10 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_hashChainStructure() public pure {
         // Verify that newer deposits wrap older ones
         WithdrawalBounceBackDeposit memory d1 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("first")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
         WithdrawalBounceBackDeposit memory d2 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x300),
-            to: address(0x200),
-            amount: 200e6,
-            tempoRefundRecipient: address(0x200),
-            memo: bytes32("second")
+            token: address(0x1000), to: address(0x200), amount: 200e6
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -123,14 +93,8 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_emptyToEmpty() public pure {
         // An empty deposit struct should still produce a valid hash
-        WithdrawalBounceBackDeposit memory d = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0),
-            to: address(0),
-            amount: 0,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
-        });
+        WithdrawalBounceBackDeposit memory d =
+            WithdrawalBounceBackDeposit({ token: address(0x1000), to: address(0), amount: 0 });
 
         bytes32 h = DepositQueueLib.enqueue(bytes32(0), d);
         bytes32 expected = keccak256(abi.encode(DepositType.WithdrawalBounceBack, d, bytes32(0)));
@@ -140,20 +104,10 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_differentInputsProduceDifferentHashes() public pure {
         WithdrawalBounceBackDeposit memory d1 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("memo1")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
         WithdrawalBounceBackDeposit memory d2 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("memo2") // Only memo differs
+            token: address(0x1000), to: address(0x300), amount: 101e6
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -164,12 +118,7 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_sameDepositDifferentPrevHashProducesDifferentResult() public pure {
         WithdrawalBounceBackDeposit memory d = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("memo")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d);
@@ -238,12 +187,7 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueueDeposit_mixedQueue() public pure {
         WithdrawalBounceBackDeposit memory d1 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("d1")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
 
         Deposit memory ed = Deposit({
@@ -262,12 +206,7 @@ contract DepositQueueLibTest is Test {
         });
 
         WithdrawalBounceBackDeposit memory d2 = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x200),
-            amount: 300e6,
-            tempoRefundRecipient: address(0x200),
-            memo: bytes32("d3")
+            token: address(0x1000), to: address(0x200), amount: 300e6
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -286,12 +225,7 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_typeDiscriminatorPreventsCollision() public pure {
         // Same sender/amount but different type discriminators produce different hashes
         WithdrawalBounceBackDeposit memory d = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(0x300),
-            amount: 100e6,
-            tempoRefundRecipient: address(0x300),
-            memo: bytes32("memo")
+            token: address(0x1000), to: address(0x300), amount: 100e6
         });
 
         Deposit memory ed = Deposit({
@@ -349,18 +283,13 @@ contract DepositQueueLibTest is Test {
         pure
     {
         WithdrawalBounceBackDeposit memory d = WithdrawalBounceBackDeposit({
-            token: address(0x1000),
-            sender: address(0x200),
-            to: address(uint160(uint256(seed))),
-            amount: amount,
-            tempoRefundRecipient: address(0x300),
-            memo: seed
+            token: address(0x1000), to: address(uint160(uint256(seed))), amount: amount
         });
         Deposit memory ed = Deposit({
             token: d.token,
-            sender: d.sender,
+            sender: address(0x200),
             amount: d.amount,
-            tempoRefundRecipient: d.tempoRefundRecipient,
+            tempoRefundRecipient: address(0x300),
             keyIndex: uint256(seed),
             encrypted: DepositPayload({
                 ephemeralPubkeyX: seed,
@@ -532,13 +461,8 @@ contract DepositQueueLibTest is Test {
     {
         return WithdrawalBounceBackDeposit({
             token: address(uint160(uint256(keccak256(abi.encode(seed, "token", index))))),
-            sender: address(uint160(uint256(keccak256(abi.encode(seed, "sender", index))))),
             to: address(uint160(uint256(keccak256(abi.encode(seed, "to", index))))),
-            amount: uint128(uint256(keccak256(abi.encode(seed, "amount", index)))),
-            tempoRefundRecipient: address(
-                uint160(uint256(keccak256(abi.encode(seed, "bounceback", index))))
-            ),
-            memo: keccak256(abi.encode(seed, "memo", index))
+            amount: uint128(uint256(keccak256(abi.encode(seed, "amount", index))))
         });
     }
 

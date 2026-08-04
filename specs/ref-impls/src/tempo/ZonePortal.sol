@@ -1097,12 +1097,7 @@ contract ZonePortal is IZonePortal {
     /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
     function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
         WithdrawalBounceBackDeposit memory depositData = WithdrawalBounceBackDeposit({
-            token: _token,
-            sender: address(this),
-            to: address(uint160(fallbackNonce)),
-            amount: amount,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
+            token: _token, to: address(uint160(fallbackNonce)), amount: amount
         });
 
         bytes32 newCurrentDepositQueueHash =

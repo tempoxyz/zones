@@ -140,22 +140,6 @@ contract ZoneInboxTest is Test {
         assertEq(inbox.processedDepositQueueHash(), bytes32(0));
     }
 
-    function test_advanceTempo_rejectsExternalWithdrawalBounceBack() public {
-        WithdrawalBounceBackDeposit[] memory deposits = new WithdrawalBounceBackDeposit[](1);
-        deposits[0] = WithdrawalBounceBackDeposit({
-            token: address(zoneToken),
-            sender: mockPortal,
-            to: bob,
-            amount: 1000e6,
-            tempoRefundRecipient: bob,
-            memo: bytes32("payment")
-        });
-
-        vm.prank(sequencer);
-        vm.expectRevert(IZoneInbox.InvalidWithdrawalBounceBack.selector);
-        _advanceTempo(deposits);
-    }
-
     /*//////////////////////////////////////////////////////////////
                           EVENT EMISSION TESTS
     //////////////////////////////////////////////////////////////*/
@@ -442,12 +426,7 @@ contract ZoneInboxTest is Test {
 
         // WithdrawalBounceBack queue entries are reserved for internal bounce-backs.
         WithdrawalBounceBackDeposit memory d = WithdrawalBounceBackDeposit({
-            token: address(zoneToken),
-            sender: mockPortal,
-            to: address(uint160(fallbackNonce)),
-            amount: 100e6,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
+            token: address(zoneToken), to: address(uint160(fallbackNonce)), amount: 100e6
         });
         QueuedDeposit memory qdRegular = QueuedDeposit({
             depositType: DepositType.WithdrawalBounceBack,
@@ -813,12 +792,7 @@ contract ZoneInboxTest is Test {
         zoneToken.setMinter(address(inbox), false);
         WithdrawalBounceBackDeposit[] memory deposits = new WithdrawalBounceBackDeposit[](1);
         deposits[0] = WithdrawalBounceBackDeposit({
-            token: address(zoneToken),
-            sender: mockPortal,
-            to: address(uint160(fallbackNonce)),
-            amount: 100e6,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
+            token: address(zoneToken), to: address(uint160(fallbackNonce)), amount: 100e6
         });
         tempoState.setMockStorageValue(
             mockPortal,
@@ -853,12 +827,7 @@ contract ZoneInboxTest is Test {
 
         WithdrawalBounceBackDeposit[] memory deposits = new WithdrawalBounceBackDeposit[](1);
         deposits[0] = WithdrawalBounceBackDeposit({
-            token: address(zoneToken),
-            sender: mockPortal,
-            to: address(uint160(fallbackNonce)),
-            amount: 100e6,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
+            token: address(zoneToken), to: address(uint160(fallbackNonce)), amount: 100e6
         });
         tempoState.setMockStorageValue(
             mockPortal,

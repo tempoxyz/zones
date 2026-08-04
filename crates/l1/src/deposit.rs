@@ -5,33 +5,24 @@ use super::*;
 pub struct WithdrawalBounceBackDeposit {
     /// TIP-20 token being returned to the zone.
     pub token: Address,
-    /// Portal sender on L1.
-    pub sender: Address,
     /// Recipient on the zone.
     pub to: Address,
     /// Net amount deposited (fee already deducted on L1).
     pub amount: u128,
     /// Fee paid on L1 (always zero for a bounce-back).
     pub fee: u128,
-    /// Tempo recipient for a failed-deposit refund.
-    pub tempo_refund_recipient: Address,
-    /// User-provided memo.
-    pub memo: B256,
 }
 
 impl WithdrawalBounceBackDeposit {
     /// Create a bounce-back deposit from an event.
-    pub fn from_bounce_back(event: WithdrawalBounceBack, portal_address: Address) -> Self {
+    pub fn from_bounce_back(event: WithdrawalBounceBack) -> Self {
         let mut encoded_nonce = [0u8; 20];
         encoded_nonce[12..].copy_from_slice(&event.fallbackNonce.to_be_bytes());
         Self {
             token: event.token,
-            sender: portal_address,
             to: Address::from(encoded_nonce),
             amount: event.amount,
             fee: 0,
-            tempo_refund_recipient: Address::ZERO,
-            memo: B256::ZERO,
         }
     }
 }
@@ -99,11 +90,8 @@ impl L1Deposit {
                 depositType: abi::DepositType::WithdrawalBounceBack,
                 depositData: abi::WithdrawalBounceBackDeposit {
                     token: d.token,
-                    sender: d.sender,
                     to: d.to,
                     amount: d.amount,
-                    tempoRefundRecipient: d.tempo_refund_recipient,
-                    memo: d.memo,
                 }
                 .abi_encode()
                 .into(),
@@ -138,11 +126,8 @@ impl L1Deposit {
                     abi::DepositType::WithdrawalBounceBack,
                     abi::WithdrawalBounceBackDeposit {
                         token: d.token,
-                        sender: d.sender,
                         to: d.to,
                         amount: d.amount,
-                        tempoRefundRecipient: d.tempo_refund_recipient,
-                        memo: d.memo,
                     },
                     prev_hash,
                 )

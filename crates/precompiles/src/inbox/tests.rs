@@ -418,11 +418,8 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let first = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 100,
-        tempoRefundRecipient: Address::ZERO,
-        memo: B256::ZERO,
     };
     let first_hash = keccak256(
         (DepositType::WithdrawalBounceBack, first.clone(), B256::ZERO).abi_encode_params(),
@@ -458,55 +455,6 @@ fn queue_head_mismatch_reverts_and_rolls_back() -> eyre::Result<()> {
     let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
     StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
         assert_eq!(TempoState::new().tempo_block_number()?, 0);
-        assert_eq!(
-            ZoneInbox::new().processed_deposit_queue_hash.read()?,
-            B256::ZERO
-        );
-        assert_eq!(ZoneInbox::new().processed_deposit_number.read()?, 0);
-        Ok(())
-    })?;
-    Ok(())
-}
-
-#[test]
-fn external_withdrawal_bounce_back_is_rejected() -> eyre::Result<()> {
-    let mut harness = Harness::new()?;
-    let deposit = WithdrawalBounceBackDeposit {
-        token: PATH_USD_ADDRESS,
-        sender: ALICE,
-        to: BOB,
-        amount: 500,
-        tempoRefundRecipient: ALICE,
-        memo: B256::repeat_byte(0x11),
-    };
-    let expected_hash = keccak256(
-        (
-            DepositType::WithdrawalBounceBack,
-            deposit.clone(),
-            B256::ZERO,
-        )
-            .abi_encode_params(),
-    );
-    harness.set_queue_hash(expected_hash);
-    let queued = QueuedDeposit {
-        depositType: DepositType::WithdrawalBounceBack,
-        depositData: deposit.abi_encode().into(),
-    };
-
-    let output = harness.call_atomic(
-        Address::ZERO,
-        harness.advance_call(vec![queued], Vec::new()).abi_encode(),
-    )?;
-
-    assert!(output.is_revert());
-    assert_eq!(
-        output.bytes,
-        IZoneInbox::InvalidWithdrawalBounceBack {}.abi_encode()
-    );
-    assert_eq!(harness.balance(PATH_USD_ADDRESS, BOB)?, U256::ZERO);
-    assert!(harness.pending_withdrawals()?.is_empty());
-    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
-    StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
         assert_eq!(
             ZoneInbox::new().processed_deposit_queue_hash.read()?,
             B256::ZERO
@@ -863,11 +811,8 @@ fn failed_withdrawal_bounce_back_parks_refund() -> eyre::Result<()> {
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = WithdrawalBounceBackDeposit {
         token,
-        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 555,
-        tempoRefundRecipient: Address::ZERO,
-        memo: B256::ZERO,
     };
     let expected_hash = keccak256(
         (
@@ -914,11 +859,8 @@ fn withdrawal_bounce_back_consumes_fallback_nonce() -> eyre::Result<()> {
     encoded_nonce[12..].copy_from_slice(&nonce.to_be_bytes());
     let deposit = WithdrawalBounceBackDeposit {
         token: PATH_USD_ADDRESS,
-        sender: PORTAL,
         to: Address::from(encoded_nonce),
         amount: 321,
-        tempoRefundRecipient: Address::ZERO,
-        memo: B256::ZERO,
     };
     let expected_hash = keccak256(
         (

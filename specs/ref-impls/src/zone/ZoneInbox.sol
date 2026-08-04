@@ -241,10 +241,7 @@ contract ZoneInbox is IZoneInbox {
                     abi.decode(qd.depositData, (WithdrawalBounceBackDeposit));
                 currentHash =
                     keccak256(abi.encode(DepositType.WithdrawalBounceBack, d, currentHash));
-                if (
-                    d.sender != tempoPortal || d.tempoRefundRecipient != address(0)
-                        || d.memo != bytes32(0) || qd.rejected
-                ) {
+                if (qd.rejected) {
                     revert InvalidWithdrawalBounceBack();
                 }
                 _processWithdrawalBounceBack(d);
