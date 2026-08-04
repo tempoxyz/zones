@@ -27,7 +27,7 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
+use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockTracker, TempoStateExt as _};
 use zone_p2p::{LeadershipSchedule, P2pCommand, P2pEvent, P2pPeerId};
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
@@ -69,6 +69,7 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub chain_spec: Arc<ZoneChainSpec>,
     pub deposit_queue: DepositQueue,
     pub l1_block_tracker: L1BlockTracker,
+    pub encryption_keys: EncryptionKeyRing,
     pub commands: mpsc::Sender<P2pCommand>,
     pub attestation: AttestationContext,
     pub portal_address: Address,
@@ -415,9 +416,11 @@ where
     P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
 {
     if let Some(recovery) = schedule.forced_recovery().filter(|recovery| {
-        recovery.is_active()
-            && &recovery.leader == local
+        &recovery.leader == local
             && next_anchor >= recovery.recovery_start_tempo_block
+            && recovery
+                .portal_activation_tempo_block
+                .is_none_or(|activation| next_anchor < activation)
     }) {
         let local_height = match provider.best_block_number() {
             Ok(height) => height,
@@ -900,7 +903,6 @@ fn build_engine<P, Pool>(
 where
     P: Clone,
 {
-    let sequencer_key = k256::SecretKey::from(sequencer.config.sequencer_signer.credential());
     ZoneEngine::new(
         context.chain_spec.clone(),
         context.engine_handle.clone(),
@@ -909,7 +911,7 @@ where
         context.l1_block_tracker.clone(),
         last_header,
         sequencer.config.sequencer_signer.address(),
-        sequencer_key,
+        context.encryption_keys.clone(),
         context.portal_address,
     )
     .with_production_permit(ProductionPermit::new(

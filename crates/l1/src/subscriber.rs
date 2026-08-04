@@ -6,9 +6,9 @@ use tempo_primitives::is_tip20_prefix;
 
 use std::collections::BTreeMap;
 
-/// Maximum number of authenticated L1 blocks a follower may retain ahead of its imported Tempo
-/// checkpoint (approximately one hour at Tempo's 500ms block time).
-pub const MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
+/// Maximum number of authenticated L1 blocks the subscriber may retain ahead of the Zone
+/// consumer's imported Tempo checkpoint (approximately one hour at Tempo's 500ms block time).
+pub const MAX_L1_LOOKAHEAD_BLOCKS: u64 = 7_200;
 
 #[derive(Debug, Default)]
 struct L1BlockTrackerState {
@@ -26,9 +26,14 @@ struct L1BlockObservation {
 /// L1 blocks whose headers and receipts have been independently validated and
 /// whose derived state has been applied to the local caches.
 ///
-/// Followers use this to gate zone-block import on the exact L1 anchor embedded
-/// in `advanceTempo`. This tracker deliberately assumes observed L1 blocks do
-/// not reorg: conflicting or non-contiguous observations are errors.
+/// Followers use this to gate zone-block import on the exact L1 anchor embedded in
+/// `advanceTempo`. The tracker also provides backpressure for the L1 subscriber: before fetching
+/// a block, the subscriber waits for capacity relative to the last checkpoint released by the
+/// Zone consumer. Queue-backed subscribers therefore retain observations until block production
+/// or follower import calls [`L1BlockTracker::prune_through`].
+///
+/// This tracker deliberately assumes observed L1 blocks do not reorg: conflicting or
+/// non-contiguous observations are errors.
 #[derive(Debug, Clone)]
 pub struct L1BlockTracker {
     state: Arc<parking_lot::RwLock<L1BlockTrackerState>>,
@@ -68,14 +73,15 @@ impl L1BlockTracker {
         self.state.read().latest
     }
 
-    /// Return whether `number` fits inside the bounded follower lookahead window.
+    /// Return whether `number` fits inside the bounded subscriber lookahead window.
     pub fn has_capacity_for(&self, number: u64) -> bool {
-        self.state.read().pruned_through.is_none_or(|consumed| {
-            number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
-        })
+        self.state
+            .read()
+            .pruned_through
+            .is_none_or(|consumed| number <= consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS))
     }
 
-    /// Wait until canonical follower import advances enough to retain `number`.
+    /// Wait until the Zone consumer advances enough for the subscriber to retain `number`.
     pub async fn wait_for_capacity(&self, number: u64) -> eyre::Result<()> {
         let mut changed = self.changed.subscribe();
         while !self.has_capacity_for(number) {
@@ -87,7 +93,7 @@ impl L1BlockTracker {
         Ok(())
     }
 
-    /// Return the next L1 height the observer needs to retain.
+    /// Return the next L1 height the subscriber needs to retain.
     pub fn next_observation_number(&self) -> Option<u64> {
         let state = self.state.read();
         state
@@ -183,10 +189,10 @@ impl L1BlockTracker {
             .pruned_through
             .get_or_insert_with(|| block.number.saturating_sub(1));
         eyre::ensure!(
-            block.number <= consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS),
-            "L1 observation {} exceeds follower lookahead through {}",
+            block.number <= consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS),
+            "L1 observation {} exceeds subscriber lookahead through {}",
             block.number,
-            consumed.saturating_add(MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS)
+            consumed.saturating_add(MAX_L1_LOOKAHEAD_BLOCKS)
         );
         if let Some(latest) = state.latest {
             eyre::ensure!(
@@ -216,7 +222,10 @@ impl L1BlockTracker {
         Ok(())
     }
 
-    /// Drop observations through `number` after canonical follower import.
+    /// Drop observations through `number` after the corresponding Zone checkpoint is canonical.
+    ///
+    /// Advancing this watermark releases L1 subscriber capacity, so queue consumers must call it
+    /// only after successfully consuming the matching finalized L1 work.
     pub fn prune_through(&self, number: u64) {
         let mut state = self.state.write();
         state.observed.retain(|height, _| *height > number);
@@ -268,8 +277,6 @@ pub struct L1SubscriberConfig {
     pub l1_state_cache: crate::state::cache::L1StateCache,
     /// Validated and applied L1 anchors shared with follower block import.
     pub block_tracker: L1BlockTracker,
-    /// Whether observations must be retained until a consumer releases them.
-    pub retain_observations: bool,
     /// Maximum number of concurrent header and receipt fetches while syncing a
     /// finalized L1 range.
     pub l1_fetch_concurrency: usize,
@@ -278,40 +285,12 @@ pub struct L1SubscriberConfig {
     /// Optional sink that receives leadership transitions before the block that
     /// recorded them is enqueued.
     pub leadership_sink: Option<Arc<dyn LeadershipSink>>,
+    /// Private encryption keys bound by finalized Portal rotation events.
+    pub encryption_keys: Option<crate::EncryptionKeyRing>,
 }
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
     fn latest_tempo_checkpoint(&self) -> eyre::Result<NumHash>;
-}
-
-/// Optional sink for finalized deposit-bearing L1 blocks.
-///
-/// Sequencers and P2P replicas retain a queue so blocks can be produced or validated later.
-/// Observer-only nodes still apply finalized events to their caches, but retain no queue.
-#[derive(Debug, Clone)]
-pub(crate) enum DepositSink {
-    Queue(DepositQueue),
-    Observer,
-}
-
-impl DepositSink {
-    fn last_enqueued(&self) -> Option<NumHash> {
-        match self {
-            Self::Queue(queue) => queue.last_enqueued(),
-            Self::Observer => None,
-        }
-    }
-
-    fn enqueue(
-        &self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-    ) -> eyre::Result<bool> {
-        match self {
-            Self::Queue(queue) => queue.try_enqueue_sealed(header, events),
-            Self::Observer => Ok(false),
-        }
-    }
 }
 
 struct ProviderLocalTempoCheckpointReader<P> {
@@ -333,8 +312,8 @@ where
 pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
     pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
-    /// Optional deposit sink. P2P members retain it so follower queues stay warm.
-    pub(crate) deposit_sink: DepositSink,
+    /// Finalized L1 blocks retained until a Zone consumer processes them.
+    pub(crate) deposit_queue: DepositQueue,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
@@ -399,45 +378,12 @@ impl L1Subscriber {
     ) where
         P: StateProviderFactory + Clone + Send + Sync + 'static,
     {
-        Self::spawn_inner(
-            config,
-            local_state_provider,
-            DepositSink::Queue(deposit_queue),
-            task_executor,
-        );
-    }
-
-    /// Create and spawn an observer that advances finalized L1-derived caches without
-    /// retaining deposit blocks.
-    pub fn spawn_observer<P>(
-        config: L1SubscriberConfig,
-        local_state_provider: P,
-        task_executor: reth_tasks::Runtime,
-    ) where
-        P: StateProviderFactory + Clone + Send + Sync + 'static,
-    {
-        Self::spawn_inner(
-            config,
-            local_state_provider,
-            DepositSink::Observer,
-            task_executor,
-        );
-    }
-
-    fn spawn_inner<P>(
-        config: L1SubscriberConfig,
-        local_state_provider: P,
-        deposit_sink: DepositSink,
-        task_executor: reth_tasks::Runtime,
-    ) where
-        P: StateProviderFactory + Clone + Send + Sync + 'static,
-    {
         let subscriber = Self {
             config,
             local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
-            deposit_sink,
+            deposit_queue,
             subscriber_metrics: Default::default(),
         };
 
@@ -551,7 +497,7 @@ impl L1Subscriber {
     pub(crate) fn next_block_to_sync(&self) -> eyre::Result<u64> {
         let resolved = self.resolve_start_block()?;
         let queued = self
-            .deposit_sink
+            .deposit_queue
             .last_enqueued()
             .map(|last| last.number.saturating_add(1));
         let observed = self
@@ -755,9 +701,20 @@ impl L1Subscriber {
                         })?;
                 }
             }
+            if let Some(keys) = &self.config.encryption_keys {
+                for rotation in &events.encryption_key_rotations {
+                    keys.apply_rotation(rotation).map_err(|err| {
+                        FencedIngestionError::new(
+                            block_number,
+                            "encryption key rotation application",
+                            err,
+                        )
+                    })?;
+                }
+            }
             let appended = self
-                .deposit_sink
-                .enqueue(sealed, events.clone())
+                .deposit_queue
+                .try_enqueue_sealed(sealed, events.clone())
                 .wrap_err_with(|| {
                     format!("unexpected discontinuity while enqueueing L1 block {block_number}")
                 })?;
@@ -770,9 +727,6 @@ impl L1Subscriber {
             self.update_l1_state_anchor(block_number, &invalidated);
             if appended {
                 self.subscriber_metrics.blocks_enqueued.increment(1);
-            }
-            if !self.config.retain_observations {
-                self.config.block_tracker.prune_through(anchor.number);
             }
             processed += 1;
 

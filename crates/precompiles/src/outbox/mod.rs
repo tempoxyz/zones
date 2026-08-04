@@ -167,6 +167,9 @@ impl ZoneOutbox {
         if call.zoneFallbackRecipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
         }
+        if call.amount == 0 {
+            return Err(ZoneOutboxError::zero_amount_withdrawal().into());
+        }
         if call.data.len() > MAX_CALLBACK_DATA_SIZE {
             return Err(ZoneOutboxError::callback_data_too_large().into());
         }

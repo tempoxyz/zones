@@ -112,6 +112,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error ZeroAmountWithdrawal();
     error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
@@ -251,6 +252,7 @@ contract ZoneOutbox is IZoneOutbox {
         if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
+        if (amount == 0) revert ZeroAmountWithdrawal();
 
         if (!_isEnabledToken(token)) {
             revert IZonePortal.TokenNotEnabled();

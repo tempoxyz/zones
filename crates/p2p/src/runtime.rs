@@ -8,9 +8,7 @@ use std::{
 
 use alloy_primitives::{Address as EthereumAddress, B256};
 use commonware_cryptography::ed25519::PublicKey;
-use commonware_p2p::{
-    AddressableManager as _, Receiver as _, Recipients, Sender as _, authenticated::lookup,
-};
+use commonware_p2p::{AddressableManager as _, Recipients, Sender as _, authenticated::lookup};
 use commonware_runtime::{Runner as _, Spawner as _};
 use eyre::WrapErr as _;
 use tokio::sync::{Mutex, mpsc, oneshot};
@@ -25,6 +23,8 @@ use crate::{
         MAX_MESSAGE_SIZE, SETTLEMENT_PROPOSAL_CHANNEL, SETTLEMENT_SIGNATURE_CHANNEL,
         TRANSACTION_BACKLOG, TRANSACTION_CHANNEL,
     },
+    protocol::{RequestFrame, ResponseFrame},
+    routing::{RoutingMembership, RoutingPolicy},
 };
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -33,41 +33,7 @@ const BROADCAST_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const BACKFILL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const COMMAND_BACKLOG: usize = 128;
 const EVENT_BACKLOG: usize = 128;
-const BACKFILL_BLOCK_FRAME: u8 = 0;
-const BACKFILL_COMPLETE_FRAME: u8 = 1;
-
-/// Authenticated Commonware identity used to address one manifest peer.
-pub type P2pPeerId = PublicKey;
-
-/// A peer's advertised canonical tip.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PeerTip {
-    pub zone_height: u64,
-    pub zone_hash: B256,
-    pub tempo_block_number: u64,
-    pub tempo_block_hash: B256,
-}
-
-impl PeerTip {
-    const ENCODED_LEN: usize = 8 + 32 + 8 + 32;
-
-    fn encode_into(&self, frame: &mut Vec<u8>) {
-        frame.extend_from_slice(&self.zone_height.to_be_bytes());
-        frame.extend_from_slice(self.zone_hash.as_slice());
-        frame.extend_from_slice(&self.tempo_block_number.to_be_bytes());
-        frame.extend_from_slice(self.tempo_block_hash.as_slice());
-    }
-
-    fn decode(payload: &[u8]) -> Option<Self> {
-        let payload: &[u8; Self::ENCODED_LEN] = payload.try_into().ok()?;
-        Some(Self {
-            zone_height: u64::from_be_bytes(payload[..8].try_into().expect("fixed size")),
-            zone_hash: B256::from_slice(&payload[8..40]),
-            tempo_block_number: u64::from_be_bytes(payload[40..48].try_into().expect("fixed size")),
-            tempo_block_hash: B256::from_slice(&payload[48..80]),
-        })
-    }
-}
+use crate::PeerTip;
 
 type CommonwareSender = lookup::Sender<PublicKey, commonware_runtime::tokio::Context>;
 type CommonwareReceiver = lookup::Receiver<PublicKey>;
@@ -169,13 +135,13 @@ struct P2pSenders {
     transactions: CommonwareSender,
 }
 
-struct P2pReceivers {
-    blocks: CommonwareReceiver,
-    settlement_proposals: CommonwareReceiver,
-    settlement_signatures: CommonwareReceiver,
-    backfill_requests: CommonwareReceiver,
-    backfill_responses: CommonwareReceiver,
-    transactions: CommonwareReceiver,
+struct P2pReceivers<R = CommonwareReceiver> {
+    blocks: R,
+    settlement_proposals: R,
+    settlement_signatures: R,
+    backfill_requests: R,
+    backfill_responses: R,
+    transactions: R,
 }
 
 /// Fully validated configuration for one node's Zone P2P runtime.
@@ -569,17 +535,14 @@ fn run(
             })
             .await;
 
-        let peers: Vec<PublicKey> = config
-            .manifest
-            .nodes()
-            .iter()
-            .map(|node| node.ed25519_public_key().clone())
-            .collect();
+        let membership = RoutingMembership::from_manifest(
+            &config.manifest,
+            local_ed25519_public_key.clone(),
+        );
 
         let backfill_lifecycle = Arc::new(Mutex::new(BackfillJob::default()));
         let command_loop = run_commands(
-            local_ed25519_public_key.clone(),
-            peers,
+            membership.clone(),
             leadership.clone(),
             backfill_lifecycle.clone(),
             P2pSenders {
@@ -595,9 +558,8 @@ fn run(
         tokio::pin!(command_loop);
 
         let receive_loop = run_receivers(
-            local_ed25519_public_key,
+            membership,
             leadership,
-            config.manifest,
             P2pReceivers {
                 blocks: block_receiver,
                 settlement_proposals: settlement_proposal_receiver,
@@ -631,25 +593,19 @@ fn run(
 }
 
 async fn run_commands(
-    local_ed25519_public_key: PublicKey,
-    peers: Vec<PublicKey>,
+    membership: RoutingMembership,
     leadership: LeadershipSchedule,
     backfill_job: SharedBackfillLifecycle,
     mut senders: P2pSenders,
     mut commands: mpsc::Receiver<P2pCommand>,
 ) -> eyre::Result<()> {
-    let others: Vec<PublicKey> = peers
-        .iter()
-        .filter(|peer| *peer != &local_ed25519_public_key)
-        .cloned()
-        .collect();
-
     while let Some(command) = commands.recv().await {
+        let policy = RoutingPolicy::new(&membership, &leadership);
         if let P2pCommand::RequestBackfill { start } = command {
             // Chain data always comes from a quorum member: standbys hold the same chain but are
             // the internet-facing members, and keeping them out of every node's catch-up source
             // set is the point of the role.
-            let candidates = leadership.quorum_peers(&others);
+            let candidates = policy.other_quorum_peers();
             let now = Instant::now();
             // Ask the leader alone first: backfilled blocks carry no producer claim, so a page
             // from any other member could be a valid alternative chain rather than the leader's.
@@ -660,7 +616,7 @@ async fn run_commands(
             // `finish_send` drops its outstanding entry, so `is_unresponsive` would stay false
             // forever and every retry would re-pick it. Attempting the wider set in the same
             // pass is what keeps a leader outage from wedging catch-up entirely.
-            let leader = leadership.next_anchor_record().map(|record| record.leader);
+            let leader = policy.preferred_backfill_leader();
             let leader_first = match &leader {
                 Some(leader) => {
                     candidates.contains(leader)
@@ -681,9 +637,7 @@ async fn run_commands(
                     debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
                     continue;
                 };
-                let mut request_frame = Vec::with_capacity(16);
-                request_frame.extend_from_slice(&request_id.to_be_bytes());
-                request_frame.extend_from_slice(&start.to_be_bytes());
+                let request_frame = RequestFrame { request_id, start }.encode().to_vec();
                 let sent = match senders
                     .backfill_requests
                     .send(Recipients::Some(request_peers.clone()), request_frame, true)
@@ -716,7 +670,7 @@ async fn run_commands(
                 // `producer == leader_for(anchor)` fence. Recipients are all other manifest
                 // members — during a scheduled handoff the incoming leader must keep
                 // receiving live blocks.
-                if !leadership.is_scheduled_leader(&local_ed25519_public_key) {
+                if !policy.am_i_retained_leader() {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", "Ignoring live block broadcast command without retained scheduled leadership");
                     continue;
@@ -727,7 +681,7 @@ async fn run_commands(
                     continue;
                 }
 
-                let recipients = &others;
+                let recipients = policy.other_peers();
                 let sent = tokio::time::timeout(BROADCAST_RETRY_TIMEOUT, async {
                     loop {
                         let sent = senders.blocks
@@ -754,7 +708,7 @@ async fn run_commands(
             }
 
             P2pCommand::BroadcastSettlementProposal(proposal) => {
-                if !leadership.is_scheduled_leader(&local_ed25519_public_key) {
+                if !policy.am_i_retained_leader() {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", "Ignoring settlement proposal command without retained scheduled leadership");
                     continue;
@@ -764,7 +718,7 @@ async fn run_commands(
                 senders
                     .settlement_proposals
                     .send(
-                        Recipients::Some(leadership.quorum_peers(&others)),
+                        Recipients::Some(policy.other_quorum_peers()),
                         proposal,
                         true,
                     )
@@ -773,14 +727,9 @@ async fn run_commands(
             }
 
             P2pCommand::SendSettlementSignature { leader, signature } => {
-                if !leadership.is_quorum_member(&local_ed25519_public_key) {
-                    metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
-                    warn!(target: "zone::p2p", "Ignoring settlement signature command from a node outside the on-chain quorum");
-                    continue;
-                }
                 // The signature answers a specific proposal, so it returns to that
                 // proposal's sender (not to the most recent leader. Important during handoff)
-                if leader == local_ed25519_public_key || !leadership.is_scheduled_leader(&leader) {
+                if !policy.may_send_settlement_signature(&leader) {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %leader, "Ignoring settlement signature addressed to a peer without retained scheduled leadership");
                     continue;
@@ -801,14 +750,13 @@ async fn run_commands(
                 request_id,
                 block,
             } => {
-                if block.len().saturating_add(9) > MAX_MESSAGE_SIZE as usize {
-                    error!(target: "zone::p2p", block_size_bytes = block.len(), max_frame_size_bytes = MAX_MESSAGE_SIZE, "Backfill block exceeds the P2P response frame size limit");
-                    continue;
-                }
-                let mut frame = Vec::with_capacity(block.len() + 9);
-                frame.push(BACKFILL_BLOCK_FRAME);
-                frame.extend_from_slice(&request_id.to_be_bytes());
-                frame.extend_from_slice(&block);
+                let frame = match (ResponseFrame::Block { request_id, block }).encode() {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        error!(target: "zone::p2p", %err, "Backfill block exceeds the P2P response frame size limit");
+                        continue;
+                    }
+                };
                 senders
                     .backfill_responses
                     .send(Recipients::Some(vec![peer]), frame, true)
@@ -821,10 +769,9 @@ async fn run_commands(
                 request_id,
                 tip,
             } => {
-                let mut frame = Vec::with_capacity(9 + PeerTip::ENCODED_LEN);
-                frame.push(BACKFILL_COMPLETE_FRAME);
-                frame.extend_from_slice(&request_id.to_be_bytes());
-                tip.encode_into(&mut frame);
+                let frame = ResponseFrame::Complete { request_id, tip }
+                    .encode()
+                    .expect("completion frames have a fixed size");
                 senders
                     .backfill_responses
                     .send(Recipients::Some(vec![peer]), frame, true)
@@ -840,19 +787,21 @@ async fn run_commands(
                 // fence, but send to every other quorum member so every possible successor
                 // retains the transaction before a leadership handoff. RPC-only standbys can
                 // originate transactions but never need to retain transactions from other nodes.
-                let Some(record) = leadership.next_anchor_record() else {
-                    metrics::counter!("zone_p2p_uninitialized_leadership_commands_dropped_total")
+                if !policy.may_forward_transaction() {
+                    if !policy.is_leadership_initialized() {
+                        metrics::counter!(
+                            "zone_p2p_uninitialized_leadership_commands_dropped_total"
+                        )
                         .increment(1);
-                    warn!(target: "zone::p2p", ?transaction_hash, "Dropping forwarded transaction while leadership is uninitialized");
-                    continue;
-                };
-                let leader = record.leader;
-                if leader == local_ed25519_public_key {
-                    metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
-                    warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on the next-anchor leader");
+                        warn!(target: "zone::p2p", ?transaction_hash, "Dropping forwarded transaction while leadership is uninitialized");
+                    } else {
+                        metrics::counter!("zone_p2p_role_invalid_messages_dropped_total")
+                            .increment(1);
+                        warn!(target: "zone::p2p", ?transaction_hash, "Ignoring outbound transaction command on the next-anchor leader");
+                    }
                     continue;
                 }
-                let recipients = leadership.quorum_peers(&others);
+                let recipients = policy.other_quorum_peers();
                 let configured = recipients.len();
                 let transaction_size = transaction.len();
                 let sent = match senders
@@ -882,14 +831,16 @@ async fn run_commands(
     Err(eyre::eyre!("P2P command channel closed unexpectedly"))
 }
 
-async fn run_receivers(
-    local_ed25519_public_key: PublicKey,
+async fn run_receivers<R>(
+    membership: RoutingMembership,
     leadership: LeadershipSchedule,
-    manifest: Arc<ZoneManifest>,
-    receivers: P2pReceivers,
+    receivers: P2pReceivers<R>,
     backfill_job: SharedBackfillLifecycle,
     events: mpsc::Sender<P2pEvent>,
-) -> eyre::Result<()> {
+) -> eyre::Result<()>
+where
+    R: commonware_p2p::Receiver<PublicKey = PublicKey>,
+{
     let P2pReceivers {
         mut blocks,
         mut settlement_proposals,
@@ -904,12 +855,11 @@ async fn run_receivers(
             // Got a block
             result = blocks.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("block channel receive failed: {err}"))?;
+                let policy = RoutingPolicy::new(&membership, &leadership);
                 // A lagging follower must not drop the rightful
                 // producer of in-between anchors just because a later transition is already
                 // the "current" record.
-                if peer == local_ed25519_public_key
-                    || !leadership.is_scheduled_leader(&peer)
-                {
+                if !policy.may_accept_block(&peer) {
                     warn!(target: "zone::p2p", %peer, "Ignoring live block from non-leader");
                     continue;
                 }
@@ -919,14 +869,12 @@ async fn run_receivers(
             // Got a settlement proposal at a batch boundary
             result = settlement_proposals.recv() => {
                 let (peer, bytes) = result.wrap_err("settlement proposal channel receive failed")?;
+                let policy = RoutingPolicy::new(&membership, &leadership);
                 // The proposer must lead somewhere in the retained schedule — during a scheduled handoff the
                 // outgoing leader still settles pre-boundary batches. The follower rebuilds
                 // the proposal from its own state before signing. An RPC-only member drops the
                 // proposal here: only the on-chain quorum signs.
-                if peer == local_ed25519_public_key
-                    || !leadership.is_scheduled_leader(&peer)
-                    || !leadership.is_quorum_member(&local_ed25519_public_key)
-                {
+                if !policy.may_accept_settlement_proposal(&peer) {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement proposal from ineligible peer");
                     continue;
                 }
@@ -936,13 +884,11 @@ async fn run_receivers(
             // Got a response from a follower to the settlement proposal
             result = settlement_signatures.recv() => {
                 let (peer, bytes) = result.wrap_err("settlement signature channel receive failed")?;
+                let policy = RoutingPolicy::new(&membership, &leadership);
                 // An RPC-only member has no address registered with `ZonePortal`, so its
                 // signature could never be counted; reject it at the transport instead of
                 // relying on the attestation-address lookup further in.
-                if peer == local_ed25519_public_key
-                    || !leadership.is_quorum_member(&peer)
-                    || !leadership.is_scheduled_leader(&local_ed25519_public_key)
-                {
+                if !policy.may_accept_settlement_signature(&peer) {
                     warn!(target: "zone::p2p", %peer, "Ignoring settlement signature from ineligible peer");
                     continue;
                 }
@@ -952,64 +898,58 @@ async fn run_receivers(
             // Got backfill request
             result = backfill_requests.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill request receive failed: {err}"))?;
-                let Ok(bytes): Result<[u8; 16], _> = bytes.as_ref().try_into() else {
-                    warn!(target: "zone::p2p", %peer, size = bytes.len(), "Ignoring malformed backfill request");
-                    continue;
+                let request = match RequestFrame::decode(bytes.as_ref()) {
+                    Ok(request) => request,
+                    Err(err) => {
+                        warn!(target: "zone::p2p", %peer, size = bytes.len(), %err, "Ignoring malformed backfill request");
+                        continue;
+                    }
                 };
-                let request_id = u64::from_be_bytes(bytes[..8].try_into().expect("fixed-size request ID"));
-                let start = u64::from_be_bytes(bytes[8..].try_into().expect("fixed-size backfill start"));
-                P2pEvent::BackfillRequested { peer, request_id, start }
+                let policy = RoutingPolicy::new(&membership, &leadership);
+                if !policy.is_remote_peer(&peer) {
+                    warn!(target: "zone::p2p", %peer, "Ignoring backfill request from ineligible peer");
+                    continue;
+                }
+                P2pEvent::BackfillRequested {
+                    peer,
+                    request_id: request.request_id,
+                    start: request.start,
+                }
             }
 
             // Got backfill response (for an existing request)
             result = backfill_responses.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("backfill response receive failed: {err}"))?;
-                // Backfill responses are accepted from any quorum member — the request side
-                // only ever asks them, so a page from an internet-facing standby is unsolicited.
-                if peer == local_ed25519_public_key
-                    || !manifest.contains_ed25519_public_key(&peer)
-                    || !leadership.is_quorum_member(&peer)
-                {
+                let frame = match ResponseFrame::decode(bytes.as_ref()) {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        warn!(target: "zone::p2p", %peer, size = bytes.len(), %err, "Ignoring malformed backfill response");
+                        continue;
+                    }
+                };
+                let policy = RoutingPolicy::new(&membership, &leadership);
+                if !policy.is_remote_quorum_peer(&peer) {
                     warn!(target: "zone::p2p", %peer, "Ignoring backfill response from ineligible peer");
                     continue;
                 }
-                let Some((&frame_kind, frame_payload)) = bytes.as_ref().split_first() else {
-                    warn!(target: "zone::p2p", %peer, "Ignoring empty backfill response frame");
-                    continue;
-                };
-                let Some((request_id_bytes, payload)) = frame_payload.split_at_checked(8) else {
-                    warn!(target: "zone::p2p", %peer, size = frame_payload.len(), "Ignoring backfill response without a request ID");
-                    continue;
-                };
-                let request_id = u64::from_be_bytes(request_id_bytes.try_into().expect("fixed-size request ID"));
                 let received_at = Instant::now();
 
                 let mut backfill_job = backfill_job.lock().await;
-                match frame_kind {
-                    BACKFILL_BLOCK_FRAME => {
-                        if !backfill_job
-                            .accepts(&peer, request_id, received_at)
-                        {
+                match frame {
+                    ResponseFrame::Block { request_id, block } => {
+                        if !backfill_job.accepts(&peer, request_id, received_at) {
                             warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill block");
                             continue;
                         }
-                        P2pEvent::BackfillBlockReceived { peer, block: payload.to_vec() }
+                        P2pEvent::BackfillBlockReceived { peer, block }
                     }
-                    BACKFILL_COMPLETE_FRAME => {
+                    ResponseFrame::Complete { request_id, tip } => {
                         let accepted = backfill_job.complete(&peer, request_id, received_at);
                         if !accepted {
                             warn!(target: "zone::p2p", %peer, request_id, "Ignoring unsolicited or stale backfill completion");
                             continue;
                         }
-                        let Some(tip) = PeerTip::decode(payload) else {
-                            warn!(target: "zone::p2p", %peer, request_id, size = payload.len(), "Ignoring malformed backfill completion");
-                            continue;
-                        };
                         P2pEvent::BackfillCompleted { peer, tip }
-                    }
-                    _ => {
-                        warn!(target: "zone::p2p", %peer, frame_kind, "Ignoring backfill response with unknown frame kind");
-                        continue;
                     }
                 }
             }
@@ -1018,10 +958,8 @@ async fn run_receivers(
             // admit these into their pools; RPC-only standbys can never become leader.
             result = transactions.recv() => {
                 let (peer, bytes) = result.map_err(|err| eyre::eyre!("transaction channel receive failed: {err}"))?;
-                if peer == local_ed25519_public_key
-                    || !manifest.contains_ed25519_public_key(&peer)
-                    || !leadership.is_quorum_member(&local_ed25519_public_key)
-                {
+                let policy = RoutingPolicy::new(&membership, &leadership);
+                if !policy.may_accept_transaction(&peer) {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", %peer, "Ignoring transaction from role-invalid peer");
                     continue;
@@ -1050,17 +988,44 @@ mod tests {
 
     use alloy_primitives::{B256, address};
     use commonware_codec::Encode as _;
-    use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+    use commonware_cryptography::{
+        Signer as _,
+        ed25519::{PrivateKey, PublicKey as Ed25519PublicKey},
+    };
+    use commonware_runtime::IoBuf;
+    use tokio::sync::{Mutex, mpsc};
 
     use super::{
-        BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, spawn_p2p,
-        validate_ip_check_configuration,
+        BACKFILL_RESPONSE_TIMEOUT, BackfillJob, P2pCommand, P2pConfig, P2pEvent, P2pHandle,
+        P2pHandleParts, P2pReceivers, run_receivers, spawn_p2p, validate_ip_check_configuration,
     };
     use crate::{
         P2pNetworkId, ZoneManifest,
         identity::{Ed25519Identity, Secp256k1Identity},
-        network::MAX_MESSAGE_SIZE,
+        protocol::ResponseFrame,
+        routing::RoutingMembership,
     };
+
+    #[derive(Debug)]
+    struct TestReceiver {
+        messages: mpsc::Receiver<(Ed25519PublicKey, IoBuf)>,
+    }
+
+    impl commonware_p2p::Receiver for TestReceiver {
+        type Error = std::io::Error;
+        type PublicKey = Ed25519PublicKey;
+
+        async fn recv(&mut self) -> Result<commonware_p2p::Message<Self::PublicKey>, Self::Error> {
+            self.messages.recv().await.ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "test receiver closed")
+            })
+        }
+    }
+
+    fn test_receiver() -> (mpsc::Sender<(Ed25519PublicKey, IoBuf)>, TestReceiver) {
+        let (sender, messages) = mpsc::channel(8);
+        (sender, TestReceiver { messages })
+    }
 
     fn test_tip(zone_height: u64) -> super::PeerTip {
         super::PeerTip {
@@ -1144,6 +1109,101 @@ mod tests {
         assert!(lifecycle.complete(&peer, replacement_id, expired_at));
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn receiver_ignores_malformed_completion_and_accepts_valid_response_afterward() {
+        let identities = [1_u64, 2, 3].map(ed25519_identity);
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let manifest = Arc::new(
+            ZoneManifest::parse(&manifest_with_standby(
+                &identities,
+                &addresses,
+                1,
+                usize::MAX,
+            ))
+            .unwrap(),
+        );
+        let local_peer = identities[0].ed25519_public_key();
+        let peer = identities[1].ed25519_public_key();
+
+        let now = Instant::now();
+        let mut lifecycle = BackfillJob::default();
+        let (request_id, peers) = lifecycle
+            .begin_request(std::slice::from_ref(&peer), now)
+            .unwrap();
+        lifecycle.finish_send(request_id, &peers);
+
+        let (blocks_sender, blocks) = test_receiver();
+        let (proposals_sender, proposals) = test_receiver();
+        let (signatures_sender, signatures) = test_receiver();
+        let (requests_sender, requests) = test_receiver();
+        let (responses_sender, responses) = test_receiver();
+        let (transactions_sender, transactions) = test_receiver();
+        let (events_sender, mut events) = mpsc::channel(4);
+        let receiver_task = tokio::spawn(run_receivers(
+            RoutingMembership::from_manifest(&manifest, local_peer),
+            manifest.leadership_schedule(),
+            P2pReceivers {
+                blocks,
+                settlement_proposals: proposals,
+                settlement_signatures: signatures,
+                backfill_requests: requests,
+                backfill_responses: responses,
+                transactions,
+            },
+            Arc::new(Mutex::new(lifecycle)),
+            events_sender,
+        ));
+
+        // Keep the other receiver channels open while the response receiver is under test.
+        let _senders = (
+            blocks_sender,
+            proposals_sender,
+            signatures_sender,
+            requests_sender,
+            transactions_sender,
+        );
+
+        let mut malformed = vec![1];
+        malformed.extend_from_slice(&request_id.to_be_bytes());
+        malformed.extend_from_slice(&[0; super::PeerTip::ENCODED_LEN - 1]);
+        responses_sender
+            .send((peer.clone(), IoBuf::from(malformed)))
+            .await
+            .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), events.recv())
+                .await
+                .is_err(),
+            "malformed completion should not emit an event"
+        );
+
+        let valid = ResponseFrame::Complete {
+            request_id,
+            tip: test_tip(7),
+        };
+        responses_sender
+            .send((peer.clone(), IoBuf::from(valid.encode().unwrap())))
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            P2pEvent::BackfillCompleted {
+                peer,
+                tip: test_tip(7)
+            }
+        );
+
+        receiver_task.abort();
+        let _ = receiver_task.await;
+    }
+
     /// Resend `command` until the test drops the returned handle.
     ///
     /// Commonware drops messages for peers that have not handshaked yet, so a phase that must be
@@ -1160,6 +1220,32 @@ mod tests {
         })
     }
 
+    /// Stop a peer that may still be receiving traffic.
+    ///
+    /// Unlike [`P2pHandle::shutdown`], this keeps the event receiver alive until the runtime
+    /// observes cancellation, so an in-flight `BlockReceived` cannot fail the runtime with
+    /// "P2P event channel closed" during mid-test peer restarts.
+    async fn shutdown_while_receiving(handle: P2pHandle) -> eyre::Result<()> {
+        let P2pHandleParts {
+            shutdown,
+            stopped,
+            thread,
+            commands,
+            events,
+        } = handle.into_parts();
+        shutdown.cancel();
+        drop(commands);
+        let stopped_result = stopped.await;
+        tokio::task::spawn_blocking(move || thread.join())
+            .await
+            .map_err(|err| eyre::eyre!("failed joining P2P runtime thread: {err}"))?
+            .map_err(|_| eyre::eyre!("P2P runtime thread panicked"))?;
+        drop(events);
+        stopped_result
+            .map_err(|err| eyre::eyre!("P2P runtime dropped its completion channel: {err}"))?
+            .map_err(|err| eyre::eyre!("P2P runtime failed: {err}"))
+    }
+
     /// Drain events for `duration`, failing if any of them satisfies `forbidden`.
     async fn assert_no_event_matching(
         events: &mut tokio::sync::mpsc::Receiver<P2pEvent>,
@@ -1174,20 +1260,6 @@ mod tests {
         })
         .await;
         assert!(result.is_err(), "{context}: event channel closed");
-    }
-
-    async fn assert_no_backfill_response_events(
-        events: &mut tokio::sync::mpsc::Receiver<P2pEvent>,
-        duration: Duration,
-        context: &str,
-    ) {
-        assert_no_event_matching(events, duration, context, |event| {
-            matches!(
-                event,
-                P2pEvent::BackfillBlockReceived { .. } | P2pEvent::BackfillCompleted { .. }
-            )
-        })
-        .await;
     }
 
     /// Manifest TOML for a topology with one `rpc_only` standby.
@@ -1242,17 +1314,6 @@ mod tests {
         let addresses = config.block_attestation_addresses();
         assert_eq!(addresses.len(), 3);
         assert!(!addresses.contains_key(&identities[3].ed25519_public_key()));
-
-        let peers = identities
-            .iter()
-            .map(|identity| identity.ed25519_public_key())
-            .collect::<Vec<_>>();
-        let [leader, follower_a, follower_b, rpc] = peers.clone().try_into().unwrap();
-        assert_eq!(
-            config.leadership().quorum_peers(&peers),
-            vec![leader, follower_a, follower_b]
-        );
-        assert!(config.leadership().is_rpc_only(&rpc));
     }
 
     #[test]
@@ -1282,7 +1343,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn leader_broadcasts_blocks_to_followers() {
+    async fn leader_broadcasts_blocks_and_serves_backfill() {
         let addresses = [
             available_address(),
             available_address(),
@@ -1306,8 +1367,6 @@ mod tests {
             ));
         }
         let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
-        let leader_peer = identities[0].ed25519_public_key();
-        let first_follower_peer = identities[1].ed25519_public_key();
         let mut handles = identities
             .into_iter()
             .zip(addresses)
@@ -1341,11 +1400,6 @@ mod tests {
 
         let block = vec![0xf8, 0x01, 0x80];
         let commands = handles[0].parts.as_ref().unwrap().commands.clone();
-        let oversized_block = vec![0; MAX_MESSAGE_SIZE as usize + 1];
-        commands
-            .send(P2pCommand::BroadcastBlock(oversized_block))
-            .await
-            .expect("P2P command channel should remain open");
         let broadcaster = repeat(commands, P2pCommand::BroadcastBlock(block.clone()));
 
         for handle in handles.iter_mut().skip(1) {
@@ -1365,216 +1419,57 @@ mod tests {
         }
         broadcaster.abort();
 
-        let leader_commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        // Exercise the complete backfill response path through the real Commonware senders and
+        // receivers. A completed request must also reject a replay with the same request ID.
         let follower_commands = handles[1].parts.as_ref().unwrap().commands.clone();
-        // Role-invalid commands are dropped without stopping either runtime.
-        leader_commands
-            .send(P2pCommand::ForwardTransaction {
-                transaction_hash: B256::with_last_byte(1),
-                transaction: vec![0x01],
-            })
-            .await
-            .unwrap();
-        follower_commands
-            .send(P2pCommand::BroadcastBlock(block.clone()))
-            .await
-            .unwrap();
-
-        let transaction_hash = B256::with_last_byte(2);
-        let transaction = vec![0x76, 0x01, 0x02, 0x03];
-        let forwarder = repeat(
-            follower_commands.clone(),
-            P2pCommand::ForwardTransaction {
-                transaction_hash,
-                transaction: transaction.clone(),
-            },
-        );
-        for index in [0, 2] {
-            tokio::time::timeout(Duration::from_secs(15), async {
-                loop {
-                    if let Some(P2pEvent::TransactionReceived {
-                        follower_ed25519_public_key,
-                        transaction: received,
-                    }) = handles[index].events_mut().recv().await
-                    {
-                        assert_eq!(follower_ed25519_public_key, first_follower_peer);
-                        assert_eq!(received, transaction);
-                        return;
-                    }
-                }
-            })
-            .await
-            .unwrap_or_else(|_| panic!("node-{index} did not receive forwarded transaction"));
-        }
-        forwarder.abort();
-
-        let proposal = vec![0x10, 0x20];
-        leader_commands
-            .send(P2pCommand::BroadcastSettlementProposal(proposal.clone()))
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
+        let requester = repeat(follower_commands, P2pCommand::RequestBackfill { start: 7 });
+        let (requesting_peer, request_id) = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                if let Some(P2pEvent::SettlementProposalReceived {
-                    leader,
-                    proposal: received,
-                }) = handles[1].events_mut().recv().await
-                {
-                    assert_eq!(leader, leader_peer);
-                    assert_eq!(received, proposal);
-                    return;
-                }
-            }
-        })
-        .await
-        .expect("follower did not receive settlement proposal");
-
-        let settlement_signature = vec![0x30, 0x40];
-        follower_commands
-            .send(P2pCommand::SendSettlementSignature {
-                leader: leader_peer.clone(),
-                signature: settlement_signature.clone(),
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::SettlementSignatureReceived {
-                    follower,
-                    signature,
+                if let Some(P2pEvent::BackfillRequested {
+                    peer,
+                    request_id,
+                    start: 7,
                 }) = handles[0].events_mut().recv().await
                 {
-                    assert_eq!(follower, first_follower_peer);
-                    assert_eq!(signature, settlement_signature);
-                    return;
+                    return (peer, request_id);
                 }
             }
         })
         .await
-        .expect("leader did not receive settlement signature");
+        .expect("leader did not receive the backfill request");
+        requester.abort();
 
-        leader_commands
-            .send(P2pCommand::SendBackfillBlock {
-                peer: first_follower_peer.clone(),
-                request_id: 0,
-                block: block.clone(),
-            })
-            .await
-            .unwrap();
+        let backfill_blocks = [vec![0xf8, 0x02, 0x80], vec![0xf8, 0x03, 0x80]];
+        let leader_commands = handles[0].parts.as_ref().unwrap().commands.clone();
+        for block in &backfill_blocks {
+            leader_commands
+                .send(P2pCommand::SendBackfillBlock {
+                    peer: requesting_peer.clone(),
+                    request_id,
+                    block: block.clone(),
+                })
+                .await
+                .unwrap();
+        }
         leader_commands
             .send(P2pCommand::CompleteBackfill {
-                peer: first_follower_peer.clone(),
-                request_id: 0,
-                tip: test_tip(99),
-            })
-            .await
-            .unwrap();
-        assert_no_backfill_response_events(
-            handles[1].events_mut(),
-            Duration::from_secs(2),
-            "follower without an outstanding backfill request",
-        )
-        .await;
-
-        follower_commands
-            .send(P2pCommand::RequestBackfill { start: 7 })
-            .await
-            .unwrap();
-        let (requesting_peer, follower_request_id) =
-            tokio::time::timeout(Duration::from_secs(15), async {
-                loop {
-                    if let Some(P2pEvent::BackfillRequested {
-                        peer,
-                        request_id,
-                        start: 7,
-                    }) = handles[0].events_mut().recv().await
-                    {
-                        return (peer, request_id);
-                    }
-                }
-            })
-            .await
-            .expect("leader did not receive backfill request");
-
-        follower_commands
-            .send(P2pCommand::RequestBackfill { start: 8 })
-            .await
-            .unwrap();
-        let duplicate_request = tokio::time::timeout(Duration::from_millis(750), async {
-            loop {
-                if let Some(P2pEvent::BackfillRequested { start: 8, .. }) =
-                    handles[0].events_mut().recv().await
-                {
-                    return;
-                }
-            }
-        })
-        .await;
-        assert!(
-            duplicate_request.is_err(),
-            "follower sent a duplicate backfill request while the first response was outstanding"
-        );
-
-        follower_commands
-            .send(P2pCommand::SendBackfillBlock {
-                peer: leader_peer.clone(),
-                request_id: 0,
-                block: block.clone(),
-            })
-            .await
-            .unwrap();
-        follower_commands
-            .send(P2pCommand::CompleteBackfill {
-                peer: leader_peer.clone(),
-                request_id: 0,
-                tip: test_tip(100),
-            })
-            .await
-            .unwrap();
-        assert_no_backfill_response_events(
-            handles[0].events_mut(),
-            Duration::from_secs(2),
-            "leader without an outstanding backfill request",
-        )
-        .await;
-
-        leader_commands
-            .send(P2pCommand::SendBackfillBlock {
                 peer: requesting_peer.clone(),
-                request_id: follower_request_id,
-                block: block.clone(),
-            })
-            .await
-            .unwrap();
-        let second_block = vec![0xf8, 0x02, 0x80];
-        leader_commands
-            .send(P2pCommand::SendBackfillBlock {
-                peer: requesting_peer.clone(),
-                request_id: follower_request_id,
-                block: second_block.clone(),
-            })
-            .await
-            .unwrap();
-        leader_commands
-            .send(P2pCommand::CompleteBackfill {
-                peer: requesting_peer,
-                request_id: follower_request_id,
+                request_id,
                 tip: test_tip(9),
             })
             .await
             .unwrap();
+
         tokio::time::timeout(Duration::from_secs(15), async {
-            let expected_blocks = [block.clone(), second_block];
-            let mut received_blocks = 0;
+            let mut received_blocks = Vec::new();
             loop {
                 match handles[1].events_mut().recv().await {
                     Some(P2pEvent::BackfillBlockReceived { block, .. }) => {
-                        assert_eq!(block, expected_blocks[received_blocks]);
-                        received_blocks += 1;
+                        received_blocks.push(block);
                     }
-                    Some(P2pEvent::BackfillCompleted { tip, .. }) if tip.zone_height == 9 => {
+                    Some(P2pEvent::BackfillCompleted { tip, .. }) => {
                         assert_eq!(tip, test_tip(9));
-                        assert_eq!(received_blocks, expected_blocks.len());
+                        assert_eq!(received_blocks, backfill_blocks);
                         return;
                     }
                     Some(_) => {}
@@ -1583,94 +1478,28 @@ mod tests {
             }
         })
         .await
-        .expect("follower did not receive ordered backfill response");
+        .expect("follower did not receive the complete backfill response");
 
         leader_commands
-            .send(P2pCommand::SendBackfillBlock {
-                peer: first_follower_peer.clone(),
-                request_id: follower_request_id,
-                block: block.clone(),
-            })
-            .await
-            .unwrap();
-        leader_commands
             .send(P2pCommand::CompleteBackfill {
-                peer: first_follower_peer.clone(),
-                request_id: follower_request_id,
+                peer: requesting_peer,
+                request_id,
                 tip: test_tip(10),
             })
             .await
             .unwrap();
-        assert_no_backfill_response_events(
+        assert_no_event_matching(
             handles[1].events_mut(),
-            Duration::from_secs(2),
-            "follower after its backfill request completed",
+            Duration::from_millis(500),
+            "completed backfill request accepted a replay",
+            |event| {
+                matches!(
+                    event,
+                    P2pEvent::BackfillBlockReceived { .. } | P2pEvent::BackfillCompleted { .. }
+                )
+            },
         )
         .await;
-
-        leader_commands
-            .send(P2pCommand::RequestBackfill { start: 11 })
-            .await
-            .unwrap();
-        let leader_request_id = tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::BackfillRequested {
-                    request_id,
-                    start: 11,
-                    ..
-                }) = handles[1].events_mut().recv().await
-                {
-                    return request_id;
-                }
-            }
-        })
-        .await
-        .expect("follower did not receive recovering leader's backfill request");
-
-        follower_commands
-            .send(P2pCommand::SendBackfillBlock {
-                peer: leader_peer.clone(),
-                request_id: leader_request_id,
-                block: block.clone(),
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::BackfillBlockReceived {
-                    peer,
-                    block: received,
-                }) = handles[0].events_mut().recv().await
-                {
-                    assert!(peer == first_follower_peer);
-                    assert_eq!(received, block);
-                    return;
-                }
-            }
-        })
-        .await
-        .expect("leader did not receive requested backfill block");
-        follower_commands
-            .send(P2pCommand::CompleteBackfill {
-                peer: leader_peer,
-                request_id: leader_request_id,
-                tip: test_tip(12),
-            })
-            .await
-            .unwrap();
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                if let Some(P2pEvent::BackfillCompleted { peer, tip }) =
-                    handles[0].events_mut().recv().await
-                    && tip == test_tip(12)
-                {
-                    assert!(peer == first_follower_peer);
-                    return;
-                }
-            }
-        })
-        .await
-        .expect("leader did not receive requested backfill completion");
 
         for handle in handles {
             tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
@@ -2011,16 +1840,6 @@ mod tests {
         .await;
         proposer.abort();
 
-        // ...and a signature from outside the quorum never reaches the leader: the command is
-        // dropped before it is sent, and the leader's receive guard would reject it anyway.
-        rpc_commands
-            .send(P2pCommand::SendSettlementSignature {
-                leader: leader_peer.clone(),
-                signature: vec![0x30, 0x40],
-            })
-            .await
-            .unwrap();
-
         // Operator RPC submissions reach every quorum member, not just the active leader.
         let transaction_hash = B256::with_last_byte(7);
         let transaction = vec![0x76, 0x07];
@@ -2248,6 +2067,334 @@ mod tests {
 
         for handle in handles {
             handle.shutdown().await.unwrap();
+        }
+    }
+
+    /// A quorum follower that is shut down and respawned with the same identity and listen
+    /// address must remesh and resume receiving the leader's live block broadcasts.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn follower_remeshes_after_shutdown_and_respawn() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [
+            ed25519_identity(61),
+            ed25519_identity(62),
+            ed25519_identity(63),
+        ];
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 61);
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let leader_peer = identities[0].ed25519_public_key();
+
+        let spawn_node = |index: usize| {
+            spawn_p2p(
+                P2pConfig {
+                    manifest: manifest.clone(),
+                    ed25519_identity: ed25519_identity(index as u64 + 61),
+                    secp256k1_identity: Some(secp256k1_identity(index as u64 + 61)),
+                    listen: addresses[index],
+                    bypass_ip_check: false,
+                    leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+                },
+                network_id,
+            )
+            .unwrap()
+        };
+
+        let leader = spawn_node(0);
+        let mut follower_a = spawn_node(1);
+        let mut follower_b = spawn_node(2);
+
+        let initial_block = vec![0xf8, 0x01, 0x80];
+        let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
+        let initial_broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(initial_block.clone()),
+        );
+        for (label, handle) in [
+            ("follower-a", &mut follower_a),
+            ("follower-b", &mut follower_b),
+        ] {
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        leader_ed25519_public_key,
+                        block: received,
+                    }) = handle.events_mut().recv().await
+                    {
+                        assert_eq!(leader_ed25519_public_key, leader_peer);
+                        assert_eq!(received, initial_block);
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{label} did not receive the initial leader block"));
+        }
+        initial_broadcaster.abort();
+
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            shutdown_while_receiving(follower_b),
+        )
+        .await
+        .expect("stopped follower did not shut down")
+        .expect("stopped follower runtime failed");
+
+        // While the peer is down, the remaining follower must keep receiving broadcasts.
+        let offline_block = vec![0xf8, 0x02, 0x80];
+        let offline_broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(offline_block.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::BlockReceived {
+                    leader_ed25519_public_key,
+                    block: received,
+                }) = follower_a.events_mut().recv().await
+                    && leader_ed25519_public_key == leader_peer
+                    && received == offline_block
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("remaining follower did not receive blocks while the peer was shut down");
+        offline_broadcaster.abort();
+
+        // Listen-port reuse can race the OS briefly after shutdown; retry spawn if needed.
+        let mut follower_b = None;
+        for attempt in 0..10 {
+            match spawn_p2p(
+                P2pConfig {
+                    manifest: manifest.clone(),
+                    ed25519_identity: ed25519_identity(63),
+                    secp256k1_identity: Some(secp256k1_identity(63)),
+                    listen: addresses[2],
+                    bypass_ip_check: false,
+                    leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+                },
+                network_id,
+            ) {
+                Ok(handle) => {
+                    follower_b = Some(handle);
+                    break;
+                }
+                Err(err) => {
+                    assert!(
+                        attempt < 9,
+                        "respawned follower failed to bind after retries: {err}"
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+            }
+        }
+        let mut follower_b = follower_b.expect("respawned follower handle");
+
+        let remesh_block = vec![0xf8, 0x03, 0x80];
+        let remesh_broadcaster = repeat(
+            leader_commands,
+            P2pCommand::BroadcastBlock(remesh_block.clone()),
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(P2pEvent::BlockReceived {
+                    leader_ed25519_public_key,
+                    block: received,
+                }) = follower_b.events_mut().recv().await
+                    && leader_ed25519_public_key == leader_peer
+                    && received == remesh_block
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("respawned follower did not remesh and receive subsequent leader blocks");
+        remesh_broadcaster.abort();
+
+        for handle in [leader, follower_a, follower_b] {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
+        }
+    }
+
+    /// Unlike the permanent offline-leader tests, this covers recovery: followers mesh while
+    /// the leader is down, then remesh with the leader once it comes online.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn mesh_recovers_when_leader_comes_online_after_being_offline() {
+        let addresses = [
+            available_address(),
+            available_address(),
+            available_address(),
+        ];
+        let identities = [
+            ed25519_identity(71),
+            ed25519_identity(72),
+            ed25519_identity(73),
+        ];
+        let mut input = format!(
+            "zone_id = 9\nleader_ed25519_public_key = \"{}\"\n",
+            const_hex::encode_prefixed(identities[0].ed25519_public_key().as_ref())
+        );
+        for (index, (identity, address)) in identities.iter().zip(addresses).enumerate() {
+            let secp256k1_identity = secp256k1_identity(index as u64 + 71);
+            input.push_str(&format!(
+                "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+                const_hex::encode_prefixed(identity.ed25519_public_key().as_ref()),
+                secp256k1_identity.address(),
+            ));
+        }
+        let manifest = Arc::new(ZoneManifest::parse(&input).unwrap());
+        let network_id = P2pNetworkId::new(1, address!("1111111111111111111111111111111111111111"));
+        let leader_peer = identities[0].ed25519_public_key();
+        let sender_peer = identities[1].ed25519_public_key();
+
+        // Spawn only the followers first — same shape as the permanent offline-leader tests.
+        let mut followers = [1_usize, 2]
+            .map(|index| {
+                spawn_p2p(
+                    P2pConfig {
+                        manifest: manifest.clone(),
+                        ed25519_identity: ed25519_identity(index as u64 + 71),
+                        secp256k1_identity: Some(secp256k1_identity(index as u64 + 71)),
+                        listen: addresses[index],
+                        bypass_ip_check: false,
+                        leadership: crate::LeadershipSchedule::seeded(
+                            manifest.bootstrap_leadership(),
+                        ),
+                    },
+                    network_id,
+                )
+                .unwrap()
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        for handle in &mut followers {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !matches!(
+                    handle.events_mut().recv().await,
+                    Some(P2pEvent::Started { .. })
+                ) {}
+            })
+            .await
+            .expect("follower P2P runtime did not start");
+        }
+
+        let offline_transaction = vec![0x76, 0x01];
+        let offline_forwarder = repeat(
+            followers[0].parts.as_ref().unwrap().commands.clone(),
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(1),
+                transaction: offline_transaction.clone(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Some(P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key,
+                    transaction: received,
+                }) = followers[1].events_mut().recv().await
+                {
+                    assert_eq!(follower_ed25519_public_key, sender_peer);
+                    assert_eq!(received, offline_transaction);
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("followers did not exchange transactions while the leader was offline");
+        offline_forwarder.abort();
+
+        let mut leader = spawn_p2p(
+            P2pConfig {
+                manifest: manifest.clone(),
+                ed25519_identity: ed25519_identity(71),
+                secp256k1_identity: Some(secp256k1_identity(71)),
+                listen: addresses[0],
+                bypass_ip_check: false,
+                leadership: crate::LeadershipSchedule::seeded(manifest.bootstrap_leadership()),
+            },
+            network_id,
+        )
+        .unwrap();
+
+        let block = vec![0xf8, 0x01, 0x80];
+        let leader_commands = leader.parts.as_ref().unwrap().commands.clone();
+        let broadcaster = repeat(
+            leader_commands.clone(),
+            P2pCommand::BroadcastBlock(block.clone()),
+        );
+        for (index, handle) in followers.iter_mut().enumerate() {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if let Some(P2pEvent::BlockReceived {
+                        leader_ed25519_public_key,
+                        block: received,
+                    }) = handle.events_mut().recv().await
+                        && leader_ed25519_public_key == leader_peer
+                        && received == block
+                    {
+                        return;
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!("follower-{index} did not receive blocks after the leader came online")
+            });
+        }
+        broadcaster.abort();
+
+        let online_transaction = vec![0x76, 0x02];
+        let online_forwarder = repeat(
+            followers[0].parts.as_ref().unwrap().commands.clone(),
+            P2pCommand::ForwardTransaction {
+                transaction_hash: B256::with_last_byte(2),
+                transaction: online_transaction.clone(),
+            },
+        );
+        tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(P2pEvent::TransactionReceived {
+                    follower_ed25519_public_key,
+                    transaction: received,
+                }) = leader.events_mut().recv().await
+                    && follower_ed25519_public_key == sender_peer
+                    && received == online_transaction
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("leader did not receive a forwarded transaction after coming online");
+        online_forwarder.abort();
+
+        for handle in std::iter::once(leader).chain(followers) {
+            tokio::time::timeout(Duration::from_secs(10), handle.shutdown())
+                .await
+                .expect("P2P runtime did not stop")
+                .expect("P2P runtime failed");
         }
     }
 }

@@ -1143,21 +1143,15 @@ contract ZoneOutboxTest is Test {
                           ZERO AMOUNT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_requestWithdrawal_zeroAmount() public {
+    function test_requestWithdrawal_zeroAmount_reverts() public {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 0);
+        vm.expectRevert(ZoneOutbox.ZeroAmountWithdrawal.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(_pendingWithdrawalsCount(), 1);
-
-        // Should still produce valid hash
-        Withdrawal memory w = _withdrawal(1, alice, bob, 0, bytes32(0), 0, alice, "");
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
-
-        bytes32 hash = _finalizeWithdrawalBatch(1);
-
-        assertEq(hash, expectedHash);
+        assertEq(_pendingWithdrawalsCount(), 0);
+        assertEq(outbox.lastFallbackNonce(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////

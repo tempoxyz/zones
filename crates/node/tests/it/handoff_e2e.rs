@@ -31,9 +31,9 @@ const QUIESCENCE: Duration = Duration::from_secs(3);
 const LIVE_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// A crashes after producing a tip shared by every follower. Three L1 anchors pass with no zone
-/// blocks, then an operator selects B and the shared tip for forced recovery. The matching
-/// finalized transition lets B fill the missing anchor range and continue as the portal leader,
-/// without replacing any block preceding the crash.
+/// blocks, then an operator selects B and the shared tip for forced recovery. B optimistically
+/// fills the missing anchor range before the next transition finalizes. That transition selects C,
+/// which takes over at its exact anchor without replacing any block preceding the crash.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -73,32 +73,48 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
         );
     }
 
-    // The force RPC installs this request on each surviving node before relaying setLeader.
-    // Publishing the matching transition stands in for their subscribers finalizing that L1
-    // transaction. Its portal activation is anchor 7, while the recovery override starts at 4.
+    // A coordinated restart installs the same manifest directive on each surviving node. The
+    // runtime override immediately lets B consume the queued anchors.
     let recovery_epoch = 1;
     let replacement_index = 1;
     let replacement = cluster.p2p_public_keys[replacement_index].clone();
     for node in &cluster.nodes {
-        assert!(node.leadership().prepare_forced_recovery(
+        assert!(node.leadership().install_forced_recovery(
             recovery_epoch,
             replacement.clone(),
             recovery_block_hash,
             recovery_start_tempo_block,
         )?);
-        assert!(
+        assert_eq!(
             node.leadership()
                 .leader_for(recovery_start_tempo_block)
-                .is_none(),
-            "the recovery range must remain fenced before setLeader finalizes"
+                .expect("optimistic recovery must govern immediately")
+                .leader,
+            replacement,
+        );
+        assert!(!node.leadership().forced_recovery().unwrap().is_bounded());
+    }
+
+    let optimistic_tip = recovery_start_tempo_block + 2;
+    cluster.wait_all_at(optimistic_tip, HANDOFF_TIMEOUT).await?;
+    let b_producer = cluster.sequencer_signers[replacement_index].address();
+    for height in recovery_start_tempo_block..=optimistic_tip {
+        assert_eq!(
+            cluster.assert_same_block(height).await?.beneficiary,
+            b_producer,
+            "replacement leader B did not optimistically produce recovery block {height}"
         );
     }
 
+    // A finalized transition to C at anchor 7 closes the optimistic override even though it does
+    // not select B. Subscriber ordering publishes this transition before anchor 7 can be built.
     let portal_activation_tempo_block = cluster.next_anchor_number();
     assert_eq!(portal_activation_tempo_block, 7);
+    let portal_leader_index = 2;
+    let c_producer = cluster.sequencer_signers[portal_leader_index].address();
     cluster.publish_transition(
         recovery_epoch,
-        replacement_index,
+        portal_leader_index,
         portal_activation_tempo_block,
     )?;
     cluster.inject_block(vec![])?;
@@ -116,16 +132,16 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
         );
     }
 
-    // B produced every missing block and the portal-activation block. Once anchor 7 is applied,
-    // ordinary portal authority takes over and the temporary recovery state is removed.
-    let b_producer = cluster.sequencer_signers[replacement_index].address();
-    for height in recovery_start_tempo_block..=portal_activation_tempo_block {
-        assert_eq!(
-            cluster.assert_same_block(height).await?.beneficiary,
-            b_producer,
-            "replacement leader B did not produce recovery block {height}"
-        );
-    }
+    // C, rather than B, produces the portal-activation block. Once it is applied, the temporary
+    // recovery state is removed.
+    assert_eq!(
+        cluster
+            .assert_same_block(portal_activation_tempo_block)
+            .await?
+            .beneficiary,
+        c_producer,
+        "portal-selected leader C did not produce the transition block"
+    );
     for node in &cluster.nodes {
         assert!(
             node.leadership().forced_recovery().is_none(),
@@ -139,7 +155,7 @@ async fn test_forced_recovery_resumes_after_leader_crash() -> eyre::Result<()> {
     cluster.wait_all_at(next_height, HANDOFF_TIMEOUT).await?;
     assert_eq!(
         cluster.assert_same_block(next_height).await?.beneficiary,
-        b_producer
+        c_producer
     );
     Ok(())
 }

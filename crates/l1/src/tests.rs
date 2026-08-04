@@ -1,8 +1,5 @@
 use super::*;
-use crate::{
-    abi::DepositType,
-    subscriber::{DepositSink, is_fenced_ingestion_error},
-};
+use crate::{abi::DepositType, subscriber::is_fenced_ingestion_error};
 use alloy_consensus::{Header, ReceiptWithBloom};
 use alloy_primitives::{Bloom, Bytes, address};
 use alloy_rpc_types_eth::{Header as RpcHeader, TransactionReceipt};
@@ -173,22 +170,15 @@ fn test_subscriber(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscr
             enabled_tokens: crate::state::EnabledTokenRegistry::default(),
             l1_state_cache: crate::L1StateCache::new(),
             block_tracker: L1BlockTracker::default(),
-            retain_observations: true,
             l1_fetch_concurrency: 1,
             retry_connection_interval: Duration::from_secs(1),
             leadership_sink: None,
+            encryption_keys: None,
         },
         local_state,
-        deposit_sink: DepositSink::Queue(DepositQueue::default()),
+        deposit_queue: DepositQueue::default(),
         subscriber_metrics: Default::default(),
     }
-}
-
-fn test_observer(local_state: Arc<dyn LocalTempoCheckpointReader>) -> L1Subscriber {
-    let mut subscriber = test_subscriber(local_state);
-    subscriber.config.retain_observations = false;
-    subscriber.deposit_sink = DepositSink::Observer;
-    subscriber
 }
 
 #[tokio::test]
@@ -231,6 +221,7 @@ fn observed_portal_events_require_complete_advance_tempo_inputs() {
             symbol: "aUSD".to_owned(),
             currency: "USD".to_owned(),
         }],
+        encryption_key_rotations: vec![],
         leader_transitions: vec![],
     };
     let deposits: Vec<_> = events
@@ -312,13 +303,13 @@ async fn l1_block_tracker_backpressures_at_one_hour_lookahead() {
     let consumed = 100;
     tracker.initialize_consumed_through(consumed);
 
-    for number in consumed + 1..=consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS {
+    for number in consumed + 1..=consumed + MAX_L1_LOOKAHEAD_BLOCKS {
         tracker
             .record(NumHash::new(number, B256::with_last_byte(number as u8)))
             .unwrap();
     }
 
-    let blocked_number = consumed + MAX_FOLLOWER_L1_LOOKAHEAD_BLOCKS + 1;
+    let blocked_number = consumed + MAX_L1_LOOKAHEAD_BLOCKS + 1;
     assert!(!tracker.has_capacity_for(blocked_number));
     assert_eq!(tracker.next_observation_number(), Some(blocked_number));
     assert!(
@@ -741,6 +732,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
     let header_10 = make_test_header(10);
     let header_11 = make_chained_header(11, header_hash(&header_10));
     let header_12 = make_chained_header(12, header_hash(&header_11));
+    let anchor_12 = seal(header_12.clone()).num_hash();
 
     // Initial sync through finalized block 10.
     asserter.push_success(&Some(header_response(header_10.clone())));
@@ -761,10 +753,7 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
         .expect_err("finite trigger stream should end the subscriber");
     assert!(err.to_string().contains("head notification stream ended"));
 
-    let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
-        panic!("test subscriber must retain deposits");
-    };
-    let blocks = queue.drain();
+    let blocks = subscriber.deposit_queue.drain();
     assert_eq!(
         blocks
             .iter()
@@ -772,59 +761,10 @@ async fn test_follow_finalized_uses_new_heads_to_sync_missing_finalized_range() 
             .collect::<Vec<_>>(),
         vec![10, 11, 12]
     );
-    assert!(asserter.read_q().is_empty());
-}
-
-#[tokio::test]
-async fn observer_advances_caches_without_retaining_deposit_blocks() {
-    let subscriber = test_observer(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
-    let cached_address = address!("0x0000000000000000000000000000000000000ABC");
-    let cached_slot = B256::with_last_byte(1);
-    let cached_value = B256::with_last_byte(2);
-    {
-        let mut cache = subscriber.config.l1_state_cache.lock();
-        cache.invalidate_and_set_anchor(9, []);
-        cache.set(cached_address, cached_slot, 9, cached_value);
-    }
-
-    let asserter = Asserter::new();
-    let l1_provider =
-        ProviderBuilder::new_with_network::<TempoNetwork>().connect_mocked_client(asserter.clone());
-    let header_10 = make_test_header(10);
-    let header_11 = make_chained_header(11, header_hash(&header_10));
-    let header_12 = make_chained_header(12, header_hash(&header_11));
-
-    asserter.push_success(&Some(header_response(header_12.clone())));
-    push_header_and_empty_receipts(&asserter, header_10);
-    push_header_and_empty_receipts(&asserter, header_11);
-    push_header_and_empty_receipts(&asserter, header_12);
-
-    assert_eq!(
-        subscriber
-            .sync_finalized_once(&l1_provider, 10)
-            .await
-            .unwrap(),
-        13
-    );
-
-    assert_eq!(
-        subscriber
-            .config
-            .l1_state_cache
-            .lock()
-            .get(cached_address, cached_slot, 12),
-        Some(cached_value),
-        "receipt coverage must keep advancing on an observer"
-    );
-    assert_eq!(subscriber.config.block_tracker.latest().unwrap().number, 12);
     assert_eq!(
         subscriber.config.block_tracker.observed_hash(12),
-        None,
-        "an observer has no downstream consumer requiring retained observations"
-    );
-    assert!(
-        matches!(subscriber.deposit_sink, DepositSink::Observer),
-        "an observer must not accumulate finalized blocks in a deposit queue"
+        Some(anchor_12.hash),
+        "a queue-backed subscriber must retain observations until its consumer prunes them"
     );
     assert!(asserter.read_q().is_empty());
 }
@@ -864,10 +804,7 @@ async fn test_sync_finalized_once_does_not_refetch_current_cursor() {
         .unwrap();
 
     assert_eq!(next, 11);
-    let DepositSink::Queue(queue) = &subscriber.deposit_sink else {
-        panic!("test subscriber must retain deposits");
-    };
-    assert!(queue.drain().is_empty());
+    assert!(subscriber.deposit_queue.drain().is_empty());
     assert!(asserter.read_q().is_empty());
 }
 
@@ -1126,6 +1063,15 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         U256::ZERO,
     )
     .expect("encrypted deposit should be valid");
+    let encryption_keys = EncryptionKeyRing::new([sequencer_key.clone()]);
+    encryption_keys
+        .apply_rotation(&EncryptionKeyRotation {
+            x: seq_pub_x,
+            y_parity: seq_pub_y_parity,
+            key_index: U256::ZERO,
+            activation_block: block_number,
+        })
+        .unwrap();
 
     let block = L1BlockDeposits {
         header: seal(make_test_header(block_number)),
@@ -1145,7 +1091,7 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
     };
 
     let prepared = block
-        .prepare(&sequencer_key, portal)
+        .prepare(&encryption_keys, portal)
         .await
         .expect("decrypted deposit should prepare without an engine-side policy read");
 
@@ -1158,6 +1104,93 @@ async fn test_prepare_decrypted_deposit_defers_policy_to_upstream_mint() {
         prepared.decryptions.len(),
         1,
         "successfully decrypted deposits must provide on-chain decryption data"
+    );
+}
+
+#[tokio::test]
+async fn encrypted_deposits_select_the_private_key_by_portal_index() {
+    let token = address!("0x0000000000000000000000000000000000001000");
+    let sender = address!("0x0000000000000000000000000000000000001234");
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let old = k256::SecretKey::from_slice(&[0x11; 32]).unwrap();
+    let current = k256::SecretKey::from_slice(&[0x22; 32]).unwrap();
+    let encryption_keys = EncryptionKeyRing::new([old.clone(), current.clone()]);
+    let mut deposits = Vec::new();
+    let mut expected_shared_secrets = Vec::new();
+
+    for (key_index, key, recipient) in [
+        (
+            U256::ZERO,
+            old,
+            address!("0x000000000000000000000000000000000000BEEF"),
+        ),
+        (
+            U256::from(1),
+            current,
+            address!("0x000000000000000000000000000000000000CAFE"),
+        ),
+    ] {
+        let public = key.public_key();
+        let (x, y_parity) = crate::precompiles::ecies::compressed_x_and_parity(public.as_affine());
+        encryption_keys
+            .apply_rotation(&EncryptionKeyRotation {
+                x,
+                y_parity,
+                key_index,
+                activation_block: key_index.to::<u64>() + 10,
+            })
+            .unwrap();
+        let encrypted = crate::precompiles::ecies::encrypt_deposit(
+            &x,
+            y_parity,
+            recipient,
+            B256::ZERO,
+            portal,
+            key_index,
+        )
+        .unwrap();
+        let decrypted = crate::precompiles::ecies::decrypt_deposit(
+            &key,
+            &encrypted.eph_pub_x,
+            encrypted.eph_pub_y_parity,
+            &encrypted.ciphertext,
+            &encrypted.nonce,
+            &encrypted.tag,
+            portal,
+            key_index,
+        )
+        .unwrap();
+        expected_shared_secrets.push(decrypted.proof.shared_secret);
+        deposits.push(L1Deposit::Encrypted(EncryptedDeposit {
+            token,
+            sender,
+            amount: 1_000_000,
+            fee: 0,
+            tempo_refund_recipient: sender,
+            key_index,
+            ephemeral_pubkey_x: encrypted.eph_pub_x,
+            ephemeral_pubkey_y_parity: encrypted.eph_pub_y_parity,
+            ciphertext: encrypted.ciphertext,
+            nonce: encrypted.nonce,
+            tag: encrypted.tag,
+        }));
+    }
+
+    let prepared = L1BlockDeposits {
+        header: seal(make_test_header(20)),
+        events: L1PortalEvents::from_deposits(deposits),
+    }
+    .prepare(&encryption_keys, portal)
+    .await
+    .unwrap();
+
+    assert_eq!(
+        prepared
+            .decryptions
+            .iter()
+            .map(|decryption| decryption.sharedSecret)
+            .collect::<Vec<_>>(),
+        expected_shared_secrets
     );
 }
 
@@ -1439,6 +1472,52 @@ fn leader_updated_log(
     }
 }
 
+fn encryption_key_updated_log(
+    portal: Address,
+    x: B256,
+    y_parity: u8,
+    key_index: U256,
+    activation_block: u64,
+) -> Log {
+    let event = crate::abi::ZonePortal::SequencerEncryptionKeyUpdated {
+        x,
+        yParity: y_parity,
+        keyIndex: key_index,
+        activationBlock: activation_block,
+    };
+    Log {
+        inner: alloy_primitives::Log {
+            address: portal,
+            data: event.encode_log_data(),
+        },
+        ..Default::default()
+    }
+}
+
+#[test]
+fn decodes_encryption_key_rotation_into_portal_events() {
+    let portal = address!("0x0000000000000000000000000000000000000ABC");
+    let x = B256::repeat_byte(0x42);
+    let mut events = L1PortalEvents::default();
+
+    events
+        .push_log(
+            &encryption_key_updated_log(portal, x, 0x03, U256::from(7), 77),
+            77,
+        )
+        .unwrap();
+
+    assert_eq!(
+        events.encryption_key_rotations,
+        vec![EncryptionKeyRotation {
+            x,
+            y_parity: 0x03,
+            key_index: U256::from(7),
+            activation_block: 77,
+        }]
+    );
+}
+
 #[test]
 fn decodes_leader_updated_into_portal_events() {
     let portal = address!("0x0000000000000000000000000000000000000ABC");
@@ -1569,9 +1648,7 @@ fn extract_events_fails_closed_on_corrupt_recognized_portal_log() {
 async fn sync_classifies_corrupt_recognized_portal_log_as_fenced() {
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let portal = subscriber.config.portal_address;
-    let DepositSink::Queue(queue) = subscriber.deposit_sink.clone() else {
-        panic!("test subscriber must retain deposits");
-    };
+    let queue = subscriber.deposit_queue.clone();
 
     let receipt =
         make_receipt_with_logs(10, B256::ZERO, vec![corrupt_recognized_portal_log(portal)]);
@@ -1625,9 +1702,7 @@ impl LeadershipSink for RecordingLeadershipSink {
 async fn sync_applies_leadership_transition_before_enqueueing_the_activation_block() {
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let portal = subscriber.config.portal_address;
-    let DepositSink::Queue(queue) = subscriber.deposit_sink.clone() else {
-        panic!("test subscriber must retain deposits");
-    };
+    let queue = subscriber.deposit_queue.clone();
     let sink = Arc::new(RecordingLeadershipSink {
         queue: queue.clone(),
         seen: parking_lot::Mutex::new(Vec::new()),
@@ -1674,9 +1749,7 @@ async fn sync_applies_leadership_transition_before_enqueueing_the_activation_blo
 async fn sync_fences_the_block_when_the_leadership_sink_rejects_the_transition() {
     let mut subscriber = test_subscriber(Arc::new(SequenceLocalTempoCheckpointReader::new([9])));
     let portal = subscriber.config.portal_address;
-    let DepositSink::Queue(queue) = subscriber.deposit_sink.clone() else {
-        panic!("test subscriber must retain deposits");
-    };
+    let queue = subscriber.deposit_queue.clone();
     subscriber.config.leadership_sink = Some(Arc::new(RecordingLeadershipSink {
         queue: queue.clone(),
         seen: parking_lot::Mutex::new(Vec::new()),

@@ -52,14 +52,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
+use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockDeposits, L1BlockTracker, PreparedL1Block};
 use zone_p2p::{LeadershipSchedule, P2pPeerId};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
 /// Per-anchor production permit backed by the effective leadership schedule.
 ///
-/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or an
-/// active bounded forced-recovery override assigns `N` to this node.
+/// The permit is a single schedule lookup: produce anchor `N` only if the portal schedule or a
+/// forced-recovery override assigns `N` to this node. An optimistic override is open-ended until
+/// the next finalized portal transition supplies the ordinary-authority boundary.
 #[derive(Debug, Clone)]
 pub struct ProductionPermit {
     schedule: LeadershipSchedule,
@@ -180,8 +181,8 @@ pub struct ZoneEngine {
     last_header: SealedHeader<TempoHeader>,
     /// Address that receives block fees.
     fee_recipient: Address,
-    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
-    sequencer_key: k256::SecretKey,
+    /// Private keys bound to the Portal indexes used by encrypted deposits.
+    encryption_keys: EncryptionKeyRing,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
     /// Optional per-anchor leadership permit. `None` runs the legacy single-sequencer mode.
@@ -197,7 +198,7 @@ impl ZoneEngine {
         l1_block_tracker: L1BlockTracker,
         last_header: SealedHeader<TempoHeader>,
         fee_recipient: Address,
-        sequencer_key: k256::SecretKey,
+        encryption_keys: EncryptionKeyRing,
         portal_address: Address,
     ) -> Self {
         Self {
@@ -208,7 +209,7 @@ impl ZoneEngine {
             l1_block_tracker,
             last_header,
             fee_recipient,
-            sequencer_key,
+            encryption_keys,
             portal_address,
             production_permit: None,
         }
@@ -315,7 +316,7 @@ impl ZoneEngine {
     /// against the finalized L1 anchor.
     async fn prepare_l1_block(&self, l1_block: L1BlockDeposits) -> eyre::Result<PreparedL1Block> {
         l1_block
-            .prepare(&self.sequencer_key, self.portal_address)
+            .prepare(&self.encryption_keys, self.portal_address)
             .await
     }
 
@@ -587,7 +588,7 @@ mod tests {
 
         let recovery_schedule = LeadershipSchedule::seeded(LeadershipState::new(7, me, 0));
         recovery_schedule
-            .prepare_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
+            .install_forced_recovery(8, other.clone(), B256::repeat_byte(0x11), 51)
             .unwrap();
         recovery_schedule
             .publish(LeadershipState::new(8, other.clone(), 60))

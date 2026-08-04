@@ -1484,7 +1484,7 @@ mod tests {
         let incoming = PrivateKey::from_seed(2).public_key();
         let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, outgoing.clone(), 0));
         schedule
-            .prepare_forced_recovery(8, incoming.clone(), B256::repeat_byte(0x11), 51)
+            .install_forced_recovery(8, incoming.clone(), B256::repeat_byte(0x11), 51)
             .unwrap();
         schedule
             .publish(LeadershipState::new(8, incoming.clone(), 60))

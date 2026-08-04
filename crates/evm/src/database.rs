@@ -53,14 +53,14 @@ impl<DB, L1> L1OverlayDB<DB, L1> {
         self.inner
     }
 
-    /// Returns the execution-local L1 state shared with native precompiles.
+    /// Returns the execution-local L1 state shared with L1-backed precompiles.
     pub const fn l1_state(&self) -> &L1State<L1> {
         &self.l1
     }
 
     /// Clears bookkeeping that is valid only for the current transaction attempt.
     pub(crate) fn reset_transaction_state(&mut self) {
-        self.l1.reset_anchor();
+        self.l1.reset_transaction_state();
     }
 }
 
@@ -85,18 +85,6 @@ impl<DB: Database, L1: L1StorageReader> L1OverlayDB<DB, L1> {
             .map_err(ZoneDbError::Inner)?;
         let anchor = u64::try_from(value).map_err(|_| ZoneDbError::AnchorOverflow(value))?;
         Ok(anchor)
-    }
-
-    fn l1_storage(
-        &self,
-        address: Address,
-        slot: U256,
-        anchor: u64,
-    ) -> Result<U256, ZoneDbError<DB::Error>> {
-        self.l1
-            .read_l1_storage(address, B256::from(slot), anchor)
-            .map(Into::into)
-            .map_err(ZoneDbError::L1State)
     }
 
     /// Rejects writes to the L1-mirrored TIP-403 registry.
@@ -151,7 +139,11 @@ impl<DB: Database, L1: L1StorageReader> RevmDatabase for L1OverlayDB<DB, L1> {
         }
 
         let anchor = self.anchor()?;
-        self.l1_storage(address, slot, anchor)
+        // REVM already charges this TIP-403 SLOAD; the host-side L1 fetch must not be charged again.
+        self.l1
+            .read_l1_storage_unmetered(address, B256::from(slot), anchor)
+            .map(Into::into)
+            .map_err(ZoneDbError::L1State)
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {

@@ -94,6 +94,7 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     let events = L1PortalEvents {
         deposits: vec![L1Deposit::Regular(deposit)],
         enabled_tokens: vec![enabled],
+        encryption_key_rotations: vec![],
         leader_transitions: vec![],
     };
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
@@ -145,6 +146,7 @@ async fn test_pool_validation_uses_enabled_token_anchored_policy() -> eyre::Resu
                 symbol: "ppUSD".to_string(),
                 currency: "USD".to_string(),
             }],
+            encryption_key_rotations: vec![],
         },
     );
 

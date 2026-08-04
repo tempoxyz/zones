@@ -310,41 +310,6 @@ pub struct SequencerInfoResponse {
     pub readiness: Option<SequencerReadiness>,
 }
 
-/// Optional behavior for `zone_setLeader`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetLeaderOptions {
-    /// Enable the crashed-leader recovery override.
-    #[serde(default)]
-    pub force: bool,
-    /// Finalized portal epoch that the call is expected to replace.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expected_epoch: Option<U64>,
-    /// Exact canonical zone head from which the selected leader must recover.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub recovery_block_hash: Option<B256>,
-}
-
-/// Backward-compatible parameters for `zone_setLeader`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
-pub enum SetLeaderParams {
-    /// Existing form: `[target]`.
-    Regular((Address,)),
-    /// Extended form: `[target, options]`.
-    WithOptions((Address, SetLeaderOptions)),
-}
-
-impl SetLeaderParams {
-    /// Split the parsed parameters into their target and optional behavior.
-    pub fn into_parts(self) -> (Address, SetLeaderOptions) {
-        match self {
-            Self::Regular((target,)) => (target, SetLeaderOptions::default()),
-            Self::WithOptions((target, options)) => (target, options),
-        }
-    }
-}
-
 /// Response payload for `zone_setLeader`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -467,38 +432,4 @@ pub fn to_raw<T: serde::Serialize>(value: &T) -> Result<Box<RawValue>, JsonRpcEr
 /// Shorthand for wrapping any `Display` error into a [`JsonRpcError::internal`].
 pub fn internal(e: impl std::fmt::Display) -> JsonRpcError {
     JsonRpcError::internal(e.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use alloy_primitives::{Address, B256};
-
-    use super::SetLeaderParams;
-
-    #[test]
-    fn set_leader_params_accept_legacy_and_force_forms() {
-        let target = Address::repeat_byte(0x11);
-        let legacy: SetLeaderParams = serde_json::from_value(serde_json::json!([target])).unwrap();
-        let (parsed_target, options) = legacy.into_parts();
-        assert_eq!(parsed_target, target);
-        assert!(!options.force);
-
-        let forced: SetLeaderParams = serde_json::from_value(serde_json::json!([
-            target,
-            {
-                "force": true,
-                "expectedEpoch": "0x7",
-                "recoveryBlockHash": B256::repeat_byte(0x22),
-            }
-        ]))
-        .unwrap();
-        let (parsed_target, options) = forced.into_parts();
-        assert_eq!(parsed_target, target);
-        assert!(options.force);
-        assert_eq!(options.expected_epoch.unwrap().to::<u64>(), 7);
-        assert_eq!(
-            options.recovery_block_hash.unwrap(),
-            B256::repeat_byte(0x22)
-        );
-    }
 }

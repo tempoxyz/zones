@@ -18,7 +18,7 @@ use crate::{
         operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
@@ -73,8 +73,8 @@ use tracing::{debug, info, warn};
 use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
-    DepositQueue, L1BlockTracker, L1Subscriber, L1SubscriberConfig, LeaderTransition,
-    LeadershipSink, TempoStateExt,
+    DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
+    L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
@@ -240,8 +240,8 @@ impl ZoneNode {
             block_tracker: l1_block_tracker.clone(),
             l1_fetch_concurrency,
             retry_connection_interval,
-            retain_observations: false,
             leadership_sink: None,
+            encryption_keys: None,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -279,18 +279,33 @@ impl ZoneNode {
     pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
         let encryption_key = SecretKey::from(config.sequencer_signer.credential());
         self.withdrawal_reveal_encryptor = Some(Arc::new(SequencerWithdrawalRevealEncryptor::new(
-            encryption_key,
+            encryption_key.clone(),
             config.zone_id,
         )));
+        self = self.with_deposit_decryption_keys([encryption_key]);
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Add private keys that may be referenced by finalized encrypted deposits.
+    pub fn with_deposit_decryption_keys(
+        mut self,
+        keys: impl IntoIterator<Item = SecretKey>,
+    ) -> Self {
+        let ring = self
+            .l1_config
+            .encryption_keys
+            .get_or_insert_with(EncryptionKeyRing::default);
+        for key in keys {
+            ring.add_candidate(key);
+        }
         self
     }
 
     /// Declare that a consumer outside this builder drains [`Self::deposit_queue`].
     ///
-    /// Without a sequencer or P2P config the node assumes nothing consumes deposits and
-    /// launches a sink-less L1 observer. Callers that drive their own [`crate::ZoneEngine`]
-    /// against the shared queue — such as test harnesses — must opt back into retention.
+    /// Callers that drive their own [`crate::ZoneEngine`] against the shared queue — such as test
+    /// harnesses — must opt in so node startup knows the Zone chain can advance.
     pub fn with_external_deposit_consumer(mut self) -> Self {
         self.external_deposit_consumer = true;
         self
@@ -298,9 +313,6 @@ impl ZoneNode {
 
     /// Enable static Zone P2P networking for this node.
     pub fn with_p2p(mut self, config: P2pConfig) -> Self {
-        // Multi-sequencer members gate follower block import on independently observed L1
-        // anchors, so observations must survive until their zone block is consumed.
-        self.l1_config.retain_observations = true;
         self.p2p_config = Some(config);
         self
     }
@@ -356,6 +368,11 @@ impl ZoneNode {
     /// Returns the L1 block observation tracker.
     pub fn l1_block_tracker(&self) -> L1BlockTracker {
         self.l1_block_tracker.clone()
+    }
+
+    /// Returns the shared encrypted-deposit key ring, when configured.
+    pub fn deposit_decryption_keys(&self) -> Option<EncryptionKeyRing> {
+        self.l1_config.encryption_keys.clone()
     }
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
@@ -499,6 +516,13 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        eyre::ensure!(
+            self.sequencer_config.is_some()
+                || self.p2p_config.is_some()
+                || self.external_deposit_consumer,
+            "no Zone chain advancement mechanism configured: enable a sequencer, configure P2P, or register an external deposit consumer"
+        );
+
         let tempo_block_number = ctx.node.provider().latest()?.tempo_block_number()?;
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
@@ -510,6 +534,10 @@ where
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
+        if let Some(keys) = self.l1_config.encryption_keys.clone() {
+            self.resolve_and_seed_encryption_keys(&l1_provider, tempo_block_number, &keys)
+                .await?;
+        }
 
         // Multi-sequencer mode: bootstrap the leadership schedule from the portal
         // snapshot at the local Tempo anchor, and install the transition sink before
@@ -529,13 +557,25 @@ where
             // Seed the applied anchor from the persisted checkpoint so it targets the leader
             // of the next anchor from the very start (and not after the first post-restart block)
             schedule.record_applied_anchor(snapshot_anchor);
+            install_manifest_forced_recovery(
+                ctx.node.provider(),
+                snapshot_anchor,
+                p2p.manifest(),
+                &schedule,
+            )?;
             self.l1_config.leadership_sink = Some(Arc::new(ScheduleLeadershipSink {
                 schedule,
                 manifest: p2p.manifest().clone(),
             }));
         }
 
-        self.spawn_l1_subscriber(&ctx);
+        L1Subscriber::spawn(
+            self.l1_config.clone(),
+            ctx.node.provider().clone(),
+            self.deposit_queue.clone(),
+            ctx.node.task_executor().clone(),
+        );
+        info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
 
         let task_executor = ctx.node.task_executor().clone();
         // Start the Commonware network and the long-lived event router
@@ -632,8 +672,7 @@ where
         } else if let Some(ref config) = self.sequencer_config {
             // Legacy single-sequencer mode keeps the static engine.
             let sequencer_addr = config.sequencer_signer.address();
-            let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
-            self.spawn_zone_engine(&ctx, sequencer_addr, sequencer_key)?;
+            self.spawn_zone_engine(&ctx, sequencer_addr)?;
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
@@ -715,6 +754,8 @@ where
                 chain_spec: provider.chain_spec(),
                 deposit_queue: self.deposit_queue.clone(),
                 l1_block_tracker: self.l1_config.block_tracker.clone(),
+                // Follower-only nodes have no private keys and never construct an engine.
+                encryption_keys: self.l1_config.encryption_keys.clone().unwrap_or_default(),
                 commands,
                 attestation,
                 portal_address: self.portal_address,
@@ -793,6 +834,64 @@ impl LeadershipSink for ScheduleLeadershipSink {
         );
         Ok(())
     }
+}
+
+/// Install the manifest's temporary runtime authority before any role-dependent task starts.
+///
+/// The selected block must be the persisted canonical head. The schedule was seeded from the
+/// portal at that block's Tempo anchor immediately before this call, so its latest epoch is the
+/// portal state being overridden.
+fn install_manifest_forced_recovery<P>(
+    provider: &P,
+    snapshot_anchor: u64,
+    manifest: &ZoneManifest,
+    schedule: &LeadershipSchedule,
+) -> eyre::Result<()>
+where
+    P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
+{
+    let Some(recovery) = manifest.forced_recovery() else {
+        return Ok(());
+    };
+    let portal_epoch = schedule.latest().map(|record| record.epoch).ok_or_else(|| {
+        eyre::eyre!(
+            "forced recovery requires a portal leadership snapshot at the local Tempo checkpoint"
+        )
+    })?;
+    let zone_height = provider.best_block_number()?;
+    let zone_header = provider
+        .sealed_header(zone_height)?
+        .ok_or_else(|| eyre::eyre!("local canonical zone header {zone_height} is missing"))?;
+    eyre::ensure!(
+        zone_header.hash() == recovery.recovery_block_hash(),
+        "forced recovery block hash {} does not equal local canonical head {} at height {}",
+        recovery.recovery_block_hash(),
+        zone_header.hash(),
+        zone_height,
+    );
+
+    let recovery_start_tempo_block = snapshot_anchor
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("forced recovery Tempo anchor overflow"))?;
+    let recovery_epoch = portal_epoch
+        .checked_add(1)
+        .ok_or_else(|| eyre::eyre!("forced recovery epoch overflow"))?;
+    schedule.install_forced_recovery(
+        recovery_epoch,
+        recovery.leader().clone(),
+        recovery.recovery_block_hash(),
+        recovery_start_tempo_block,
+    )?;
+    info!(
+        target: "reth::cli",
+        leader = %recovery.leader(),
+        portal_epoch,
+        recovery_zone_height = zone_height,
+        recovery_zone_hash = %recovery.recovery_block_hash(),
+        recovery_start_tempo_block,
+        "Installed manifest forced recovery"
+    );
+    Ok(())
 }
 
 /// Seed the leadership schedule from the portal snapshot at the local Tempo anchor.
@@ -1014,31 +1113,64 @@ where
         Ok(())
     }
 
-    /// Spawn shared L1 observation.
-    ///
-    /// Sequencers, P2P replicas, and externally driven queue consumers retain finalized blocks
-    /// in the deposit queue. A node with none of those only maintains its L1-derived caches and
-    /// must not accumulate an unconsumed queue.
-    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
-        if self.sequencer_config.is_some()
-            || self.p2p_config.is_some()
-            || self.external_deposit_consumer
-        {
-            L1Subscriber::spawn(
-                self.l1_config.clone(),
-                ctx.node.provider().clone(),
-                self.deposit_queue.clone(),
-                ctx.node.task_executor().clone(),
-            );
-            info!(target: "reth::cli", "L1 subscriber started with deposit enqueueing");
-        } else {
-            L1Subscriber::spawn_observer(
-                self.l1_config.clone(),
-                ctx.node.provider().clone(),
-                ctx.node.task_executor().clone(),
-            );
-            info!(target: "reth::cli", "L1 observer started without a deposit sink");
+    /// Bind configured private keys to the Portal key history at the persisted L1 anchor.
+    async fn resolve_and_seed_encryption_keys(
+        &mut self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        block_number: u64,
+        keys: &EncryptionKeyRing,
+    ) -> eyre::Result<()> {
+        // Synthetic-L1 nodes use the zero address to mean that no Portal is configured.
+        if self.portal_address.is_zero() {
+            return Ok(());
         }
+
+        let block_id = alloy_rpc_types_eth::BlockId::number(block_number);
+        let portal_code = l1_provider
+            .get_code_at(self.portal_address)
+            .block_id(block_id)
+            .await?;
+        if portal_code.is_empty() {
+            return Ok(());
+        }
+
+        let portal = ZonePortal::new(self.portal_address, l1_provider);
+        let count = portal.encryptionKeyCount().block(block_id).call().await?;
+        let count: u64 = count
+            .try_into()
+            .map_err(|_| eyre::eyre!("Portal encryption key count does not fit in u64"))?;
+
+        for index in 0..count {
+            let key_index = U256::from(index);
+            let entry = portal
+                .encryptionKeyAt(key_index)
+                .block(block_id)
+                .call()
+                .await?;
+            let rotation = EncryptionKeyRotation {
+                x: entry.x,
+                y_parity: entry.yParity,
+                key_index,
+                activation_block: entry.activationBlock,
+            };
+            if keys.has_candidate(rotation.x, rotation.y_parity) {
+                keys.apply_rotation(&rotation)?;
+                continue;
+            }
+
+            let validity = portal
+                .isEncryptionKeyValid(key_index)
+                .block(block_id)
+                .call()
+                .await?;
+            eyre::ensure!(
+                !validity.valid,
+                "missing private decryption key for grace-valid Portal key index {key_index} at \
+                 L1 block {block_number}"
+            );
+        }
+
+        Ok(())
     }
 
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
@@ -1046,7 +1178,6 @@ where
         &self,
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
-        sequencer_key: SecretKey,
     ) -> eyre::Result<()> {
         let provider = ctx.node.provider();
         let last_header = provider
@@ -1060,7 +1191,10 @@ where
             self.l1_config.block_tracker.clone(),
             last_header,
             fee_recipient,
-            sequencer_key,
+            self.l1_config
+                .encryption_keys
+                .clone()
+                .expect("sequencer mode configures deposit decryption keys"),
             self.portal_address,
         );
         ctx.node
