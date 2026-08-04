@@ -11627,7 +11627,6 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "const-hex",
- "futures",
  "serde",
  "tokio",
  "zone-primitives",
