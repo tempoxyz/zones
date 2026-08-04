@@ -688,10 +688,15 @@ where
         reward_percentiles: Option<Vec<f64>>,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            let mut history =
-                EthFees::fee_history(&self.eth.api, block_count, newest_block, reward_percentiles)
-                    .await
-                    .map_err(internal)?;
+            // The redacted RPC never returns reward percentiles. Keep the requested
+            // width so we can preserve the response shape, but do not forward the
+            // caller's percentiles to Reth: calculating them loads private block
+            // bodies and receipts.
+            let mut history = EthFees::fee_history(&self.eth.api, block_count, newest_block, None)
+                .await
+                .map_err(internal)?;
+            synthesize_redacted_fee_history_rewards(&mut history, reward_percentiles.as_deref());
+
             // Redact gas fields (like `gas_used_ratio`) that can be used to guess tx counts
             redact_fee_history(&mut history);
             to_raw(&history)
@@ -1273,6 +1278,19 @@ fn redact_fee_history(history: &mut FeeHistory) {
     }
 }
 
+/// Preserve the `eth_feeHistory` reward matrix shape without loading private receipts.
+fn synthesize_redacted_fee_history_rewards(
+    history: &mut FeeHistory,
+    reward_percentiles: Option<&[f64]>,
+) {
+    if let Some(reward_percentiles) = reward_percentiles {
+        history.reward = Some(vec![
+            vec![0; reward_percentiles.len()];
+            history.gas_used_ratio.len()
+        ]);
+    }
+}
+
 /// Prefill missing transaction fee fields with public, deterministic values before calling reth's
 /// transaction filler, so `eth_fillTransaction` does not expose dynamic fee estimates derived from
 /// private zone activity.
@@ -1416,6 +1434,18 @@ mod tests {
         assert_eq!(history.base_fee_per_blob_gas, vec![0; 3]);
         assert_eq!(history.blob_gas_used_ratio, vec![0.0; 2]);
         assert_eq!(history.reward, Some(vec![vec![0, 0], vec![0, 0]]));
+    }
+
+    #[test]
+    fn synthesize_redacted_fee_history_rewards_preserves_requested_shape() {
+        let mut history = FeeHistory {
+            gas_used_ratio: vec![0.25, 0.75],
+            ..Default::default()
+        };
+
+        synthesize_redacted_fee_history_rewards(&mut history, Some(&[1.0, 50.0, 99.0]));
+
+        assert_eq!(history.reward, Some(vec![vec![0, 0, 0], vec![0, 0, 0]]));
     }
 
     #[test]
