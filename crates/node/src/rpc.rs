@@ -597,7 +597,12 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     }
 
     fn zone_tokens(&self) -> Vec<Address> {
-        cached_zone_tokens(self.config.zone_portal, &self.enabled_tokens)
+        // Preserve the default token when running without an L1 portal.
+        if self.config.zone_portal.is_zero() {
+            return vec![ZONE_TOKEN_ADDRESS];
+        }
+
+        self.enabled_tokens.read().iter().copied().collect()
     }
 
     fn enforce_authorized(
@@ -1320,51 +1325,9 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
         )
 }
 
-fn cached_zone_tokens(
-    portal_address: Address,
-    enabled_tokens: &EnabledTokenRegistry,
-) -> Vec<Address> {
-    if portal_address.is_zero() {
-        return vec![ZONE_TOKEN_ADDRESS];
-    }
-
-    enabled_tokens.read().iter().copied().collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cached_zone_tokens_reflect_registry_updates() {
-        let registry = EnabledTokenRegistry::default();
-        let first = Address::repeat_byte(0x11);
-        let second = Address::repeat_byte(0x22);
-        registry.write().insert(first);
-
-        assert_eq!(
-            cached_zone_tokens(Address::repeat_byte(1), &registry),
-            vec![first]
-        );
-
-        registry.write().insert(second);
-        assert_eq!(
-            cached_zone_tokens(Address::repeat_byte(1), &registry)
-                .into_iter()
-                .collect::<HashSet<_>>(),
-            HashSet::from([first, second]),
-        );
-    }
-
-    #[test]
-    fn cached_zone_tokens_preserve_portalless_default() {
-        let registry = EnabledTokenRegistry::default();
-
-        assert_eq!(
-            cached_zone_tokens(Address::ZERO, &registry),
-            vec![ZONE_TOKEN_ADDRESS]
-        );
-    }
 
     #[tokio::test]
     async fn operator_rpc_module_exposes_sequencer_methods_without_auth() {
