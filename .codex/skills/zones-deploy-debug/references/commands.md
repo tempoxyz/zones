@@ -119,7 +119,7 @@ tail -f /tmp/tempo-zone-my-zone*/logs/*/reth.log
 Useful patterns:
 
 ```bash
-rg -n "Prepared L1 block deposits|Including advanceTempo|TokenEnabled|EncryptedDepositProcessed|WithdrawalProcessed" /tmp/tempo-zone-my-zone*/logs/*/reth.log
+rg -n "Prepared L1 block deposits|Including advanceTempo|TokenEnabled|DepositProcessed|WithdrawalProcessed" /tmp/tempo-zone-my-zone*/logs/*/reth.log
 ```
 
 When `demo-swap-and-deposit` stalls at token enablement:
