@@ -4,11 +4,10 @@ pragma solidity ^0.8.13;
 import {
     BlockTransition,
     Deposit,
+    DepositPayload,
     DepositQueueTransition,
     DepositType,
     ENCRYPTION_KEY_GRACE_PERIOD,
-    EncryptedDeposit,
-    EncryptedDepositPayload,
     EncryptionKeyEntry,
     IVerifier,
     IZoneMessenger,
@@ -18,6 +17,7 @@ import {
     Role,
     TokenConfig,
     Withdrawal,
+    WithdrawalBounceBackDeposit,
     ZONE_FACTORY_ADDRESS,
     ZONE_PORTAL_IMPL_ADDRESS
 } from "../interfaces/IZone.sol";
@@ -753,26 +753,6 @@ contract ZonePortal is IZonePortal {
         return !_isAccessEnforced || role[account] == Role.Account;
     }
 
-    function _validateDepositPolicy(
-        address _token,
-        address to,
-        address tempoRefundRecipient
-    )
-        internal
-        view
-    {
-        uint64 policyId = ITIP20(_token).transferPolicyId();
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
-            revert ITIP20.PolicyForbids();
-        }
-        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-            revert ITIP20.PolicyForbids();
-        }
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, tempoRefundRecipient)) {
-            revert ITIP20.PolicyForbids();
-        }
-    }
-
     function _collectDepositFunds(
         address _token,
         uint128 amount
@@ -815,67 +795,25 @@ contract ZonePortal is IZonePortal {
         thisDeposit = ++depositCount;
     }
 
-    /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
-    /// @dev Fee is deducted from amount and paid to the admin in the same token.
-    ///      The token must be enabled and deposits must be active.
-    /// @param _token The TIP-20 token to deposit
-    /// @param to Recipient address on the zone
-    /// @param amount Total amount to deposit (fee will be deducted)
-    /// @param memo User-provided context
-    /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
+    /// @notice Alias for `depositEncrypted`.
     function deposit(
         address _token,
-        address to,
         uint128 amount,
-        bytes32 memo,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
-        // An enforced, registered gateway is independently authorized to return callback funds.
-        _requireAllowedDepositor(msg.sender);
-        _requireAllowed(tempoRefundRecipient);
-
-        _validateDepositsActive(_token);
-        _validateDepositPolicy(_token, to, tempoRefundRecipient);
-        (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
-
-        // Build deposit struct with net amount (fee already paid to the admin on Tempo)
-        Deposit memory depositData = Deposit({
-            token: _token,
-            sender: msg.sender,
-            to: to,
-            amount: netAmount,
-            tempoRefundRecipient: tempoRefundRecipient,
-            memo: memo
-        });
-
-        // Insert deposit into queue
-        newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit = _recordDeposit(
-            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
-        );
-
-        emit DepositMade(
-            newCurrentDepositQueueHash,
-            msg.sender,
-            _token,
-            to,
-            netAmount,
-            fee,
-            memo,
-            tempoRefundRecipient,
-            thisDeposit
-        );
+        return depositEncrypted(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
     }
 
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key.
     ///      The token identity is public (not encrypted) since the portal must escrow it.
     ///      Validates that keyIndex is valid (exists and not expired).
-    ///      Charges the same deposit fee as regular deposits.
+    ///      Charges the configured zone deposit fee.
     /// @param _token The TIP-20 token to deposit
     /// @param amount Amount to deposit (fee deducted from this amount)
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
@@ -885,10 +823,23 @@ contract ZonePortal is IZonePortal {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
-        external
+        public
+        returns (bytes32 newCurrentDepositQueueHash)
+    {
+        return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
+    }
+
+    function _deposit(
+        address _token,
+        uint128 amount,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted,
+        address tempoRefundRecipient
+    )
+        internal
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
@@ -934,8 +885,8 @@ contract ZonePortal is IZonePortal {
 
         (uint128 fee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
-        // Build encrypted deposit struct
-        EncryptedDeposit memory depositData = EncryptedDeposit({
+        // Build the queued deposit.
+        Deposit memory depositData = Deposit({
             token: _token,
             sender: msg.sender,
             amount: netAmount,
@@ -944,14 +895,14 @@ contract ZonePortal is IZonePortal {
             encrypted: encrypted
         });
 
-        // Insert encrypted deposit into queue
+        // Insert the deposit into the queue.
         newCurrentDepositQueueHash =
-            DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
+            DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
         uint64 thisDeposit = _recordDeposit(
             newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
         );
 
-        emit EncryptedDepositMade(
+        emit DepositMade(
             newCurrentDepositQueueHash,
             msg.sender,
             _token,
@@ -1145,13 +1096,8 @@ contract ZonePortal is IZonePortal {
     /// @param amount The amount to bounce back
     /// @param fallbackNonce The nonce resolving to the zone bounce-back recipient
     function _enqueueBounceBack(address _token, uint128 amount, uint64 fallbackNonce) internal {
-        Deposit memory depositData = Deposit({
-            token: _token,
-            sender: address(this),
-            to: address(uint160(fallbackNonce)),
-            amount: amount,
-            tempoRefundRecipient: address(0),
-            memo: bytes32(0)
+        WithdrawalBounceBackDeposit memory depositData = WithdrawalBounceBackDeposit({
+            token: _token, to: address(uint160(fallbackNonce)), amount: amount
         });
 
         bytes32 newCurrentDepositQueueHash =
@@ -1298,7 +1244,9 @@ contract ZonePortal is IZonePortal {
         if (
             nextZoneHeight <= zoneHeight || signatures.length < threshold
                 || signatures.length > _sequencers.length
-        ) return false;
+        ) {
+            return false;
+        }
 
         bytes32 structHash = keccak256(
             abi.encode(

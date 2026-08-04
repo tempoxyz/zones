@@ -24,7 +24,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip403_registry::AuthRole,
 };
 use tempo_primitives::transaction::Call;
-use tempo_zone_contracts::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
+use tempo_zone_contracts::{DepositPayload, ZONE_OUTBOX_ADDRESS, ZonePortal};
 
 const AMOUNT: u128 = 1_000_000;
 const REWARD_AMOUNT: u128 = AMOUNT / 10;
@@ -82,7 +82,7 @@ alloy_sol_types::sol! {
         ExcessReturnFee excess;
     }
 
-    struct EarnEncryptedDepositPayload {
+    struct EarnDepositPayload {
         bytes32 ephemeralPubkeyX;
         uint8 ephemeralPubkeyYParity;
         bytes ciphertext;
@@ -92,7 +92,7 @@ alloy_sol_types::sol! {
 
     struct EarnZoneReturn {
         uint256 keyIndex;
-        EarnEncryptedDepositPayload encrypted;
+        EarnDepositPayload encrypted;
         address refundRecipient;
     }
 
@@ -113,7 +113,7 @@ alloy_sol_types::sol! {
     struct LegacyEarnZoneDelivery {
         address portal;
         uint256 keyIndex;
-        EarnEncryptedDepositPayload encrypted;
+        EarnDepositPayload encrypted;
         address refundRecipient;
     }
 
@@ -313,10 +313,6 @@ impl EarnZoneFixture {
         let portal = l1.deploy_zone().await?;
         let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal).await?;
         zone.wait_for_l2_tempo_finalized(0, E2E_TIMEOUT).await?;
-
-        let encryption_key = k256::SecretKey::from(l1.dev_signer().credential());
-        l1.set_sequencer_encryption_key(portal, &encryption_key)
-            .await?;
 
         let messenger = EarnZonePortalView::new(portal, l1.provider())
             .messenger()
@@ -690,7 +686,7 @@ impl EarnZoneFixture {
         Ok(())
     }
 
-    async fn encrypted_entry(&mut self, token: Address, amount: u128) -> eyre::Result<()> {
+    async fn deposit_entry(&mut self, token: Address, amount: u128) -> eyre::Result<()> {
         let recipient = self.user.address();
         let provider = self.user.l1_provider();
         let receipt = ITIP20::new(token, provider)
@@ -707,7 +703,7 @@ impl EarnZoneFixture {
             .await?;
         let balance_before = self.zone.balance_of(token, recipient).await?;
         let receipt = ZonePortal::new(self.portal, provider)
-            .depositEncrypted(token, amount, key_index, encrypted, recipient)
+            .deposit(token, amount, key_index, encrypted, recipient)
             .send()
             .await?
             .get_receipt()
@@ -740,7 +736,7 @@ impl EarnZoneFixture {
         let action_id = keccak256(encrypted.ciphertext.as_ref());
         let zone_return = EarnZoneReturn {
             keyIndex: key_index,
-            encrypted: map_encrypted_payload(encrypted),
+            encrypted: map_deposit_payload(encrypted),
             refundRecipient: refund_recipient,
         };
         Ok(EarnCallbackData {
@@ -897,7 +893,7 @@ impl EarnZoneFixture {
         input_token: Address,
         recipient: Address,
     ) -> eyre::Result<u128> {
-        self.encrypted_entry(input_token, AMOUNT).await?;
+        self.deposit_entry(input_token, AMOUNT).await?;
         let before = self.zone.balance_of(self.earn_share, recipient).await?;
         let public_recipient_before = self.l1.balance_of(self.earn_share, recipient).await?;
         let portal_before = self.l1.balance_of(self.earn_share, self.portal).await?;
@@ -991,7 +987,7 @@ impl EarnZoneFixture {
         recipient: Address,
         data: Bytes,
     ) -> eyre::Result<()> {
-        self.encrypted_entry(input_token, AMOUNT).await?;
+        self.deposit_entry(input_token, AMOUNT).await?;
         let private_input_before = self
             .zone
             .balance_of(input_token, self.user.address())
@@ -1082,7 +1078,7 @@ impl EarnZoneFixture {
         input_token: Address,
         recipient: Address,
     ) -> eyre::Result<()> {
-        self.encrypted_entry(input_token, AMOUNT).await?;
+        self.deposit_entry(input_token, AMOUNT).await?;
         let recipient_earn_before = self.zone.balance_of(self.earn_share, recipient).await?;
         let public_refund_before = self
             .l1
@@ -1348,7 +1344,7 @@ impl EarnZoneFixture {
             Call {
                 to: TxKind::Call(self.portal),
                 value: U256::ZERO,
-                input: ZonePortal::depositEncryptedCall {
+                input: ZonePortal::depositCall {
                     token: self.earn_share,
                     amount: earn_shares_u128,
                     keyIndex: key_index,
@@ -1458,8 +1454,8 @@ async fn deploy_contract(
         .ok_or_else(|| eyre::eyre!("{contract} deployment returned no contract address"))
 }
 
-fn map_encrypted_payload(payload: EncryptedDepositPayload) -> EarnEncryptedDepositPayload {
-    EarnEncryptedDepositPayload {
+fn map_deposit_payload(payload: DepositPayload) -> EarnDepositPayload {
+    EarnDepositPayload {
         ephemeralPubkeyX: payload.ephemeralPubkeyX,
         ephemeralPubkeyYParity: payload.ephemeralPubkeyYParity,
         ciphertext: payload.ciphertext,
@@ -1472,7 +1468,7 @@ fn legacy_delivery(portal: Address, refund_recipient: Address) -> LegacyEarnZone
     LegacyEarnZoneDelivery {
         portal,
         keyIndex: U256::ZERO,
-        encrypted: EarnEncryptedDepositPayload {
+        encrypted: EarnDepositPayload {
             ephemeralPubkeyX: B256::ZERO,
             ephemeralPubkeyYParity: 0,
             ciphertext: Bytes::new(),

@@ -826,23 +826,21 @@ impl L1Subscriber {
     }
 
     fn record_portal_event_metrics(&self, portal_events: &L1PortalEvents) {
-        let mut regular = 0u64;
-        let mut encrypted = 0u64;
+        let mut withdrawal_bounce_backs = 0u64;
+        let mut deposits = 0u64;
         for deposit in &portal_events.deposits {
             match deposit {
-                L1Deposit::Regular(_) => regular += 1,
-                L1Deposit::Encrypted(_) => encrypted += 1,
+                L1Deposit::WithdrawalBounceBack(_) => withdrawal_bounce_backs += 1,
+                L1Deposit::Deposit(_) => deposits += 1,
             }
         }
-        if regular > 0 {
+        if withdrawal_bounce_backs > 0 {
             self.subscriber_metrics
-                .regular_deposit_events
-                .increment(regular);
+                .withdrawal_bounce_back_events
+                .increment(withdrawal_bounce_backs);
         }
-        if encrypted > 0 {
-            self.subscriber_metrics
-                .encrypted_deposit_events
-                .increment(encrypted);
+        if deposits > 0 {
+            self.subscriber_metrics.deposit_events.increment(deposits);
         }
         if !portal_events.enabled_tokens.is_empty() {
             self.subscriber_metrics

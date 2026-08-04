@@ -12,7 +12,7 @@ pub struct L1BlockDeposits {
 impl L1BlockDeposits {
     /// Prepare all deposits for the payload builder.
     ///
-    /// Decrypts encrypted deposits and ABI-encodes into the types the `advanceTempo` call expects.
+    /// Decrypts deposits and ABI-encodes the types the `advanceTempo` call expects.
     /// Mint-recipient policy is enforced by upstream TIP-20 after the L1 state is anchored.
     /// The resulting [`PreparedL1Block`] is ready to be passed via payload attributes to the
     /// builder.
@@ -31,8 +31,10 @@ impl L1BlockDeposits {
 
         for deposit in &self.events.deposits {
             match deposit {
-                L1Deposit::Regular(_) => queued_deposits.push(deposit.to_abi_queued_deposit()),
-                L1Deposit::Encrypted(d) => {
+                L1Deposit::WithdrawalBounceBack(_) => {
+                    queued_deposits.push(deposit.to_abi_queued_deposit())
+                }
+                L1Deposit::Deposit(d) => {
                     let queued = deposit.to_abi_queued_deposit();
                     let decryption_key = encryption_keys.key(d.key_index)?;
 
@@ -56,7 +58,7 @@ impl L1BlockDeposits {
                             recipient = %dec.to,
                             token = %d.token,
                             amount = %d.amount,
-                            "Decrypted encrypted deposit"
+                            "Decrypted deposit"
                         );
 
                         let decryption = abi::DecryptionData {
@@ -154,10 +156,10 @@ impl L1BlockDeposits {
 pub struct PreparedL1Block {
     /// The sealed L1 block header.
     pub header: SealedHeader<TempoHeader>,
-    /// ABI-encoded queued deposits (regular + encrypted).
+    /// ABI-encoded user deposits and internal withdrawal bounce-backs.
     #[serde(skip)]
     pub queued_deposits: Vec<abi::QueuedDeposit>,
-    /// Decryption data for every encrypted deposit submitted for on-chain verification, in order.
+    /// Decryption data for every user deposit submitted for on-chain verification, in order.
     #[serde(skip)]
     pub decryptions: Vec<abi::DecryptionData>,
     /// Tokens newly enabled for bridging in this block.

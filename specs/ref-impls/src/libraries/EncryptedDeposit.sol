@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {
-    DepositType,
-    EncryptedDeposit,
-    EncryptedDepositPayload,
-    EncryptionKeyEntry
-} from "../interfaces/IZone.sol";
+import { Deposit, DepositPayload, DepositType, EncryptionKeyEntry } from "../interfaces/IZone.sol";
 
 /*
 Encrypted Deposit Helpers
@@ -21,8 +16,8 @@ Encryption scheme: ECIES with secp256k1
 - Plaintext (to || memo) is encrypted with AES-256-GCM using derived key
 - Ciphertext includes ephemeral public key for sequencer to derive same shared secret
 
-Types (EncryptedDepositPayload, EncryptedDeposit, EncryptionKeyEntry) are defined in IZone.sol.
-Portal interface (depositEncrypted, key management) is in IZonePortal.
+Types (DepositPayload, Deposit, EncryptionKeyEntry) are defined in IZone.sol.
+Portal interface (deposit, key management) is in IZonePortal.
 */
 
 /*//////////////////////////////////////////////////////////////
@@ -60,16 +55,9 @@ library EncryptedDepositLib {
 
     /// @notice Compute the queue hash for an encrypted deposit
     /// @dev Matches the queue hash chain format used in DepositQueueLib:
-    ///      keccak256(abi.encode(DepositType.Encrypted, deposit, prevHash))
-    function queueHash(
-        EncryptedDeposit memory deposit,
-        bytes32 prevHash
-    )
-        internal
-        pure
-        returns (bytes32)
-    {
-        return keccak256(abi.encode(DepositType.Encrypted, deposit, prevHash));
+    ///      keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
+    function queueHash(Deposit memory deposit, bytes32 prevHash) internal pure returns (bytes32) {
+        return keccak256(abi.encode(DepositType.Deposit, deposit, prevHash));
     }
 
     /// @notice Encode plaintext for encryption
@@ -108,13 +96,13 @@ library EncryptedDepositLib {
                     UNIFIED DEPOSIT QUEUE PROCESSING
 //////////////////////////////////////////////////////////////*/
 
-/// @dev The deposit queue on Tempo contains both regular and encrypted deposits
+/// @dev The deposit queue contains user deposits and internal withdrawal bounce-backs
 ///      in a single ordered sequence. The sequencer must provide decryption data
 ///      for encrypted deposits when processing the queue on the zone.
 ///
 ///      Queue hash chain includes type discriminator:
-///      - Regular:   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
-///      - Encrypted: keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
+///      - WithdrawalBounceBack: keccak256(abi.encode(DepositType.WithdrawalBounceBack, bounceBack, prevHash))
+///      - Deposit:              keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
 ///
 ///      The zone's advanceTempo() processes deposits in order. For encrypted deposits,
 ///      the sequencer provides the ECDH shared secret and proof; the zone decrypts
