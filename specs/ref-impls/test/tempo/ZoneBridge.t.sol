@@ -810,7 +810,7 @@ contract ZoneBridgeTest is BaseTest {
         // Deposit on L1
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""), alice);
+        _deposit(l1Portal, address(l2ZoneToken), alice, 1000e6, bytes32(""), alice);
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));

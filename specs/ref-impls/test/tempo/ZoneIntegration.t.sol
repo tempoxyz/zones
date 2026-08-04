@@ -261,10 +261,13 @@ contract ZoneIntegrationTest is BaseTest {
         }
     }
 
-    function _advanceTempo(Deposit[] memory deposits) internal {
-        vm.prank(address(0));
-        l2Inbox.advanceTempo(
-            new bytes[](1), _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+    function _advanceTempo(IntegrationDepositFixture[] memory deposits) internal {
+        uint256 keyIndex = l1Portal.encryptionKeyCount() - 1;
+        EncryptionKeyEntry memory key = l1Portal.encryptionKeyAt(keyIndex);
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
+        l2TempoState.setMockStorageValue(address(l1Portal), bytes32(base + keyIndex * 2), key.x);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), bytes32(base + keyIndex * 2 + 1), bytes32(uint256(key.yParity))
         );
 
         vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
@@ -294,7 +297,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         QueuedDeposit[] memory queuedDeposits = _wrapDeposits(deposits);
         vm.prank(address(0));
-        l2Inbox.advanceTempo("", queuedDeposits, decryptions, new EnabledToken[](0));
+        l2Inbox.advanceTempo(new bytes[](1), queuedDeposits, decryptions, new EnabledToken[](0));
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
