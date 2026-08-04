@@ -105,6 +105,11 @@ where
         &mut self,
         tx: TempoTxEnv,
     ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
+        if let Err(err) = contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)
+        {
+            self.clear_l1_overlay_state();
+            return (Err(EVMError::Transaction(err)), tx);
+        }
         let (result, tx) = self.inner.validate_pool_transaction(tx);
         let result = result.map_err(map_adapter_error);
         self.clear_l1_overlay_state();
