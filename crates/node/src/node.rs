@@ -1375,7 +1375,8 @@ where
             self.l1_state_cache.clone(),
             self.enabled_tokens.clone(),
         );
-        let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
+        let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks)
+            .with_l1_fetch_concurrency(self.l1_config.l1_fetch_concurrency);
         if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
             payload_factory = payload_factory.with_withdrawal_reveal_encryptor(encryptor);
         }

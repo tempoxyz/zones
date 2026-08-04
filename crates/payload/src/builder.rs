@@ -32,6 +32,7 @@ use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, cancelled::CancelOnDrop, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_tasks::TaskExecutor;
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, PoolTransaction as _, TransactionPool,
     ValidPoolTransaction, error::InvalidPoolTransactionError,
@@ -52,7 +53,7 @@ use zone_l1::{PreparedL1Block, TempoStateExt};
 use zone_precompiles::L1StateError;
 use zone_primitives::constants::MAX_RLP_BLOCK_SIZE;
 
-use crate::{ZonePayloadAttributes, ZonePayloadTypes};
+use crate::{ZonePayloadAttributes, ZonePayloadTypes, prewarming::PrewarmingExecutionContext};
 
 /// Default empty-batch cadence: every 120 zone blocks (~60 sec at Tempo's 500 ms block time).
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
@@ -76,6 +77,7 @@ const L1_STORAGE_UNAVAILABLE_ERROR_PREFIX: &str = "Tempo L1 storage unavailable"
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
     withdrawal_batch_interval_blocks: u64,
+    l1_fetch_concurrency: usize,
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
 
@@ -84,8 +86,15 @@ impl ZonePayloadFactory {
     pub fn new(withdrawal_batch_interval_blocks: u64) -> Self {
         Self {
             withdrawal_batch_interval_blocks: withdrawal_batch_interval_blocks.max(1),
+            l1_fetch_concurrency: 1,
             withdrawal_reveal_encryptor: None,
         }
+    }
+
+    /// Configure the total L1 fetch budget used by canonical execution and prewarming.
+    pub fn with_l1_fetch_concurrency(mut self, l1_fetch_concurrency: usize) -> Self {
+        self.l1_fetch_concurrency = l1_fetch_concurrency.max(1);
+        self
     }
 
     pub fn with_withdrawal_reveal_encryptor(
@@ -134,6 +143,8 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
+            task_executor: ctx.task_executor().clone(),
+            l1_fetch_concurrency: self.l1_fetch_concurrency,
             withdrawal_batch_interval_blocks: self.withdrawal_batch_interval_blocks,
             withdrawal_reveal_encryptor: self.withdrawal_reveal_encryptor.clone(),
         })
@@ -149,6 +160,10 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: EvmConfig,
+    /// Runs the background coordinator and dedicated prewarming-pool workers.
+    task_executor: TaskExecutor,
+    /// Total L1 fetch budget; one slot is reserved for canonical execution.
+    l1_fetch_concurrency: usize,
     /// Number of zone blocks between withdrawal batch boundaries.
     withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data for batch finalization.
@@ -237,7 +252,7 @@ where
         };
         let mut builder = self
             .evm_config
-            .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
+            .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes.clone())
             .map_err(PayloadBuilderError::other)?;
         let base_fee = builder.evm().block().basefee();
         let block_number: u64 = builder
@@ -251,6 +266,21 @@ where
             warn!(%err, "failed to apply pre-execution changes");
             PayloadBuilderError::Internal(err.into())
         })?;
+
+        // Start bounded cache prewarming immediately before canonical execution. It uses isolated
+        // Zone builders and never contributes state or receipts to the canonical block; canonical
+        // `advanceTempo` retains one of the configured L1-fetch slots.
+        let prewarming = PrewarmingExecutionContext {
+            provider: self.provider.clone(),
+            evm_config: self.evm_config.clone(),
+            task_executor: self.task_executor.clone(),
+            l1_fetch_concurrency: self.l1_fetch_concurrency,
+            parent_hash: parent_header.hash(),
+            parent_header: (*parent_header).clone(),
+            next_block_env_attributes,
+            prepared: prepared.clone(),
+        }
+        .start();
 
         // Execute advanceTempo system transaction — exactly one per zone block.
         builder
@@ -266,6 +296,8 @@ where
                 );
                 err
             })?;
+        // Canonical `advanceTempo` can no longer benefit from additional reads.
+        drop(prewarming);
 
         // Execute pool transactions until either all of them fit or their packed RLP bytes reach
         // the size budget
