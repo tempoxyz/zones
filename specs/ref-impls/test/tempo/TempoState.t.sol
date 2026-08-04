@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import { ITempoState, ZONE_INBOX } from "../../src/interfaces/IZone.sol";
 import { TempoState } from "../../src/tempo/TempoState.sol";
 import { Test, stdJson } from "forge-std/Test.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 contract TempoStateRlpHarness is TempoState {
 
@@ -155,12 +156,21 @@ contract TempoStateTest is Test {
         headers[0] = header1;
         headers[1] = header2;
 
+        vm.recordLogs();
         vm.prank(zoneInbox);
         tempoState.finalizeTempo(headers);
 
         bytes32 block102Hash = keccak256(header2);
         assertEq(tempoState.tempoBlockHash(), block102Hash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 2);
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 1, "multi-header finalization must emit one event");
+        assertEq(logs[0].emitter, address(tempoState));
+        assertEq(logs[0].topics[0], keccak256("TempoBlockFinalized(bytes32,uint64,bytes32)"));
+        assertEq(logs[0].topics[1], block102Hash);
+        assertEq(logs[0].topics[2], bytes32(uint256(GENESIS_BLOCK_NUMBER + 2)));
+        assertEq(logs[0].data, abi.encode(keccak256("stateRoot2")));
     }
 
     function test_finalizeTempo_revertsOnEmptyHeaders() public {
