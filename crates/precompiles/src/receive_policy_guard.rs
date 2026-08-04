@@ -17,17 +17,13 @@ use tempo_zone_contracts::Unauthorized;
 /// Stakeholder-only admission for receipt balance lookups.
 pub(crate) struct ReceivePolicyGuardRules;
 
-/// Fixed gas charged for claims that release blocked funds through an internal TIP-20 transfer.
-///
-/// The fixed charge hides destination balance-slot initialization from gas estimates, matching
-/// the envelope used by direct Zone TIP-20 transfers.
-pub(crate) const RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS: u64 = TIP20_FIXED_TRANSFER_GAS;
-
 impl CallRules for ReceivePolicyGuardRules {
+    // Fixed gas hides destination balance-slot initialization from claim gas estimates, matching
+    // the envelope used by direct Zone TIP-20 transfers.
     fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
         selector
             .is_some_and(|selector| selector == IReceivePolicyGuard::claimCall::SELECTOR)
-            .then_some(RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS)
+            .then_some(TIP20_FIXED_TRANSFER_GAS)
     }
 
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
@@ -197,7 +193,7 @@ mod tests {
 
         assert_eq!(
             rules.fixed_gas(Some(IReceivePolicyGuard::claimCall::SELECTOR)),
-            Some(RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS)
+            Some(TIP20_FIXED_TRANSFER_GAS)
         );
         assert_eq!(
             rules.fixed_gas(Some(IReceivePolicyGuard::balanceOfCall::SELECTOR)),
@@ -328,10 +324,9 @@ mod tests {
         }
         .abi_encode()
         .into();
-        let claimed =
-            harness.call_with_gas(RECEIVER, claim, RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS, false)?;
+        let claimed = harness.call_with_gas(RECEIVER, claim, TIP20_FIXED_TRANSFER_GAS, false)?;
         assert!(claimed.is_success());
-        assert_eq!(claimed.gas_used, RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS);
+        assert_eq!(claimed.gas_used, TIP20_FIXED_TRANSFER_GAS);
 
         let balance = harness.balance_of(RECEIVER)?;
         assert_eq!(decode_balance(&balance)?, U256::ZERO);
@@ -350,10 +345,9 @@ mod tests {
         .abi_encode()
         .into();
 
-        let result =
-            harness.call_with_gas(RECEIVER, claim, RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS, false)?;
+        let result = harness.call_with_gas(RECEIVER, claim, TIP20_FIXED_TRANSFER_GAS, false)?;
         assert!(result.is_revert());
-        assert_eq!(result.gas_used, RECEIVE_POLICY_GUARD_FIXED_CLAIM_GAS);
+        assert_eq!(result.gas_used, TIP20_FIXED_TRANSFER_GAS);
         Ok(())
     }
 }
