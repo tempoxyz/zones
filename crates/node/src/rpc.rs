@@ -606,6 +606,27 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     }
 }
 
+impl<Api> ZoneRpc<Api>
+where
+    Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
+{
+    fn block_by_id(&self, id: BlockId) -> BoxFut<'_> {
+        Box::pin(async move {
+            let block = EthBlocks::rpc_block(&self.eth.api, id, false)
+                .await
+                .map_err(internal)?;
+
+            let Some(mut block) = block else {
+                return Ok(raw_null());
+            };
+
+            redact_block(&mut block);
+
+            to_raw(&block)
+        })
+    }
+}
+
 impl<Api> zone_rpc::ZoneRpcApi for ZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
@@ -737,38 +758,14 @@ where
     fn block_by_number(
         &self,
         number: BlockNumberOrTag,
-        full: bool,
+        _full: bool,
         _auth: AuthContext,
     ) -> BoxFut<'_> {
-        Box::pin(async move {
-            let block = EthBlocks::rpc_block(&self.eth.api, number.into(), full)
-                .await
-                .map_err(internal)?;
-
-            let Some(mut block) = block else {
-                return Ok(raw_null());
-            };
-
-            redact_block(&mut block);
-
-            to_raw(&block)
-        })
+        self.block_by_id(number.into())
     }
 
-    fn block_by_hash(&self, hash: B256, full: bool, _auth: AuthContext) -> BoxFut<'_> {
-        Box::pin(async move {
-            let block = EthBlocks::rpc_block(&self.eth.api, hash.into(), full)
-                .await
-                .map_err(internal)?;
-
-            let Some(mut block) = block else {
-                return Ok(raw_null());
-            };
-
-            redact_block(&mut block);
-
-            to_raw(&block)
-        })
+    fn block_by_hash(&self, hash: B256, _full: bool, _auth: AuthContext) -> BoxFut<'_> {
+        self.block_by_id(hash.into())
     }
 
     fn transaction_by_hash(&self, hash: B256, auth: AuthContext) -> BoxFut<'_> {
