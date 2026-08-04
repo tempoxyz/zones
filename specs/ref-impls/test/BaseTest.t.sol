@@ -275,7 +275,8 @@ contract BaseTest is Test {
         internal
         returns (bytes32)
     {
-        if (portal.encryptionKeyCount() == 0) {
+        uint256 keyCount = uint256(vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT));
+        if (keyCount == 0) {
             bytes32 entriesBase = keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT)));
             vm.store(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT, bytes32(uint256(1)));
             vm.store(
@@ -288,13 +289,10 @@ contract BaseTest is Test {
                 bytes32(uint256(entriesBase) + 1),
                 bytes32((uint256(uint64(block.number)) << 8) | uint256(0x02))
             );
+            keyCount = 1;
         }
         return portal.deposit(
-            token,
-            amount,
-            portal.encryptionKeyCount() - 1,
-            _encryptedDepositPayload(to, memo),
-            tempoRefundRecipient
+            token, amount, keyCount - 1, _encryptedDepositPayload(to, memo), tempoRefundRecipient
         );
     }
 

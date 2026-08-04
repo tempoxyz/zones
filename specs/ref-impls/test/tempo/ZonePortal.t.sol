@@ -1653,7 +1653,7 @@ contract ZonePortalTest is BaseTest {
         assertTrue(hash1 != hash3);
     }
 
-    function test_deposit_revertsWhenCompoundPolicyBlocksMintRecipient() public {
+    function test_deposit_doesNotInspectEncryptedMintRecipientPolicy() public {
         uint128 depositAmount = 1000e6;
 
         address[] memory senderAccounts = new address[](2);
@@ -1684,9 +1684,16 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        vm.expectRevert(ITIP20.PolicyForbids.selector);
-        _deposit(portal, address(pathUSD), bob, depositAmount, bytes32("memo"), bob);
+        bytes32 depositHash =
+            _deposit(portal, address(pathUSD), bob, depositAmount, bytes32("memo"), bob);
         vm.stopPrank();
+
+        // The mint recipient is encrypted, so its mint policy is enforced only after decryption
+        // on the zone. The L1 portal can validate the public refund recipient but must enqueue the
+        // opaque recipient payload.
+        assertEq(portal.depositCount(), 1);
+        assertEq(portal.currentDepositQueueHash(), depositHash);
+        assertEq(pathUSD.balanceOf(address(portal)), depositAmount);
     }
 
     function test_deposit_revertsWhenBouncebackRecipientBlocked() public {
