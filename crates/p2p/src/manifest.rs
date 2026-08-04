@@ -63,10 +63,7 @@ pub(crate) struct Authority<'a> {
 
 impl Authority<'_> {
     pub(crate) fn is_retained_leader(&self, peer: &PublicKey) -> bool {
-        self.state
-            .transitions
-            .values()
-            .any(|record| &record.leader == peer)
+        self.state.is_retained_leader(peer)
     }
 
     pub(crate) fn next_anchor_record(&self) -> Option<LeadershipState> {
@@ -178,6 +175,16 @@ struct LeadershipScheduleState {
 }
 
 impl LeadershipScheduleState {
+    fn is_retained_leader(&self, peer: &PublicKey) -> bool {
+        self.transitions
+            .values()
+            .any(|record| &record.leader == peer)
+            || self
+                .forced_recovery
+                .as_ref()
+                .is_some_and(|recovery| &recovery.leader == peer)
+    }
+
     fn leader_for(&self, tempo_anchor: u64) -> Option<LeadershipState> {
         let scheduled = self
             .transitions
@@ -570,14 +577,7 @@ impl LeadershipSchedule {
     /// observed. The exact per-anchor fence lives in the import path.
     pub fn is_scheduled_leader(&self, ed25519_public_key: &PublicKey) -> bool {
         let state = self.inner.read().expect("poisoned");
-        state
-            .transitions
-            .values()
-            .any(|record| &record.leader == ed25519_public_key)
-            || state
-                .forced_recovery
-                .as_ref()
-                .is_some_and(|recovery| &recovery.leader == ed25519_public_key)
+        state.is_retained_leader(ed25519_public_key)
     }
 }
 

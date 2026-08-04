@@ -93,10 +93,6 @@ impl<'a> RoutingPolicy<'a> {
         self.membership.other_quorum_peers(self.local)
     }
 
-    pub(crate) fn may_accept_block(&self, peer: &PublicKey) -> bool {
-        self.is_remote_retained_leader(peer)
-    }
-
     pub(crate) fn may_broadcast_settlement_proposal(&self) -> bool {
         self.may_broadcast_block()
     }
@@ -177,6 +173,7 @@ impl<'a> RoutingPolicy<'a> {
 mod tests {
     use std::collections::BTreeSet;
 
+    use alloy_primitives::B256;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{RoutingMembership, RoutingPolicy};
@@ -234,7 +231,6 @@ mod tests {
             let leader_key = key(1);
             let leader = RoutingPolicy::new(&leader_key, &membership, authority);
             assert!(leader.may_broadcast_block());
-            assert!(leader.may_accept_block(&key(2)));
             assert_eq!(
                 leader
                     .block_recipients()
@@ -274,6 +270,47 @@ mod tests {
             assert!(!policy.may_broadcast_block());
             assert_eq!(policy.transaction_forwarding_status(), None);
             assert_eq!(policy.preferred_backfill_leader(), None);
+        });
+    }
+
+    #[test]
+    fn forced_recovery_leader_is_retained_for_block_broadcast_and_settlement_routing() {
+        let manifest = manifest();
+        let membership = RoutingMembership::from_manifest(&manifest);
+        let outgoing = key(1);
+        let recovery = key(2);
+        let portal_successor = key(3);
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(1, outgoing, 0));
+        schedule
+            .install_forced_recovery(2, recovery.clone(), B256::repeat_byte(0x11), 51)
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(2, portal_successor.clone(), 60))
+            .unwrap();
+
+        schedule.with_authority(|authority| {
+            let recovery_policy = RoutingPolicy::new(&recovery, &membership, authority);
+            assert!(recovery_policy.may_broadcast_block());
+            assert!(recovery_policy.may_broadcast_settlement_proposal());
+            assert!(
+                recovery_policy.may_accept_settlement_signature(&portal_successor),
+                "the recovery leader must accept quorum signatures"
+            );
+        });
+        schedule.with_authority(|authority| {
+            let follower = RoutingPolicy::new(&portal_successor, &membership, authority);
+            assert!(follower.may_accept_settlement_proposal(&recovery));
+            assert!(follower.may_send_settlement_signature(&recovery));
+        });
+
+        schedule.record_applied_anchor(60);
+        schedule.with_authority(|authority| {
+            let completed_recovery = RoutingPolicy::new(&recovery, &membership, authority);
+            assert!(!completed_recovery.may_broadcast_block());
+        });
+        schedule.with_authority(|authority| {
+            let follower = RoutingPolicy::new(&portal_successor, &membership, authority);
+            assert!(!follower.may_send_settlement_signature(&recovery));
         });
     }
 }
