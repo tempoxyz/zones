@@ -3,6 +3,7 @@ name: Storage Layout
 on:
   pull_request:
     paths:
+      - "specs/ref-impls/src/**/*.sol"
       - "specs/ref-impls/src/tempo/ZonePortal.sol"
       - "specs/ref-impls/src/interfaces/IZone.sol"
       - "specs/ref-impls/foundry.toml"
@@ -37,20 +38,31 @@ jobs:
             # can change when an imported interface changes.
             jq -S '
               def normalize_type_refs:
-                gsub("t_(struct|enum)\\(([^)]*)\\)[0-9]+(_storage)?"; "t_\\1(\\2)\\3");
-              walk(
-                if type == "object" then
-                  del(.astId)
-                  | with_entries(
-                      .key |= normalize_type_refs
-                      | if (.value | type) == "string"
-                        then .value |= normalize_type_refs
-                        else .
-                        end
-                    )
-                else .
-                end
-              )
+                gsub(
+                  "t_(?<kind>struct|enum)\\((?<name>[^)]*)\\)[0-9]+";
+                  "t_\(.kind)(\(.name))"
+                );
+              def assert_no_type_collisions:
+                . as $layout
+                | ($layout.types | keys | map(normalize_type_refs)) as $keys
+                | if ($keys | unique | length) == ($keys | length)
+                  then $layout
+                  else error("storage-layout normalization collapsed type definitions")
+                  end;
+              assert_no_type_collisions
+              | walk(
+                  if type == "object" then
+                    del(.astId)
+                    | with_entries(
+                        .key |= normalize_type_refs
+                        | if (.value | type) == "string"
+                          then .value |= normalize_type_refs
+                          else .
+                          end
+                      )
+                  else .
+                  end
+                )
             '
           }
 
