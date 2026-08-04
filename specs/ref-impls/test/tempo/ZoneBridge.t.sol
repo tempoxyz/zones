@@ -839,7 +839,8 @@ contract ZoneBridgeTest is BaseTest {
             sharedSecretYParity: 0x02,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
-        _setupEncryptionKeyMockOnZone(deposit.keyIndex, bytes32(0), 0x02);
+        EncryptionKeyEntry memory key = l1Portal.encryptionKeyAt(deposit.keyIndex);
+        _setupEncryptionKeyMockOnZone(deposit.keyIndex, key.x, key.yParity);
         _setupPrecompileMocksSuccess(d.to, d.memo);
 
         // A final-root queue mismatch reverts the complete system transaction.
