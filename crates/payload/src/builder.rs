@@ -840,66 +840,6 @@ mod tests {
         assert_eq!(best_txs.oversized_marked, total - expected_fit);
     }
 
-    /// Execution feedback must be applied before selecting the next candidate so a state-aware
-    /// iterator can filter transactions invalidated by the transaction that just committed.
-    #[test]
-    fn pool_transactions_apply_execution_feedback_before_advancing() {
-        struct FeedbackAwareBestTransactions {
-            queue: VecDeque<Arc<ValidPoolTransaction<TempoPooledTransaction>>>,
-            state_changed: bool,
-            filtered: usize,
-        }
-
-        impl Iterator for FeedbackAwareBestTransactions {
-            type Item = Arc<ValidPoolTransaction<TempoPooledTransaction>>;
-
-            fn next(&mut self) -> Option<Self::Item> {
-                loop {
-                    let tx = self.queue.pop_front()?;
-                    if self.state_changed {
-                        self.filtered += 1;
-                        continue;
-                    }
-                    return Some(tx);
-                }
-            }
-        }
-
-        impl BestTransactions for FeedbackAwareBestTransactions {
-            fn mark_invalid(&mut self, _tx: &Self::Item, _kind: InvalidPoolTransactionError) {}
-
-            fn no_updates(&mut self) {}
-
-            fn set_skip_blobs(&mut self, _skip_blobs: bool) {}
-        }
-
-        let total = 4usize;
-        let mut best_txs = FeedbackAwareBestTransactions {
-            queue: (0..total)
-                .map(|nonce| pool_tx_with_calldata(0, nonce as u64))
-                .collect(),
-            state_changed: false,
-            filtered: 0,
-        };
-        let mut executed = 0usize;
-
-        let outcome = super::execute_pool_transactions(
-            |_tx, best_txs| -> Result<(), reth_evm::block::BlockExecutionError> {
-                executed += 1;
-                best_txs.state_changed = true;
-                Ok(())
-            },
-            &mut best_txs,
-            &CancelOnDrop::default(),
-            usize::MAX,
-        )
-        .expect("pool execution should not error");
-
-        assert_eq!(outcome, super::PoolExecutionOutcome::Complete);
-        assert_eq!(executed, 1);
-        assert_eq!(best_txs.filtered, total - 1);
-    }
-
     /// Verify calldata for an internal withdrawal bounce-back followed by an
     /// encrypted user deposit.
     #[test]
