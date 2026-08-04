@@ -915,7 +915,8 @@ where
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
             zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
-            zone_rpc::filter::scope_filter_for_caller(&mut filter, &auth.caller)?;
+            let scope = zone_rpc::filter::scope_filter_for_caller(&mut filter, &auth.caller)?;
+            zone_rpc::filter::validate_receipt_query(&filter, scope)?;
             let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
                 .await
                 .map_err(internal)?;
@@ -928,7 +929,8 @@ where
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
             zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
-            zone_rpc::filter::scope_filter_for_caller(&mut filter, &auth.caller)?;
+            let scope = zone_rpc::filter::scope_filter_for_caller(&mut filter, &auth.caller)?;
+            zone_rpc::filter::validate_live_filter(scope)?;
             let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
                 .await
                 .map_err(internal)?;
@@ -1061,7 +1063,8 @@ where
 
             let zone_tokens = self.zone_tokens().await?;
             zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
-            zone_rpc::filter::scope_filter_for_caller(&mut filter, &caller)?;
+            let scope = zone_rpc::filter::scope_filter_for_caller(&mut filter, &caller)?;
+            zone_rpc::filter::validate_live_filter(scope)?;
 
             let stream = provider
                 .canonical_state_stream()

@@ -7,7 +7,7 @@
 use alloy_consensus::TxReceipt;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, b256};
-use alloy_rpc_types_eth::{Filter, FilterSet, Log};
+use alloy_rpc_types_eth::{Filter, FilterBlockOption, FilterSet, Log};
 use alloy_sol_types::SolEvent;
 use tempo_alloy::rpc::TempoTransactionReceipt;
 use tempo_contracts::precompiles::{IReceivePolicyGuard, RECEIVE_POLICY_GUARD_ADDRESS};
@@ -47,6 +47,13 @@ pub const WHITELISTED_TOPICS: [B256; 6] = [
     TRANSFER_BLOCKED_TOPIC,
 ];
 
+const TOPIC1_CALLER_TOPICS: [B256; 5] = [
+    TRANSFER_TOPIC,
+    APPROVAL_TOPIC,
+    TRANSFER_WITH_MEMO_TOPIC,
+    MINT_TOPIC,
+    BURN_TOPIC,
+];
 const TOPIC2_CALLER_TOPICS: [B256; 4] = [
     TRANSFER_TOPIC,
     APPROVAL_TOPIC,
@@ -55,6 +62,19 @@ const TOPIC2_CALLER_TOPICS: [B256; 4] = [
 ];
 const CALLER_SCOPED_FILTER_ERROR: &str =
     "private log filter must include authenticated caller in topic1 or topic2";
+const RECEIPT_QUERY_RANGE_ERROR: &str = "private TransferBlocked discovery requires blockHash, matching numeric block bounds, or no block bounds";
+const RECEIPT_LIVE_FILTER_ERROR: &str =
+    "private TransferBlocked discovery without indexed receiver is only supported by eth_getLogs";
+
+/// Describes whether the backend filter is already tied to an indexed caller topic or still needs
+/// receipt decoding to authorize each result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallerFilterScope {
+    /// The backend query is correlated to an indexed caller topic.
+    Indexed,
+    /// The originator/recovery authority can only be identified after decoding each receipt.
+    ReceiptPostFilter,
+}
 
 /// Returns `true` if `caller` appears in an eligible indexed-topic position
 /// for the log's event type.
@@ -236,16 +256,27 @@ pub fn scope_filter(filter: &mut Filter) {
 /// The authenticated caller must normally appear in an eligible indexed topic before backend log
 /// retrieval. An explicit `TransferBlocked` filter is also allowed because the originator and
 /// recovery authority can only be authorized by decoding the returned receipt.
-pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<(), JsonRpcError> {
+pub fn scope_filter_for_caller(
+    filter: &mut Filter,
+    caller: &Address,
+) -> Result<CallerFilterScope, JsonRpcError> {
     scope_filter(filter);
     if filter.topics[0].len() == 1 && filter.topics[0].contains(&B256::ZERO) {
-        return Ok(());
+        return Ok(CallerFilterScope::Indexed);
     }
 
     let caller_word = B256::left_padding_from(caller.as_slice());
     if filter.topics[1].contains(&caller_word) {
-        filter.topics[1] = FilterSet::from(caller_word);
-        return Ok(());
+        let topic0 = filter.topics[0]
+            .iter()
+            .copied()
+            .filter(|topic| TOPIC1_CALLER_TOPICS.contains(topic))
+            .collect::<Vec<_>>();
+        if !topic0.is_empty() {
+            filter.topics[0] = FilterSet::from(topic0);
+            filter.topics[1] = FilterSet::from(caller_word);
+            return Ok(CallerFilterScope::Indexed);
+        }
     }
 
     if filter.topics[2].contains(&caller_word) {
@@ -257,7 +288,7 @@ pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<
         if !topic0.is_empty() {
             filter.topics[0] = FilterSet::from(topic0);
             filter.topics[2] = FilterSet::from(caller_word);
-            return Ok(());
+            return Ok(CallerFilterScope::Indexed);
         }
     }
 
@@ -265,10 +296,63 @@ pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<
     // Permit an explicitly TransferBlocked-only query and enforce stakeholder access after the
     // backend returns the logs by decoding each receipt in `is_log_visible`.
     if filter.topics[0].len() == 1 && filter.topics[0].contains(&TRANSFER_BLOCKED_TOPIC) {
-        return Ok(());
+        if filter.address.contains(&RECEIVE_POLICY_GUARD_ADDRESS) {
+            filter.address = FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS);
+            return Ok(CallerFilterScope::ReceiptPostFilter);
+        }
+
+        // An explicitly different allowed address cannot emit the canonical guard event.
+        filter.topics[0] = FilterSet::from(B256::ZERO);
+        return Ok(CallerFilterScope::Indexed);
     }
 
     Err(JsonRpcError::invalid_params(CALLER_SCOPED_FILTER_ERROR))
+}
+
+/// Bounds one-shot queries that require receipt post-filtering to a single block.
+///
+/// Reth applies result caps before the zone's stakeholder authorization. Keeping the raw scan to
+/// one block prevents unrelated historical activity from exhausting the cap or making one request
+/// traverse the global `TransferBlocked` history.
+pub fn validate_receipt_query(
+    filter: &Filter,
+    scope: CallerFilterScope,
+) -> Result<(), JsonRpcError> {
+    if scope == CallerFilterScope::Indexed {
+        return Ok(());
+    }
+
+    let single_block = match filter.block_option {
+        FilterBlockOption::AtBlockHash(_) => true,
+        FilterBlockOption::Range {
+            from_block: None,
+            to_block: None,
+        } => true,
+        FilterBlockOption::Range {
+            from_block: Some(from),
+            to_block: Some(to),
+        } => from
+            .as_number()
+            .zip(to.as_number())
+            .is_some_and(|(from, to)| from == to),
+        FilterBlockOption::Range { .. } => false,
+    };
+
+    if single_block {
+        Ok(())
+    } else {
+        Err(JsonRpcError::invalid_params(RECEIPT_QUERY_RANGE_ERROR))
+    }
+}
+
+/// Rejects installed filters and subscriptions that would scan global guard events before receipt
+/// authorization. Indexed receiver filters remain supported on every log endpoint.
+pub fn validate_live_filter(scope: CallerFilterScope) -> Result<(), JsonRpcError> {
+    if scope == CallerFilterScope::Indexed {
+        Ok(())
+    } else {
+        Err(JsonRpcError::invalid_params(RECEIPT_LIVE_FILTER_ERROR))
+    }
 }
 
 #[cfg(test)]
@@ -276,7 +360,7 @@ mod tests {
     use super::*;
     use alloy_consensus::ReceiptWithBloom;
     use alloy_primitives::{Address, Bytes, LogData, TxHash, U256, address, keccak256};
-    use alloy_rpc_types_eth::TransactionReceipt;
+    use alloy_rpc_types_eth::{BlockNumberOrTag, TransactionReceipt};
     use alloy_sol_types::SolValue;
     use tempo_alloy::rpc::TempoTransactionReceipt;
     use tempo_primitives::{TempoReceipt, TempoTxType};
@@ -923,9 +1007,28 @@ mod tests {
 
         scope_filter_for_caller(&mut filter, &caller).unwrap();
 
-        assert_eq!(filter.topics[0].len(), WHITELISTED_TOPICS.len());
+        assert_eq!(
+            filter.topics[0],
+            FilterSet::from(TOPIC1_CALLER_TOPICS.to_vec())
+        );
         assert_eq!(filter.topics[1], FilterSet::from(caller_topic));
         assert_eq!(filter.topics[2], FilterSet::from(other_topic));
+    }
+
+    #[test]
+    fn transfer_blocked_topic1_is_not_treated_as_caller_indexed() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut filter = Filter {
+            address: FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS),
+            ..Default::default()
+        };
+        filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+        filter.topics[1] = FilterSet::from(caller_word(&caller));
+
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        assert_eq!(scope, CallerFilterScope::ReceiptPostFilter);
+        validate_live_filter(scope).unwrap_err();
     }
 
     #[test]
@@ -953,8 +1056,9 @@ mod tests {
         filter.topics[0] = FilterSet::from(vec![TRANSFER_TOPIC, TRANSFER_BLOCKED_TOPIC]);
         filter.topics[2] = FilterSet::from(caller_word(&caller));
 
-        scope_filter_for_caller(&mut filter, &caller).unwrap();
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
 
+        assert_eq!(scope, CallerFilterScope::Indexed);
         assert!(filter.topics[0].contains(&TRANSFER_TOPIC));
         assert!(filter.topics[0].contains(&TRANSFER_BLOCKED_TOPIC));
         assert_eq!(filter.topics[2], FilterSet::from(caller_word(&caller)));
@@ -965,10 +1069,16 @@ mod tests {
         let caller = address!("0x0000000000000000000000000000000000000001");
         let mut filter = Filter::default();
         filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+        scope_filter_addresses(&mut filter, &[]).unwrap();
 
-        scope_filter_for_caller(&mut filter, &caller).unwrap();
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
 
+        assert_eq!(scope, CallerFilterScope::ReceiptPostFilter);
         assert_eq!(filter.topics[0], FilterSet::from(TRANSFER_BLOCKED_TOPIC));
+        assert_eq!(
+            filter.address,
+            FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS)
+        );
     }
 
     #[test]
@@ -986,10 +1096,153 @@ mod tests {
         filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
 
         scope_filter_addresses(&mut filter, &[]).unwrap();
-        scope_filter_for_caller(&mut filter, &originator).unwrap();
+        let scope = scope_filter_for_caller(&mut filter, &originator).unwrap();
+        validate_receipt_query(&filter, scope).unwrap();
 
         assert_eq!(filter_logs(vec![log.clone()], &originator).len(), 1);
         assert!(filter_logs(vec![log], &outsider).is_empty());
+    }
+
+    #[test]
+    fn receipt_post_filter_rejects_multi_block_query() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut filter = Filter::default().select(10u64..=11u64);
+        filter.address = FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS);
+        filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+        scope_filter_addresses(&mut filter, &[]).unwrap();
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        let err = validate_receipt_query(&filter, scope).unwrap_err();
+
+        assert_eq!(scope, CallerFilterScope::ReceiptPostFilter);
+        assert_eq!(err.code, JsonRpcError::invalid_params("").code);
+        assert_eq!(err.message, RECEIPT_QUERY_RANGE_ERROR);
+    }
+
+    #[test]
+    fn receipt_post_filter_rejects_open_ended_query() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        for block_option in [
+            FilterBlockOption::default().with_from_block(10u64.into()),
+            FilterBlockOption::default().with_to_block(10u64.into()),
+        ] {
+            let mut filter = Filter {
+                block_option,
+                ..Default::default()
+            };
+            filter.address = FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS);
+            filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+            scope_filter_addresses(&mut filter, &[]).unwrap();
+            let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+            let err = validate_receipt_query(&filter, scope).unwrap_err();
+
+            assert_eq!(scope, CallerFilterScope::ReceiptPostFilter);
+            assert_eq!(err.message, RECEIPT_QUERY_RANGE_ERROR);
+        }
+    }
+
+    #[test]
+    fn receipt_post_filter_allows_exact_block_queries() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        for block_option in [
+            FilterBlockOption::from(10u64),
+            FilterBlockOption::AtBlockHash(B256::with_last_byte(1)),
+            FilterBlockOption::default(),
+        ] {
+            let mut filter = Filter {
+                block_option,
+                ..Default::default()
+            };
+            filter.address = FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS);
+            filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+            scope_filter_addresses(&mut filter, &[]).unwrap();
+            let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+            validate_receipt_query(&filter, scope).unwrap();
+            assert_eq!(scope, CallerFilterScope::ReceiptPostFilter);
+        }
+    }
+
+    #[test]
+    fn receipt_post_filter_rejects_dynamic_block_tags() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        for tag in [
+            BlockNumberOrTag::Earliest,
+            BlockNumberOrTag::Pending,
+            BlockNumberOrTag::Latest,
+            BlockNumberOrTag::Safe,
+            BlockNumberOrTag::Finalized,
+        ] {
+            let mut filter = Filter {
+                block_option: FilterBlockOption::Range {
+                    from_block: Some(tag),
+                    to_block: Some(tag),
+                },
+                address: FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS),
+                ..Default::default()
+            };
+            filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+            scope_filter_addresses(&mut filter, &[]).unwrap();
+            let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+            let err = validate_receipt_query(&filter, scope).unwrap_err();
+
+            assert_eq!(scope, CallerFilterScope::ReceiptPostFilter);
+            assert_eq!(err.message, RECEIPT_QUERY_RANGE_ERROR);
+        }
+    }
+
+    #[test]
+    fn receipt_post_filter_rejected_for_installed_and_live_filters() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut filter = Filter {
+            address: FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS),
+            ..Default::default()
+        };
+        filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+        scope_filter_addresses(&mut filter, &[]).unwrap();
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        let err = validate_live_filter(scope).unwrap_err();
+
+        assert_eq!(err.code, JsonRpcError::invalid_params("").code);
+        assert_eq!(err.message, RECEIPT_LIVE_FILTER_ERROR);
+    }
+
+    #[test]
+    fn indexed_receiver_filter_remains_available_for_broad_and_live_queries() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut filter = Filter::default().select(0u64..=1_000_000u64);
+        filter.address = FilterSet::from(RECEIVE_POLICY_GUARD_ADDRESS);
+        filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+        filter.topics[2] = FilterSet::from(caller_word(&caller));
+        scope_filter_addresses(&mut filter, &[]).unwrap();
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        assert_eq!(scope, CallerFilterScope::Indexed);
+        validate_receipt_query(&filter, scope).unwrap();
+        validate_live_filter(scope).unwrap();
+    }
+
+    #[test]
+    fn transfer_blocked_at_non_guard_address_is_scoped_to_no_match() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let zone_token = address!("0x20c0000000000000000000000000000000000001");
+        let mut filter = Filter {
+            address: FilterSet::from(zone_token),
+            ..Default::default()
+        };
+        filter.topics[0] = FilterSet::from(TRANSFER_BLOCKED_TOPIC);
+        scope_filter_addresses(&mut filter, &[zone_token]).unwrap();
+
+        let scope = scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        assert_eq!(scope, CallerFilterScope::Indexed);
+        assert_eq!(filter.address, FilterSet::from(zone_token));
+        assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
+        validate_receipt_query(&filter, scope).unwrap();
+        validate_live_filter(scope).unwrap();
     }
 
     #[test]
