@@ -568,19 +568,18 @@ async fn run_commands(
             }
 
             P2pCommand::BroadcastSettlementProposal(proposal) => {
-                let (may_broadcast, recipients) = leadership.with_authority(|authority| {
+                let recipients = leadership.with_authority(|authority| {
                     let policy =
                         RoutingPolicy::new(&local_ed25519_public_key, &membership, authority);
-                    (
-                        policy.may_broadcast_settlement_proposal(),
-                        policy.settlement_proposal_recipients(),
-                    )
+                    policy
+                        .may_broadcast_settlement_proposal()
+                        .then(|| policy.settlement_proposal_recipients())
                 });
-                if !may_broadcast {
+                let Some(recipients) = recipients else {
                     metrics::counter!("zone_p2p_role_invalid_messages_dropped_total").increment(1);
                     warn!(target: "zone::p2p", "Ignoring settlement proposal command without retained scheduled leadership");
                     continue;
-                }
+                };
                 // Only quorum members sign, so only they are asked. An RPC-only standby that
                 // received a proposal would have nothing to answer it with.
                 senders
