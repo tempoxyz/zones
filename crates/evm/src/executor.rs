@@ -146,6 +146,14 @@ pub struct ZoneBlockExecutor<'a, DB: Database, I, L1: L1StorageReader = L1StateP
     phase: ZoneBlockPhase,
 }
 
+fn validate_withdrawals<T>(withdrawals: Option<&[T]>) -> Result<(), BlockExecutionError> {
+    if withdrawals.is_some_and(|withdrawals| !withdrawals.is_empty()) {
+        return Err(BlockValidationError::msg("withdrawals are not permitted").into());
+    }
+
+    Ok(())
+}
+
 impl<'a, DB, I, L1> ZoneBlockExecutor<'a, DB, I, L1>
 where
     DB: StateDB,
@@ -182,6 +190,7 @@ where
     type Result = ZoneTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
+        validate_withdrawals(self.inner.ctx.withdrawals.as_deref())?;
         self.inner.apply_pre_execution_changes()
     }
 
@@ -246,7 +255,7 @@ where
 mod tests {
     use super::{
         ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneBlockPhase,
-        ZoneTransactionKind,
+        ZoneTransactionKind, validate_withdrawals,
     };
 
     use alloy_consensus::{Signed, TxLegacy};
@@ -284,6 +293,15 @@ mod tests {
             ZONE_INBOX_ADDRESS,
             Bytes::copy_from_slice(&ADVANCE_TEMPO_SELECTOR),
         )
+    }
+
+    #[test]
+    fn rejects_non_empty_consensus_withdrawals() {
+        assert!(validate_withdrawals(None::<&[u8]>).is_ok());
+        assert!(validate_withdrawals(Some(&[] as &[u8])).is_ok());
+
+        let error = validate_withdrawals(Some(&[0])).unwrap_err();
+        assert_eq!(error.to_string(), "withdrawals are not permitted");
     }
 
     fn finalize_withdrawal_batch_tx() -> TempoTxEnvelope {
