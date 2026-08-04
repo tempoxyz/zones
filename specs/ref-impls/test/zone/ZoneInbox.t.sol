@@ -212,8 +212,7 @@ contract ZoneInboxTest is Test {
                     HASH CHAIN VALIDATION TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_advanceTempo_allowsHashMismatch() public {
-        // Hash mismatch is now allowed on-chain — the proof validates ancestor contiguity
+    function test_advanceTempo_revertsForHashMismatchAndRollsBack() public {
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({
             token: address(zoneToken),
@@ -229,18 +228,18 @@ contract ZoneInboxTest is Test {
             mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("moreDepositsPending")
         );
 
-        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
-
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         vm.prank(sequencer);
         _advanceTempo(deposits);
 
-        // Deposits are processed and state is updated
-        assertEq(inbox.processedDepositQueueHash(), expectedHash);
-        assertEq(zoneToken.balanceOf(bob), 1000e6);
+        // The mismatch reverts the whole call, including the checkpoint and mint.
+        assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+        assertEq(zoneToken.balanceOf(bob), 0);
+        assertEq(tempoState.tempoBlockNumber(), GENESIS_TEMPO_BLOCK_NUMBER);
+        assertEq(tempoState.tempoBlockHash(), GENESIS_TEMPO_BLOCK_HASH);
     }
 
-    function test_advanceTempo_partialProcessingAllowed() public {
-        // Partial processing is now allowed — the proof validates ancestor contiguity
+    function test_advanceTempo_revertsForPartialProcessingAndRollsBack() public {
         Deposit[] memory allDeposits = new Deposit[](2);
         allDeposits[0] = Deposit({
             token: address(zoneToken),
@@ -266,26 +265,18 @@ contract ZoneInboxTest is Test {
 
         tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
 
-        // Process only one deposit — should succeed (partial processing)
+        // Process only one deposit — the final queue hash does not match, so the call reverts.
         Deposit[] memory oneDeposit = new Deposit[](1);
         oneDeposit[0] = allDeposits[0];
 
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         vm.prank(sequencer);
         _advanceTempo(oneDeposit);
 
-        // State updated to intermediate hash
-        assertEq(inbox.processedDepositQueueHash(), h1);
-        assertEq(zoneToken.balanceOf(alice), 100e6);
-
-        // Process the second deposit to catch up
-        Deposit[] memory secondDeposit = new Deposit[](1);
-        secondDeposit[0] = allDeposits[1];
-
-        vm.prank(sequencer);
-        _advanceTempo(secondDeposit);
-
-        assertEq(inbox.processedDepositQueueHash(), h2);
-        assertEq(zoneToken.balanceOf(bob), 200e6);
+        assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+        assertEq(zoneToken.balanceOf(alice), 0);
+        assertEq(tempoState.tempoBlockNumber(), GENESIS_TEMPO_BLOCK_NUMBER);
+        assertEq(tempoState.tempoBlockHash(), GENESIS_TEMPO_BLOCK_HASH);
     }
 
     /*//////////////////////////////////////////////////////////////

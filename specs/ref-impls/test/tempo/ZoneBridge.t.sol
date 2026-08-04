@@ -770,7 +770,7 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.transfer(bob, 100_001e6);
     }
 
-    function test_l2_depositHashMismatchAllowed() public {
+    function test_l2_depositHashMismatchReverts() public {
         // Deposit on L1
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 1000e6);
@@ -787,7 +787,8 @@ contract ZoneBridgeTest is BaseTest {
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = pendingDeposits[0].deposit;
 
-        // Should succeed — proof validates ancestor contiguity, not exact match
+        // A final-root queue mismatch reverts the complete system transaction.
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         vm.prank(address(0));
         l2Inbox.advanceTempo(
             new bytes[](1), _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)

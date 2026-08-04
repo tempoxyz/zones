@@ -67,9 +67,8 @@ struct BlockTransition {
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
-/// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash is an ancestor of (or equal to) currentDepositQueueHash.
-///      This allows partial deposit processing.
+/// @dev The proof reads currentDepositQueueHash from Tempo state and requires
+///      nextProcessedHash to equal it. Deposit processing is all-or-nothing per system call.
 ///      The deposit numbers mirror the hash chain for easy status checking:
 ///      a deposit with number N is confirmed once lastProcessedDepositNumber >= N.
 struct DepositQueueTransition {
@@ -1147,11 +1146,10 @@ interface IZoneInbox {
     /// @dev This is the main entry point for the block executor at block start.
     ///      1. Advances the zone's view of Tempo by processing the header array
     ///      2. Processes deposits from the unified queue (regular and encrypted)
-    ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
+    ///      3. Validates the resulting hash chain equals Tempo's currentDepositQueueHash
     ///
-    ///      The system transaction may process a bounded subset of pending deposits.
-    ///      The proof validates contiguity: processedDepositQueueHash
-    ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
+    ///      The system transaction is all-or-nothing and must process every pending deposit
+    ///      through the final queue head. A mismatch reverts the complete call.
     ///
     ///      For encrypted deposits, the sequencer provides DecryptionData with the
     ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
