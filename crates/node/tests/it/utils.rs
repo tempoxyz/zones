@@ -1383,13 +1383,14 @@ impl ZoneTestNode {
         // Build the real redacted RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
+        let rpc_enabled_tokens = enabled_tokens.clone();
         let rpc_api_factory = Arc::new(move |config: zone_node::rpc::RedactedRpcConfig| {
             let eth_handlers = eth_handlers.clone();
+            let enabled_tokens = rpc_enabled_tokens.clone();
             Box::pin(async move {
-                Ok(
-                    Arc::new(zone_node::rpc::ZoneRpc::new(eth_handlers, config).await?)
-                        as Arc<dyn zone_node::rpc::ZoneRpcApi>,
-                )
+                Ok(Arc::new(
+                    zone_node::rpc::ZoneRpc::new(eth_handlers, config, enabled_tokens).await?,
+                ) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
             })
                 as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>
         });

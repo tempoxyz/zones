@@ -714,6 +714,7 @@ where
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
+            self.l1_config.enabled_tokens.clone(),
             chain_id,
         )
         .await?;
@@ -1233,6 +1234,7 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         portal_address: Address,
+        enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
@@ -1251,8 +1253,9 @@ where
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
         };
-        let api: Arc<dyn ZoneRpcApi> =
-            Arc::new(ZoneRpc::new(eth_handlers, redacted_rpc_config.clone()).await?);
+        let api: Arc<dyn ZoneRpcApi> = Arc::new(
+            ZoneRpc::new(eth_handlers, redacted_rpc_config.clone(), enabled_tokens).await?,
+        );
         let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
 
