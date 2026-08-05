@@ -823,7 +823,7 @@ The zone's view of Tempo is the final Tempo block imported by the latest zone bl
 
 The zone node must only finalize Tempo headers that have reached finality on Tempo. Proofs should only reference finalized Tempo blocks to avoid reorg risk.
 
-Operators MUST preserve a historical Tempo state witness at least every five minutes and at every leader transition. Each catch-up range needs only the witness for its final anchor; intermediate headers are retained for continuity validation.
+Operators MUST preserve a historical Tempo state witness at least every 35 minutes and at every leader transition. Each catch-up range needs only the witness for its final anchor; intermediate headers are retained for continuity validation.
 
 <br>
 
