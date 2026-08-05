@@ -61,6 +61,18 @@ contract ZonePortal is IZonePortal {
     ///      below the buffered 200,000,000 gas ceiling.
     uint64 public constant MAX_UNPROCESSED_DEPOSITS = 230;
 
+    /// @notice Maximum tokens that may be enabled for this portal in one Tempo block.
+    /// @dev Under T9, processing 230 worst-case deposits plus 8 token enablements with maximum
+    ///      metadata uses 218,815,278 gas, below the buffered 225,000,000 gas ceiling.
+    uint64 public constant MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK = 8;
+
+    /// @notice Maximum token metadata sizes copied into the zone, measured in bytes.
+    /// @dev Symbol and currency stay within Solidity's one-slot short-string representation.
+    ///      A maximum-size name has a bounded three-slot representation.
+    uint256 public constant MAX_TOKEN_NAME_BYTES = 64;
+    uint256 public constant MAX_TOKEN_SYMBOL_BYTES = 31;
+    uint256 public constant MAX_TOKEN_CURRENCY_BYTES = 31;
+
     /// @dev Reserves enough capacity for one maximum-size sequencer withdrawal batch to bounce.
     ///      The 20M batch gas ceiling fits at most 19 simple withdrawals (plus one slot of margin).
     uint64 internal constant WITHDRAWAL_BOUNCEBACK_RESERVE = 20;
@@ -189,6 +201,14 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Tempo block number that recorded the most recent leader transition.
     uint64 public leaderActivationTempoBlock;
+
+    /// @dev Per-Tempo-block deposit admission counter. Appended for upgrade-safe storage layout.
+    uint64 internal _depositCountBlock;
+    uint64 internal _depositsInCurrentBlock;
+
+    /// @dev Per-Tempo-block token-enablement admission counter. Appended for upgrade safety.
+    uint64 internal _tokenEnableCountBlock;
+    uint64 internal _tokensEnabledInCurrentBlock;
 
     /*//////////////////////////////////////////////////////////////
                              INITIALIZATION
@@ -545,6 +565,26 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Internal function to enable a token (used by initializer and enableToken)
     function _enableTokenInternal(address _token) internal {
+        _recordTokenEnablement();
+
+        // Bound the metadata copied into the zone before mutating portal or policy state. The zone
+        // must initialize every token emitted in this block inside advanceTempo's fixed gas budget.
+        string memory name = ITIP20(_token).name();
+        string memory symbol = ITIP20(_token).symbol();
+        string memory currency = ITIP20(_token).currency();
+        uint256 nameLength = bytes(name).length;
+        uint256 symbolLength = bytes(symbol).length;
+        uint256 currencyLength = bytes(currency).length;
+        if (nameLength > MAX_TOKEN_NAME_BYTES) {
+            revert TokenNameTooLong(nameLength, MAX_TOKEN_NAME_BYTES);
+        }
+        if (symbolLength > MAX_TOKEN_SYMBOL_BYTES) {
+            revert TokenSymbolTooLong(symbolLength, MAX_TOKEN_SYMBOL_BYTES);
+        }
+        if (currencyLength > MAX_TOKEN_CURRENCY_BYTES) {
+            revert TokenCurrencyTooLong(currencyLength, MAX_TOKEN_CURRENCY_BYTES);
+        }
+
         address[] memory tokens = new address[](1);
         tokens[0] = _token;
 
@@ -560,12 +600,21 @@ contract ZonePortal is IZonePortal {
         _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
         _enabledTokens.push(_token);
 
-        // Read token metadata for the event so zone-side can create matching TIP-20
-        string memory name = ITIP20(_token).name();
-        string memory symbol = ITIP20(_token).symbol();
-        string memory currency = ITIP20(_token).currency();
-
         emit TokenEnabled(_token, name, symbol, currency);
+    }
+
+    function _recordTokenEnablement() internal {
+        uint64 currentBlock = uint64(block.number);
+        if (_tokenEnableCountBlock != currentBlock) {
+            _tokenEnableCountBlock = currentBlock;
+            _tokensEnabledInCurrentBlock = 0;
+        }
+        if (_tokensEnabledInCurrentBlock >= MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK) {
+            revert TokenEnablementBlockCapacityExceeded(MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK);
+        }
+        unchecked {
+            ++_tokensEnabledInCurrentBlock;
+        }
     }
 
     /// @notice Update the zone's operator RPC endpoint.
