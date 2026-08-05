@@ -1085,21 +1085,22 @@ contract ZonePortal is IZonePortal {
         if (bouncebackFee > withdrawal.amount) {
             bouncebackFee = withdrawal.amount;
         }
-        uint128 refundAmount = withdrawal.amount - bouncebackFee;
-
-        if (bouncebackFee > 0) {
-            // A recipient-policy failure must not block deposits or withdrawals.
-            _tryTransfer(_token, admin, bouncebackFee);
+        // Only deduct the fee if the admin transfer succeeds; otherwise the full amount remains
+        // refundable to the deposit recipient.
+        uint128 collectedFee;
+        if (bouncebackFee > 0 && _tryTransfer(_token, admin, bouncebackFee)) {
+            collectedFee = bouncebackFee;
         }
+        uint128 refundAmount = withdrawal.amount - collectedFee;
 
         bool success =
             _isAllowed(withdrawal.to) && _tryTransfer(_token, withdrawal.to, refundAmount);
 
         if (success) {
-            emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);
+            emit DepositBounceBack(withdrawal.to, _token, refundAmount, collectedFee);
         } else {
             refunds[_token][withdrawal.to] += refundAmount;
-            emit DepositBounceBackPending(withdrawal.to, _token, refundAmount, bouncebackFee);
+            emit DepositBounceBackPending(withdrawal.to, _token, refundAmount, collectedFee);
         }
     }
 

@@ -255,13 +255,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::{
-        ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneBlockPhase,
-        ZoneTransactionKind,
+        ADVANCE_TEMPO_SELECTOR, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneBlockExecutor,
+        ZoneBlockPhase, ZoneTransactionKind,
     };
 
-    use alloy_consensus::{Signed, TxLegacy};
-    use alloy_primitives::{Address, Bytes, Signature, U256};
+    use alloy_consensus::{Header, Signed, TxLegacy};
+    use alloy_evm::{EvmEnv, EvmFactory, block::BlockExecutor, eth::EthBlockExecutionCtx};
+    use alloy_primitives::{Address, B256, Bytes, Signature, U256, keccak256};
+    use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
+    use reth_primitives_traits::Recovered;
+    use revm::database::{CacheDB, EmptyDB};
+    use tempo_chainspec::spec::DEV;
+    use tempo_evm::TempoBlockExecutionCtx;
     use tempo_precompiles::{
         DEFAULT_FEE_TOKEN, TIP_FEE_MANAGER_ADDRESS,
         storage::{ContractStorage, Handler, StorageCtx, hashmap::HashMapStorageProvider},
@@ -269,14 +275,20 @@ mod tests {
         tip_fee_manager::{TipFeeManager, amm::PoolKey},
     };
     use tempo_primitives::{
-        TempoTxEnvelope,
+        TempoHeader, TempoTxEnvelope,
         subblock::TEMPO_SUBBLOCK_NONCE_KEY_PREFIX,
         transaction::{
-            Call, TempoSignature, TempoTransaction, envelope::TEMPO_SYSTEM_TX_SIGNATURE,
+            Call, TempoSignature, TempoTransaction,
+            envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
         },
     };
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
-    use tempo_zone_contracts::IZoneOutbox;
+    use tempo_zone_contracts::{ChaumPedersenProof, DecryptionData, IZoneInbox, IZoneOutbox};
+    use zone_chainspec::ZoneChainSpec;
+    use zone_precompiles::{tempo_state::TEMPO_BLOCK_NUMBER_SLOT, test_utils::MockL1Reader};
+    use zone_primitives::constants::TEMPO_STATE_ADDRESS;
+
+    use crate::ZoneEvmFactory;
 
     fn system_tx(to: Address, input: Bytes) -> TempoTxEnvelope {
         TempoTxEnvelope::Legacy(Signed::new_unhashed(
@@ -577,6 +589,91 @@ mod tests {
                 .validate_transaction(&finalize_lookalike)
                 .unwrap(),
             ZoneBlockPhase::Executing
+        );
+    }
+
+    #[test]
+    fn reverted_advance_tempo_does_not_satisfy_block_guard() {
+        let genesis = TempoHeader::default();
+        let mut genesis_rlp = Vec::new();
+        genesis.encode(&mut genesis_rlp);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let child = TempoHeader {
+            inner: Header {
+                parent_hash: genesis_hash,
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut child_rlp = Vec::new();
+        child.encode(&mut child_rlp);
+
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_storage(
+            TEMPO_STATE_ADDRESS,
+            U256::ZERO,
+            U256::from_be_bytes(genesis_hash.0),
+        )
+        .unwrap();
+        db.insert_account_storage(TEMPO_STATE_ADDRESS, TEMPO_BLOCK_NUMBER_SLOT, U256::ZERO)
+            .unwrap();
+        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
+        let evm = factory.create_evm(db, EvmEnv::default());
+        let chain_spec = ZoneChainSpec::from(DEV.clone());
+        let ctx = TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: B256::ZERO,
+                parent_beacon_block_root: None,
+                ommers: &[],
+                withdrawals: None,
+                extra_data: Bytes::new(),
+                tx_count_hint: Some(1),
+                slot_number: None,
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let mut executor = ZoneBlockExecutor::new(evm, ctx, &chain_spec);
+
+        // The header is the valid next checkpoint, but a decryption entry without an encrypted
+        // deposit makes the Inbox precompile revert after attempting the checkpoint transition.
+        let calldata = IZoneInbox::advanceTempoCall {
+            header: child_rlp.into(),
+            deposits: Vec::new(),
+            decryptions: vec![DecryptionData {
+                sharedSecret: B256::ZERO,
+                sharedSecretYParity: 2,
+                cpProof: ChaumPedersenProof {
+                    s: B256::ZERO,
+                    c: B256::ZERO,
+                },
+            }],
+            enabledTokens: Vec::new(),
+        }
+        .abi_encode();
+        let tx = Recovered::new_unchecked(
+            system_tx(ZONE_INBOX_ADDRESS, calldata.into()),
+            TEMPO_SYSTEM_TX_SENDER,
+        );
+        let error = executor.execute_transaction_without_commit(tx).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("system transaction execution failed"),
+            "unexpected error: {error}"
+        );
+        let finish_error = match executor.finish() {
+            Ok(_) => panic!("reverted advanceTempo unexpectedly satisfied the block guard"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            finish_error.to_string(),
+            "zone block is missing its advanceTempo system transaction"
         );
     }
 

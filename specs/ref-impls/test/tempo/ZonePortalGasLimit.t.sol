@@ -184,28 +184,48 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
 
-    function test_processWithdrawal_depositBounceBack_feeTransferFailureForgoesFeeAndClearsQueue()
-        public
-    {
+    function test_processWithdrawal_depositBounceBack_feeTransferFailureRefundsFullAmount() public {
         _configureBouncebackFee();
         token.mint(address(portal), 1000e6);
         token.setBlockedRecipient(admin, true);
-
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
-        uint128 refundAmount = 1000e6 - bouncebackFee;
 
         Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
+        emit IZonePortal.DepositBounceBack(recipient, address(token), 1000e6, 0);
         portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
 
         assertEq(token.balanceOf(admin), 0);
-        assertEq(token.balanceOf(recipient), refundAmount);
-        assertEq(token.balanceOf(address(portal)), bouncebackFee);
+        assertEq(token.balanceOf(recipient), 1000e6);
+        assertEq(token.balanceOf(address(portal)), 0);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+    }
+
+    function test_processWithdrawal_depositBounceBack_feeAndRefundFailureParksFullAmount() public {
+        _configureBouncebackFee();
+        token.mint(address(portal), 1000e6);
+        token.setBlockedRecipient(admin, true);
+        token.setBlockedRecipient(recipient, true);
+
+        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
+        _storeSingleWithdrawal(w);
+
+        vm.expectEmit(true, false, false, true, address(portal));
+        emit IZonePortal.DepositBounceBackPending(recipient, address(token), 1000e6, 0);
+        portal.processWithdrawals(_singleWithdrawal(w), bytes32(0));
+
+        assertEq(token.balanceOf(admin), 0);
+        assertEq(token.balanceOf(recipient), 0);
+        assertEq(token.balanceOf(address(portal)), 1000e6);
+        assertEq(portal.refunds(address(token), recipient), 1000e6);
+
+        token.setBlockedRecipient(recipient, false);
+        vm.prank(recipient);
+        assertEq(portal.claimRefund(address(token)), 1000e6);
+        assertEq(token.balanceOf(recipient), 1000e6);
+        assertEq(portal.refunds(address(token), recipient), 0);
     }
 
     function test_processWithdrawal_depositBounceBack_parksRefundWhenTransferFails() public {

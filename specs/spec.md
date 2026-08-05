@@ -506,14 +506,14 @@ The portal's internal withdrawal-bounce-back deposits are the only `DepositType.
 **Zone-side handling.** When an encrypted deposit fails, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, tempoRefundRecipient)`. Invalid encryption skips the mint; a mint revert is caught; and a sequencer-rejected encrypted deposit skips both verification and minting. `enqueueDepositBounceBack` records a zero-callback, zero-`fallbackNonce` withdrawal in the outbox's pending list with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `DepositFailed` for verification or mint failure, or `DepositRejected` for a sequencer rejection. The deposit queue hash chain advances normally; no retries are performed on the zone.
 
 
-**Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawals` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fallbackNonce == 0`), it computes `bouncebackFee = min(ceil(bouncebackGas * block.basefee / 1e12), amount)`, attempts to pay it to the portal admin, and attempts `ITIP20.transfer(tempoRefundRecipient, amount - bouncebackFee)` from the portal's escrow, wrapped in `try/catch`.
+**Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawals` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fallbackNonce == 0`), it computes `bouncebackFee = min(ceil(bouncebackGas * block.basefee / 1e12), amount)` and attempts to pay it to the portal admin. The effective `collectedFee` is `bouncebackFee` only when that transfer succeeds, otherwise it is zero; the portal then attempts `ITIP20.transfer(tempoRefundRecipient, amount - collectedFee)` from its escrow, wrapped in `try/catch`.
 
-If the refund transfer succeeds, the portal emits `DepositBounceBack(tempoRefundRecipient, token, amount - bouncebackFee, bouncebackFee)`. If it reverts (e.g. the token's TIP-403 policy forbids `tempoRefundRecipient`, or the token is paused), the funds stay in the portal's locked balance and the portal credits `_refunds[token][tempoRefundRecipient] += (amount - bouncebackFee)` and emits `DepositBounceBackPending(...)`. Either way the bounce-back entry is fully retired. The admin collects `bouncebackFee` only if the Tempo-side fee transfer succeeds; if it fails, processing continues and the unpaid fee remains in the portal so as to not stall withdrawals.
+If the refund transfer succeeds, the portal emits `DepositBounceBack(tempoRefundRecipient, token, amount - collectedFee, collectedFee)`. If it reverts (e.g. the token's TIP-403 policy forbids `tempoRefundRecipient`, or the token is paused), the funds stay in the portal's locked balance and the portal credits `_refunds[token][tempoRefundRecipient] += (amount - collectedFee)` and emits `DepositBounceBackPending(...)`. Either way the bounce-back entry is fully retired. If the admin fee transfer fails, processing continues without charging the fee and the full amount remains refundable.
 
 In the case of a failed bounceback, the recipient can claim the parked funds by calling `ZonePortal.claimRefund(token)` on Tempo. The portal zeroes `_refunds[token][msg.sender]` and calls `ITIP20.transfer(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
 - A deposit created by the portal as a bounce-back from a failed _withdrawal_ (`_enqueueWithdrawalBounceBack`) is encoded as the only valid `DepositType.WithdrawalBounceBack` entry with the canonical `(token, to, amount)` payload. The zone-side mint is attempted with the standard `mint`, and on failure the funds land in a refund registry on `ZoneInbox` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)) rather than re-bouncing.
-- A withdrawal created by the zone as a bounce-back from a failed _deposit_ (`enqueueDepositBounceBack`) always sets `gasLimit = 0`, `callbackData = ""`, and `fallbackNonce = 0`. The Tempo-side fee transfer and refund transfer are wrapped in `try/catch`: the portal admin receives `bouncebackFee` only if the fee transfer succeeds, and the user receives `amount - bouncebackFee` directly only if the refund transfer succeeds. If the refund transfer fails, the same value is parked in the portal's refund registry. `bouncebackFee` is computed on Tempo at processing time from `block.basefee` and capped at `amount`.
+- A withdrawal created by the zone as a bounce-back from a failed _deposit_ (`enqueueDepositBounceBack`) always sets `gasLimit = 0`, `callbackData = ""`, and `fallbackNonce = 0`. The Tempo-side fee transfer and refund transfer are wrapped in `try/catch`: the portal admin receives `bouncebackFee` only if the fee transfer succeeds, and the user receives `amount - collectedFee` directly only if the refund transfer succeeds. If the fee transfer fails, `collectedFee` is zero and the full amount remains refundable. If the refund transfer fails, the effective refund amount is parked in the portal's refund registry. `bouncebackFee` is computed on Tempo at processing time from `block.basefee` and capped at `amount`.
 
 **Events summary.**
 
@@ -547,11 +547,16 @@ sequenceDiagram
     Z->>T: ZoneOutbox.finalizeWithdrawalBatch + submitBatch
     T->>T: ZonePortal.processWithdrawals (zero-callback)
     T->>T: attempt to pay bouncebackFee to admin
-    alt TIP20.transfer(tempoRefundRecipient, amount-bouncebackFee) succeeds
-        T->>U: receives amount-bouncebackFee
+    alt fee transfer succeeds
+        T->>T: collectedFee = bouncebackFee
+    else fee transfer fails
+        T->>T: collectedFee = 0
+    end
+    alt TIP20.transfer(tempoRefundRecipient, amount-collectedFee) succeeds
+        T->>U: receives amount-collectedFee
         Note over T: emit DepositBounceBack
     else transfer reverts (e.g. TIP-403)
-        T->>T: _refunds[token][tempoRefundRecipient] += amount-bouncebackFee
+        T->>T: _refunds[token][tempoRefundRecipient] += amount-collectedFee
         Note over T: emit DepositBounceBackPending
         U->>T: later: ZonePortal.claimRefund(token)
         T->>U: TIP20.transfer(msg.sender, claimed)
