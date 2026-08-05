@@ -1513,8 +1513,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
     }
 
-    function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+    function test_deposit_enforcesPerL1BatchCapAcrossDepositTypes() public {
+        uint64 maximum = portal.MAX_DEPOSITS_PER_L1_BATCH();
         uint64 maximumPublicDeposits = maximum - 20;
         assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
@@ -1534,7 +1534,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositBatchCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         _deposit(portal, address(pathUSD), bob, amount, bytes32("over cap"), bob);
@@ -1544,9 +1544,37 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(alice), aliceBalanceAtCapacity);
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
 
+        // Advancing the L1 block does not start a new batch while the sequencer is absent.
         vm.roll(block.number + 1);
-        _deposit(portal, address(pathUSD), bob, amount, bytes32("next block"), bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositBatchCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("same batch"), bob);
         vm.stopPrank();
+
+        // A successfully submitted batch advances the admission window.
+        vm.prank(sequencer);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("batch")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+        vm.prank(alice);
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("next batch"), bob);
 
         assertEq(portal.depositCount(), maximumPublicDeposits + 1);
     }
@@ -1595,7 +1623,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximum = portal.MAX_DEPOSITS_PER_L1_BATCH();
         uint64 maximumPublicDeposits = maximum - uint64(reserve);
         vm.startPrank(alice);
         pathUSD.approve(address(portal), maximum);
@@ -1615,7 +1643,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositBatchCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         vm.prank(alice);

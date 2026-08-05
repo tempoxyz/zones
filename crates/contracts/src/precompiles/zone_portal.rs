@@ -179,7 +179,7 @@ crate::sol! {
         error PolicyForbids();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
-        error DepositBlockCapacityExceeded(uint64 maximum);
+        error DepositBatchCapacityExceeded(uint64 maximum);
         error InvalidCallbackTarget();
         error AccountNotAllowed(address account);
         error InvalidLeader();
@@ -223,7 +223,7 @@ crate::sol! {
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
         function lastProcessedDepositNumber() external view returns (uint64);
-        function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+        function MAX_DEPOSITS_PER_L1_BATCH() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
         // -- State-changing functions --
@@ -431,7 +431,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
-            Self::DepositBlockCapacityExceeded(_) => f.write_str("DepositBlockCapacityExceeded"),
+            Self::DepositBatchCapacityExceeded(_) => f.write_str("DepositBatchCapacityExceeded"),
             Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
             Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
             Self::InvalidLeader(_) => f.write_str("InvalidLeader"),

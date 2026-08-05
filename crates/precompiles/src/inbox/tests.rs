@@ -289,10 +289,10 @@ fn failed_deposit_gas(deposits: usize) -> eyre::Result<u64> {
 #[test]
 fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
     const BUFFERED_GAS_LIMIT: u64 = 200_000_000;
-    const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
+    const MAX_DEPOSITS_PER_L1_BATCH: usize = 230;
 
-    for deposits in [640, MAX_DEPOSITS_PER_TEMPO_BLOCK] {
-        let should_fit = deposits <= MAX_DEPOSITS_PER_TEMPO_BLOCK;
+    for deposits in [640, MAX_DEPOSITS_PER_L1_BATCH] {
+        let should_fit = deposits <= MAX_DEPOSITS_PER_L1_BATCH;
         let gas_used = failed_deposit_gas(deposits)?;
         eprintln!("{deposits} portal deposit block: {gas_used} gas");
         assert_eq!(

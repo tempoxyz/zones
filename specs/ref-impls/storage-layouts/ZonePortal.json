@@ -275,7 +275,7 @@
     {
       "astId": 5284,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "_depositCountBlock",
+      "label": "_depositCountBatch",
       "offset": 8,
       "slot": "24",
       "type": "t_uint64"
@@ -283,7 +283,7 @@
     {
       "astId": 5286,
       "contract": "src/tempo/ZonePortal.sol:ZonePortal",
-      "label": "_depositsInCurrentBlock",
+      "label": "_depositsInCurrentBatch",
       "offset": 16,
       "slot": "24",
       "type": "t_uint64"
