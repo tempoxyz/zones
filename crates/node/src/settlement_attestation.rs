@@ -340,6 +340,7 @@ pub(crate) async fn collect_leader_settlements<P>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
     context: AttestationContext,
+    portal_confirmed_height: u64,
 ) where
     P: PersistedBlockSubscriptions
         + BlockNumReader
@@ -364,8 +365,11 @@ pub(crate) async fn collect_leader_settlements<P>(
         }
     };
 
+    // Start at the block after the portal-confirmed anchor.
+    let recovery_start = portal_confirmed_height.saturating_add(1);
     let mut pending_boundary =
-        propose_persisted_settlement_range(&provider, &commands, &context, 1, head).await;
+        propose_persisted_settlement_range(&provider, &commands, &context, recovery_start, head)
+            .await;
 
     let mut last_scanned = head;
     let mut retry = tokio::time::interval(Duration::from_secs(5));
@@ -598,6 +602,28 @@ mod tests {
         let pending = scan_settlement_range(pending.unwrap(), 4, propose).await;
         assert_eq!(pending, Some(2));
         assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2]);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_begins_after_portal_confirmed_height() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                Ok(number == 360)
+            }
+        };
+
+        let portal_confirmed_height = 240u64;
+        let pending =
+            scan_settlement_range(portal_confirmed_height.saturating_add(1), 360, propose).await;
+
+        assert_eq!(pending, Some(360));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.first(), Some(&241));
+        assert_eq!(calls.last(), Some(&360));
+        assert_eq!(calls.len(), 120);
     }
 
     #[tokio::test]

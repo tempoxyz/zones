@@ -392,6 +392,8 @@ async fn handle_test_l1_rpc_request(
                     .and_then(|index| enabled_tokens.get(index))
                     .map(|token| serde_json::json!(const_hex::encode_prefixed(token.abi_encode())))
                     .unwrap_or(serde_json::Value::Null)
+            } else if input.starts_with(&ZonePortal::blockHashCall::SELECTOR) {
+                serde_json::json!(const_hex::encode_prefixed(B256::ZERO.abi_encode()))
             } else {
                 serde_json::Value::Null
             }

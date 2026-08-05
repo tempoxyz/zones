@@ -31,7 +31,9 @@ pub mod withdrawals;
 pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
 pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
-pub use settlement::{BatchAnchorConfig, BatchData, BatchSubmitter};
+pub use settlement::{
+    BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
+};
 pub use withdrawals::{
     DEFAULT_MAX_IN_FLIGHT_WITHDRAWAL_BATCHES, DEFAULT_MAX_WITHDRAWAL_BATCH_GAS,
     MAX_WITHDRAWAL_BATCH_GAS, SharedWithdrawalStore, WithdrawalBatchLimits,
