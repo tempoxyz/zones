@@ -924,6 +924,12 @@ contract ZonePortal is IZonePortal {
         onlySequencer
         nonReentrantWithdrawal
     {
+        uint64 unprocessedDeposits = depositCount - lastProcessedDepositNumber;
+        uint64 remainingCapacity = MAX_UNPROCESSED_DEPOSITS - unprocessedDeposits;
+        if (withdrawals.length > remainingCapacity) {
+            revert WithdrawalBatchCapacityExceeded(withdrawals.length, remainingCapacity);
+        }
+
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
         bytes32 nextQueue = remainingQueue;
 

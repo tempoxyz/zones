@@ -622,6 +622,7 @@ interface IZonePortal {
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error DepositQueueCapacityExceeded(uint64 maximum);
+    error WithdrawalBatchCapacityExceeded(uint256 attempted, uint64 remaining);
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -913,6 +914,8 @@ interface IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
+    /// @dev The attempted withdrawal count must fit within the remaining deposit-queue
+    ///      capacity, conservatively assuming every withdrawal fails and creates a bounce-back.
     function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
     function deliverWithdrawal(

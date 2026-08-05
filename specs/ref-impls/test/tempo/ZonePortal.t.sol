@@ -1678,6 +1678,58 @@ contract ZonePortalTest is BaseTest {
         _deposit(portal, address(pathUSD), bob, 1, bytes32("reserved"), bob);
     }
 
+    function test_processWithdrawals_rejectsBatchAboveRemainingDepositCapacity() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
+        uint64 publicDepositLimit = maximum - 20;
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), publicDepositLimit);
+        for (uint256 i; i < publicDepositLimit; ++i) {
+            _deposit(portal, address(pathUSD), bob, 1, bytes32(i), bob);
+        }
+        vm.stopPrank();
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, 1, bytes32("capacity"), 0, alice, "");
+        uint256 attempted = 21;
+        Withdrawal[] memory withdrawals = new Withdrawal[](attempted);
+        bytes32 withdrawalHash = EMPTY_SENTINEL;
+        for (uint256 i = attempted; i > 0; --i) {
+            withdrawals[i - 1] = withdrawal;
+            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
+        }
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("capacity batch")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalHash,
+            "",
+            ""
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.WithdrawalBatchCapacityExceeded.selector, attempted, uint64(20)
+            )
+        );
+        portal.processWithdrawals(withdrawals, bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), 0);
+        assertEq(portal.withdrawalQueueSlot(0), withdrawalHash);
+    }
+
     function test_deposit_hashChainStructure() public {
         // Verify the hash chain is built correctly: newest deposits wrap the outside
         uint128 amount = 1000e6;
