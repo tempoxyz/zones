@@ -1,4 +1,4 @@
-//! Contract creation validation and runtime enforcement.
+//! Zone transaction validation and contract creation runtime enforcement.
 
 use alloy_evm::Database;
 use alloy_primitives::Address;
@@ -48,11 +48,22 @@ fn create<const IS_CREATE2: bool, DB: Database>(
     revm_create::<IS_CREATE2, EthInterpreter, TempoContext<DB>>(context)
 }
 
-/// Reject transaction-level contract creation unless its deployer is explicitly allowed.
+/// Validates Zone transaction policies shared by pool admission and block execution.
 pub fn validate_transaction(
     tx: &TempoTxEnv,
     allowlist: &[Address],
 ) -> Result<(), TempoInvalidTransaction> {
+    let has_eip7702_authorizations = !tx.inner.authorization_list.is_empty();
+    let has_tempo_authorizations = tx
+        .tempo_tx_env
+        .as_ref()
+        .is_some_and(|env| !env.tempo_authorization_list.is_empty());
+    if has_eip7702_authorizations || has_tempo_authorizations {
+        return Err(TempoInvalidTransaction::CallsValidation(
+            "authorization lists are not supported",
+        ));
+    }
+
     if contract_creation_deployer(tx).is_some_and(|deployer| !allowlist.contains(&deployer)) {
         return Err(TempoInvalidTransaction::CallsValidation(
             "contract creation is not supported",

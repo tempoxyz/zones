@@ -105,21 +105,6 @@ where
         &mut self,
         tx: TempoTxEnv,
     ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
-        let has_eip7702_authorizations = !tx.inner.authorization_list.is_empty();
-        let has_tempo_authorizations = tx
-            .tempo_tx_env
-            .as_ref()
-            .is_some_and(|env| !env.tempo_authorization_list.is_empty());
-        if has_eip7702_authorizations || has_tempo_authorizations {
-            return (
-                Err(EVMError::Transaction(
-                    TempoInvalidTransaction::CallsValidation(
-                        "authorization lists are not supported",
-                    ),
-                )),
-                tx,
-            );
-        }
         if let Err(err) = contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)
         {
             return (Err(EVMError::Transaction(err)), tx);
@@ -219,13 +204,22 @@ mod tests {
     use alloy_evm::EvmEnv;
     use alloy_primitives::U256;
     use revm::{
-        context::result::{ExecutionResult, HaltReason, Output, ResultGas, SuccessReason},
+        context::{
+            TxEnv,
+            result::{ExecutionResult, HaltReason, Output, ResultGas, SuccessReason},
+            transaction::{Authorization, SignedAuthorization},
+        },
+        context_interface::either::Either,
         database::EmptyDB,
         inspector::NoOpInspector,
         primitives::AddressMap,
         state::{Account, EvmStorageSlot},
     };
     use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+    use tempo_primitives::transaction::{
+        RecoveredTempoAuthorization, TempoSignature, TempoSignedAuthorization,
+    };
+    use tempo_revm::TempoBatchCallEnv;
     use zone_precompiles::test_utils::MockL1Reader;
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
@@ -244,6 +238,73 @@ mod tests {
             },
         );
         AddressMap::from_iter([(TIP403_REGISTRY_ADDRESS, account)])
+    }
+
+    fn transactions_with_authorization_lists() -> [TempoTxEnv; 2] {
+        let authorization = Authorization {
+            chain_id: U256::ZERO,
+            address: Address::ZERO,
+            nonce: 0,
+        };
+
+        let eip7702 = TempoTxEnv {
+            inner: TxEnv {
+                authorization_list: vec![Either::Left(SignedAuthorization::new_unchecked(
+                    authorization.clone(),
+                    0,
+                    U256::ONE,
+                    U256::ONE,
+                ))],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tempo = TempoTxEnv {
+            tempo_tx_env: Some(Box::new(TempoBatchCallEnv {
+                tempo_authorization_list: vec![RecoveredTempoAuthorization::new(
+                    TempoSignedAuthorization::new_unchecked(
+                        authorization,
+                        TempoSignature::default(),
+                    ),
+                )],
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        [eip7702, tempo]
+    }
+
+    #[test]
+    fn pool_validation_rejects_authorization_lists() {
+        for tx in transactions_with_authorization_lists() {
+            let (result, _) = test_evm().validate_pool_transaction(tx);
+
+            assert!(matches!(
+                result,
+                Err(EVMError::Transaction(
+                    TempoInvalidTransaction::CallsValidation(
+                        "authorization lists are not supported"
+                    )
+                ))
+            ));
+        }
+    }
+
+    #[test]
+    fn block_execution_rejects_authorization_lists() {
+        for tx in transactions_with_authorization_lists() {
+            let err = test_evm()
+                .transact_raw(tx)
+                .expect_err("authorization list must be rejected before execution");
+
+            assert!(matches!(
+                err,
+                EVMError::Transaction(TempoInvalidTransaction::CallsValidation(
+                    "authorization lists are not supported"
+                ))
+            ));
+        }
     }
 
     #[test]
