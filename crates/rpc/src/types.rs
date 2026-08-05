@@ -1,4 +1,4 @@
-//! JSON-RPC types for the private zone RPC.
+//! JSON-RPC types for the redacted zone RPC.
 
 use std::{future::Future, pin::Pin};
 
@@ -195,8 +195,10 @@ pub struct ZoneInfoResponse {
 pub struct LocalSequencerInfo {
     /// Manifest node name.
     pub name: String,
-    /// Individual secp256k1 address.
-    pub sequencer_address: Address,
+    /// Individual secp256k1 address. Absent on an `rpc_only` node, which holds no
+    /// individual key and is not registered with `ZonePortal`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
     /// Hex-encoded Ed25519 Commonware public key.
     pub p2p_public_key: String,
     /// Current role: `leader`, `follower`, or `fenced`.
@@ -211,7 +213,8 @@ pub struct ActiveLeaderInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// Individual secp256k1 address registered on the portal.
-    pub sequencer_address: Address,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
     /// Hex-encoded Ed25519 Commonware public key.
     pub p2p_public_key: String,
     /// Leadership epoch.
@@ -226,8 +229,11 @@ pub struct ActiveLeaderInfo {
 pub struct SequencerPeerInfo {
     /// Manifest node name.
     pub name: String,
-    /// Individual secp256k1 address.
-    pub sequencer_address: Address,
+    /// Individual secp256k1 address. Absent for an `rpc_only` peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sequencer_address: Option<Address>,
+    /// Whether this peer replicates without joining the on-chain settlement quorum.
+    pub rpc_only: bool,
     /// Whether this entry describes the local node.
     pub is_local: bool,
     /// Most recent hash-carrying tip evidence, when observed.
@@ -291,6 +297,9 @@ pub struct SequencerInfoResponse {
     /// Active finalized leader (multi-sequencer mode only, once observed).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub active_leader: Option<ActiveLeaderInfo>,
+    /// Exact local canonical tip usable as a forced-recovery point.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_tip: Option<PeerTipInfo>,
     /// All configured manifest members with observed tip evidence.
     pub peers: Vec<SequencerPeerInfo>,
     /// Consumption and observation progress (multi-sequencer mode only).
@@ -323,7 +332,7 @@ pub enum MethodTier {
     Public,
     /// Only available to the sequencer.
     Restricted,
-    /// Disabled on the private RPC.
+    /// Disabled on the redacted RPC.
     Disabled,
 }
 

@@ -93,30 +93,8 @@ max-approve-portal token="0x20C0000000000000000000000000000000000000":
     echo "Approved!"
 
 [group('zone')]
-[doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
-    #!/bin/bash
-    set -euo pipefail
-    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
-    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    SENDER=$(cast wallet address "$PK")
-    TO="{{to}}"
-    if [[ -z "$TO" ]]; then
-        TO="$SENDER"
-    fi
-    echo "Depositing {{amount}} to $TO..."
-    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32,address)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" "$SENDER" \
-        --rpc-url "$RPC" --private-key "$PK" --json)
-    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
-    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
-    echo "Deposit sent! (block $L1_BLOCK_DEC)"
-    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
-
-[group('zone')]
-[doc('Sends an encrypted deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit-encrypted amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
+[doc('Sends a deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
+send-deposit amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -125,7 +103,7 @@ send-deposit-encrypted amount="1000000" to="" memo="0x00000000000000000000000000
         TO=$(cast wallet address "$PK")
     fi
     ARGS="--amount {{amount}} --token {{token}} --memo {{memo}} --to $TO --zone-rpc-url {{rpc}}"
-    cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
+    cargo run -p tempo-xtask -- deposit --private-key "$PK" $ARGS
 
 [group('zone')]
 [doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...). Set ZONE_FACTORY to override the Moderato default.')]
@@ -227,7 +205,7 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         --stablecoin-dex "{{dex}}"
 
 [group('zone')]
-[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone via an encrypted deposit. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
 demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
@@ -689,7 +667,7 @@ check-balance account token="0x20C0000000000000000000000000000000000000" rpc=zon
     @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --from "{{account}}" --rpc-url "{{rpc}}"
 
 [group('zone')]
-[doc('Generates a signed auth token for the private zone RPC. Requires PRIVATE_KEY env var. Reads zone metadata from generated/<name>/zone.json.')]
+[doc('Generates a signed auth token for the redacted zone RPC. Requires PRIVATE_KEY env var. Reads zone metadata from generated/<name>/zone.json.')]
 zone-auth-token name:
     #!/bin/bash
     set -euo pipefail
@@ -717,8 +695,8 @@ zone-auth-token name:
     echo "${SIG_HEX}${FIELDS}"
 
 [group('zone')]
-[doc('Checks TIP-20 token balance via the private RPC (with auth token). Requires PRIVATE_KEY env var.')]
-check-balance-private name token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8544":
+[doc('Checks TIP-20 token balance via the redacted RPC (with auth token). Requires PRIVATE_KEY env var.')]
+check-balance-redacted name token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8544":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -729,13 +707,13 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
         -H "Content-Type: application/json" \
         -H "x-authorization-token: ${TOKEN}" \
         -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}") || {
-            echo "Failed to reach private RPC at {{rpc}}"
+            echo "Failed to reach redacted RPC at {{rpc}}"
             exit 1
         }
     HTTP_STATUS=$(printf '%s' "$RESPONSE" | tail -n1)
     RESULT=$(printf '%s' "$RESPONSE" | sed '$d')
     if [[ "$HTTP_STATUS" != "200" ]]; then
-        echo "Private RPC HTTP $HTTP_STATUS"
+        echo "Redacted RPC HTTP $HTTP_STATUS"
         echo "${RESULT:-<empty response>}"
         exit 1
     fi
@@ -924,15 +902,12 @@ deploy-zone name token="" access_enforced="false" gateway_enforced="false":
                       --sequencer-key "$SEQUENCER_KEY"
 
 [group('zone')]
-[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000 1 (10 txs, 10 per block, 200000 amount, encrypted)')]
-spam-deposits total="20" per-block="10" amount="1000000" encrypted="" token="0x20C0000000000000000000000000000000000000" lead-time="3":
+[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000')]
+spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" lead-time="3":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
-    if [[ "{{encrypted}}" == "true" || "{{encrypted}}" == "1" ]]; then
-        ARGS="$ARGS --encrypted"
-    fi
     cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
 
 [group('zone')]

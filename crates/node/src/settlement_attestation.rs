@@ -23,6 +23,79 @@ use zone_p2p::P2pCommand;
 use crate::replication::AttestationContext;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
+/// Check the manifest's settlement quorum against `ZonePortal` before any role task starts.
+///
+/// A quorum node the portal has not registered can never settle, and an unreachable threshold
+/// stalls settlement — both otherwise surface as a mysterious stall at the next batch boundary.
+///
+/// Extra registered signers only warn: deregistering is a cleanup task, and failing on it would
+/// make every membership change a window in which no node can start.
+///
+/// Skipped when no portal is deployed yet, matching `seed_leadership_schedule`: a zone whose
+/// creation block has not replayed has nothing to reconcile against.
+pub(crate) async fn validate_registered_sequencer_set(
+    manifest: &zone_p2p::ZoneManifest,
+    portal_address: alloy_primitives::Address,
+    l1_provider: &alloy_provider::DynProvider<tempo_alloy::TempoNetwork>,
+) -> eyre::Result<()> {
+    // No portal configured (dev and test harnesses) means there is nothing to reconcile against.
+    if portal_address.is_zero() {
+        info!(target: "zone::p2p", "No ZonePortal configured; skipping the manifest quorum check");
+        return Ok(());
+    }
+    let portal_code = l1_provider
+        .get_code_at(portal_address)
+        .await
+        .map_err(|err| eyre::eyre!("failed to check portal {portal_address} deployment: {err}"))?;
+    if portal_code.is_empty() {
+        info!(
+            target: "zone::p2p",
+            %portal_address,
+            "Portal is not deployed yet; skipping the manifest quorum check"
+        );
+        return Ok(());
+    }
+
+    // Read at the chain tip rather than the finalized head: a fresh or local L1 may have no
+    // finalized block at all, and an unfinalized registration satisfying this check early is
+    // harmless for a startup sanity check.
+    let portal = ZonePortal::new(portal_address, l1_provider);
+    let quorum: Vec<_> = manifest.quorum_nodes().collect();
+    let threshold_call = portal.sequencerThreshold();
+    let count_call = portal.sequencerCount();
+    let registered = futures::future::try_join_all(quorum.iter().map(|(node, address)| {
+        let (name, address) = (node.name(), *address);
+        let call = portal.isSequencer(address);
+        async move { call.call().await.map(|ok| (name, address, ok)) }
+    }));
+    let (threshold, registered_count, registered) =
+        tokio::try_join!(threshold_call.call(), count_call.call(), registered)
+            .wrap_err("failed reading the registered sequencer set from ZonePortal")?;
+
+    for (name, address, is_registered) in registered {
+        eyre::ensure!(
+            is_registered,
+            "manifest quorum node `{name}` ({address}) is not a registered ZonePortal sequencer"
+        );
+    }
+    eyre::ensure!(
+        threshold > 0 && usize::from(threshold) <= quorum.len(),
+        "ZonePortal settlement threshold {threshold} is not reachable by the manifest's {} quorum nodes",
+        quorum.len()
+    );
+    if registered_count > U256::from(quorum.len()) {
+        tracing::warn!(
+            target: "zone::p2p",
+            %registered_count,
+            manifest_quorum = quorum.len(),
+            "ZonePortal has registered sequencers the manifest does not list; they hold a share of the threshold this zone never signs for"
+        );
+    }
+
+    info!(target: "zone::p2p", threshold, quorum_nodes = quorum.len(), "Checked the manifest quorum against ZonePortal");
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct BlockCommitments {
     tempo_block_hash: B256,
@@ -281,10 +354,7 @@ pub(crate) async fn collect_leader_settlements<P>(
     // persisted-block stream is latest-value based, so notifications are wake-ups rather than a
     // lossless sequence of every persisted block.
     let mut persisted = provider.persisted_block_stream();
-    let store = context
-        .store
-        .as_ref()
-        .expect("leader must have an attestation store");
+    let store = &context.store;
     let mut submitted_heights = store.subscribe_submitted_height();
     let head = match provider.last_block_number() {
         Ok(head) => head,
@@ -473,13 +543,15 @@ where
     else {
         return Ok(false);
     };
+    let signer_key = context
+        .signer
+        .as_ref()
+        .ok_or_eyre("this node holds no individual secp256k1 key, so it cannot settle")?;
     let signed =
-        SignedSettlementAttestation::sign(attestation.clone(), context.domain, &context.signer)?;
+        SignedSettlementAttestation::sign(attestation.clone(), context.domain, signer_key)?;
     let signer = signed.recover_signer(context.domain)?;
     let (_, signatures) = context
         .store
-        .as_ref()
-        .expect("leader must have an attestation store")
         .insert_settlement(context.domain, signer, signed);
     commands
         .send(P2pCommand::BroadcastSettlementProposal(

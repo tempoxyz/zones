@@ -1,11 +1,11 @@
 //! Error types for zone-specific precompiles.
 
-use alloy_sol_types::{SolError, SolInterface};
+use alloy_sol_types::SolInterface;
 use revm::precompile::{PrecompileOutput, PrecompileResult};
 use tempo_precompiles::IntoPrecompileResult;
 use tempo_zone_contracts::{TempoStateError, ZoneInboxError, ZoneOutboxError, ZonePortalError};
 
-use crate::{storage::L1StateError, tip403_proxy::ReadOnlyRegistry};
+use crate::storage::L1StateError;
 
 pub use tempo_precompiles::error::{Result, TempoPrecompileError};
 
@@ -41,9 +41,6 @@ pub enum ZonePrecompileError {
     /// Malformed nested ABI data, matching Solidity's empty revert.
     #[error("malformed ABI calldata")]
     MalformedCalldata,
-    /// Error from the read-only zone TIP-403 registry.
-    #[error("Zone TIP-403 registry error: {0:?}")]
-    Zone403Registry(ReadOnlyRegistry),
 }
 
 impl IntoPrecompileResult for ZonePrecompileError {
@@ -56,7 +53,6 @@ impl IntoPrecompileResult for ZonePrecompileError {
             Self::TempoState(error) => error.abi_encode(),
             Self::Inbox(error) => error.abi_encode(),
             Self::MalformedCalldata => Default::default(),
-            Self::Zone403Registry(error) => error.abi_encode(),
         };
         Ok(PrecompileOutput::revert(gas, data.into(), reservoir))
     }

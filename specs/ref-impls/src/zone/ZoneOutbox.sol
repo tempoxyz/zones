@@ -2,14 +2,21 @@
 pragma solidity ^0.8.13;
 
 import {
-    IZoneConfig,
+    ITempoState,
     IZoneOutbox,
     IZonePortal,
     IZoneToken,
     IZoneTxContext,
     LastBatch,
     MAX_WITHDRAWAL_CALLBACK_GAS,
+    PORTAL_ACCESS_MODE_SLOT,
+    PORTAL_GATEWAY_MODE_SLOT,
+    PORTAL_IS_SEQUENCER_SLOT,
+    PORTAL_MAX_TEMPO_GAS_RATE_SLOT,
+    PORTAL_ROLE_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT,
     PendingWithdrawal,
+    Role,
     Withdrawal,
     ZONE_INBOX,
     ZONE_TX_CONTEXT
@@ -51,8 +58,8 @@ contract ZoneOutbox is IZoneOutbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Zone configuration (reads sequencer from L1)
-    IZoneConfig public immutable config;
+    address public immutable tempoPortal;
+    ITempoState public immutable tempoState;
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
@@ -105,6 +112,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error ZeroAmountWithdrawal();
     error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
@@ -115,8 +123,9 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config) {
-        config = IZoneConfig(_config);
+    constructor(address _tempoPortal, address _tempoState) {
+        tempoPortal = _tempoPortal;
+        tempoState = ITempoState(_tempoState);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -130,8 +139,8 @@ contract ZoneOutbox is IZoneOutbox {
     ///      The portal admin bounds this rate through maxTempoGasRate.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
-        if (_tempoGasRate > config.maxTempoGasRate()) revert GasFeeRateTooHigh();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
+        if (_tempoGasRate > _maxTempoGasRate()) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }
@@ -140,7 +149,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     /// @param maxWithdrawals The maximum number of requestWithdrawal() calls per block
     function setMaxWithdrawalsPerBlock(uint32 maxWithdrawals) external {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         maxWithdrawalsPerBlock = maxWithdrawals;
         emit MaxWithdrawalsPerBlockUpdated(maxWithdrawals);
     }
@@ -243,8 +252,9 @@ contract ZoneOutbox is IZoneOutbox {
         if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
+        if (amount == 0) revert ZeroAmountWithdrawal();
 
-        if (!config.isEnabledToken(token)) {
+        if (!_isEnabledToken(token)) {
             revert IZonePortal.TokenNotEnabled();
         }
 
@@ -254,13 +264,13 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         if (gasLimit == 0) {
-            if (!config.isGatewayOpen() && config.isZoneGateway(to)) {
+            if (!_isGatewayOpen() && _isZoneGateway(to)) {
                 revert IZonePortal.InvalidCallbackTarget();
             }
-            if (!config.isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
+            if (!_isAllowedAccount(to)) revert IZonePortal.AccountNotAllowed(to);
         } else {
             _validateGasLimit(gasLimit);
-            if (!config.isGatewayOpen() && !config.isZoneGateway(to)) {
+            if (!_isGatewayOpen() && !_isZoneGateway(to)) {
                 revert IZonePortal.InvalidCallbackTarget();
             }
         }
@@ -401,7 +411,7 @@ contract ZoneOutbox is IZoneOutbox {
         internal
         returns (bytes32 withdrawalQueueHash)
     {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
         uint256 pending = _pendingWithdrawals.length;
@@ -460,13 +470,13 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         return _pendingWithdrawals.length;
     }
 
     /// @notice Pending withdrawals in FIFO order.
     function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
-        if (msg.sender != address(0) && !config.isSequencer(msg.sender)) revert OnlySequencer();
+        if (msg.sender != address(0) && !_isSequencer(msg.sender)) revert OnlySequencer();
         uint256 count = _pendingWithdrawals.length;
         pending = new PendingWithdrawal[](count);
         for (uint256 i = 0; i < count;) {
@@ -528,6 +538,39 @@ contract ZoneOutbox is IZoneOutbox {
         if (encryptedSender.length != expectedLength) {
             revert InvalidEncryptedSenderLength(encryptedSender.length, expectedLength);
         }
+    }
+
+    function _readPortal(bytes32 slot) internal view returns (bytes32) {
+        return tempoState.readTempoStorageSlot(tempoPortal, slot);
+    }
+
+    function _isSequencer(address account) internal view returns (bool) {
+        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_IS_SEQUENCER_SLOT)))) != 0;
+    }
+
+    function _isEnabledToken(address token) internal view returns (bool) {
+        return
+            uint8(uint256(_readPortal(keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT)))))
+                != 0;
+    }
+
+    function _maxTempoGasRate() internal view returns (uint128) {
+        return uint128(uint256(_readPortal(PORTAL_MAX_TEMPO_GAS_RATE_SLOT)));
+    }
+
+    function _isGatewayOpen() internal view returns (bool) {
+        return uint8(uint256(_readPortal(PORTAL_GATEWAY_MODE_SLOT)) >> 8) == 0;
+    }
+
+    function _isAllowedAccount(address account) internal view returns (bool) {
+        if (uint8(uint256(_readPortal(PORTAL_ACCESS_MODE_SLOT))) == 0) return true;
+        return uint256(_readPortal(keccak256(abi.encode(account, PORTAL_ROLE_SLOT))))
+            == uint256(Role.Account);
+    }
+
+    function _isZoneGateway(address gateway) internal view returns (bool) {
+        return uint256(_readPortal(keccak256(abi.encode(gateway, PORTAL_ROLE_SLOT))))
+            == uint256(Role.CallbackGateway);
     }
 
 }

@@ -23,7 +23,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use zone_l1::{DepositQueue, L1BlockTracker, L1PortalEvents, TempoStateExt as _};
-use zone_p2p::{LeadershipSchedule, P2pCommand, P2pEvent, P2pPeerId, PeerTip};
+use zone_p2p::{
+    BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
+    P2pPeerId, PeerTip,
+};
 use zone_payload::{
     ZonePayloadTypes,
     abi::{IZoneInbox, ZONE_INBOX_ADDRESS},
@@ -44,9 +47,10 @@ use crate::settlement_attestation::build_settlement_attestation;
 #[derive(Clone)]
 pub(crate) struct AttestationContext {
     pub(crate) domain: AttestationDomain,
-    pub(crate) signer: PrivateKeySigner,
+    /// `None` on an rpc-only member: it holds no individual key and never signs.
+    pub(crate) signer: Option<PrivateKeySigner>,
     pub(crate) addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-    pub(crate) store: Option<AttestationStore>,
+    pub(crate) store: AttestationStore,
     pub(crate) l1_provider: DynProvider<TempoNetwork>,
     pub(crate) anchor_config: BatchAnchorConfig,
 }
@@ -54,9 +58,9 @@ pub(crate) struct AttestationContext {
 impl AttestationContext {
     pub(crate) fn new(
         domain: AttestationDomain,
-        signer: PrivateKeySigner,
+        signer: Option<PrivateKeySigner>,
         addresses: HashMap<zone_p2p::P2pPeerId, alloy_primitives::Address>,
-        store: Option<AttestationStore>,
+        store: AttestationStore,
         l1_provider: DynProvider<TempoNetwork>,
         anchor_config: BatchAnchorConfig,
     ) -> Self {
@@ -260,13 +264,6 @@ const BACKFILL_PAGE_SIZE: u64 = 64;
 /// headroom absorbs requests arriving before the server task starts.
 pub(crate) const BACKFILL_SERVE_QUEUE_CAPACITY: usize = 128;
 
-/// One peer's queued block backfill request.
-pub(crate) struct BackfillRequest {
-    pub(crate) peer: zone_p2p::P2pPeerId,
-    pub(crate) request_id: u64,
-    pub(crate) start: u64,
-}
-
 /// Keep track of the backfill exactly. We'll buffer any live blocks received
 /// during backfill.
 struct BackfillProgress {
@@ -304,15 +301,15 @@ impl BackfillProgress {
             || first_pending.is_some_and(|number| number > best.saturating_add(1));
     }
 
-    fn request(&self, best: u64) -> Option<P2pCommand> {
-        self.needed.then(|| P2pCommand::RequestBackfill {
+    fn request(&self, best: u64) -> Option<BackfillCommand> {
+        self.needed.then(|| BackfillCommand::Request {
             start: best.saturating_add(1),
         })
     }
 
-    fn probe_after_inactivity(&mut self, best: u64) -> P2pCommand {
+    fn probe_after_inactivity(&mut self, best: u64) -> BackfillCommand {
         self.needed = true;
-        P2pCommand::RequestBackfill {
+        BackfillCommand::Request {
             start: best.saturating_add(1),
         }
     }
@@ -330,22 +327,10 @@ pub(crate) struct PendingPeerBlock {
 
 /// Latest tip evidence advertised by each peer, with observation time.
 ///
-/// Fed by backfill completions on the follower sync loop, consumed by the role controller's
-/// promotion gate and the status RPC.
-#[derive(Debug, Clone)]
+/// Fed by backfill completions on the follower sync loop and consumed by the status RPC.
+#[derive(Debug, Clone, Default)]
 pub(crate) struct PeerTipRegistry {
     inner: std::sync::Arc<std::sync::Mutex<HashMap<P2pPeerId, (PeerTip, std::time::Instant)>>>,
-    changed: tokio::sync::watch::Sender<()>,
-}
-
-impl Default for PeerTipRegistry {
-    fn default() -> Self {
-        let (changed, _) = tokio::sync::watch::channel(());
-        Self {
-            inner: Default::default(),
-            changed,
-        }
-    }
 }
 
 impl PeerTipRegistry {
@@ -354,7 +339,6 @@ impl PeerTipRegistry {
             .lock()
             .expect("poisoned")
             .insert(peer, (tip, std::time::Instant::now()));
-        self.changed.send_replace(());
     }
 
     pub(crate) fn snapshot(&self) -> Vec<(P2pPeerId, PeerTip, std::time::Instant)> {
@@ -364,10 +348,6 @@ impl PeerTipRegistry {
             .iter()
             .map(|(peer, (tip, at))| (peer.clone(), *tip, *at))
             .collect()
-    }
-
-    pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<()> {
-        self.changed.subscribe()
     }
 }
 
@@ -411,7 +391,7 @@ fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
 
 fn serve_backfill_page<P>(
     provider: &P,
-    commands: &mpsc::Sender<P2pCommand>,
+    commands: &mpsc::Sender<BackfillCommand>,
     peer: zone_p2p::P2pPeerId,
     request_id: u64,
     start: u64,
@@ -429,7 +409,7 @@ where
             eyre::eyre!("canonical block {number} is missing while serving backfill")
         })?;
         commands
-            .blocking_send(P2pCommand::SendBackfillBlock {
+            .blocking_send(BackfillCommand::SendBlock {
                 peer: peer.clone(),
                 request_id,
                 block: alloy_rlp::encode(block),
@@ -444,7 +424,7 @@ where
         .state_by_block_hash(tip_header.hash())?
         .tempo_num_hash()?;
     commands
-        .blocking_send(P2pCommand::CompleteBackfill {
+        .blocking_send(BackfillCommand::Complete {
             peer,
             request_id,
             tip: PeerTip {
@@ -467,7 +447,7 @@ where
 /// Exits when the request channel closes.
 pub(crate) async fn serve_backfill_requests<P>(
     provider: P,
-    commands: mpsc::Sender<P2pCommand>,
+    commands: mpsc::Sender<BackfillCommand>,
     mut requests: mpsc::Receiver<BackfillRequest>,
 ) where
     P: BlockNumReader
@@ -540,9 +520,6 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                 };
                 match event {
                     P2pEvent::Started { .. } => {}
-                    P2pEvent::BackfillRequested { .. } => {
-                        debug!(target: "zone::p2p", "Ignoring backfill request on the leader settlement loop; the process-lifetime server handles it");
-                    }
                     P2pEvent::SettlementSignatureReceived { follower, signature } => {
                         let result = async {
                             let signed = SignedSettlementAttestation::decode(&signature)?;
@@ -562,8 +539,7 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                                 Some((signed.attestation.anchorBlockNumber, signed.attestation.anchorBlockHash)),
                             ).await?.ok_or_eyre("signed block is not a batch boundary")?;
                             eyre::ensure!(signed.attestation == expected, "settlement signature does not match leader state");
-                            let (_, signatures) = attestation.store.as_ref()
-                                .expect("leader must have an attestation store")
+                            let (_, signatures) = attestation.store
                                 .insert_settlement(attestation.domain, signer, signed);
                             Ok::<_, eyre::Report>((height, signer, signatures))
                         }.await;
@@ -573,8 +549,6 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
                         }
                     }
                     P2pEvent::BlockReceived { .. }
-                    | P2pEvent::BackfillBlockReceived { .. }
-                    | P2pEvent::BackfillCompleted { .. }
                     | P2pEvent::TransactionReceived { .. }
                     | P2pEvent::SettlementProposalReceived { .. } => {
                         // A leader never follows peer chain heads. Keeping this explicit ensures
@@ -593,14 +567,15 @@ pub(crate) async fn collect_follower_settlement_signatures<P>(
 /// `schedule.leader_for(the block's embedded anchor)`. We do this because if there are accidentally
 /// two leaders (split brain) for a block, we need to decide to import the correct one.
 ///
-/// Backfilled blocks carry only the
-/// responder's transport identity and are judged by parent/anchor/execution/conflict
-/// validation alone. The loop exits when `stop` fires.
+/// Backfilled blocks carry no producer claim and are judged by
+/// parent/anchor/execution/conflict validation alone. The loop exits when `stop` fires.
 pub(crate) async fn run_follower_block_sync<P>(
     provider: P,
     engine: ConsensusEngineHandle<ZonePayloadTypes>,
     mut events: mpsc::Receiver<P2pEvent>,
     commands: mpsc::Sender<P2pCommand>,
+    backfill_commands: mpsc::Sender<BackfillCommand>,
+    mut backfill_responses: mpsc::Receiver<BackfillResponse>,
     l1_block_tracker: L1BlockTracker,
     deposit_queue: DepositQueue,
     attestation: AttestationContext,
@@ -633,10 +608,59 @@ pub(crate) async fn run_follower_block_sync<P>(
 
     loop {
         tokio::select! {
-            biased;
+        biased;
             () = stop.cancelled() => {
                 debug!(target: "zone::p2p", "Follower block sync stopped");
                 return;
+            }
+            response = backfill_responses.recv() => {
+                let Some(response) = response else {
+                    debug!(target: "zone::p2p", "Backfill response channel closed");
+                    return;
+                };
+                match response {
+                    BackfillResponse::Block { block, .. } => {
+                        let number = match encoded_block_number(&block) {
+                            Ok(number) => number,
+                            Err(err) => {
+                                tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
+                                continue;
+                            }
+                        };
+                        inactivity
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
+                        process_follower_block(
+                            &provider,
+                            &engine,
+                            &l1_block_tracker,
+                            &deposit_queue,
+                            &schedule,
+                            &mut pending,
+                            &mut backfill,
+                            number,
+                            block,
+                            None,
+                        )
+                        .await;
+                    }
+                    BackfillResponse::Completed { peer, tip } => {
+                        peer_tips.record(peer.clone(), tip);
+                        let best = match provider.best_block_number() {
+                            Ok(best) => best,
+                            Err(err) => {
+                                tracing::error!(target: "zone::p2p", %err, "Failed reading local head after backfill response");
+                                continue;
+                            }
+                        };
+                        backfill.complete(
+                            tip.zone_height,
+                            best,
+                            pending.first_key_value().map(|(&number, _)| number),
+                        );
+                        debug!(target: "zone::p2p", %peer, best, tip_height = tip.zone_height, tip_hash = ?tip.zone_hash, backfill_needed = backfill.needed, "Completed block backfill response page");
+                    }
+                }
             }
             event = events.recv() => {
                 let Some(event) = event else {
@@ -660,10 +684,15 @@ pub(crate) async fn run_follower_block_sync<P>(
                             ).await?.ok_or_eyre("proposed block is not a batch boundary")?;
                             eyre::ensure!(proposal == expected, "settlement proposal does not match follower state");
 
+                            // Unreachable on an rpc-only member: the P2P layer never routes a
+                            // proposal to one. Fails closed rather than panicking if it ever does.
+                            let signer = attestation.signer.as_ref().ok_or_eyre(
+                                "this node holds no individual secp256k1 key, so it cannot sign a settlement attestation",
+                            )?;
                             let signed = SignedSettlementAttestation::sign(
                                 proposal,
                                 attestation.domain,
-                                &attestation.signer,
+                                signer,
                             )?;
 
                             // Return the signed settlement attestation to the peer that
@@ -682,93 +711,36 @@ pub(crate) async fn run_follower_block_sync<P>(
                             Err(err) => tracing::warn!(target: "zone::p2p", %leader, %err, "Rejected settlement proposal"),
                         }
                     }
-                    P2pEvent::BackfillRequested { .. } => {
-                        debug!(target: "zone::p2p", "Ignoring backfill request on follower block sync; the process-lifetime server handles it");
-                    }
-                    P2pEvent::BlockReceived { .. }
-                    | P2pEvent::BackfillBlockReceived { .. } => {
+                    P2pEvent::BlockReceived { .. } => {
                         let (block, live_sender) = match event {
                             P2pEvent::BlockReceived { leader_ed25519_public_key, block } => {
                                 (block, Some(leader_ed25519_public_key))
                             }
-                            P2pEvent::BackfillBlockReceived { block, .. } => (block, None),
                             _ => unreachable!("outer match arm restricts the event kind"),
                         };
-                        match encoded_block_number(&block) {
-                            Ok(number) => {
-                                inactivity
-                                    .as_mut()
-                                    .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
-                                let best = match provider.best_block_number() {
-                                    Ok(best) => best,
-                                    Err(err) => {
-                                        tracing::error!(target: "zone::p2p", %err, "Failed reading local head");
-                                        continue;
-                                    }
-                                };
-                                let peer_block = PendingPeerBlock { encoded: block, live_sender };
-                                if number <= best {
-                                    if let Err(err) = import_peer_block(
-                                        &provider,
-                                        &engine,
-                                        &l1_block_tracker,
-                                        &deposit_queue,
-                                        &schedule,
-                                        &peer_block,
-                                    ).await {
-                                        tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
-                                    }
-                                    continue;
-                                }
-                                backfill.observe_block(number, best);
-                                if let Some(dropped) = buffer_pending_block(&mut pending, number, peer_block) {
-                                    tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
-                                }
-                                if number > best.saturating_add(1) {
-                                    info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
-                                }
-                                if let Err(err) = drain_pending_blocks(
-                                    &provider,
-                                    &engine,
-                                    &l1_block_tracker,
-                                    &deposit_queue,
-                                    &schedule,
-                                    &mut pending,
-                                ).await {
-                                    tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
-                                    backfill.needed = true;
-                                } else {
-                                    let best = match provider.best_block_number() {
-                                        Ok(best) => best,
-                                        Err(err) => {
-                                            tracing::error!(target: "zone::p2p", %err, "Failed reading local head after importing peer blocks");
-                                            continue;
-                                        }
-                                    };
-                                    backfill.refresh_after_import(
-                                        best,
-                                        pending.first_key_value().map(|(&number, _)| number),
-                                    );
-                                }
-                            }
-                            Err(err) => tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block"),
-                        }
-                    }
-                    P2pEvent::BackfillCompleted { peer, tip } => {
-                        peer_tips.record(peer.clone(), tip);
-                        let best = match provider.best_block_number() {
-                            Ok(best) => best,
+                        let number = match encoded_block_number(&block) {
+                            Ok(number) => number,
                             Err(err) => {
-                                tracing::error!(target: "zone::p2p", %err, "Failed reading local head after backfill response");
+                                tracing::error!(target: "zone::p2p", %err, "Rejected malformed peer block");
                                 continue;
                             }
                         };
-                        backfill.complete(
-                            tip.zone_height,
-                            best,
-                            pending.first_key_value().map(|(&number, _)| number),
-                        );
-                        debug!(target: "zone::p2p", %peer, best, tip_height = tip.zone_height, tip_hash = ?tip.zone_hash, backfill_needed = backfill.needed, "Completed block backfill response page");
+                        inactivity
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + BLOCK_INACTIVITY_TIMEOUT);
+                        process_follower_block(
+                            &provider,
+                            &engine,
+                            &l1_block_tracker,
+                            &deposit_queue,
+                            &schedule,
+                            &mut pending,
+                            &mut backfill,
+                            number,
+                            block,
+                            live_sender,
+                        )
+                        .await;
                     }
                     P2pEvent::TransactionReceived { .. } => {
                         debug!(target: "zone::p2p", "Ignoring unexpected transaction event in follower block sync");
@@ -789,7 +761,7 @@ pub(crate) async fn run_follower_block_sync<P>(
 
                 // retry the backfill
                 if let Some(command) = backfill.request(best)
-                    && commands.send(command).await.is_err()
+                    && backfill_commands.send(command).await.is_err()
                 {
                     debug!(target: "zone::p2p", "P2P command channel closed");
                     return;
@@ -810,12 +782,91 @@ pub(crate) async fn run_follower_block_sync<P>(
                 };
                 let command = backfill.probe_after_inactivity(best);
                 info!(target: "zone::p2p", best, "No peer block received recently; probing for backfill");
-                if commands.send(command).await.is_err() {
+                if backfill_commands.send(command).await.is_err() {
                     debug!(target: "zone::p2p", "P2P command channel closed");
                     return;
                 }
             }
         }
+    }
+}
+
+async fn process_follower_block<P>(
+    provider: &P,
+    engine: &ConsensusEngineHandle<ZonePayloadTypes>,
+    l1_block_tracker: &L1BlockTracker,
+    deposit_queue: &DepositQueue,
+    schedule: &LeadershipSchedule,
+    pending: &mut BTreeMap<u64, PendingPeerBlock>,
+    backfill: &mut BackfillProgress,
+    number: u64,
+    block: Vec<u8>,
+    live_sender: Option<P2pPeerId>,
+) where
+    P: BlockNumReader
+        + BlockReader<Block = Block>
+        + HeaderProvider<Header = TempoHeader>
+        + StateProviderFactory
+        + ReceiptProvider
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+{
+    let best = match provider.best_block_number() {
+        Ok(best) => best,
+        Err(err) => {
+            tracing::error!(target: "zone::p2p", %err, "Failed reading local head");
+            return;
+        }
+    };
+    let peer_block = PendingPeerBlock {
+        encoded: block,
+        live_sender,
+    };
+    if number <= best {
+        if let Err(err) = import_peer_block(
+            provider,
+            engine,
+            l1_block_tracker,
+            deposit_queue,
+            schedule,
+            &peer_block,
+        )
+        .await
+        {
+            tracing::error!(target: "zone::p2p", %err, "Rejected duplicate or conflicting peer block");
+        }
+        return;
+    }
+    backfill.observe_block(number, best);
+    if let Some(dropped) = buffer_pending_block(pending, number, peer_block) {
+        tracing::warn!(target: "zone::p2p", dropped, pending_limit = MAX_PENDING_BLOCKS, "Dropped far-future peer block because the pending block buffer is full");
+    }
+    if number > best.saturating_add(1) {
+        info!(target: "zone::p2p", local_head = best, received = number, "Detected zone block gap; requesting backfill");
+    }
+    if let Err(err) = drain_pending_blocks(
+        provider,
+        engine,
+        l1_block_tracker,
+        deposit_queue,
+        schedule,
+        pending,
+    )
+    .await
+    {
+        tracing::error!(target: "zone::p2p", %err, "Rejected peer block while draining backfill");
+        backfill.needed = true;
+    } else {
+        let best = match provider.best_block_number() {
+            Ok(best) => best,
+            Err(err) => {
+                tracing::error!(target: "zone::p2p", %err, "Failed reading local head after importing peer blocks");
+                return;
+            }
+        };
+        backfill.refresh_after_import(best, pending.first_key_value().map(|(&number, _)| number));
     }
 }
 
@@ -1153,7 +1204,7 @@ mod tests {
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
-    use zone_p2p::{LeadershipSchedule, LeadershipState, P2pCommand};
+    use zone_p2p::{BackfillCommand, LeadershipSchedule, LeadershipState, P2pCommand};
 
     #[derive(Clone)]
     struct StartupRaceSource {
@@ -1488,6 +1539,26 @@ mod tests {
         assert!(message.contains("schedule assigns that anchor"));
     }
 
+    #[test]
+    fn forced_recovery_reassigns_live_sender_for_missing_anchors() {
+        use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
+
+        let outgoing = PrivateKey::from_seed(1).public_key();
+        let incoming = PrivateKey::from_seed(2).public_key();
+        let schedule = LeadershipSchedule::seeded(LeadershipState::new(7, outgoing.clone(), 0));
+        schedule
+            .install_forced_recovery(8, incoming.clone(), B256::repeat_byte(0x11), 51)
+            .unwrap();
+        schedule
+            .publish(LeadershipState::new(8, incoming.clone(), 60))
+            .unwrap();
+
+        validate_live_block_sender(&schedule, Some(&incoming), 51, 11).unwrap();
+        let error = validate_live_block_sender(&schedule, Some(&outgoing), 51, 11)
+            .expect_err("the crashed leader must not remain authoritative in the recovery window");
+        assert!(error.to_string().contains(&incoming.to_string()));
+    }
+
     #[tokio::test]
     async fn broadcasts_block_persisted_during_startup_reconciliation_once() {
         let source = StartupRaceSource {
@@ -1516,7 +1587,7 @@ mod tests {
         let mut backfill = BackfillProgress::new();
         assert_eq!(
             backfill.request(LOCAL_HEAD),
-            Some(P2pCommand::RequestBackfill {
+            Some(BackfillCommand::Request {
                 start: LOCAL_HEAD + 1,
             })
         );
@@ -1533,7 +1604,7 @@ mod tests {
         // The retry starts at the missing N+1 rather than skipping to the received N+2.
         assert_eq!(
             backfill.request(LOCAL_HEAD),
-            Some(P2pCommand::RequestBackfill {
+            Some(BackfillCommand::Request {
                 start: LOCAL_HEAD + 1,
             })
         );
@@ -1549,26 +1620,24 @@ mod tests {
 
         assert_eq!(
             backfill.probe_after_inactivity(LOCAL_HEAD),
-            P2pCommand::RequestBackfill {
+            BackfillCommand::Request {
                 start: LOCAL_HEAD + 1,
             }
         );
         assert_eq!(
             backfill.request(LOCAL_HEAD),
-            Some(P2pCommand::RequestBackfill {
+            Some(BackfillCommand::Request {
                 start: LOCAL_HEAD + 1,
             })
         );
     }
 
     #[test]
-    fn peer_tip_registry_announces_fresh_evidence() {
+    fn peer_tip_registry_records_latest_tip() {
         use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
         use zone_p2p::PeerTip;
 
         let registry = super::PeerTipRegistry::default();
-        let mut changes = registry.subscribe();
-        assert!(!changes.has_changed().unwrap());
 
         let peer = PrivateKey::from_seed(1).public_key();
         let tip = PeerTip {
@@ -1578,12 +1647,9 @@ mod tests {
             tempo_block_hash: B256::repeat_byte(0x11),
         };
         registry.record(peer.clone(), tip);
-        assert!(changes.has_changed().unwrap());
-        changes.borrow_and_update();
 
-        // Re-advertising the same tip refreshes its evidence timestamp and must wake waiters.
+        // Re-advertising the same tip refreshes its observation timestamp.
         registry.record(peer.clone(), tip);
-        assert!(changes.has_changed().unwrap());
         let snapshot = registry.snapshot();
         assert_eq!(snapshot.len(), 1);
         assert_eq!(snapshot[0].0, peer);

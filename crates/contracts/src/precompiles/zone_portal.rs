@@ -1,7 +1,7 @@
 //! `ZonePortal` — deployed on Tempo L1.
 
 pub use ZonePortal::{
-    BlockTransition, DepositQueueTransition, EncryptedDeposit, EncryptedDepositPayload, Withdrawal,
+    BlockTransition, Deposit, DepositPayload, DepositQueueTransition, Withdrawal,
     ZonePortalErrors as ZonePortalError,
 };
 
@@ -32,8 +32,8 @@ crate::sol! {
             bytes encryptedSender;
         }
 
-        /// Encrypted deposit payload (ECIES encrypted recipient and memo)
-        struct EncryptedDepositPayload {
+        /// Deposit payload (ECIES-encrypted recipient and memo).
+        struct DepositPayload {
             bytes32 ephemeralPubkeyX;
             uint8 ephemeralPubkeyYParity;
             bytes ciphertext;
@@ -41,14 +41,20 @@ crate::sol! {
             bytes16 tag;
         }
 
-        /// Encrypted deposit stored in the queue
-        struct EncryptedDeposit {
+        /// User deposit stored in the queue.
+        struct Deposit {
             address token;
             address sender;
             uint128 amount;
             address tempoRefundRecipient;
             uint256 keyIndex;
-            EncryptedDepositPayload encrypted;
+            DepositPayload encrypted;
+        }
+
+        struct EncryptionKeyEntry {
+            bytes32 x;
+            uint8 yParity;
+            uint64 activationBlock;
         }
 
         struct BlockTransition {
@@ -69,18 +75,6 @@ crate::sol! {
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed sender,
             address token,
-            address to,
-            uint128 netAmount,
-            uint128 fee,
-            bytes32 memo,
-            address tempoRefundRecipient,
-            uint64 depositNumber
-        );
-
-        event EncryptedDepositMade(
-            bytes32 indexed newCurrentDepositQueueHash,
-            address indexed sender,
-            address token,
             uint128 netAmount,
             uint128 fee,
             uint256 keyIndex,
@@ -96,6 +90,13 @@ crate::sol! {
         /// Event emitted when a new TIP-20 token is enabled for bridging.
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
+        event SequencerEncryptionKeyUpdated(
+            bytes32 x,
+            uint8 yParity,
+            uint256 keyIndex,
+            uint64 activationBlock
+        );
 
         /// `withdrawalQueueIndex` is the logical withdrawal queue index the batch's hash
         /// chain was enqueued under, or `NO_QUEUE_INDEX` when the batch
@@ -178,6 +179,7 @@ crate::sol! {
         error PolicyForbids();
         error InvalidBouncebackRecipient();
         error TokenNotEnabled();
+        error DepositBlockCapacityExceeded(uint64 maximum);
         error InvalidCallbackTarget();
         error AccountNotAllowed(address account);
         error InvalidLeader();
@@ -221,19 +223,10 @@ crate::sol! {
         function calculateBouncebackFee() external view returns (uint128 fee);
         function depositCount() external view returns (uint64);
         function lastProcessedDepositNumber() external view returns (uint64);
+        function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
         // -- State-changing functions --
-
-        function deposit(
-            address token,
-            address to,
-            uint128 amount,
-            bytes32 memo,
-            address tempoRefundRecipient
-        )
-            external
-            returns (bytes32 newCurrentDepositQueueHash);
 
         function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
@@ -263,11 +256,19 @@ crate::sol! {
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
 
+        function deposit(
+            address token,
+            uint128 amount,
+            uint256 keyIndex,
+            DepositPayload calldata encrypted,
+            address tempoRefundRecipient
+        ) external returns (bytes32 newCurrentDepositQueueHash);
+
         function depositEncrypted(
             address token,
             uint128 amount,
             uint256 keyIndex,
-            EncryptedDepositPayload calldata encrypted,
+            DepositPayload calldata encrypted,
             address tempoRefundRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
@@ -293,6 +294,10 @@ crate::sol! {
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
         function encryptionKeyCount() external view returns (uint256);
+        function encryptionKeyAt(uint256 index)
+            external view returns (EncryptionKeyEntry memory entry);
+        function isEncryptionKeyValid(uint256 keyIndex)
+            external view returns (bool valid, uint64 expiresAtBlock);
         function encryptionKeyAtBlock(uint64 tempoBlockNumber)
             external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
         function claimRefund(address token) external returns (uint128 amount);
@@ -335,8 +340,11 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         futures::future::try_join_all(futs).await
     }
 
-    /// Fetches the active sequencer encryption key and its index.
+    /// Fetches the active sequencer encryption key and its index from one L1 snapshot.
     ///
+    /// Reads the current L1 block number, then pins an atomic
+    /// [`encryptionKeyAtBlock`](ZonePortal::encryptionKeyAtBlockCall) call to that block so a key
+    /// rotation cannot pair a key with an index from a different state snapshot.
     /// Returns `(key, key_index)` where `key` is the
     /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
     /// `key_index` is the zero-based index of the current key.
@@ -349,11 +357,53 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         ),
         alloy_contract::Error,
     > {
-        let key_call = self.sequencerEncryptionKey();
-        let count_call = self.encryptionKeyCount();
-        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
-        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
-        Ok((key, key_index))
+        let block_number = self.provider().get_block_number().await?;
+        let key = self
+            .encryptionKeyAtBlock(block_number)
+            .block(alloy_rpc_types_eth::BlockId::number(block_number))
+            .call()
+            .await?;
+        Ok((
+            ZonePortal::sequencerEncryptionKeyReturn {
+                x: key.x,
+                yParity: key.yParity,
+            },
+            key.keyIndex,
+        ))
+    }
+}
+
+#[cfg(all(test, feature = "rpc"))]
+mod tests {
+    use super::*;
+    use alloy_primitives::U256;
+    use alloy_provider::ProviderBuilder;
+    use alloy_sol_types::SolCall;
+    use alloy_transport::mock::Asserter;
+
+    #[tokio::test]
+    async fn encryption_key_reads_key_and_index_from_one_snapshot() {
+        let asserter = Asserter::new();
+        let provider = ProviderBuilder::new().connect_mocked_client(asserter.clone());
+        let block_number = 42_u64;
+        let expected = ZonePortal::encryptionKeyAtBlockReturn {
+            x: B256::repeat_byte(0x11),
+            yParity: 1,
+            keyIndex: U256::from(7),
+        };
+
+        asserter.push_success(&block_number);
+        asserter.push_success(&Bytes::from(
+            ZonePortal::encryptionKeyAtBlockCall::abi_encode_returns(&expected),
+        ));
+
+        let portal = ZonePortal::new(Address::ZERO, &provider);
+        let (key, key_index) = portal.encryption_key().await.unwrap();
+
+        assert_eq!(key.x, expected.x);
+        assert_eq!(key.yParity, expected.yParity);
+        assert_eq!(key_index, expected.keyIndex);
+        assert!(asserter.read_q().is_empty());
     }
 }
 
@@ -381,6 +431,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
             Self::TokenNotEnabled(_) => f.write_str("TokenNotEnabled"),
+            Self::DepositBlockCapacityExceeded(_) => f.write_str("DepositBlockCapacityExceeded"),
             Self::InvalidCallbackTarget(_) => f.write_str("InvalidCallbackTarget"),
             Self::AccountNotAllowed(_) => f.write_str("AccountNotAllowed"),
             Self::InvalidLeader(_) => f.write_str("InvalidLeader"),
@@ -391,15 +442,15 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     }
 }
 
-impl EncryptedDeposit {
-    /// Build the event emitted after a successful encrypted deposit.
+impl Deposit {
+    /// Build the event emitted after a successfully processed deposit.
     pub fn processed_event(
         &self,
         deposit_hash: B256,
         recipient: Address,
         memo: B256,
     ) -> ZoneInboxEvent {
-        ZoneInboxEvent::encrypted_deposit_processed(
+        ZoneInboxEvent::deposit_processed(
             deposit_hash,
             self.sender,
             recipient,
@@ -409,9 +460,9 @@ impl EncryptedDeposit {
         )
     }
 
-    /// Build the event emitted after a failed encrypted deposit.
+    /// Build the event emitted after a failed deposit.
     pub fn failed_event(&self, deposit_hash: B256) -> ZoneInboxEvent {
-        ZoneInboxEvent::encrypted_deposit_failed(deposit_hash, self.sender, self.token, self.amount)
+        ZoneInboxEvent::deposit_failed(deposit_hash, self.sender, self.token, self.amount)
     }
 }
 

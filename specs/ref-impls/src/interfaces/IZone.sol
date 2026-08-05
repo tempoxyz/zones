@@ -82,26 +82,23 @@ struct DepositQueueTransition {
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
-    Regular, // Standard deposit with plaintext recipient and memo
-    Encrypted // Encrypted deposit with hidden recipient and memo
+    WithdrawalBounceBack, // Internal withdrawal bounce-back entry
+    Deposit // User deposit with hidden recipient and memo
 }
 
-struct Deposit {
+struct WithdrawalBounceBackDeposit {
     address token; // TIP-20 token being deposited
-    address sender;
     address to;
     uint128 amount;
-    address tempoRefundRecipient;
-    bytes32 memo;
 }
 
 /*//////////////////////////////////////////////////////////////
-                        ENCRYPTED DEPOSITS
+                              DEPOSITS
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Encrypted deposit payload (recipient and memo encrypted to sequencer)
+/// @notice Deposit payload with recipient and memo encrypted to the sequencer
 /// @dev Uses ECIES with secp256k1: ephemeral ECDH + AES-256-GCM
-struct EncryptedDepositPayload {
+struct DepositPayload {
     bytes32 ephemeralPubkeyX; // Ephemeral public key X coordinate (for ECDH)
     uint8 ephemeralPubkeyYParity; // Y coordinate parity (0x02 or 0x03)
     bytes ciphertext; // AES-256-GCM encrypted (to || memo || padding)
@@ -109,18 +106,18 @@ struct EncryptedDepositPayload {
     bytes16 tag; // GCM authentication tag
 }
 
-/// @notice Encrypted deposit stored in the queue
+/// @notice User deposit stored in the queue
 /// @dev Sender, token, amount, and key index are public; recipient and memo are encrypted.
 ///      The token identity is public because the portal must escrow the correct token.
 ///      The keyIndex specifies which encryption key the user used, allowing the prover
 ///      to look up the correct key for decryption even after key rotations.
-struct EncryptedDeposit {
+struct Deposit {
     address token; // TIP-20 token being deposited (public, for escrow accounting)
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     address tempoRefundRecipient; // Tempo recipient for a failed-deposit refund
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
-    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+    DepositPayload encrypted; // Encrypted (to, memo)
 }
 
 /// @notice Historical record of an encryption key with its activation block
@@ -128,7 +125,7 @@ struct EncryptedDeposit {
 ///      slot 0: x (bytes32) — full slot
 ///      slot 1: yParity (uint8, lowest byte) | activationBlock (uint64, next 8 bytes)
 ///      WARNING: Do not reorder fields. ZoneInbox._readEncryptionKey() and
-///      ZoneConfig.sequencerEncryptionKey() read these via raw storage slot access.
+///      ZoneInbox._readEncryptionKey() reads these via raw storage slot access.
 struct EncryptionKeyEntry {
     bytes32 x; // X coordinate of the public key
     uint8 yParity; // Y coordinate parity (0x02 or 0x03)
@@ -146,10 +143,10 @@ uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
 
 /// @notice A deposit entry in the unified queue (for zone-side processing)
 /// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
-///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
+///      The depositData is ABI-encoded WithdrawalBounceBackDeposit or Deposit depending on type.
 struct QueuedDeposit {
     DepositType depositType;
-    bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bytes depositData; // abi.encode(WithdrawalBounceBackDeposit) or abi.encode(Deposit)
     bool rejected;
 }
 
@@ -163,8 +160,8 @@ struct ChaumPedersenProof {
     bytes32 c; // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
 }
 
-/// @notice Decryption data provided by sequencer for encrypted deposits
-/// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance).
+/// @notice Decryption data provided by the sequencer for deposits
+/// @dev Must match 1:1 with user deposits in the queue (in order of appearance).
 ///      Includes a Chaum-Pedersen proof to verify the shared secret was correctly derived
 ///      without exposing the sequencer's private key.
 ///      The sequencer's public key is looked up from the deposit's keyIndex on-chain,
@@ -314,9 +311,6 @@ address constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
 // ZoneOutbox system contract address (0x1c00...0002)
 address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
-// ZoneConfig system contract address (0x1c00...0003)
-address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
-
 // ZoneTxContext precompile address (0x1c00...0005)
 address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;
 
@@ -360,10 +354,12 @@ interface IZoneTxContext {
 //   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //   slot 22: maxTempoGasRate (uint128)
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
-//   slot 24: leaderActivationTempoBlock (uint64)
+//   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBlock (uint64)
+//            + _depositsInCurrentBlock (uint64) + _tokenEnableCountBlock (uint64) [packed]
+//   slot 25: _tokensEnabledInCurrentBlock (uint64)
 //
 // These constants are the single source of truth for cross-domain reads.
-// ZoneConfig and ZoneInbox use them to read portal state via
+// ZoneInbox and ZoneOutbox use them to read portal state via
 // TempoState.readTempoStorageSlot(). If the portal layout changes,
 // update these constants and the vm.load regression tests will catch mismatches.
 bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(0));
@@ -501,18 +497,6 @@ struct TokenConfig {
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
 
-    event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash,
-        address indexed sender,
-        address token,
-        address to,
-        uint128 netAmount,
-        uint128 fee,
-        bytes32 memo,
-        address tempoRefundRecipient,
-        uint64 depositNumber
-    );
-
     /// @notice Emitted after a batch is accepted by `submitBatch`.
     /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
     ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
@@ -549,8 +533,8 @@ interface IZonePortal {
     /// @notice Emitted when a pending admin accepts and the admin role is handed over.
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
 
-    /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
-    event EncryptedDepositMade(
+    /// @notice Emitted when a deposit is made (recipient/memo not revealed)
+    event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address token,
@@ -598,7 +582,7 @@ interface IZonePortal {
     /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
 
-    /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
+    /// @notice Emitted when the sequencer updates the zone's operator RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
     /// @notice Emitted when the admin replaces the batch-attestation signer set.
@@ -640,6 +624,11 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
+    error DepositBlockCapacityExceeded(uint64 maximum);
+    error TokenEnablementBlockCapacityExceeded(uint64 maximum);
+    error TokenNameTooLong(uint256 actual, uint256 maximum);
+    error TokenSymbolTooLong(uint256 actual, uint256 maximum);
+    error TokenCurrencyTooLong(uint256 actual, uint256 maximum);
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -680,6 +669,21 @@ interface IZonePortal {
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
+
+    /// @notice Maximum deposits accepted by this portal in one Tempo block.
+    function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+
+    /// @notice Maximum tokens enabled by this portal in one Tempo block.
+    function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
+
+    /// @notice Maximum byte length accepted for a bridged token name.
+    function MAX_TOKEN_NAME_BYTES() external view returns (uint256);
+
+    /// @notice Maximum byte length accepted for a bridged token symbol.
+    function MAX_TOKEN_SYMBOL_BYTES() external view returns (uint256);
+
+    /// @notice Maximum byte length accepted for a bridged token currency.
+    function MAX_TOKEN_CURRENCY_BYTES() external view returns (uint256);
 
     /// @notice Maximum callback gas accepted for withdrawals
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
@@ -805,11 +809,11 @@ interface IZonePortal {
     /// @notice Resume deposits for a token. Only callable by admin.
     function resumeDeposits(address token) external;
 
-    /// @notice The zone's public RPC endpoint
+    /// @notice The zone's operator RPC endpoint
     /// @return The stored RPC URL, or empty string if unset
     function rpcUrl() external view returns (string memory);
 
-    /// @notice Update the zone's public RPC endpoint. Only callable by sequencer.
+    /// @notice Update the zone's operator RPC endpoint. Only callable by sequencer.
     /// @param rpcUrl The new RPC URL (may be empty to clear it)
     function setRpcUrl(string calldata rpcUrl) external;
 
@@ -824,7 +828,7 @@ interface IZonePortal {
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
     function acceptAdmin() external;
 
-    /// @notice Get the sequencer's current encryption public key for encrypted deposits
+    /// @notice Get the sequencer's current encryption public key for deposits
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
@@ -895,11 +899,14 @@ interface IZonePortal {
         view
         returns (bool valid, uint64 expiresAtBlock);
 
+    /// @notice Alias for `depositEncrypted`.
+    /// @dev This entrypoint accepts only encrypted recipient and memo data and emits
+    ///      `DepositMade`.
     function deposit(
         address token,
-        address to,
         uint128 amount,
-        bytes32 memo,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
@@ -919,7 +926,7 @@ interface IZonePortal {
         address token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted,
+        DepositPayload calldata encrypted,
         address tempoRefundRecipient
     )
         external
@@ -1013,7 +1020,7 @@ struct LastBatch {
 /// @notice Interface for zone-side Tempo state verification predeploy
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
 ///      System-only contract. Only ZoneInbox can call finalizeTempo().
-///      Only ZoneInbox, ZoneOutbox, and ZoneConfig can call readTempoStorageSlot(s).
+///      Only ZoneInbox and ZoneOutbox can call readTempoStorageSlot(s).
 interface ITempoState {
 
     event TempoBlockFinalized(
@@ -1063,6 +1070,8 @@ interface IZoneInbox {
         uint64 lastProcessedDepositNumber
     );
 
+    /// @notice Emitted when a deposit is processed (decrypted and credited)
+    // Revealed after decryption
     event DepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
@@ -1072,29 +1081,9 @@ interface IZoneInbox {
         bytes32 memo
     );
 
-    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
-    // Revealed after decryption
-    event EncryptedDepositProcessed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        bytes32 memo
-    );
-
-    /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
-    event EncryptedDepositFailed(
-        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
-
+    /// @notice Emitted when a deposit fails (invalid ciphertext, funds returned to sender)
     event DepositFailed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        address tempoRefundRecipient
+        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
 
     event DepositRejected(
@@ -1121,13 +1110,11 @@ interface IZoneInbox {
 
     error OnlySequencer();
     error InvalidDepositQueueHash();
+    error InvalidWithdrawalBounceBack();
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
     error Unauthorized();
-
-    /// @notice Zone configuration (reads sequencer from L1)
-    function config() external view returns (IZoneConfig);
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     function tempoPortal() external view returns (address);
@@ -1144,22 +1131,22 @@ interface IZoneInbox {
 
     function claimRefund(address token) external returns (uint128 amount);
 
-    /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
-    /// @dev This is the main entry point for the sequencer at block start.
+    /// @notice Advance Tempo state and process deposits in a single system-only call.
+    /// @dev This is the main entry point for the block executor at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the unified queue (regular and encrypted)
+    ///      2. Processes user deposits and internal withdrawal bounce-backs
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///
-    ///      The sequencer may process a bounded subset of pending deposits.
+    ///      The system transaction may process a bounded subset of pending deposits.
     ///      The proof validates contiguity: processedDepositQueueHash
     ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
     ///
-    ///      For encrypted deposits, the sequencer provides DecryptionData with the
+    ///      For user deposits, the sequencer provides DecryptionData with the
     ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
     ///
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
-    /// @param decryptions Decryption data for valid encrypted deposits, in order
+    /// @param decryptions Decryption data for valid user deposits, in order
     /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
         bytes calldata header,
@@ -1205,9 +1192,6 @@ interface IZoneOutbox {
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
-
-    /// @notice Zone configuration (reads sequencer from L1)
-    function config() external view returns (IZoneConfig);
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
@@ -1290,48 +1274,5 @@ interface IZoneOutbox {
     )
         external
         returns (bytes32 withdrawalQueueHash);
-
-}
-
-/// @title IZoneConfig
-/// @notice Interface for zone configuration and L1 state access
-/// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
-///      Provides centralized access to zone metadata and reads the sequencer set from L1.
-interface IZoneConfig {
-
-    error NotSequencer();
-    error NoEncryptionKeySet();
-
-    /// @notice L1 ZonePortal address
-    function tempoPortal() external view returns (address);
-
-    /// @notice TempoState predeploy for L1 reads
-    function tempoState() external view returns (ITempoState);
-
-    /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
-    /// @dev Used for encrypted deposits (ECIES).
-    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
-
-    /// @notice Check if an address belongs to the active sequencer set.
-    function isSequencer(address account) external view returns (bool);
-
-    /// @notice Check if a token is enabled by reading from L1 ZonePortal
-    function isEnabledToken(address token) external view returns (bool);
-
-    /// @notice Read the maximum sequencer-configurable Tempo gas rate from L1 ZonePortal.
-    function maxTempoGasRate() external view returns (uint128);
-
-    /// @notice Read whether account allowlist enforcement is enabled on L1 ZonePortal.
-    function isAccessEnforced() external view returns (bool);
-
-    /// @notice Read whether callback gateway registration enforcement is disabled on L1 ZonePortal.
-    function isGatewayOpen() external view returns (bool);
-
-    /// @notice Check whether an account is authorized under the zone's access policy.
-    /// @dev Returns true for every account when enforcement is disabled.
-    function isAllowedAccount(address account) external view returns (bool);
-
-    /// @notice Check whether an address is a registered callback-only ZoneGateway.
-    function isZoneGateway(address gateway) external view returns (bool);
 
 }

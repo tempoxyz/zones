@@ -1,4 +1,4 @@
-//! Shared websocket subscription types for the private zone RPC.
+//! Shared websocket subscription types for the redacted zone RPC.
 
 use std::{future::Future, pin::Pin};
 

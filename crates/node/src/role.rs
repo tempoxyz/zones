@@ -2,7 +2,7 @@
 //!
 //! The [`RoleController`] switches complete role generations — block production or import,
 //! broadcast, transaction flow, settlement, and sequencer background tasks — as one fenced
-//! unit, driven by the finalized [`LeadershipSchedule`].
+//! unit, driven by the effective [`LeadershipSchedule`].
 //!
 //! The control rule is about the **next anchor**, never the last applied one: for the next
 //! Tempo anchor `N` to be consumed, if `schedule.leader_for(N)` is this node and the zone
@@ -27,8 +27,11 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
-use zone_p2p::{LeadershipSchedule, P2pCommand, P2pEvent, P2pPeerId};
+use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockTracker, TempoStateExt as _};
+use zone_p2p::{
+    BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
+    P2pPeerId,
+};
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
     ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, spawn_zone_sequencer,
@@ -42,7 +45,7 @@ mod zone_transaction_pool_alias {
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     replication::{
-        AttestationContext, BackfillRequest, PeerTipRegistry, broadcast_persisted_blocks,
+        AttestationContext, PeerTipRegistry, broadcast_persisted_blocks,
         collect_follower_settlement_signatures, run_follower_block_sync,
     },
     settlement_attestation::collect_leader_settlements,
@@ -57,8 +60,6 @@ const GENERATION_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const GENERATION_RESTART_BACKOFF: Duration = Duration::from_millis(500);
 /// Buffer size for per-generation event channels.
 const GENERATION_EVENT_BACKLOG: usize = 128;
-/// Tip evidence older than this is stale for promotion decisions.
-const TIP_EVIDENCE_TTL: Duration = Duration::from_secs(30);
 
 /// Everything a role generation needs to start its tasks.
 pub(crate) struct RoleControllerContext<P, Pool> {
@@ -71,7 +72,9 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub chain_spec: Arc<ZoneChainSpec>,
     pub deposit_queue: DepositQueue,
     pub l1_block_tracker: L1BlockTracker,
+    pub encryption_keys: EncryptionKeyRing,
     pub commands: mpsc::Sender<P2pCommand>,
+    pub backfill_commands: mpsc::Sender<BackfillCommand>,
     pub attestation: AttestationContext,
     pub portal_address: Address,
     /// Sequencer resources constructed unconditionally at startup; activation is gated by
@@ -120,19 +123,27 @@ pub(crate) struct EventSinks {
 struct GenerationSinks {
     sync: Option<mpsc::Sender<P2pEvent>>,
     transactions: Option<mpsc::Sender<P2pEvent>>,
+    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
 }
 
 impl EventSinks {
-    fn install(&self, sync: mpsc::Sender<P2pEvent>, transactions: Option<mpsc::Sender<P2pEvent>>) {
+    fn install(
+        &self,
+        sync: mpsc::Sender<P2pEvent>,
+        transactions: Option<mpsc::Sender<P2pEvent>>,
+        backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
+    ) {
         let mut sinks = self.inner.lock().expect("poisoned");
         sinks.sync = Some(sync);
         sinks.transactions = transactions;
+        sinks.backfill_responses = backfill_responses;
     }
 
     fn clear(&self) {
         let mut sinks = self.inner.lock().expect("poisoned");
         sinks.sync = None;
         sinks.transactions = None;
+        sinks.backfill_responses = None;
     }
 
     fn sink_for(&self, event: &P2pEvent) -> Option<mpsc::Sender<P2pEvent>> {
@@ -143,41 +154,27 @@ impl EventSinks {
             sinks.sync.clone()
         }
     }
+
+    fn backfill_response_sink(&self) -> Option<mpsc::Sender<BackfillResponse>> {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .backfill_responses
+            .clone()
+    }
 }
 
-/// Long-lived P2P event demultiplexer.
+/// Long-lived P2P event demultiplexer for non-backfill protocols.
 ///
-/// Owns the single event receiver for the process lifetime. Backfill requests are
-/// generation-independent — every role serves the same canonical provider — so they go to
-/// the process-lifetime backfill server, never to a role generation; dropping one would
-/// suppress the requesting peer until its response timeout and stall a leadership handoff.
-/// Every other event is forwarded to the active generation's substream, and events arriving
-/// between generations are dropped because the successor re-derives its state from the
-/// provider and schedule. Generation delivery is deliberately non-blocking: when a generation
-/// falls behind, dropping recoverable events is preferable to blocking process-lifetime backfill
-/// serving behind generation-local backpressure.
+/// It owns the generic event receiver for the process lifetime and forwards events to the active
+/// generation's substream. Events arriving between generations are dropped because the successor
+/// re-derives its state from the provider and schedule. Generation delivery is deliberately
+/// non-blocking so a slow generation cannot block process-lifetime protocol work.
 pub(crate) async fn route_events_to_generations(
     mut events: mpsc::Receiver<P2pEvent>,
     sinks: EventSinks,
-    backfill: mpsc::Sender<BackfillRequest>,
 ) {
     while let Some(event) = events.recv().await {
-        if let P2pEvent::BackfillRequested {
-            peer,
-            request_id,
-            start,
-        } = event
-        {
-            if let Err(err) = backfill.try_send(BackfillRequest {
-                peer,
-                request_id,
-                start,
-            }) {
-                metrics::counter!("zone_leadership_backfill_requests_dropped_total").increment(1);
-                warn!(target: "zone::role", %err, start, "Dropped a block backfill request because the serving queue is unavailable");
-            }
-            continue;
-        }
         let Some(sink) = sinks.sink_for(&event) else {
             metrics::counter!("zone_leadership_events_dropped_between_generations_total")
                 .increment(1);
@@ -187,9 +184,8 @@ pub(crate) async fn route_events_to_generations(
         match sink.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                // Live blocks and backfill responses are recovered by the follower's periodic
-                // backfill probe; transaction forwarding reconciles from the pool. Never let a
-                // slow generation block the process-lifetime backfill request path.
+                // Live blocks are recovered by the follower's periodic backfill probe, and
+                // transaction forwarding reconciles from the pool. Keep this router non-blocking.
                 metrics::counter!("zone_leadership_events_dropped_backpressure_total").increment(1);
                 debug!(
                     target: "zone::role",
@@ -208,6 +204,48 @@ pub(crate) async fn route_events_to_generations(
     error!(target: "zone::role", "P2P event channel closed");
 }
 
+/// Routes process-lifetime backfill requests to the canonical provider server.
+pub(crate) async fn route_backfill_requests(
+    mut requests: mpsc::Receiver<BackfillRequest>,
+    backfill: mpsc::Sender<BackfillRequest>,
+) {
+    while let Some(request) = requests.recv().await {
+        let start = request.start;
+        if let Err(err) = backfill.try_send(request) {
+            metrics::counter!("zone_leadership_backfill_requests_dropped_total").increment(1);
+            warn!(target: "zone::role", %err, start, "Dropped a block backfill request because the serving queue is unavailable");
+        }
+    }
+    error!(target: "zone::role", "Typed P2P backfill request channel closed");
+}
+
+/// Routes accepted backfill responses to the currently active follower generation.
+pub(crate) async fn route_backfill_responses(
+    mut responses: mpsc::Receiver<BackfillResponse>,
+    sinks: EventSinks,
+) {
+    while let Some(response) = responses.recv().await {
+        let Some(sink) = sinks.backfill_response_sink() else {
+            metrics::counter!("zone_leadership_events_dropped_between_generations_total")
+                .increment(1);
+            debug!(target: "zone::role", "Dropping backfill response with no active follower consumer");
+            continue;
+        };
+        match sink.try_send(response) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!("zone_leadership_events_dropped_backpressure_total").increment(1);
+                debug!(target: "zone::role", "Dropping backfill response because the generation sink is full");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!("zone_leadership_events_dropped_between_generations_total")
+                    .increment(1);
+            }
+        }
+    }
+    error!(target: "zone::role", "Typed P2P backfill response channel closed");
+}
+
 /// The role a generation runs, derived from the next-anchor rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DesiredRole {
@@ -224,20 +262,39 @@ enum DesiredRole {
 }
 
 impl DesiredRole {
-    const fn kind(self) -> GenerationKind {
+    /// Stable name for status, metric labels, and logs.
+    const fn name(self) -> &'static str {
         match self {
-            Self::Leader { .. } => GenerationKind::Leader,
-            Self::Follower { .. } => GenerationKind::Follower,
-            Self::Fenced => GenerationKind::Fenced,
+            Self::Leader { .. } => "leader",
+            Self::Follower { .. } => "follower",
+            Self::Fenced => "fenced",
         }
     }
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GenerationKind {
-    Leader,
-    Follower,
-    Fenced,
+    /// Value for the `zone_leadership_role` gauge.
+    const fn gauge(self) -> f64 {
+        match self {
+            Self::Leader { .. } => 2.0,
+            Self::Follower { .. } => 1.0,
+            Self::Fenced => 0.0,
+        }
+    }
+
+    /// Epoch of the governing record, when one governs.
+    const fn epoch(self) -> Option<u64> {
+        match self {
+            Self::Leader { epoch, .. } | Self::Follower { epoch } => Some(epoch),
+            Self::Fenced => None,
+        }
+    }
+
+    /// Whether two roles are the same variant, ignoring the epoch.
+    ///
+    /// Generations are switched per variant, not per epoch: an epoch bump that leaves this
+    /// node in the same role must not tear down and rebuild its task graph.
+    fn same_variant(self, other: Self) -> bool {
+        std::mem::discriminant(&self) == std::mem::discriminant(&other)
+    }
 }
 
 /// Outcome of one generation task, tagged for supervision decisions.
@@ -298,7 +355,7 @@ async fn supervise_sequencer_tasks(
 
 struct RunningGeneration {
     id: u64,
-    kind: GenerationKind,
+    role: DesiredRole,
     token: CancellationToken,
     tasks: JoinSet<TaskEnd>,
 }
@@ -330,11 +387,14 @@ impl RunningGeneration {
                 }
             }
         }
-        info!(target: "zone::role", generation = self.id, kind = ?self.kind, "Role generation stopped");
+        info!(target: "zone::role", generation = self.id, role = self.role.name(), "Role generation stopped");
     }
 }
 
 /// Derive the desired role for the next anchor from local canonical state and the schedule.
+///
+/// `DesiredRole::Leader` carries the next anchor it was derived from, so the promotion
+/// barrier never re-reads the checkpoint under a second, possibly divergent, error policy.
 fn desired_role<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
@@ -373,106 +433,67 @@ where
     })
 }
 
-/// Promotion-readiness verdict from hash-carrying peer tip evidence.
+/// Promotion-readiness verdict from the evidence required by the active transition mode.
 #[derive(Debug)]
 enum Readiness {
     Ready,
-    NotReady(Vec<String>),
-    /// A peer holds a different block at a height we consider canonical: fence.
     Conflicted(String),
 }
 
 /// Evaluate the promotion barrier
 ///
-/// Quorum depends on the mode: a **planned handoff** (the outgoing leader is alive and authoritative)
-/// requires the outgoing leader's fresh evidence to match our head;
-/// **same-identity recovery** (we already governed the previous anchor, or nothing did) requires fresh
-/// evidence from every other manifest peer, because an unreachable follower may hold replicated blocks
-/// the others lack.
+/// Forced-recovery promotion requires the local canonical head to remain exactly at the
+/// operator-selected block. Normal transitions need no additional evidence: the next-anchor rule
+/// and one-to-one zone/L1 block mapping ensure all earlier leaders' blocks are already local.
 fn promotion_readiness<P>(
     provider: &P,
     schedule: &LeadershipSchedule,
     local: &P2pPeerId,
-    manifest_peers: &[P2pPeerId],
-    registry: &PeerTipRegistry,
     next_anchor: u64,
 ) -> Readiness
 where
     P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
 {
-    let local_head = match provider.best_block_number() {
-        Ok(head) => head,
-        Err(err) => return Readiness::NotReady(vec![format!("cannot read the local head: {err}")]),
-    };
-
-    let now = tokio::time::Instant::now().into_std();
-    let mut fresh = std::collections::HashMap::new();
-    for (peer, tip, at) in registry.snapshot() {
-        if now.duration_since(at) <= TIP_EVIDENCE_TTL {
-            fresh.insert(peer, tip);
-        }
-    }
-
-    let mut reasons = Vec::new();
-    for (peer, tip) in &fresh {
-        if tip.zone_height > local_head {
-            reasons.push(format!(
-                "peer {peer} advertises tip {} above the local head {local_head}",
-                tip.zone_height
-            ));
-            continue;
-        }
-        match provider.sealed_header(tip.zone_height) {
-            Ok(Some(header)) if header.hash() == tip.zone_hash => {}
-            Ok(Some(header)) => {
+    if let Some(recovery) = schedule.forced_recovery().filter(|recovery| {
+        &recovery.leader == local
+            && next_anchor >= recovery.recovery_start_tempo_block
+            && recovery
+                .portal_activation_tempo_block
+                .is_none_or(|activation| next_anchor < activation)
+    }) {
+        let local_height = match provider.best_block_number() {
+            Ok(height) => height,
+            Err(err) => {
                 return Readiness::Conflicted(format!(
-                    "peer {peer} holds a conflicting block at height {}: local {}, peer {}",
-                    tip.zone_height,
-                    header.hash(),
-                    tip.zone_hash,
+                    "cannot read the local head for forced recovery: {err}"
                 ));
             }
-            Ok(None) => reasons.push(format!(
-                "local canonical header {} is missing while validating peer {peer} evidence",
-                tip.zone_height
-            )),
-            Err(err) => reasons.push(format!(
-                "cannot read local header {}: {err}",
-                tip.zone_height
-            )),
-        }
-    }
-
-    // A planned handoff has a distinct outgoing leader governing the previous anchor.
-    let outgoing = schedule
-        .leader_for(next_anchor.saturating_sub(1))
-        .filter(|record| &record.leader != local)
-        .map(|record| record.leader);
-    match outgoing {
-        Some(outgoing) => {
-            if !fresh.contains_key(&outgoing) {
-                reasons.push(format!(
-                    "no fresh tip evidence from the outgoing leader {outgoing}"
+        };
+        let header = match provider.sealed_header(local_height) {
+            Ok(Some(header)) => header,
+            Ok(None) => {
+                return Readiness::Conflicted(format!(
+                    "forced recovery local header {local_height} is missing"
                 ));
             }
-        }
-        None => {
-            for peer in manifest_peers {
-                if peer != local && !fresh.contains_key(peer) {
-                    reasons.push(format!(
-                        "no fresh tip evidence from peer {peer} (required for same-identity \
-                         recovery; an unreachable follower may hold replicated blocks)"
-                    ));
-                }
+            Err(err) => {
+                return Readiness::Conflicted(format!(
+                    "cannot read forced recovery local header {local_height}: {err}"
+                ));
             }
+        };
+        if header.hash() != recovery.recovery_block_hash {
+            return Readiness::Conflicted(format!(
+                "forced recovery canonical head mismatch at height {local_height}: expected {}, \
+                 found {}",
+                recovery.recovery_block_hash,
+                header.hash(),
+            ));
         }
+        return Readiness::Ready;
     }
 
-    if reasons.is_empty() {
-        Readiness::Ready
-    } else {
-        Readiness::NotReady(reasons)
-    }
+    Readiness::Ready
 }
 
 /// Run the role controller until the process shuts down.
@@ -480,8 +501,8 @@ where
 /// `sinks` must be the same [`EventSinks`] handed to [`route_events_to_generations`] — the
 /// router is long-lived while generations come and go.
 ///
-/// Subscribes to schedule and peer-tip notifications plus generation task completion,
-/// re-derives the desired role by the next-anchor rule, and switches role generations.
+/// Subscribes to schedule notifications plus generation task completion, re-derives the desired
+/// role by the next-anchor rule, and switches role generations.
 /// Observation alone never switches roles — the trigger is consumption progress reaching
 /// the boundary, which this loop tracks by re-reading the local Tempo checkpoint.
 pub(crate) async fn run_role_controller<P, Pool>(
@@ -502,14 +523,18 @@ pub(crate) async fn run_role_controller<P, Pool>(
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
 {
     let mut schedule_changes = context.schedule.subscribe();
-    let mut peer_tip_changes = context.peer_tips.subscribe();
 
     let mut generation_id: u64 = 0;
     let mut current: Option<RunningGeneration> = None;
-    let manifest_peers: Vec<P2pPeerId> = context.attestation.addresses.keys().cloned().collect();
 
     loop {
-        let can_lead = context.sequencer.is_some();
+        // An rpc-only member is not registered with `ZonePortal`, so it can never be named
+        // leader by a finalized transition. Fencing it explicitly means a corrupt or wrongly
+        // provisioned record cannot start a producer whose blocks nobody could settle.
+        let can_lead = context.sequencer.is_some()
+            && context
+                .schedule
+                .is_quorum_member(&context.local_ed25519_public_key);
         let mut retry_decision = false;
         let mut desired = match desired_role(
             &context.provider,
@@ -525,53 +550,39 @@ pub(crate) async fn run_role_controller<P, Pool>(
             }
         };
 
-        // Promotion barrier: switching the head writer to this node requires hash-carrying
-        // tip evidence. Until the barrier is satisfied the node keeps importing as a
-        // follower and actively probes peers for evidence.
-        let mut ready_for_promotion = true;
+        // Only forced recovery has an additional promotion barrier. Normal transitions are
+        // complete when the local next anchor is assigned to this node.
         let mut promotion_reasons = Vec::new();
         if let DesiredRole::Leader { epoch, next_anchor } = desired
-            && current.as_ref().map(|generation| generation.kind) != Some(GenerationKind::Leader)
+            && !current
+                .as_ref()
+                .is_some_and(|generation| generation.role.same_variant(desired))
         {
             match promotion_readiness(
                 &context.provider,
                 &context.schedule,
                 &context.local_ed25519_public_key,
-                &manifest_peers,
-                &context.peer_tips,
                 next_anchor,
             ) {
                 Readiness::Ready => {
                     info!(target: "zone::role", epoch, next_anchor, "Promotion barrier satisfied");
                 }
-                Readiness::NotReady(reasons) => {
-                    retry_decision = true;
-                    ready_for_promotion = false;
-                    debug!(target: "zone::role", epoch, next_anchor, ?reasons, "Promotion pending readiness");
-                    promotion_reasons = reasons;
-                    // Probe peers so evidence (and any missing blocks) arrive promptly.
-                    if let Ok(best) = context.provider.best_block_number() {
-                        let _ = context.commands.try_send(P2pCommand::RequestBackfill {
-                            start: best.saturating_add(1),
-                        });
-                    }
-                    desired = DesiredRole::Follower { epoch };
-                }
                 Readiness::Conflicted(detail) => {
-                    ready_for_promotion = false;
                     error!(
                         target: "zone::role",
                         epoch,
                         %detail,
-                        "Conflicting peer tip evidence; fencing instead of promoting"
+                        "Conflicting promotion evidence; fencing instead of promoting"
                     );
                     promotion_reasons = vec![detail];
                     desired = DesiredRole::Fenced;
                 }
             }
         }
-        let switch = current.as_ref().map(|generation| generation.kind) != Some(desired.kind());
-        if switch {
+        if !current
+            .as_ref()
+            .is_some_and(|generation| generation.role.same_variant(desired))
+        {
             if let Some(generation) = current.take() {
                 generation.stop(&sinks).await;
             }
@@ -586,69 +597,49 @@ pub(crate) async fn run_role_controller<P, Pool>(
                     // complete desired generation after the decision backoff.
                     sinks.clear();
                     retry_decision = true;
-                    ready_for_promotion = false;
                     promotion_reasons = vec![format!(
-                        "failed to start {:?} generation: {err:#}",
-                        desired.kind()
+                        "failed to start {} generation: {err:#}",
+                        desired.name()
                     )];
                     error!(
                         target: "zone::role",
                         generation = generation_id,
-                        kind = ?desired.kind(),
+                        role = desired.name(),
                         %err,
                         "Role generation failed to start; fencing before retry"
                     );
                 }
             }
 
-            let active_kind = current
+            let active_role = current
                 .as_ref()
-                .map(|generation| generation.kind)
-                .unwrap_or(GenerationKind::Fenced);
+                .map(|generation| generation.role)
+                .unwrap_or(DesiredRole::Fenced);
             metrics::counter!(
                 "zone_leadership_transitions_total",
-                "to" => match active_kind {
-                    GenerationKind::Leader => "leader",
-                    GenerationKind::Follower => "follower",
-                    GenerationKind::Fenced => "fenced",
-                },
+                "to" => active_role.name(),
             )
             .increment(1);
-            metrics::gauge!("zone_leadership_role").set(match active_kind {
-                GenerationKind::Leader => 2.0,
-                GenerationKind::Follower => 1.0,
-                GenerationKind::Fenced => 0.0,
-            });
-            if active_kind == desired.kind()
-                && let Some(epoch) = match desired {
-                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
-                        Some(epoch)
-                    }
-                    DesiredRole::Fenced => None,
-                }
+            metrics::gauge!("zone_leadership_role").set(active_role.gauge());
+            if active_role.same_variant(desired)
+                && let Some(epoch) = desired.epoch()
             {
                 metrics::gauge!("zone_leadership_epoch").set(epoch as f64);
             }
         }
 
-        let active_kind = current
+        let active_role = current
             .as_ref()
-            .map(|generation| generation.kind)
-            .unwrap_or(GenerationKind::Fenced);
+            .map(|generation| generation.role)
+            .unwrap_or(DesiredRole::Fenced);
+        // Readiness is exactly "nothing is blocking promotion", so it is derived rather than
+        // tracked alongside the reasons it would have to stay consistent with.
+        let ready_for_promotion = promotion_reasons.is_empty();
         {
             let mut status = context.status.lock().expect("poisoned");
-            status.role = match active_kind {
-                GenerationKind::Leader => "leader",
-                GenerationKind::Follower => "follower",
-                GenerationKind::Fenced => "fenced",
-            };
-            status.epoch = if active_kind == desired.kind() {
-                match desired {
-                    DesiredRole::Leader { epoch, .. } | DesiredRole::Follower { epoch } => {
-                        Some(epoch)
-                    }
-                    DesiredRole::Fenced => None,
-                }
+            status.role = active_role.name();
+            status.epoch = if active_role.same_variant(desired) {
+                desired.epoch()
             } else {
                 None
             };
@@ -661,7 +652,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
         } else {
             0.0
         });
-
         // A fenced generation has no tasks; an empty JoinSet's join_next() is immediately
         // ready with None, so polling it would spin this loop hot. Stay pending instead and
         // wake only on an explicit change or a retry for a failed/pending decision.
@@ -678,12 +668,6 @@ pub(crate) async fn run_role_controller<P, Pool>(
             changed = schedule_changes.changed() => {
                 if changed.is_err() {
                     error!(target: "zone::role", "Leadership schedule notifier closed");
-                    return;
-                }
-            }
-            changed = peer_tip_changes.changed() => {
-                if changed.is_err() {
-                    error!(target: "zone::role", "Peer tip notifier closed");
                     return;
                 }
             }
@@ -776,12 +760,15 @@ where
         }
         DesiredRole::Follower { epoch } => {
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, None);
+            let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            let (backfill_tx, backfill_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            sinks.install(sync_tx, Some(transactions_tx), Some(backfill_tx));
 
             let follower_token = token.clone();
             let provider = context.provider.clone();
             let engine = context.engine_handle.clone();
             let commands = context.commands.clone();
+            let backfill_commands = context.backfill_commands.clone();
             let tracker = context.l1_block_tracker.clone();
             let queue = context.deposit_queue.clone();
             let attestation = context.attestation.clone();
@@ -793,6 +780,8 @@ where
                     engine,
                     sync_rx,
                     commands,
+                    backfill_commands,
+                    backfill_rx,
                     tracker,
                     queue,
                     attestation,
@@ -822,6 +811,20 @@ where
                     }
                 }
             });
+
+            // Quorum followers retain transactions received from originating peers so a future
+            // promotion cannot lose traffic submitted immediately before the handoff. RPC-only
+            // followers receive no transaction events from the P2P transport.
+            let pool = context.pool.clone();
+            let import_token = token.clone();
+            tasks.spawn(async move {
+                tokio::select! {
+                    () = import_token.cancelled() => TaskEnd::Ended("transaction-import (cancelled)"),
+                    () = insert_forwarded_transactions(pool, transactions_rx) => {
+                        TaskEnd::Ended("transaction-import")
+                    }
+                }
+            });
             info!(target: "zone::role", generation = id, epoch, "Follower generation started");
         }
         DesiredRole::Leader { epoch, .. } => {
@@ -837,7 +840,7 @@ where
 
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, Some(transactions_tx));
+            sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
             let engine = build_engine(context, sequencer, last_header);
@@ -918,7 +921,7 @@ where
 
     Ok(RunningGeneration {
         id,
-        kind: desired.kind(),
+        role: desired,
         token,
         tasks,
     })
@@ -943,7 +946,6 @@ fn build_engine<P, Pool>(
 where
     P: Clone,
 {
-    let sequencer_key = k256::SecretKey::from(sequencer.config.sequencer_signer.credential());
     ZoneEngine::new(
         context.chain_spec.clone(),
         context.engine_handle.clone(),
@@ -952,7 +954,7 @@ where
         context.l1_block_tracker.clone(),
         last_header,
         sequencer.config.sequencer_signer.address(),
-        sequencer_key,
+        context.encryption_keys.clone(),
         context.portal_address,
     )
     .with_production_permit(ProductionPermit::new(
@@ -963,19 +965,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, net::SocketAddr, time::Duration};
+    use std::{future::pending, time::Duration};
 
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_provider::test_utils::MockEthProvider;
     use tempo_primitives::TempoPrimitives;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
-    use zone_p2p::P2pEvent;
+    use zone_p2p::{BackfillRequest, BackfillResponse};
     use zone_sequencer::ZoneSequencerHandle;
 
     use super::{
-        EventSinks, TaskEnd, latest_sealed_header, route_events_to_generations,
-        supervise_sequencer_tasks,
+        EventSinks, TaskEnd, latest_sealed_header, route_backfill_requests,
+        route_backfill_responses, supervise_sequencer_tasks,
     };
 
     struct DropSignal(Option<oneshot::Sender<()>>);
@@ -1093,29 +1095,16 @@ mod tests {
     /// losing it leaves the requester blocked behind the P2P backfill response timeout.
     #[tokio::test]
     async fn backfill_request_bypasses_generation_sinks() {
-        let sinks = EventSinks::default();
-        let (network_events, event_rx) = mpsc::channel(1);
+        let (network_requests, request_rx) = mpsc::channel(1);
         let (backfill_tx, mut backfill_rx) = mpsc::channel(1);
-        let router = tokio::spawn(route_events_to_generations(
-            event_rx,
-            sinks.clone(),
-            backfill_tx,
-        ));
+        let router = tokio::spawn(route_backfill_requests(request_rx, backfill_tx));
         let peer = PrivateKey::from_seed(1).public_key();
 
-        network_events
-            .send(P2pEvent::BackfillRequested {
+        network_requests
+            .send(BackfillRequest {
                 peer: peer.clone(),
                 request_id: 7,
                 start: 42,
-            })
-            .await
-            .unwrap();
-        // A generation-specific event with no installed sink is dropped, not deferred.
-        network_events
-            .send(P2pEvent::Started {
-                ed25519_public_key: peer.clone(),
-                listen: SocketAddr::from(([127, 0, 0, 1], 9000)),
             })
             .await
             .unwrap();
@@ -1128,7 +1117,7 @@ mod tests {
         assert_eq!(request.request_id, 7);
         assert_eq!(request.start, 42);
 
-        drop(network_events);
+        drop(network_requests);
         tokio::time::timeout(Duration::from_secs(1), router)
             .await
             .expect("event router did not stop")
@@ -1136,61 +1125,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_request_bypasses_saturated_generation_sink() {
+    async fn backfill_response_drops_on_generation_backpressure() {
         let sinks = EventSinks::default();
-        let (generation_tx, mut generation_rx) = mpsc::channel(1);
-        sinks.install(generation_tx, None);
-
-        let (network_events, event_rx) = mpsc::channel(4);
-        let (backfill_tx, mut backfill_rx) = mpsc::channel(1);
-        let router = tokio::spawn(route_events_to_generations(event_rx, sinks, backfill_tx));
+        let (generation_response_tx, mut generation_response_rx) = mpsc::channel(1);
+        sinks.install(mpsc::channel(1).0, None, Some(generation_response_tx));
+        let (network_responses, response_rx) = mpsc::channel(4);
+        let router = tokio::spawn(route_backfill_responses(response_rx, sinks));
         let peer = PrivateKey::from_seed(1).public_key();
 
-        // The first event fills the generation sink. The second must be dropped instead of
-        // parking the router ahead of the process-lifetime backfill request.
-        for port in [9000, 9001] {
-            network_events
-                .send(P2pEvent::Started {
-                    ed25519_public_key: peer.clone(),
-                    listen: SocketAddr::from(([127, 0, 0, 1], port)),
-                })
-                .await
-                .unwrap();
-        }
-        network_events
-            .send(P2pEvent::BackfillRequested {
+        network_responses
+            .send(BackfillResponse::Completed {
                 peer: peer.clone(),
-                request_id: 8,
-                start: 43,
+                tip: zone_p2p::PeerTip {
+                    zone_height: 1,
+                    zone_hash: alloy_primitives::B256::ZERO,
+                    tempo_block_number: 1,
+                    tempo_block_hash: alloy_primitives::B256::ZERO,
+                },
+            })
+            .await
+            .unwrap();
+        network_responses
+            .send(BackfillResponse::Completed {
+                peer,
+                tip: zone_p2p::PeerTip {
+                    zone_height: 2,
+                    zone_hash: alloy_primitives::B256::ZERO,
+                    tempo_block_number: 2,
+                    tempo_block_hash: alloy_primitives::B256::ZERO,
+                },
             })
             .await
             .unwrap();
 
-        let request = tokio::time::timeout(Duration::from_secs(1), backfill_rx.recv())
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), generation_response_rx.recv())
             .await
-            .expect("generation backpressure blocked the backfill request")
-            .expect("backfill serving channel closed");
-        assert_eq!(request.peer, peer);
-        assert_eq!(request.request_id, 8);
-        assert_eq!(request.start, 43);
+            .expect("the first backfill response was not forwarded")
+            .expect("generation response channel closed");
+        assert!(
+            matches!(forwarded, BackfillResponse::Completed { tip, .. } if tip.zone_height == 1)
+        );
 
-        drop(network_events);
+        drop(network_responses);
         tokio::time::timeout(Duration::from_secs(1), router)
             .await
             .expect("event router did not stop")
             .expect("event router task panicked");
-
-        let forwarded = generation_rx
-            .recv()
-            .await
-            .expect("the first generation event should have been forwarded");
-        assert!(matches!(
-            forwarded,
-            P2pEvent::Started { listen, .. } if listen.port() == 9000
-        ));
-        assert!(
-            generation_rx.try_recv().is_err(),
-            "the event that encountered backpressure should have been dropped"
-        );
     }
 }

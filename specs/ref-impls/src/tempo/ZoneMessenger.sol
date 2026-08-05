@@ -55,15 +55,22 @@ contract ZoneMessenger is IZoneMessenger {
             revert InvalidCallbackTarget();
         }
 
+        // Raw call is fine: `enableToken` only accepts native TIP-20s, which revert small.
         if (!ITIP20(token).transfer(target, amount)) {
             revert TransferFailed();
         }
 
-        bytes4 selector = IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
+        // The target is untrusted, so the empty `catch` drops its revert data. Copying it would
+        // cost quadratic memory gas here and again in the portal, well past `gasLimit`.
+        try IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
             zoneId, msg.sender, senderTag, token, amount, data
-        );
-
-        if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
+        ) returns (
+            bytes4 selector
+        ) {
+            if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
+                revert CallbackRejected();
+            }
+        } catch {
             revert CallbackRejected();
         }
     }

@@ -43,7 +43,7 @@ use eyre::{OptionExt as _, Result};
 use futures::{StreamExt, TryStreamExt};
 use parking_lot::RwLock;
 use schnellru::{ByLength, LruMap};
-use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
+use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderExt, rpc::TempoCallBuilderExt};
 use tempo_primitives::{Block, TempoReceipt};
 use tracing::{info, instrument, warn};
 
@@ -61,6 +61,14 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 /// At roughly 600 bytes per header, this caps payload storage near 150 MiB plus
 /// map overhead while covering more than the current Zone E recovery gap.
 const DEFAULT_ANCESTRY_HEADER_CACHE_CAPACITY: u32 = 262_144;
+
+/// Maximum number of pending withdrawal queue slots in the portal ring buffer.
+pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
+
+/// Maximum block span for one bounded log query.
+///
+/// Native Zone reads no longer use this limit; it remains the bound for L1 portal log recovery.
+pub(crate) const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
 
 /// EIP-2935 anchor limits used by the batch submitter.
 ///
@@ -122,88 +130,6 @@ impl Default for BatchAnchorConfig {
     }
 }
 
-/// Maximum number of pending withdrawal queue slots in the portal ring buffer.
-pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
-
-/// Maximum block span for one bounded log query.
-///
-/// Native Zone reads no longer use this limit; it remains the bound for L1 portal log recovery.
-pub(crate) const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
-
-/// Data required to submit a single batch to the ZonePortal on L1.
-///
-/// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
-#[derive(Debug, Clone)]
-pub struct BatchData {
-    /// Zone L2 height committed by this batch.
-    pub zone_height: u64,
-    /// Tempo L1 block number for EIP-2935 verification.
-    pub tempo_block_number: u64,
-    /// Previous zone block hash (must match portal's current `blockHash`).
-    pub prev_block_hash: B256,
-    /// New zone block hash after this batch.
-    pub next_block_hash: B256,
-    /// Deposit queue: where the zone started processing.
-    pub prev_processed_deposit_hash: B256,
-    /// Deposit queue: where the zone processed up to.
-    pub next_processed_deposit_hash: B256,
-    /// Deposit counter at the start of processing.
-    pub prev_deposit_number: u64,
-    /// Deposit counter after processing.
-    pub next_deposit_number: u64,
-    /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
-    pub withdrawal_queue_hash: B256,
-    /// L2 withdrawal batch index validated against the portal before submission.
-    pub withdrawal_batch_index: u64,
-}
-
-struct SettlementAttestationInput<'a> {
-    batch: &'a BatchData,
-    anchor_block_number: u64,
-    anchor_block_hash: B256,
-    block_transition: &'a BlockTransition,
-    deposit_transition: &'a DepositQueueTransition,
-    verifier_config: &'a Bytes,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct StablePortalMetadata {
-    zone_id: u32,
-    chain_id: u64,
-}
-
-struct RawPortalSubmissionMetadata {
-    queue_head: U256,
-    queue_tail: U256,
-    withdrawal_batch_index: u64,
-    sequencer_set_version: u64,
-    sequencer_threshold: u8,
-    signer_is_sequencer: bool,
-    verifier: Address,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct PortalSubmissionMetadata {
-    queue_head: u64,
-    queue_tail: u64,
-    withdrawal_batch_index: u64,
-    stable: StablePortalMetadata,
-    sequencer_set_version: u64,
-    sequencer_threshold: u8,
-    signer_is_sequencer: bool,
-    verifier: Address,
-}
-/// One L2 withdrawal batch finalized by `ZoneOutbox`.
-#[derive(Debug, Clone)]
-pub(crate) struct FinalizedBatch {
-    /// Authoritative hash emitted by `BatchFinalized` and stored in `lastBatch()`.
-    pub finalized_hash: B256,
-    /// Authoritative L2 withdrawal batch index emitted by `BatchFinalized`.
-    pub finalized_index: u64,
-    /// Reconstructed withdrawal payloads for the off-chain processor store.
-    pub withdrawals: Vec<abi::Withdrawal>,
-}
-
 /// Submits zone batches to the ZonePortal contract on Tempo L1.
 ///
 /// Holds a contract instance pointing at the portal, backed by a shared
@@ -233,94 +159,6 @@ pub struct BatchSubmitter {
     /// can reuse almost the entire preceding range.
     ancestry_header_cache: RwLock<LruMap<u64, CachedAncestryHeader>>,
 }
-
-/// One validated L1 header retained for ancestry proof construction.
-#[derive(Debug, Clone)]
-struct CachedAncestryHeader {
-    parent_hash: B256,
-    hash: B256,
-    encoded: Bytes,
-}
-
-/// A complete, ordered, parent-linked ancestry range.
-///
-/// `headers` excludes the base block at `from`; `fetched_headers` contains only
-/// entries that the caller should commit to the cache after resolution succeeds.
-#[derive(Debug)]
-struct ResolvedAncestry {
-    headers: Vec<Bytes>,
-    fetched_headers: Vec<(u64, CachedAncestryHeader)>,
-}
-
-/// Merge cached and fetched headers into one validated ancestry range.
-fn resolve_ancestry_headers(
-    from: u64,
-    to: u64,
-    cached: Vec<(u64, CachedAncestryHeader)>,
-    fetched: Vec<(u64, CachedAncestryHeader)>,
-) -> Result<ResolvedAncestry> {
-    debug_assert!(from < to, "caller skips empty ancestry ranges");
-
-    let range_len = (to - from + 1) as usize;
-    let fetched_count = fetched.len();
-    let mut merged = vec![None; range_len];
-
-    let mut insert = |block_number, header, was_fetched| -> Result<()> {
-        if !(from..=to).contains(&block_number) {
-            return Err(eyre::eyre!(
-                "received out-of-range L1 header for block {block_number}; expected {from}..={to}"
-            ));
-        }
-        let index = (block_number - from) as usize;
-        if merged[index].replace((header, was_fetched)).is_some() {
-            return Err(eyre::eyre!(
-                "received duplicate L1 header for block {block_number}"
-            ));
-        }
-        Ok(())
-    };
-    for (block_number, header) in cached {
-        insert(block_number, header, false)?;
-    }
-    for (block_number, header) in fetched {
-        insert(block_number, header, true)?;
-    }
-
-    let mut merged = merged.into_iter();
-    let (base, base_was_fetched) = merged
-        .next()
-        .flatten()
-        .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
-    let mut parent_hash = base.hash;
-    let mut headers = Vec::with_capacity(range_len - 1);
-    let mut fetched_headers = Vec::with_capacity(fetched_count);
-    if base_was_fetched {
-        fetched_headers.push((from, base));
-    }
-
-    for (block_number, entry) in ((from + 1)..=to).zip(merged) {
-        let (header, was_fetched) =
-            entry.ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
-        if header.parent_hash != parent_hash {
-            return Err(eyre::eyre!(
-                "parent-hash chain broken at block {block_number}: \
-                 expected parent_hash={parent_hash}, got={}",
-                header.parent_hash
-            ));
-        }
-        parent_hash = header.hash;
-        headers.push(header.encoded.clone());
-        if was_fetched {
-            fetched_headers.push((block_number, header));
-        }
-    }
-
-    Ok(ResolvedAncestry {
-        headers,
-        fetched_headers,
-    })
-}
-
 impl BatchSubmitter {
     /// Create a batch submitter without a certificate signer.
     ///
@@ -489,12 +327,24 @@ impl BatchSubmitter {
             )?]
         };
 
+        // Refetch the committed lane nonce for every submission attempt. The provider's
+        // process-local nonce cache advances before a send is known to have succeeded, so
+        // relying on it after a failed send can create an unfillable 2D-nonce gap.
+        let submission_address = signer
+            .ok_or_eyre("batch submission requires the local sequencer signer")?
+            .address();
+        let nonce = self
+            .l1_provider
+            .get_transaction_count_with_nonce_key(submission_address, SUBMIT_BATCH_NONCE_KEY)
+            .await?;
+
         info!(
             anchor_mode = %anchor_mode,
             recent_tempo_block_number,
             current_l1_block,
             batch_prev_block_hash = %batch.prev_block_hash,
             nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
+            nonce,
             "Submitting batch to ZonePortal on L1"
         );
 
@@ -513,6 +363,7 @@ impl BatchSubmitter {
                     signatures,
                 )
                 .nonce_key(SUBMIT_BATCH_NONCE_KEY)
+                .nonce(nonce)
                 .max_fee_per_gas(crate::TEMPO_L1_MAX_FEE_PER_GAS)
                 .max_priority_fee_per_gas(0)
                 .send_sync(),
@@ -1201,6 +1052,249 @@ impl BatchSubmitter {
     }
 }
 
+/// Data required to submit a single batch to the ZonePortal on L1.
+///
+/// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
+#[derive(Debug, Clone)]
+pub struct BatchData {
+    /// Zone L2 height committed by this batch.
+    pub zone_height: u64,
+    /// Tempo L1 block number for EIP-2935 verification.
+    pub tempo_block_number: u64,
+    /// Previous zone block hash (must match portal's current `blockHash`).
+    pub prev_block_hash: B256,
+    /// New zone block hash after this batch.
+    pub next_block_hash: B256,
+    /// Deposit queue: where the zone started processing.
+    pub prev_processed_deposit_hash: B256,
+    /// Deposit queue: where the zone processed up to.
+    pub next_processed_deposit_hash: B256,
+    /// Deposit counter at the start of processing.
+    pub prev_deposit_number: u64,
+    /// Deposit counter after processing.
+    pub next_deposit_number: u64,
+    /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
+    pub withdrawal_queue_hash: B256,
+    /// L2 withdrawal batch index validated against the portal before submission.
+    pub withdrawal_batch_index: u64,
+}
+
+/// One L2 withdrawal batch finalized by `ZoneOutbox`.
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizedBatch {
+    /// Authoritative hash emitted by `BatchFinalized` and stored in `lastBatch()`.
+    pub finalized_hash: B256,
+    /// Authoritative L2 withdrawal batch index emitted by `BatchFinalized`.
+    pub finalized_index: u64,
+    /// Reconstructed withdrawal payloads for the off-chain processor store.
+    pub withdrawals: Vec<abi::Withdrawal>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizedBatchLog {
+    pub(crate) block_number: u64,
+    tx_index: u64,
+    log_index: u64,
+    tx_hash: B256,
+    withdrawal_queue_hash: B256,
+    withdrawal_batch_index: u64,
+}
+
+/// Zone L2 state read at a specific block, used to populate [`BatchData`].
+pub(crate) struct ZoneBlockSnapshot {
+    /// Latest Tempo L1 block number as seen by the zone.
+    pub tempo_block_number: u64,
+    /// Cumulative hash of all deposits processed by the zone up to this block.
+    pub processed_deposit_hash: B256,
+    /// Total number of deposits processed by the zone up to this block.
+    pub processed_deposit_number: u64,
+    /// Zone L2 block hash.
+    pub block_hash: B256,
+}
+
+struct SettlementAttestationInput<'a> {
+    batch: &'a BatchData,
+    anchor_block_number: u64,
+    anchor_block_hash: B256,
+    block_transition: &'a BlockTransition,
+    deposit_transition: &'a DepositQueueTransition,
+    verifier_config: &'a Bytes,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StablePortalMetadata {
+    zone_id: u32,
+    chain_id: u64,
+}
+
+struct RawPortalSubmissionMetadata {
+    queue_head: U256,
+    queue_tail: U256,
+    withdrawal_batch_index: u64,
+    sequencer_set_version: u64,
+    sequencer_threshold: u8,
+    signer_is_sequencer: bool,
+    verifier: Address,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PortalSubmissionMetadata {
+    queue_head: u64,
+    queue_tail: u64,
+    withdrawal_batch_index: u64,
+    stable: StablePortalMetadata,
+    sequencer_set_version: u64,
+    sequencer_threshold: u8,
+    signer_is_sequencer: bool,
+    verifier: Address,
+}
+/// One validated L1 header retained for ancestry proof construction.
+#[derive(Debug, Clone)]
+struct CachedAncestryHeader {
+    parent_hash: B256,
+    hash: B256,
+    encoded: Bytes,
+}
+
+/// A complete, ordered, parent-linked ancestry range.
+///
+/// `headers` excludes the base block at `from`; `fetched_headers` contains only
+/// entries that the caller should commit to the cache after resolution succeeds.
+#[derive(Debug)]
+struct ResolvedAncestry {
+    headers: Vec<Bytes>,
+    fetched_headers: Vec<(u64, CachedAncestryHeader)>,
+}
+
+#[derive(Debug)]
+struct RequestedWithdrawalLog {
+    block_number: u64,
+    tx_index: u64,
+    log_index: u64,
+    tx_hash: B256,
+    event: abi::IZoneOutbox::WithdrawalRequested,
+}
+
+/// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
+///
+/// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
+/// `submit_batch` can use ancestry mode when the batch-final block's
+/// `tempoBlockNumber` has fallen outside the configured direct-submission
+/// window.
+#[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
+enum AnchorMode {
+    /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
+    /// reads its hash directly. No extra proof data required.
+    Direct,
+    /// `tempoBlockNumber` is outside the effective window. A recent L1 block is
+    /// used as anchor, and the collected headers prove the parent-hash chain.
+    Ancestry {
+        /// Recent L1 block number within the EIP-2935 window, used as the
+        /// on-chain anchor for hash verification.
+        anchor_block: u64,
+        /// RLP-encoded L1 block headers from `tempo_block_number + 1` to
+        /// `anchor_block`, in ascending order. Available for the prover to
+        /// consume when integrated.
+        ancestry_headers: Vec<Bytes>,
+    },
+}
+
+impl AnchorMode {
+    /// Returns the `recentTempoBlockNumber` argument for `submitBatch`:
+    /// `0` for direct mode, or the anchor block number for ancestry mode.
+    const fn recent_block_number(&self) -> u64 {
+        match self {
+            Self::Direct => 0,
+            Self::Ancestry { anchor_block, .. } => *anchor_block,
+        }
+    }
+
+    const fn anchor_block_number(&self, tempo_block_number: u64) -> u64 {
+        match self {
+            Self::Direct => tempo_block_number,
+            Self::Ancestry { anchor_block, .. } => *anchor_block,
+        }
+    }
+}
+
+impl fmt::Display for AnchorMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Direct => f.write_str("direct"),
+            Self::Ancestry { .. } => f.write_str("ancestry"),
+        }
+    }
+}
+
+/// Merge cached and fetched headers into one validated ancestry range.
+fn resolve_ancestry_headers(
+    from: u64,
+    to: u64,
+    cached: Vec<(u64, CachedAncestryHeader)>,
+    fetched: Vec<(u64, CachedAncestryHeader)>,
+) -> Result<ResolvedAncestry> {
+    debug_assert!(from < to, "caller skips empty ancestry ranges");
+
+    let range_len = (to - from + 1) as usize;
+    let fetched_count = fetched.len();
+    let mut merged = vec![None; range_len];
+
+    let mut insert = |block_number, header, was_fetched| -> Result<()> {
+        if !(from..=to).contains(&block_number) {
+            return Err(eyre::eyre!(
+                "received out-of-range L1 header for block {block_number}; expected {from}..={to}"
+            ));
+        }
+        let index = (block_number - from) as usize;
+        if merged[index].replace((header, was_fetched)).is_some() {
+            return Err(eyre::eyre!(
+                "received duplicate L1 header for block {block_number}"
+            ));
+        }
+        Ok(())
+    };
+    for (block_number, header) in cached {
+        insert(block_number, header, false)?;
+    }
+    for (block_number, header) in fetched {
+        insert(block_number, header, true)?;
+    }
+
+    let mut merged = merged.into_iter();
+    let (base, base_was_fetched) = merged
+        .next()
+        .flatten()
+        .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
+    let mut parent_hash = base.hash;
+    let mut headers = Vec::with_capacity(range_len - 1);
+    let mut fetched_headers = Vec::with_capacity(fetched_count);
+    if base_was_fetched {
+        fetched_headers.push((from, base));
+    }
+
+    for (block_number, entry) in ((from + 1)..=to).zip(merged) {
+        let (header, was_fetched) =
+            entry.ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+        if header.parent_hash != parent_hash {
+            return Err(eyre::eyre!(
+                "parent-hash chain broken at block {block_number}: \
+                 expected parent_hash={parent_hash}, got={}",
+                header.parent_hash
+            ));
+        }
+        parent_hash = header.hash;
+        headers.push(header.encoded.clone());
+        if was_fetched {
+            fetched_headers.push((block_number, header));
+        }
+    }
+
+    Ok(ResolvedAncestry {
+        headers,
+        fetched_headers,
+    })
+}
+
 /// Pure function that resolves pre-fetched data into verified withdrawal sets
 /// ready to be stored.
 ///
@@ -1277,25 +1371,6 @@ pub(crate) fn find_processed_offset(
         }
     }
     None
-}
-
-#[derive(Debug)]
-struct RequestedWithdrawalLog {
-    block_number: u64,
-    tx_index: u64,
-    log_index: u64,
-    tx_hash: B256,
-    event: abi::IZoneOutbox::WithdrawalRequested,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct FinalizedBatchLog {
-    pub(crate) block_number: u64,
-    tx_index: u64,
-    log_index: u64,
-    tx_hash: B256,
-    withdrawal_queue_hash: B256,
-    withdrawal_batch_index: u64,
 }
 
 fn block_with_receipts<P: ZoneSequencerProvider>(
@@ -1573,69 +1648,6 @@ fn fetch_finalized_batch_logs<P: ZoneSequencerProvider>(
 
 fn backward_log_query_start(hi: u64, floor: u64) -> u64 {
     hi.saturating_sub(LOG_QUERY_BLOCK_CHUNK - 1).max(floor)
-}
-
-/// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
-///
-/// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
-/// `submit_batch` can use ancestry mode when the batch-final block's
-/// `tempoBlockNumber` has fallen outside the configured direct-submission
-/// window.
-#[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
-enum AnchorMode {
-    /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
-    /// reads its hash directly. No extra proof data required.
-    Direct,
-    /// `tempoBlockNumber` is outside the effective window. A recent L1 block is
-    /// used as anchor, and the collected headers prove the parent-hash chain.
-    Ancestry {
-        /// Recent L1 block number within the EIP-2935 window, used as the
-        /// on-chain anchor for hash verification.
-        anchor_block: u64,
-        /// RLP-encoded L1 block headers from `tempo_block_number + 1` to
-        /// `anchor_block`, in ascending order. Available for the prover to
-        /// consume when integrated.
-        ancestry_headers: Vec<Bytes>,
-    },
-}
-
-impl AnchorMode {
-    /// Returns the `recentTempoBlockNumber` argument for `submitBatch`:
-    /// `0` for direct mode, or the anchor block number for ancestry mode.
-    const fn recent_block_number(&self) -> u64 {
-        match self {
-            Self::Direct => 0,
-            Self::Ancestry { anchor_block, .. } => *anchor_block,
-        }
-    }
-
-    const fn anchor_block_number(&self, tempo_block_number: u64) -> u64 {
-        match self {
-            Self::Direct => tempo_block_number,
-            Self::Ancestry { anchor_block, .. } => *anchor_block,
-        }
-    }
-}
-
-impl fmt::Display for AnchorMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Direct => f.write_str("direct"),
-            Self::Ancestry { .. } => f.write_str("ancestry"),
-        }
-    }
-}
-
-/// Zone L2 state read at a specific block, used to populate [`BatchData`].
-pub(crate) struct ZoneBlockSnapshot {
-    /// Latest Tempo L1 block number as seen by the zone.
-    pub tempo_block_number: u64,
-    /// Cumulative hash of all deposits processed by the zone up to this block.
-    pub processed_deposit_hash: B256,
-    /// Total number of deposits processed by the zone up to this block.
-    pub processed_deposit_number: u64,
-    /// Zone L2 block hash.
-    pub block_hash: B256,
 }
 
 #[cfg(test)]

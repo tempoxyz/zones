@@ -1,6 +1,6 @@
 [package]
 name = "zone-rpc"
-description = "Private zone RPC server — authenticated JSON-RPC with per-caller privacy redactions"
+description = "Redacted zone RPC server — authenticated JSON-RPC with per-caller privacy redactions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

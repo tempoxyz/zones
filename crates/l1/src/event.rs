@@ -3,15 +3,31 @@ use super::*;
 /// Events extracted from the ZonePortal in a single L1 block.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct L1PortalEvents {
-    /// Deposit events (regular + encrypted).
+    /// User deposits and internal withdrawal bounce-backs.
     pub deposits: Vec<L1Deposit>,
     /// Tokens newly enabled for bridging in this block, with metadata.
     pub enabled_tokens: Vec<EnabledToken>,
+    /// Encryption-key registrations in canonical log order.
+    #[serde(default)]
+    pub encryption_key_rotations: Vec<EncryptionKeyRotation>,
     /// Leadership transitions in this block, in canonical log order.
     ///
     /// The portal allows at most one distinct transition per Tempo block.
     #[serde(default)]
     pub leader_transitions: Vec<LeaderTransition>,
+}
+
+/// A finalized `SequencerEncryptionKeyUpdated` Portal event.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct EncryptionKeyRotation {
+    /// Compressed public-key X coordinate.
+    pub x: B256,
+    /// Compressed public-key prefix (`0x02` or `0x03`).
+    pub y_parity: u8,
+    /// Index assigned by the Portal's append-only key history.
+    pub key_index: U256,
+    /// L1 block at which this key became current.
+    pub activation_block: u64,
 }
 
 /// A decoded `LeaderUpdated` portal event.
@@ -56,9 +72,9 @@ impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
     const SIGNATURE_HASHES: [B256; 5] = [
         DepositMade::SIGNATURE_HASH,
-        EncryptedDepositMade::SIGNATURE_HASH,
         WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
+        SequencerEncryptionKeyUpdated::SIGNATURE_HASH,
         LeaderUpdated::SIGNATURE_HASH,
     ];
 
@@ -126,23 +142,11 @@ impl L1PortalEvents {
                     l1_block = block_number,
                     token = %event.token,
                     sender = %event.sender,
-                    to = %event.to,
                     amount = %event.netAmount,
-                    "💰 Deposit from L1"
+                    "🔒 Deposit from L1"
                 );
                 self.deposits
-                    .push(L1Deposit::Regular(Deposit::from_event(event)));
-            }
-            ZonePortalEvents::EncryptedDepositMade(event) => {
-                info!(
-                    l1_block = block_number,
-                    token = %event.token,
-                    sender = %event.sender,
-                    amount = %event.netAmount,
-                    "🔒 Encrypted deposit from L1"
-                );
-                self.deposits
-                    .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(event)));
+                    .push(L1Deposit::Deposit(Deposit::from_event(event)));
             }
             ZonePortalEvents::WithdrawalBounceBack(event) => {
                 info!(
@@ -152,11 +156,9 @@ impl L1PortalEvents {
                     amount = %event.amount,
                     "↩️ Bounce-back deposit from L1"
                 );
-                self.deposits
-                    .push(L1Deposit::Regular(Deposit::from_bounce_back(
-                        event,
-                        log.address(),
-                    )));
+                self.deposits.push(L1Deposit::WithdrawalBounceBack(
+                    WithdrawalBounceBackDeposit::from_bounce_back(event),
+                ));
             }
             ZonePortalEvents::TokenEnabled(event) => {
                 info!(
@@ -172,6 +174,20 @@ impl L1PortalEvents {
                     name: event.name,
                     symbol: event.symbol,
                     currency: event.currency,
+                });
+            }
+            ZonePortalEvents::SequencerEncryptionKeyUpdated(event) => {
+                info!(
+                    l1_block = block_number,
+                    key_index = %event.keyIndex,
+                    activation_block = event.activationBlock,
+                    "Sequencer encryption key rotated on L1"
+                );
+                self.encryption_key_rotations.push(EncryptionKeyRotation {
+                    x: event.x,
+                    y_parity: event.yParity,
+                    key_index: event.keyIndex,
+                    activation_block: event.activationBlock,
                 });
             }
             ZonePortalEvents::LeaderUpdated(event) => {

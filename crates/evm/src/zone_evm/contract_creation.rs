@@ -86,7 +86,7 @@ mod tests {
         inspector::NoOpInspector,
         state::AccountInfo,
     };
-    use tempo_evm::{TempoBlockEnv, TempoHaltReason};
+    use tempo_evm::{TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm};
     use tempo_primitives::transaction::Call;
     use tempo_revm::{TempoBatchCallEnv, TempoTxEnv};
     use zone_precompiles::test_utils::MockL1Reader as TestL1;
@@ -180,6 +180,26 @@ mod tests {
         assert!(matches!(
             err,
             EVMError::Transaction(TempoInvalidTransaction::CallsValidation(..))
+        ));
+    }
+
+    #[test]
+    fn pool_validation_rejects_top_level_create_before_tempo_checks() {
+        let mut evm = evm_with_contract(Address::ZERO, &[]);
+        let (result, _) = evm.validate_pool_transaction(TempoTxEnv {
+            inner: TxEnv {
+                caller: Address::repeat_byte(0x01),
+                kind: TxKind::Create,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+
+        assert!(matches!(
+            result,
+            Err(EVMError::Transaction(
+                TempoInvalidTransaction::CallsValidation("contract creation is not supported")
+            ))
         ));
     }
 

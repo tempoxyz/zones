@@ -64,6 +64,9 @@ library WithdrawalQueueLib {
         if (withdrawalQueueHash == bytes32(0)) {
             return NO_QUEUE_INDEX;
         }
+        if (withdrawalQueueHash == EMPTY_SENTINEL) {
+            revert InvalidWithdrawalHash();
+        }
 
         uint256 tail = queue.tail;
 

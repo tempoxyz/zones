@@ -37,7 +37,7 @@ pub struct ProvisionConfig {
     pub zone_gateways: Vec<Address>,
     /// Initial portal membership (required for closed mode, retained but unenforced in open mode).
     pub allowed_accounts: Vec<Address>,
-    /// Public zone RPC URL registered on the portal.
+    /// Operator zone RPC URL registered on the portal.
     pub rpc_url: String,
 }
 
@@ -306,9 +306,13 @@ mod command {
         #[arg(long = "http.port", default_value_t = 9545)]
         http_port: u16,
 
-        /// Zone private RPC port.
-        #[arg(long = "private-rpc.port", default_value_t = 8544)]
-        private_rpc_port: u16,
+        /// Zone redacted RPC port.
+        #[arg(
+            long = "redacted-rpc.port",
+            alias = "private-rpc.port",
+            default_value_t = 8544
+        )]
+        redacted_rpc_port: u16,
 
         /// Extra arguments forwarded to `tempo-zone node`.
         #[arg(last = true)]
@@ -399,8 +403,8 @@ mod command {
             );
             println!("  WS RPC:       ws://{}:{ws_port}", self.http_addr);
             println!(
-                "  Private RPC:  http://{}:{}",
-                self.http_addr, self.private_rpc_port
+                "  Redacted RPC: http://{}:{}",
+                self.http_addr, self.redacted_rpc_port
             );
             println!("  Datadir:      {}", self.datadir.display());
 
@@ -431,8 +435,8 @@ mod command {
                 "all",
                 "--port",
                 &p2p_port.to_string(),
-                "--private-rpc.port",
-                &self.private_rpc_port.to_string(),
+                "--redacted-rpc.port",
+                &self.redacted_rpc_port.to_string(),
                 "--datadir",
                 &self.datadir.join("node").display().to_string(),
                 "--log.file.directory",
@@ -489,7 +493,20 @@ mod command {
 
     #[cfg(test)]
     mod tests {
-        use super::ensure_ws_url;
+        use clap::Parser as _;
+
+        use super::{DevCommand, ensure_ws_url};
+
+        #[test]
+        fn private_rpc_port_alias_is_accepted() {
+            let redacted =
+                DevCommand::try_parse_from(["dev", "--redacted-rpc.port", "9544"]).unwrap();
+            let private =
+                DevCommand::try_parse_from(["dev", "--private-rpc.port", "9544"]).unwrap();
+
+            assert_eq!(redacted.redacted_rpc_port, 9544);
+            assert_eq!(private.redacted_rpc_port, 9544);
+        }
 
         #[test]
         fn ensure_ws_url_accepts_websocket_schemes() {

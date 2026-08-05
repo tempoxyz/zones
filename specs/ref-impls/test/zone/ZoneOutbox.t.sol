@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IZoneOutbox,
     IZonePortal,
     LastBatch,
@@ -14,7 +14,6 @@ import {
     ZONE_TX_CONTEXT
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
@@ -37,7 +36,6 @@ contract ZoneOutboxTest is Test {
 
     uint128 internal constant TEST_MAX_TEMPO_GAS_RATE = 1e18;
 
-    ZoneConfig public config;
     ZoneOutbox public outbox;
     ZoneInbox public inbox;
     MockZoneToken public zoneToken;
@@ -61,7 +59,6 @@ contract ZoneOutboxTest is Test {
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
-        config = new ZoneConfig(mockPortal, address(tempoState));
         tempoState.setMockStorageValue(
             mockPortal,
             keccak256(abi.encode(sequencer, PORTAL_IS_SEQUENCER_SLOT)),
@@ -75,8 +72,8 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockAccountAllowed(mockPortal, charlie, true);
         tempoState.setMockZoneGateway(mockPortal, callbackTarget, true);
         _setModes(true, true);
-        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
-        outbox = new ZoneOutbox(address(config));
+        inbox = new ZoneInbox(mockPortal, address(tempoState));
+        outbox = new ZoneOutbox(mockPortal, address(tempoState));
 
         // Grant minter role to inbox and burner role to outbox
         zoneToken.setMinter(address(inbox), true);
@@ -149,7 +146,7 @@ contract ZoneOutboxTest is Test {
                 flow: flow,
                 outputToken: address(zoneToken),
                 keyIndex: 0,
-                encrypted: EncryptedDepositPayload({
+                encrypted: DepositPayload({
                     ephemeralPubkeyX: bytes32(uint256(1)),
                     ephemeralPubkeyYParity: 0x02,
                     ciphertext: new bytes(64),
@@ -190,7 +187,6 @@ contract ZoneOutboxTest is Test {
     function test_enqueueDepositBounceBack_queuesRevokedTempoRefundRecipient() public {
         uint128 amount = 1000e6;
         tempoState.setMockAccountAllowed(mockPortal, bob, false);
-        assertFalse(config.isAllowedAccount(bob));
 
         vm.expectEmit(true, true, false, true);
         emit IZoneOutbox.WithdrawalRequested(
@@ -637,7 +633,6 @@ contract ZoneOutboxTest is Test {
 
     function test_requestWithdrawal_allowsUnlistedZoneFallbackRecipient() public {
         address outsider = address(0x600);
-        assertFalse(config.isAllowedAccount(outsider));
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, outsider, "");
@@ -1148,21 +1143,15 @@ contract ZoneOutboxTest is Test {
                           ZERO AMOUNT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_requestWithdrawal_zeroAmount() public {
+    function test_requestWithdrawal_zeroAmount_reverts() public {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 0);
+        vm.expectRevert(ZoneOutbox.ZeroAmountWithdrawal.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(_pendingWithdrawalsCount(), 1);
-
-        // Should still produce valid hash
-        Withdrawal memory w = _withdrawal(1, alice, bob, 0, bytes32(0), 0, alice, "");
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
-
-        bytes32 hash = _finalizeWithdrawalBatch(1);
-
-        assertEq(hash, expectedHash);
+        assertEq(_pendingWithdrawalsCount(), 0);
+        assertEq(outbox.lastFallbackNonce(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1207,8 +1196,8 @@ contract ZoneOutboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_immutableGetters() public view {
-        assertEq(address(outbox.config()), address(config));
-        assertTrue(config.isSequencer(sequencer));
+        assertEq(outbox.tempoPortal(), mockPortal);
+        assertEq(address(outbox.tempoState()), address(tempoState));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1367,7 +1356,7 @@ contract ZoneOutboxTest is Test {
 
     /// @notice Withdrawal fee matches base plus callback gas times Tempo gas rate.
     function testFuzz_calculateWithdrawalFee(uint64 gasLimit, uint128 tempoGasRate) public {
-        tempoGasRate = uint128(bound(tempoGasRate, 0, config.maxTempoGasRate()));
+        tempoGasRate = uint128(bound(tempoGasRate, 0, TEST_MAX_TEMPO_GAS_RATE));
         uint64 maxGasLimit = outbox.MAX_WITHDRAWAL_GAS_LIMIT();
 
         vm.prank(sequencer);

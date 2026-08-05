@@ -69,18 +69,17 @@ contract TempoState is ITempoState {
     /// @dev These contracts need access to read from ZonePortal and TIP-403 on Tempo
     address private constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
     address private constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
-    address private constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
     /// @notice Check if caller is a zone system contract
     modifier onlySystemContract() {
-        if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX && msg.sender != ZONE_CONFIG) {
+        if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX) {
             revert("TempoState: only zone system contracts can read Tempo state");
         }
         _;
     }
 
     /// @notice Read a storage slot from a Tempo L1 contract at the latest finalized block
-    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
+    /// @dev RESTRICTED: Only callable by ZoneInbox and ZoneOutbox.
     ///      Implemented natively by the zone EVM.
     function readTempoStorageSlot(
         address,
@@ -95,7 +94,7 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Read multiple storage slots from a Tempo L1 contract at the latest finalized block
-    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
+    /// @dev RESTRICTED: Only callable by ZoneInbox and ZoneOutbox.
     ///      Implemented natively by the zone EVM.
     function readTempoStorageSlots(
         address,
