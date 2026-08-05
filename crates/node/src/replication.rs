@@ -389,6 +389,10 @@ fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
     Ok(block.header.number())
 }
 
+fn persisted_backfill_tip(provider: &impl BlockNumReader) -> eyre::Result<u64> {
+    Ok(provider.last_block_number()?)
+}
+
 fn serve_backfill_page<P>(
     provider: &P,
     commands: &mpsc::Sender<BackfillCommand>,
@@ -402,11 +406,11 @@ where
         + HeaderProvider<Header = TempoHeader>
         + StateProviderFactory,
 {
-    let tip = provider.best_block_number()?;
+    let tip = persisted_backfill_tip(provider)?;
     let end = tip.min(start.saturating_add(BACKFILL_PAGE_SIZE.saturating_sub(1)));
     for number in start..=end {
         let block = provider.block_by_number(number)?.ok_or_else(|| {
-            eyre::eyre!("canonical block {number} is missing while serving backfill")
+            eyre::eyre!("persisted canonical block {number} is missing while serving backfill")
         })?;
         commands
             .blocking_send(BackfillCommand::SendBlock {
@@ -416,10 +420,10 @@ where
             })
             .map_err(|_| eyre::eyre!("P2P command channel closed"))?;
     }
-    // Advertise the tip
-    let tip_header = provider
-        .sealed_header(tip)?
-        .ok_or_else(|| eyre::eyre!("canonical head {tip} is missing while serving backfill"))?;
+    // Advertise the persisted tip.
+    let tip_header = provider.sealed_header(tip)?.ok_or_else(|| {
+        eyre::eyre!("persisted canonical head {tip} is missing while serving backfill")
+    })?;
     let tempo = provider
         .state_by_block_hash(tip_header.hash())?
         .tempo_num_hash()?;
@@ -1237,11 +1241,13 @@ mod tests {
 
     use alloy_eips::NumHash;
     use futures::{StreamExt as _, stream};
+    use reth_chainspec::ChainInfo;
+    use reth_storage_api::{BlockHashReader, BlockNumReader, errors::provider::ProviderResult};
 
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, EncodedPersistedBlock, MAX_PENDING_BLOCKS,
         PersistedBlockSource, PersistedTip, broadcast_persisted_blocks, buffer_pending_block,
-        validate_live_block_sender, wait_for_validated_peer_anchor,
+        persisted_backfill_tip, validate_live_block_sender, wait_for_validated_peer_anchor,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
@@ -1279,6 +1285,50 @@ mod tests {
                 encoded: vec![number as u8],
             })
         }
+    }
+
+    struct DivergentHeads {
+        best: u64,
+        persisted: u64,
+    }
+
+    impl BlockHashReader for DivergentHeads {
+        fn block_hash(&self, _number: u64) -> ProviderResult<Option<B256>> {
+            unreachable!("backfill tip selection must not read a block hash")
+        }
+
+        fn canonical_hashes_range(&self, _start: u64, _end: u64) -> ProviderResult<Vec<B256>> {
+            unreachable!("backfill tip selection must not read block hashes")
+        }
+    }
+
+    impl BlockNumReader for DivergentHeads {
+        fn chain_info(&self) -> ProviderResult<ChainInfo> {
+            unreachable!("backfill tip selection must not read chain info")
+        }
+
+        fn best_block_number(&self) -> ProviderResult<u64> {
+            Ok(self.best)
+        }
+
+        fn last_block_number(&self) -> ProviderResult<u64> {
+            Ok(self.persisted)
+        }
+
+        fn block_number(&self, _hash: B256) -> ProviderResult<Option<u64>> {
+            unreachable!("backfill tip selection must not resolve block numbers")
+        }
+    }
+
+    #[test]
+    fn backfill_tip_uses_the_persisted_head() {
+        let provider = DivergentHeads {
+            best: 3,
+            persisted: 2,
+        };
+
+        assert_eq!(provider.best_block_number().unwrap(), 3);
+        assert_eq!(persisted_backfill_tip(&provider).unwrap(), 2);
     }
 
     #[test]
