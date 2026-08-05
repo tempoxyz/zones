@@ -97,10 +97,11 @@ All zone commands need an L1 RPC URL.
 The zone chain ID is domain-separated by that L1's chain ID. For parent chain ID
 `4217` (Tempo mainnet), it is `421700000 + zone_id`; for `42431` (Moderato), it is
 `1424310000 + zone_id`. Zone IDs outside each reserved production range are rejected
-rather than wrapped. For any other nonzero parent that fits in `u32`, the chain ID is
-`(parent_chain_id << 32) | zone_id`. These generic IDs are intentionally high and
-cannot collide with the production ranges. Every devnet must use a unique parent
-chain ID to prevent transaction replay between it and other devnets.
+rather than wrapped. For any other parent in `1..=1048574`, the chain ID is
+`(parent_chain_id << 32) | zone_id`. These generic IDs are intentionally high, cannot
+collide with the production ranges, and remain safe for JavaScript tooling and legacy
+EIP-155 `v` values. Every devnet must use a unique parent chain ID to prevent transaction
+replay between it and other devnets.
 
 **Moderato testnet:**
 ```bash
@@ -627,7 +628,7 @@ cast code 0x5A4d000000000000000000000000000000000000 --rpc-url "$ETH_RPC_URL"
 |------|---------|-------------|
 | `--l1.rpc-url` | (required) | Certified Tempo follower WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
-| `--zone.id` | 0 | Zone ID from ZoneFactory (for redacted RPC auth and startup chain-ID validation). Set to `0` to skip validation. |
+| `--zone.id` | 0 | Zone ID from ZoneFactory. At startup it must match `ZonePortal.zoneId()`; `0` does not bypass validation. |
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled; conflicts with `--sequencer-key-file` |
 | `--sequencer-key-file` | (optional) | File or FIFO containing the sequencer private key; avoids exposing it in process arguments |

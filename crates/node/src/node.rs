@@ -112,13 +112,22 @@ fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
 }
 
 fn validate_zone_chain_id(parent_chain_id: u64, zone_id: u32, chain_id: u64) -> eyre::Result<()> {
-    if zone_id == 0 {
-        return Ok(());
-    }
     let expected = zone_chain_id(parent_chain_id, zone_id)?;
     eyre::ensure!(
         chain_id == expected,
-        "chain ID mismatch: zone.id={zone_id} on parent chain {parent_chain_id} requires chain_id={expected}, but genesis has {chain_id}"
+        "chain ID mismatch: portal zone ID {zone_id} on parent chain {parent_chain_id} requires chain_id={expected}, but genesis has {chain_id}"
+    );
+    Ok(())
+}
+
+fn validate_configured_zone_id(
+    source: &str,
+    configured_zone_id: u32,
+    portal_zone_id: u32,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        configured_zone_id == portal_zone_id,
+        "zone ID mismatch: {source} has {configured_zone_id}, but portal has {portal_zone_id}"
     );
     Ok(())
 }
@@ -560,7 +569,45 @@ where
             .erased();
         let l1_chain_id = l1_provider.get_chain_id().await?;
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
-        validate_zone_chain_id(l1_chain_id, self.redacted_rpc_config.zone_id, chain_id)?;
+        // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
+        // explicit sentinel because they have no on-chain portal to bind against.
+        let zone_id = if self.portal_address.is_zero() {
+            warn!(
+                target: "reth::cli",
+                "Skipping portal-bound zone identity validation for a zero-address test/dev portal"
+            );
+            self.redacted_rpc_config.zone_id
+        } else {
+            let portal_zone_id = ZonePortal::new(self.portal_address, &l1_provider)
+                .zoneId()
+                .call()
+                .await
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to read zone ID from portal {}: {err}",
+                        self.portal_address
+                    )
+                })?;
+
+            validate_configured_zone_id(
+                "--zone.id/redacted RPC configuration",
+                self.redacted_rpc_config.zone_id,
+                portal_zone_id,
+            )?;
+            if let Some(config) = self.sequencer_config.as_ref() {
+                validate_configured_zone_id(
+                    "sequencer configuration",
+                    config.zone_id,
+                    portal_zone_id,
+                )?;
+            }
+            if let Some(config) = self.p2p_config.as_ref() {
+                validate_configured_zone_id("P2P manifest", config.zone_id(), portal_zone_id)?;
+            }
+            validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
+            portal_zone_id
+        };
+        self.redacted_rpc_config.zone_id = zone_id;
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
@@ -616,7 +663,7 @@ where
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
                 portal_address: self.portal_address,
-                zone_id: config.zone_id(),
+                zone_id,
                 sequencer_set_version: config.sequencer_set_version(),
             };
             let anchor_config = self
@@ -727,7 +774,7 @@ where
         let operator_rpc_slot = sequencer_rpc_slot.clone();
         let operator_rpc_provider = provider.clone();
         let operator_zone_api = OperatorZoneApi::new(
-            self.redacted_rpc_config.zone_id,
+            zone_id,
             chain_id,
             self.portal_address,
             l1_provider.clone(),
@@ -1767,7 +1814,14 @@ mod tests {
         assert!(validate_zone_chain_id(42_431, 7, expected).is_ok());
         assert!(validate_zone_chain_id(4_217, 7, expected).is_err());
         assert!(validate_zone_chain_id(42_431, 7, expected + 1).is_err());
-        assert!(validate_zone_chain_id(42_431, 0, 123).is_ok());
+        assert!(validate_zone_chain_id(42_431, 0, 123).is_err());
+    }
+
+    #[test]
+    fn requires_every_configured_zone_id_to_match_the_portal() {
+        assert!(validate_configured_zone_id("test", 7, 7).is_ok());
+        assert!(validate_configured_zone_id("test", 0, 7).is_err());
+        assert!(validate_configured_zone_id("test", 8, 7).is_err());
     }
 
     #[test]

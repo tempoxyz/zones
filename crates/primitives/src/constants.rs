@@ -1,6 +1,7 @@
 //! Zone protocol constants shared between host and guest.
 
 use alloy_primitives::{Address, B256, U256, address};
+use tempo_hardfork::constants::{mainnet::MAINNET_CHAIN_ID, moderato::MODERATO_CHAIN_ID};
 
 /// Sentinel value for empty withdrawal queue slots.
 pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
@@ -114,13 +115,6 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
     le[0] = 2;
     U256::from_le_bytes(le)
 };
-
-/// Tempo mainnet parent chain ID.
-pub const TEMPO_MAINNET_CHAIN_ID: u64 = 4_217;
-
-/// Tempo Moderato parent chain ID.
-pub const TEMPO_MODERATO_CHAIN_ID: u64 = 42_431;
-
 /// Base offset for deriving **mainnet** zone chain IDs.
 ///
 /// # Range safety
@@ -135,8 +129,8 @@ pub const TEMPO_MODERATO_CHAIN_ID: u64 = 42_431;
 ///
 /// | Network  | Base            | Range size        | Chain ID span                         |
 /// |----------|-----------------|-------------------|---------------------------------------|
-/// | Mainnet  | `421_700_000`   | `1_002_610_000`   | `421_700_000 ..  1_424_310_000`       |
-/// | Testnet  | `1_424_310_000` | `723_173_648`     | `1_424_310_000 .. 2_147_483_648`      |
+/// | Mainnet  | `421_700_000`   | `1_002_610_000`   | `421_700_000 ..= 1_424_309_999`       |
+/// | Testnet  | `1_424_310_000` | `723_173_648`     | `1_424_310_000 ..= 2_147_483_647`     |
 ///
 pub const ZONE_CHAIN_ID_BASE: u64 = 421_700_000;
 
@@ -157,14 +151,20 @@ pub const ZONE_CHAIN_ID_BASE_TESTNET: u64 = 1_424_310_000;
 /// strictly below the EIP-2294 safe ceiling.
 pub const ZONE_CHAIN_ID_RANGE_TESTNET: u64 = 723_173_648;
 
+/// Largest generic parent chain ID accepted by [`zone_chain_id`].
+///
+/// This leaves enough headroom that every `u32` zone ID produces an EIP-155
+/// legacy signature `v` value below JavaScript's `Number.MAX_SAFE_INTEGER`.
+pub const MAX_GENERIC_PARENT_CHAIN_ID: u64 = (1 << 20) - 2;
+
 /// Failure to derive a unique zone chain ID.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ZoneChainIdError {
     /// Production zone IDs must fit in the reserved range.
     #[error("zone ID {zone_id} exhausts the reserved range for parent chain {parent_chain_id}")]
     ZoneIdOutOfRange { parent_chain_id: u64, zone_id: u32 },
-    /// Generic parent chain IDs must be nonzero and fit in 32 bits.
-    #[error("generic parent chain ID must be in 1..=u32::MAX, got {0}")]
+    /// Generic parent chain IDs must fit the supported tooling-safe range.
+    #[error("generic parent chain ID must be in 1..={MAX_GENERIC_PARENT_CHAIN_ID}, got {0}")]
     InvalidParentChainId(u64),
 }
 
@@ -176,8 +176,8 @@ pub fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChai
     validate_chain_id(parent_chain_id, zone_id)?;
 
     let chain_id = match parent_chain_id {
-        TEMPO_MAINNET_CHAIN_ID => ZONE_CHAIN_ID_BASE + zone_id as u64,
-        TEMPO_MODERATO_CHAIN_ID => ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64,
+        MAINNET_CHAIN_ID => ZONE_CHAIN_ID_BASE + zone_id as u64,
+        MODERATO_CHAIN_ID => ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64,
         _ => (parent_chain_id << 32) | zone_id as u64,
     };
 
@@ -185,13 +185,12 @@ pub fn zone_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<u64, ZoneChai
 }
 
 fn validate_chain_id(parent_chain_id: u64, zone_id: u32) -> Result<(), ZoneChainIdError> {
-    if parent_chain_id == 0 || parent_chain_id > u32::MAX as u64 {
+    if parent_chain_id == 0 || parent_chain_id > MAX_GENERIC_PARENT_CHAIN_ID {
         return Err(ZoneChainIdError::InvalidParentChainId(parent_chain_id));
     }
 
-    if (parent_chain_id == TEMPO_MAINNET_CHAIN_ID && zone_id as u64 >= ZONE_CHAIN_ID_RANGE)
-        || (parent_chain_id == TEMPO_MODERATO_CHAIN_ID
-            && zone_id as u64 >= ZONE_CHAIN_ID_RANGE_TESTNET)
+    if (parent_chain_id == MAINNET_CHAIN_ID && zone_id as u64 >= ZONE_CHAIN_ID_RANGE)
+        || (parent_chain_id == MODERATO_CHAIN_ID && zone_id as u64 >= ZONE_CHAIN_ID_RANGE_TESTNET)
     {
         return Err(ZoneChainIdError::ZoneIdOutOfRange {
             parent_chain_id,
@@ -208,13 +207,13 @@ mod tests {
 
     #[test]
     fn derives_domain_separated_chain_ids() {
-        assert_eq!(zone_chain_id(TEMPO_MAINNET_CHAIN_ID, 7), Ok(421_700_007));
-        assert_eq!(zone_chain_id(TEMPO_MODERATO_CHAIN_ID, 7), Ok(1_424_310_007));
+        assert_eq!(zone_chain_id(MAINNET_CHAIN_ID, 7), Ok(421_700_007));
+        assert_eq!(zone_chain_id(MODERATO_CHAIN_ID, 7), Ok(1_424_310_007));
         assert_ne!(zone_chain_id(1_337, 7), zone_chain_id(1_338, 7));
 
         let production = [
-            zone_chain_id(TEMPO_MAINNET_CHAIN_ID, 42).unwrap(),
-            zone_chain_id(TEMPO_MODERATO_CHAIN_ID, 42).unwrap(),
+            zone_chain_id(MAINNET_CHAIN_ID, 42).unwrap(),
+            zone_chain_id(MODERATO_CHAIN_ID, 42).unwrap(),
         ];
         let generic = zone_chain_id(1, 42).unwrap();
         assert!(production.into_iter().all(|id| id < 1 << 31));
@@ -225,11 +224,11 @@ mod tests {
     #[test]
     fn rejects_exhausted_ranges_and_invalid_generic_parents() {
         assert!(matches!(
-            zone_chain_id(TEMPO_MAINNET_CHAIN_ID, ZONE_CHAIN_ID_RANGE as u32),
+            zone_chain_id(MAINNET_CHAIN_ID, ZONE_CHAIN_ID_RANGE as u32),
             Err(ZoneChainIdError::ZoneIdOutOfRange { .. })
         ));
         assert!(matches!(
-            zone_chain_id(TEMPO_MODERATO_CHAIN_ID, ZONE_CHAIN_ID_RANGE_TESTNET as u32),
+            zone_chain_id(MODERATO_CHAIN_ID, ZONE_CHAIN_ID_RANGE_TESTNET as u32),
             Err(ZoneChainIdError::ZoneIdOutOfRange { .. })
         ));
         assert_eq!(
@@ -237,8 +236,12 @@ mod tests {
             Err(ZoneChainIdError::InvalidParentChainId(0))
         );
         assert!(matches!(
-            zone_chain_id(u32::MAX as u64 + 1, 1),
+            zone_chain_id(MAX_GENERIC_PARENT_CHAIN_ID + 1, 1),
             Err(ZoneChainIdError::InvalidParentChainId(_))
         ));
+
+        let max_generic_chain_id = zone_chain_id(MAX_GENERIC_PARENT_CHAIN_ID, u32::MAX).unwrap();
+        let max_legacy_v = max_generic_chain_id * 2 + 36;
+        assert!(max_legacy_v <= (1 << 53) - 1);
     }
 }

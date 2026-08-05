@@ -91,11 +91,17 @@ Prefer exact metadata:
    `zone_primitives::constants::zone_chain_id`:
 
 ```text
-chain_id = 421700000 + (zone_id % 1002610000)
+if parent_chain_id == 4217:
+    chain_id = 421700000 + zone_id
+else if parent_chain_id == 42431:
+    chain_id = 1424310000 + zone_id
+else:
+    chain_id = (parent_chain_id << 32) | zone_id
 ```
 
-`xtask create-zone` writes this value, and the node validates it at startup
-when `--zone.id` is nonzero.
+Production ranges reject exhaustion, and generic parents must be in `1..=1048574`.
+`xtask create-zone` writes this value, and the node validates it at startup against
+the connected parent chain and `ZonePortal.zoneId()`.
 
 Query the factory counter:
 

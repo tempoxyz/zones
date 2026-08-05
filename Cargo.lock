@@ -13886,6 +13886,7 @@ name = "zone-primitives"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "tempo-hardfork",
  "thiserror 2.0.18",
 ]
 
