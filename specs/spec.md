@@ -823,6 +823,8 @@ The zone's view of Tempo is the final Tempo block imported by the latest zone bl
 
 The zone node must only finalize Tempo headers that have reached finality on Tempo. Proofs should only reference finalized Tempo blocks to avoid reorg risk.
 
+Operators MUST preserve historical Tempo state witnesses at regular operational checkpoints (targeting an interval of a few minutes) and at every leader transition. A gas-bounded outage may require multiple catch-up zone blocks, so every catch-up range except one ending at the current finalized head may need a historical witness for its final imported Tempo block; retaining only the current-head witness is insufficient. Because all L1 reads use the final imported root, each range needs a state witness only for that final anchor. Intermediate headers remain necessary for range continuity validation, but no intermediate state-root witness is needed when no L1 read is performed against that root.
+
 <br>
 
 ## TIP-403 Policies
