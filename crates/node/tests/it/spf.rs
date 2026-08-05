@@ -139,7 +139,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
                 transactions: vec![second_raw_transaction],
             },
         ],
-        parent_header: parent_header.clone(),
+        parent_header,
         zone_state_witness,
         tempo_state_witness: TempoStateWitness {
             initial_tempo_header_rlp: tempo_header_rlp,
@@ -231,7 +231,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
             anchor_block_hash: l1_block.header.hash_slow(),
             expected_withdrawal_batch_index: 1,
         },
-        parent_header: parent_header.clone(),
+        parent_header,
         zone_blocks: vec![ZoneBlock {
             number: built_block.header.number,
             parent_hash,
