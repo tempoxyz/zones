@@ -138,8 +138,8 @@ contract WithdrawalQueueSymbolic is Test {
         assertEq(qh.hasWithdrawals(), qh.length() != 0);
     }
 
-    /// @notice A non-empty enqueue on a non-full queue advances tail by exactly one and never
-    ///         pushes length past capacity.
+    /// @notice A valid non-empty enqueue on a non-full queue advances tail by exactly one and
+    ///         never pushes length past capacity.
     function check_enqueueAdvancesTailAndRespectsCapacity(
         uint256 _head,
         uint256 _tail,
@@ -148,6 +148,7 @@ contract WithdrawalQueueSymbolic is Test {
         external
     {
         vm.assume(h != bytes32(0));
+        vm.assume(h != EMPTY_SENTINEL);
         vm.assume(_tail >= _head);
         vm.assume(_tail - _head < qh.capacity()); // not full
         vm.assume(_tail < type(uint256).max); // tail + 1 cannot overflow
