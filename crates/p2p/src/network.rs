@@ -25,7 +25,15 @@ pub(crate) const SETTLEMENT_PROPOSAL_CHANNEL: u64 = 4;
 /// Follower-to-leader settlement signature channel.
 pub(crate) const SETTLEMENT_SIGNATURE_CHANNEL: u64 = 5;
 pub(crate) const BLOCK_BACKLOG: usize = 128;
-pub(crate) const TRANSACTION_BACKLOG: usize = 1_024;
+/// Forwarded transactions are retried from the sender's pool, so a small receive backlog bounds
+/// memory before the transaction-specific wire limit can run without sacrificing eventual relay.
+pub(crate) const TRANSACTION_BACKLOG: usize = 4;
+
+/// Maximum raw EIP-2718 transaction frame accepted from another sequencer.
+///
+/// This is eight times Reth's default 128 KiB transaction input limit, leaving room for operators
+/// to raise the pool limit without allowing block-sized frames into transaction event queues.
+pub const MAX_TRANSACTION_MESSAGE_SIZE: usize = 1024 * 1024;
 
 // At 30M gas, calldata is bounded below 7.5 MiB; leave headroom for block overhead.
 pub(crate) const MAX_MESSAGE_SIZE: u32 = 20 * 1024 * 1024;
@@ -188,7 +196,8 @@ mod tests {
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
 
     use super::{
-        NETWORK_NAMESPACE_PREFIX, P2pNetworkId, WIRE_PROTOCOL_VERSION, namespace, peer_sets,
+        MAX_MESSAGE_SIZE, MAX_TRANSACTION_MESSAGE_SIZE, NETWORK_NAMESPACE_PREFIX, P2pNetworkId,
+        TRANSACTION_BACKLOG, WIRE_PROTOCOL_VERSION, namespace, peer_sets,
     };
     use crate::ZoneManifest;
 
@@ -214,6 +223,15 @@ mod tests {
             ed25519_public_key(4),
         ));
         ZoneManifest::parse(&manifest).unwrap()
+    }
+
+    #[test]
+    fn transaction_channel_bounds_pre_validation_memory() {
+        assert!(MAX_TRANSACTION_MESSAGE_SIZE < MAX_MESSAGE_SIZE as usize);
+        assert_eq!(
+            TRANSACTION_BACKLOG * MAX_MESSAGE_SIZE as usize,
+            80 * 1024 * 1024,
+        );
     }
 
     #[test]
