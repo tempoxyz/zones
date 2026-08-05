@@ -353,8 +353,7 @@ interface IZoneTxContext {
 //   slot 21: _isAccessEnforced (bool) + _isGatewayEnforced (bool) [packed]
 //   slot 22: maxTempoGasRate (uint128)
 //   slot 23: leader (address) + leaderEpoch (uint64) [packed]
-//   slot 24: leaderActivationTempoBlock (uint64) + _depositCountBatch (uint64)
-//            + _depositsInCurrentBatch (uint64) [packed]
+//   slot 24: leaderActivationTempoBlock (uint64)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneInbox and ZoneOutbox use them to read portal state via
@@ -622,7 +621,7 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
-    error DepositBatchCapacityExceeded(uint64 maximum);
+    error DepositQueueCapacityExceeded(uint64 maximum);
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
@@ -664,8 +663,8 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
-    /// @notice Maximum deposits accepted by this portal in one L1 batch.
-    function MAX_DEPOSITS_PER_L1_BATCH() external view returns (uint64);
+    /// @notice Maximum deposits that may remain unprocessed in this portal's queue.
+    function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
 
     /// @notice Maximum callback gas accepted for withdrawals
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
