@@ -67,9 +67,8 @@ struct BlockTransition {
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
-/// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash is an ancestor of (or equal to) currentDepositQueueHash.
-///      This allows partial deposit processing.
+/// @dev The proof reads currentDepositQueueHash from Tempo state and requires
+///      nextProcessedHash to equal it. Deposit processing is all-or-nothing per system call.
 ///      The deposit numbers mirror the hash chain for easy status checking:
 ///      a deposit with number N is confirmed once lastProcessedDepositNumber >= N.
 struct DepositQueueTransition {
@@ -624,6 +623,8 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
+    error DepositQueueCapacityExceeded(uint64 maximum);
+    error WithdrawalBatchCapacityExceeded(uint256 attempted, uint64 remaining);
     error DepositBlockCapacityExceeded(uint64 maximum);
     error TokenEnablementBlockCapacityExceeded(uint64 maximum);
     error TokenNameTooLong(uint256 actual, uint256 maximum);
@@ -670,8 +671,8 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
-    /// @notice Maximum deposits accepted by this portal in one Tempo block.
-    function MAX_DEPOSITS_PER_TEMPO_BLOCK() external view returns (uint64);
+    /// @notice Maximum deposits that may remain unprocessed in this portal's queue.
+    function MAX_UNPROCESSED_DEPOSITS() external view returns (uint64);
 
     /// @notice Maximum tokens enabled by this portal in one Tempo block.
     function MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK() external view returns (uint64);
@@ -932,6 +933,8 @@ interface IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
+    /// @dev The attempted withdrawal count must fit within the remaining deposit-queue
+    ///      capacity, conservatively assuming every withdrawal fails and creates a bounce-back.
     function processWithdrawals(Withdrawal[] calldata withdrawals, bytes32 remainingQueue) external;
 
     function deliverWithdrawal(
@@ -1038,11 +1041,11 @@ interface ITempoState {
     /// @notice Current finalized Tempo block number
     function tempoBlockNumber() external view returns (uint64);
 
-    /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
-    /// @dev Validates chain continuity (parent hash must match, number must be +1).
+    /// @notice Finalize an ordered array of Tempo block headers. Only callable by ZoneInbox.
+    /// @dev Validates chain continuity across the full array and stores only the final header.
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
-    /// @param header RLP-encoded Tempo header
-    function finalizeTempo(bytes calldata header) external;
+    /// @param headers Ordered RLP-encoded Tempo headers
+    function finalizeTempo(bytes[] calldata headers) external;
 
     /// @notice Read a storage slot from a Tempo contract
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
@@ -1133,23 +1136,23 @@ interface IZoneInbox {
 
     /// @notice Advance Tempo state and process deposits in a single system-only call.
     /// @dev This is the main entry point for the block executor at block start.
-    ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes user deposits and internal withdrawal bounce-backs
-    ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
+    ///      1. Advances the zone's view of Tempo by processing the header array
+    ///      2. Processes deposits from the unified queue (regular and encrypted)
+    ///      3. Validates the resulting hash chain equals Tempo's currentDepositQueueHash
     ///
-    ///      The system transaction may process a bounded subset of pending deposits.
-    ///      The proof validates contiguity: processedDepositQueueHash
-    ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
+    ///      The system transaction is all-or-nothing and must process every pending deposit
+    ///      through the final queue head. A mismatch reverts the complete call.
     ///
     ///      For user deposits, the sequencer provides DecryptionData with the
     ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
     ///
-    /// @param header RLP-encoded Tempo block header
+    /// @param headers Ordered RLP-encoded Tempo block headers; only the final
+    ///        header's state root is used for Tempo reads in this call
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for valid user deposits, in order
     /// @param enabledTokens Tokens to activate directly in the ZoneInbox
     function advanceTempo(
-        bytes calldata header,
+        bytes[] calldata headers,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens

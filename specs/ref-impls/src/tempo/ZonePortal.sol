@@ -55,11 +55,11 @@ contract ZonePortal is IZonePortal {
     ///      to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
-    /// @notice Maximum deposits that may be appended to this portal in one Tempo block.
+    /// @notice Maximum deposits that may remain unprocessed in this portal's queue.
     /// @dev Under T9, processing 230 encrypted deposits rejected by the issuer's
     ///      TIP-403 transfer policy uses 193,044,874 gas, leaving 6,955,126 gas
     ///      below the buffered 200,000,000 gas ceiling.
-    uint64 public constant MAX_DEPOSITS_PER_TEMPO_BLOCK = 230;
+    uint64 public constant MAX_UNPROCESSED_DEPOSITS = 230;
 
     /// @notice Maximum tokens that may be enabled for this portal in one Tempo block.
     /// @dev Under T9, processing 230 worst-case deposits plus 8 token enablements with maximum
@@ -824,16 +824,9 @@ contract ZonePortal is IZonePortal {
         internal
         returns (uint64 thisDeposit)
     {
-        uint64 currentBlock = uint64(block.number);
-        if (_depositCountBlock != currentBlock) {
-            _depositCountBlock = currentBlock;
-            _depositsInCurrentBlock = 0;
-        }
-        if (_depositsInCurrentBlock >= maximum) {
-            revert DepositBlockCapacityExceeded(maximum);
-        }
-        unchecked {
-            ++_depositsInCurrentBlock;
+        uint64 unprocessedDeposits = depositCount - lastProcessedDepositNumber;
+        if (unprocessedDeposits >= maximum) {
+            revert DepositQueueCapacityExceeded(maximum);
         }
 
         currentDepositQueueHash = newCurrentDepositQueueHash;
@@ -944,7 +937,7 @@ contract ZonePortal is IZonePortal {
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueDeposit(currentDepositQueueHash, depositData);
         uint64 thisDeposit = _recordDeposit(
-            newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK - WITHDRAWAL_BOUNCEBACK_RESERVE
+            newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS - WITHDRAWAL_BOUNCEBACK_RESERVE
         );
 
         emit DepositMade(
@@ -980,6 +973,12 @@ contract ZonePortal is IZonePortal {
         onlySequencer
         nonReentrantWithdrawal
     {
+        uint64 unprocessedDeposits = depositCount - lastProcessedDepositNumber;
+        uint64 remainingCapacity = MAX_UNPROCESSED_DEPOSITS - unprocessedDeposits;
+        if (withdrawals.length > remainingCapacity) {
+            revert WithdrawalBatchCapacityExceeded(withdrawals.length, remainingCapacity);
+        }
+
         bytes32[] memory remainingQueues = new bytes32[](withdrawals.length);
         bytes32 nextQueue = remainingQueue;
 
@@ -1148,8 +1147,7 @@ contract ZonePortal is IZonePortal {
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        uint64 thisDeposit =
-            _recordDeposit(newCurrentDepositQueueHash, MAX_DEPOSITS_PER_TEMPO_BLOCK);
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash, MAX_UNPROCESSED_DEPOSITS);
 
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackNonce, _token, amount, thisDeposit
