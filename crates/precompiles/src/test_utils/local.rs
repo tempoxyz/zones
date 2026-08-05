@@ -123,6 +123,7 @@ pub(crate) struct EncryptedDepositFixture {
     pub eph_pub_y_parity: u8,
     pub portal: Address,
     pub key_index: U256,
+    pub sender: Address,
     pub to: Address,
     pub memo: B256,
     pub ciphertext: Vec<u8>,
@@ -156,9 +157,10 @@ impl EncryptedDepositFixture {
 
         let portal = Address::repeat_byte(0xAA);
         let key_index = U256::from(42u64);
+        let sender = Address::repeat_byte(0xDD);
 
         // HKDF key derivation
-        let info = crate::ecies::hkdf_info(&portal, &key_index, &eph_pub_x);
+        let info = crate::ecies::hkdf_info(&portal, &key_index, &eph_pub_x, &sender);
         let aes_key = crate::ecies::hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext
@@ -175,6 +177,7 @@ impl EncryptedDepositFixture {
             eph_pub_y_parity,
             portal,
             key_index,
+            sender,
             to,
             memo,
             ciphertext,
@@ -194,6 +197,7 @@ impl EncryptedDepositFixture {
             &self.tag,
             self.portal,
             self.key_index,
+            self.sender,
         )
     }
 }
