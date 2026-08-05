@@ -3388,6 +3388,40 @@ pub(crate) async fn start_local_zone_with_fixture(
     Ok((zone, fixture))
 }
 
+/// Start a local Zone whose production payload builder finalizes at the requested cadence.
+///
+/// SPF tests choose the cadence so finalization occurs only in the final block of the proof batch.
+pub(crate) async fn start_local_zone_with_fixture_and_withdrawal_batch_interval(
+    zone_id: u32,
+    seed_blocks: u64,
+    withdrawal_batch_interval_blocks: u64,
+    genesis: Genesis,
+) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
+    let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32])?;
+    let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
+    let zone = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
+        DUMMY_L1_URL.to_string(),
+        Address::ZERO,
+        zone_primitives::constants::zone_chain_id(zone_id),
+        Some(genesis),
+        signer,
+        withdrawal_batch_interval_blocks,
+        None,
+        true,
+    )
+    .await?;
+    let fixture = L1Fixture::new();
+
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        zone.enabled_tokens(),
+        Address::ZERO,
+        Address::ZERO,
+        seed_blocks,
+    );
+    Ok((zone, fixture))
+}
+
 /// A three-node multi-sequencer cluster driven by the real role controller.
 ///
 /// Node 0 is the manifest bootstrap leader. Each node runs the complete dynamic role

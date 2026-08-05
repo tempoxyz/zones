@@ -110,6 +110,7 @@ rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
 reth-node-core.workspace = true
 reth-tracing.workspace = true
+reth-trie-common.workspace = true
 reqwest.workspace = true
 revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -120,6 +121,7 @@ tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
+zone-spf.workspace = true
 url = "2"
 
 [features]

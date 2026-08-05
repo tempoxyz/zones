@@ -13652,6 +13652,7 @@ dependencies = [
  "zone-primitives",
  "zone-rpc",
  "zone-sequencer",
+ "zone-spf",
 ]
 
 [[package]]
