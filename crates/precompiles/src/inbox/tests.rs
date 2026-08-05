@@ -111,11 +111,20 @@ impl Harness {
         deposits: Vec<QueuedDeposit>,
         decryptions: Vec<DecryptionData>,
     ) -> IZoneInbox::advanceTempoCall {
+        self.advance_call_with_tokens(deposits, decryptions, Vec::new())
+    }
+
+    fn advance_call_with_tokens(
+        &self,
+        deposits: Vec<QueuedDeposit>,
+        decryptions: Vec<DecryptionData>,
+        enabled_tokens: Vec<EnabledToken>,
+    ) -> IZoneInbox::advanceTempoCall {
         IZoneInbox::advanceTempoCall {
             header: encode_header(&self.child_header()),
             deposits,
             decryptions,
-            enabledTokens: Vec::new(),
+            enabledTokens: enabled_tokens,
         }
     }
 
@@ -209,17 +218,40 @@ impl Harness {
     }
 }
 
-fn failed_deposit_gas(deposits: usize) -> eyre::Result<u64> {
+fn maximum_metadata_token(index: u16) -> EnabledToken {
+    let mut token = [0u8; 20];
+    token[0] = 0x20;
+    token[1] = 0xc0;
+    token[18..].copy_from_slice(&index.to_be_bytes());
+    EnabledToken {
+        token: Address::from(token),
+        name: "n".repeat(64),
+        symbol: "s".repeat(31),
+        currency: "c".repeat(31),
+    }
+}
+
+fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result<u64> {
     let mut harness = Harness::new()?;
+    let enabled_tokens = (1..=token_enablements)
+        .map(|index| maximum_metadata_token(index as u16))
+        .collect::<Vec<_>>();
     {
         let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
-        StorageCtx::enter(&mut storage, || {
+        StorageCtx::enter(&mut storage, || -> eyre::Result<()> {
             TIP20Token::from_address(PATH_USD_ADDRESS)?.change_transfer_policy_id(
                 ALICE,
                 ITIP20::changeTransferPolicyIdCall {
                     newPolicyId: REJECT_ALL_POLICY_ID,
                 },
-            )
+            )?;
+            let anchored_policy = U256::from(7) | (U256::ONE << 64);
+            for enabled in &enabled_tokens {
+                let binding_slot =
+                    TIP403Registry::new().token_transfer_policies[enabled.token].base_slot();
+                StorageCtx.sstore(TIP403_REGISTRY_ADDRESS, binding_slot, anchored_policy)?;
+            }
+            Ok(())
         })?;
     }
 
@@ -279,7 +311,7 @@ fn failed_deposit_gas(deposits: usize) -> eyre::Result<u64> {
 
     harness.set_queue_hash(head);
     let calldata = harness
-        .advance_call(queued_deposits, decryptions)
+        .advance_call_with_tokens(queued_deposits, decryptions, enabled_tokens)
         .abi_encode();
     let output = harness.call_with_gas(Address::ZERO, calldata, u64::MAX)?;
     assert!(output.is_success(), "deposit block failed: {output:?}");
@@ -293,7 +325,7 @@ fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
 
     for deposits in [640, MAX_DEPOSITS_PER_TEMPO_BLOCK] {
         let should_fit = deposits <= MAX_DEPOSITS_PER_TEMPO_BLOCK;
-        let gas_used = failed_deposit_gas(deposits)?;
+        let gas_used = failed_deposit_gas(deposits, 0)?;
         eprintln!("{deposits} portal deposit block: {gas_used} gas");
         assert_eq!(
             gas_used <= BUFFERED_GAS_LIMIT,
@@ -301,6 +333,24 @@ fn max_portal_deposit_block_fits_system_gas_budget() -> eyre::Result<()> {
             "{deposits} deposit block used {gas_used} gas"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn max_portal_deposit_and_token_block_fits_system_gas_budget() -> eyre::Result<()> {
+    const COMBINED_BUFFERED_GAS_LIMIT: u64 = 225_000_000;
+    const MAX_DEPOSITS_PER_TEMPO_BLOCK: usize = 230;
+    const MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK: usize = 8;
+
+    let gas_used = failed_deposit_gas(
+        MAX_DEPOSITS_PER_TEMPO_BLOCK,
+        MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK,
+    )?;
+    eprintln!("max portal deposit and token block: {gas_used} gas");
+    assert!(
+        gas_used <= COMBINED_BUFFERED_GAS_LIMIT,
+        "max portal deposit and token block used {gas_used} gas"
+    );
     Ok(())
 }
 
