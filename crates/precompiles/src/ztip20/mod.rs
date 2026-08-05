@@ -36,6 +36,7 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
     ITIP20::transferWithMemoCall::SELECTOR,
     ITIP20::transferFromWithMemoCall::SELECTOR,
     ITIP20::approveCall::SELECTOR,
+    ITIP20::permitCall::SELECTOR,
 ];
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.

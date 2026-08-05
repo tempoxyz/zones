@@ -4,7 +4,10 @@
 //! `balanceOf(bytes)` before the upstream balance lookup prevents unrelated callers from using
 //! the return value as a receipt-existence and amount oracle.
 
-use crate::execution::{CallCheck, CallRules};
+use crate::{
+    execution::{CallCheck, CallRules},
+    ztip20::TIP20_FIXED_TRANSFER_GAS,
+};
 use alloy_primitives::Address;
 use alloy_sol_types::{SolCall, SolError};
 use tempo_contracts::precompiles::IReceivePolicyGuard;
@@ -15,6 +18,14 @@ use tempo_zone_contracts::Unauthorized;
 pub(crate) struct ReceivePolicyGuardRules;
 
 impl CallRules for ReceivePolicyGuardRules {
+    // Fixed gas hides destination balance-slot initialization from claim gas estimates, matching
+    // the envelope used by direct Zone TIP-20 transfers.
+    fn fixed_gas(&self, selector: Option<[u8; 4]>) -> Option<u64> {
+        selector
+            .is_some_and(|selector| selector == IReceivePolicyGuard::claimCall::SELECTOR)
+            .then_some(TIP20_FIXED_TRANSFER_GAS)
+    }
+
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
         if selector_from_calldata(data) != Some(IReceivePolicyGuard::balanceOfCall::SELECTOR) {
             return CallCheck::Continue;
@@ -176,6 +187,21 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn fixed_gas_applies_only_to_claim() {
+        let rules = ReceivePolicyGuardRules;
+
+        assert_eq!(
+            rules.fixed_gas(Some(IReceivePolicyGuard::claimCall::SELECTOR)),
+            Some(TIP20_FIXED_TRANSFER_GAS)
+        );
+        assert_eq!(
+            rules.fixed_gas(Some(IReceivePolicyGuard::balanceOfCall::SELECTOR)),
+            None
+        );
+        assert_eq!(rules.fixed_gas(None), None);
+    }
+
     struct GuardHarness {
         ctx: TestContext,
         precompile: DynPrecompile,
@@ -226,12 +252,22 @@ mod tests {
         }
 
         fn call(&mut self, caller: Address, data: Bytes, is_static: bool) -> PrecompileResult {
+            self.call_with_gas(caller, data, u64::MAX, is_static)
+        }
+
+        fn call_with_gas(
+            &mut self,
+            caller: Address,
+            data: Bytes,
+            gas: u64,
+            is_static: bool,
+        ) -> PrecompileResult {
             call_precompile(
                 &mut self.ctx,
                 &self.precompile,
                 caller,
                 &data,
-                u64::MAX,
+                gas,
                 is_static,
                 RECEIVE_POLICY_GUARD_ADDRESS,
                 RECEIVE_POLICY_GUARD_ADDRESS,
@@ -288,11 +324,30 @@ mod tests {
         }
         .abi_encode()
         .into();
-        let claimed = harness.call(RECEIVER, claim, false)?;
+        let claimed = harness.call_with_gas(RECEIVER, claim, TIP20_FIXED_TRANSFER_GAS, false)?;
         assert!(claimed.is_success());
+        assert_eq!(claimed.gas_used, TIP20_FIXED_TRANSFER_GAS);
 
         let balance = harness.balance_of(RECEIVER)?;
         assert_eq!(decode_balance(&balance)?, U256::ZERO);
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_pins_claim_revert_gas() -> eyre::Result<()> {
+        let mut harness = GuardHarness::new()?;
+        let mut absent = harness.receipt.clone();
+        absent.blockedNonce += 1;
+        let claim = IReceivePolicyGuard::claimCall {
+            to: RECEIVER,
+            receipt: absent.abi_encode().into(),
+        }
+        .abi_encode()
+        .into();
+
+        let result = harness.call_with_gas(RECEIVER, claim, TIP20_FIXED_TRANSFER_GAS, false)?;
+        assert!(result.is_revert());
+        assert_eq!(result.gas_used, TIP20_FIXED_TRANSFER_GAS);
         Ok(())
     }
 }
