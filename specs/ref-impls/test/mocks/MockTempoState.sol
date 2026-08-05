@@ -62,15 +62,13 @@ contract MockTempoState {
             enabled ? bytes32(uint256(Role.CallbackGateway)) : bytes32(0);
     }
 
-    /// @notice Mock finalizeTempo - just advances block number
+    /// @notice Mock finalizeTempo - advances the synthetic checkpoint across all headers
     /// @dev No sequencer check here - ZoneInbox already validates the caller
-    function finalizeTempo(
-        bytes calldata /* header */
-    )
-        external
-    {
-        tempoBlockNumber++;
-        tempoBlockHash = keccak256(abi.encode(tempoBlockHash, tempoBlockNumber));
+    function finalizeTempo(bytes[] calldata headers) external {
+        for (uint256 i = 0; i < headers.length; i++) {
+            tempoBlockNumber++;
+            tempoBlockHash = keccak256(abi.encode(tempoBlockHash, tempoBlockNumber));
+        }
     }
 
     /// @notice Mock readTempoStorageSlot - returns preset values

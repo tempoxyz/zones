@@ -384,6 +384,15 @@ contract ZonePortalProxyStorageTest is Test {
         address[] memory tokens = new address[](1);
         tokens[0] = initialToken;
         vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.symbol.selector), abi.encode("INITIAL")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
+        );
+        vm.mockCall(
             StdPrecompiles.TIP403_REGISTRY_ADDRESS,
             abi.encodeCall(ITIP403Registry.migrateTransferPolicyIds, (tokens)),
             abi.encode(0)
@@ -555,6 +564,29 @@ contract ZonePortalTest is BaseTest {
 
     function _senderTag(address sender) internal pure returns (bytes32) {
         return keccak256(abi.encodePacked(sender));
+    }
+
+    function _stringOfLength(uint256 length) internal pure returns (string memory value) {
+        bytes memory data = new bytes(length);
+        for (uint256 i; i < length; ++i) {
+            data[i] = "x";
+        }
+        return string(data);
+    }
+
+    function _createEnablementToken(
+        string memory name,
+        string memory symbol,
+        string memory currency,
+        bytes32 salt
+    )
+        internal
+        returns (address token)
+    {
+        token = address(
+            factory.createToken(name, symbol, currency, ITIP20(_PATH_USD), sequencer, salt)
+        );
+        _mockTokenPolicyMigration(token, true);
     }
 
     function _sequencerSet() internal returns (address[] memory signers) {
@@ -1123,6 +1155,94 @@ contract ZonePortalTest is BaseTest {
         portal.enableToken(token);
     }
 
+    function test_enableToken_acceptsMaximumMetadataLengths() public {
+        address token = _createEnablementToken(
+            _stringOfLength(portal.MAX_TOKEN_NAME_BYTES()),
+            _stringOfLength(portal.MAX_TOKEN_SYMBOL_BYTES()),
+            _stringOfLength(portal.MAX_TOKEN_CURRENCY_BYTES()),
+            bytes32("max metadata")
+        );
+
+        vm.prank(admin);
+        portal.enableToken(token);
+
+        assertTrue(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_rejectsOversizedName() public {
+        uint256 maximum = portal.MAX_TOKEN_NAME_BYTES();
+        address token = _createEnablementToken(
+            _stringOfLength(maximum + 1), "T", "USD", bytes32("long name")
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.TokenNameTooLong.selector, maximum + 1, maximum)
+        );
+        portal.enableToken(token);
+
+        assertFalse(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_rejectsOversizedSymbol() public {
+        uint256 maximum = portal.MAX_TOKEN_SYMBOL_BYTES();
+        address token = _createEnablementToken(
+            "Token", _stringOfLength(maximum + 1), "USD", bytes32("long symbol")
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.TokenSymbolTooLong.selector, maximum + 1, maximum)
+        );
+        portal.enableToken(token);
+
+        assertFalse(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_rejectsOversizedCurrency() public {
+        uint256 maximum = portal.MAX_TOKEN_CURRENCY_BYTES();
+        address token = _createEnablementToken(
+            "Token", "T", _stringOfLength(maximum + 1), bytes32("long currency")
+        );
+
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.TokenCurrencyTooLong.selector, maximum + 1, maximum)
+        );
+        portal.enableToken(token);
+
+        assertFalse(portal.isTokenEnabled(token));
+    }
+
+    function test_enableToken_enforcesPerTempoBlockCapAndResets() public {
+        uint64 maximum = portal.MAX_TOKENS_ENABLED_PER_TEMPO_BLOCK();
+        assertEq(maximum, 8);
+        assertEq(portal.enabledTokenCount(), 1, "initializer must consume one enablement");
+
+        for (uint256 i = 1; i < maximum; ++i) {
+            address token = _createEnablementToken("Token", "T", "USD", bytes32(uint256(1000 + i)));
+            vm.prank(admin);
+            portal.enableToken(token);
+        }
+        assertEq(portal.enabledTokenCount(), maximum);
+
+        address overflowToken =
+            _createEnablementToken("Overflow", "OVER", "USD", bytes32("overflow"));
+        vm.prank(admin);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.TokenEnablementBlockCapacityExceeded.selector, maximum
+            )
+        );
+        portal.enableToken(overflowToken);
+        assertFalse(portal.isTokenEnabled(overflowToken));
+
+        vm.roll(block.number + 1);
+        vm.prank(admin);
+        portal.enableToken(overflowToken);
+        assertTrue(portal.isTokenEnabled(overflowToken));
+    }
+
     function test_sequencerGovernance_revertsIfAdmin() public {
         // Inverse of test_tokenGovernance_revertsIfNotAdmin: the admin role must
         // not be able to perform any sequencer-only action. Locks in the
@@ -1515,8 +1635,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
     }
 
-    function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+    function test_deposit_enforcesUnprocessedQueueCapAcrossDepositTypes() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
         uint64 maximumPublicDeposits = maximum - 20;
         assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
@@ -1536,7 +1656,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         _deposit(portal, address(pathUSD), bob, amount, bytes32("over cap"), bob);
@@ -1546,14 +1666,70 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(alice), aliceBalanceAtCapacity);
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
 
+        // Advancing the L1 block does not reduce the unprocessed queue.
         vm.roll(block.number + 1);
-        _deposit(portal, address(pathUSD), bob, amount, bytes32("next block"), bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("same batch"), bob);
         vm.stopPrank();
+
+        // A stale batch that processes no deposits does not reopen capacity.
+        vm.prank(sequencer);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("batch")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            bytes32(0),
+            "",
+            ""
+        );
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("stale batch"), bob);
+
+        // Processing the queued deposits reopens exactly that much capacity.
+        vm.roll(block.number + 1);
+        vm.prank(sequencer);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("processing batch")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: queueHashAtCapacity,
+                prevDepositNumber: 0,
+                nextDepositNumber: maximumPublicDeposits
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+        vm.prank(alice);
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("after processing"), bob);
 
         assertEq(portal.depositCount(), maximumPublicDeposits + 1);
     }
 
-    function test_withdrawalBounceBack_usesReservedBatchCapacityWithoutBlockingQueue() public {
+    function test_withdrawalBounceBack_usesReservedQueueCapacityWithoutBlockingQueue() public {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
         _deposit(portal, address(pathUSD), alice, 1000e6, bytes32("escrow"), alice);
@@ -1597,7 +1773,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
         uint64 maximumPublicDeposits = maximum - uint64(reserve);
         vm.startPrank(alice);
         pathUSD.approve(address(portal), maximum);
@@ -1617,11 +1793,63 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         vm.prank(alice);
         _deposit(portal, address(pathUSD), bob, 1, bytes32("reserved"), bob);
+    }
+
+    function test_processWithdrawals_rejectsBatchAboveRemainingDepositCapacity() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
+        uint64 publicDepositLimit = maximum - 20;
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), publicDepositLimit);
+        for (uint256 i; i < publicDepositLimit; ++i) {
+            _deposit(portal, address(pathUSD), bob, 1, bytes32(i), bob);
+        }
+        vm.stopPrank();
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, 1, bytes32("capacity"), 0, alice, "");
+        uint256 attempted = 21;
+        Withdrawal[] memory withdrawals = new Withdrawal[](attempted);
+        bytes32 withdrawalHash = EMPTY_SENTINEL;
+        for (uint256 i = attempted; i > 0; --i) {
+            withdrawals[i - 1] = withdrawal;
+            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
+        }
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("capacity batch")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalHash,
+            "",
+            ""
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.WithdrawalBatchCapacityExceeded.selector, attempted, uint64(20)
+            )
+        );
+        portal.processWithdrawals(withdrawals, bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), 0);
+        assertEq(portal.withdrawalQueueSlot(0), withdrawalHash);
     }
 
     function test_deposit_hashChainStructure() public {
