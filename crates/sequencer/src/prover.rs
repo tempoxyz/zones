@@ -20,7 +20,7 @@ use tempo_primitives::{Block, TempoHeader};
 use tempo_zone_contracts::{
     IZoneInbox as ZoneInbox, IZoneOutbox as ZoneOutbox, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
 };
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info};
 use zone_evm::ZoneEvmConfig;
 use zone_l1::TempoStateExt as _;
@@ -160,7 +160,11 @@ impl ShadowProver {
                 prev_block_hash = %batch.prev_block_hash,
                 next_block_hash = %batch.next_block_hash,
                 error = %err,
-                "Shadow prover queue unavailable; skipping finalized batch candidate"
+                "Shadow prover queue {}; skipping finalized batch candidate",
+                match err {
+                    TrySendError::Full(_) => "full",
+                    TrySendError::Closed(_) => "unavailable",
+                },
             );
         }
     }
