@@ -1684,11 +1684,11 @@ contract ZonePortalTest is BaseTest {
                 prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("batch")
             }),
             DepositQueueTransition({
-                prevProcessedHash: bytes32(0),
-                nextProcessedHash: bytes32(0),
-                prevDepositNumber: 0,
-                nextDepositNumber: 0
-            }),
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
             bytes32(0),
             "",
             ""
