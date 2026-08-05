@@ -7,12 +7,12 @@ use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS,
+    PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     receive_policy_guard::ReceivePolicyGuard,
     storage::{ContractStorage, Handler, StorageCtx},
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
-    tip403_registry::{REJECT_ALL_POLICY_ID, TIP403Registry},
+    tip403_registry::{ALLOW_ALL_POLICY_ID, ITIP403Registry, REJECT_ALL_POLICY_ID, TIP403Registry},
     zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
