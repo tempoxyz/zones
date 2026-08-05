@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import {
+    EMPTY_SENTINEL,
     WITHDRAWAL_QUEUE_CAPACITY,
     WithdrawalQueue,
     WithdrawalQueueLib
@@ -172,9 +173,10 @@ contract WithdrawalQueueSymbolic is Test {
         assertEq(qh.tail(), _tail);
     }
 
-    /// @notice A non-empty enqueue on a full queue always reverts, for any full state.
+    /// @notice A valid non-empty enqueue on a full queue always reverts, for any full state.
     function check_enqueueRevertsWhenFull(uint256 _head, uint256 _tail, bytes32 h) external {
         vm.assume(h != bytes32(0));
+        vm.assume(h != EMPTY_SENTINEL);
         vm.assume(_tail >= _head);
         vm.assume(_tail - _head == qh.capacity()); // full
 
