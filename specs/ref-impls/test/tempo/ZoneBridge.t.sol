@@ -262,7 +262,9 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(sender, zoneTxContext.txHashFor(txSequence)));
+        return keccak256(
+            abi.encodePacked(sender, zoneTxContext.txHashFor(txSequence), uint64(txSequence))
+        );
     }
 
     function _withdrawal(

@@ -627,7 +627,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 
 ### Withdrawal Batching
 
-A withdrawal batch ends with exactly one call to `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox` in the final block of that batch. The block builder includes this as the last transaction using the zone system caller (`msg.sender == address(0)`), and the `blockNumber` argument must match the current zone block number. The encrypted-senders array carries one sequencer-supplied ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`); `senderTag` is recomputed by the outbox from the queued withdrawal sender and transaction hash. This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
+A withdrawal batch ends with exactly one call to `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox` in the final block of that batch. The block builder includes this as the last transaction using the zone system caller (`msg.sender == address(0)`), and the `blockNumber` argument must match the current zone block number. The encrypted-senders array carries one sequencer-supplied ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`); `senderTag` is recomputed by the outbox from the queued withdrawal sender, transaction hash, and fallback nonce. This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
 
 ```
 withdrawalQueueHash = EMPTY_SENTINEL
@@ -708,10 +708,10 @@ The withdrawal fee is burned on the zone regardless of whether the withdrawal su
 Zone transactions are private, but when a withdrawal is processed on Tempo, the `Withdrawal` struct is passed in calldata and publicly visible. To avoid leaking the sender's identity, the `sender` field is replaced with a `senderTag` commitment:
 
 ```
-senderTag = keccak256(abi.encodePacked(sender, txHash))
+senderTag = keccak256(abi.encodePacked(sender, txHash, fallbackNonce))
 ```
 
-The `txHash` is the hash of the `requestWithdrawal` transaction on the zone. Since zone transaction data is not published, `txHash` acts as a blinding factor known only to the sender and the sequencer.
+The `txHash` is the hash of the `requestWithdrawal` transaction on the zone. Since zone transaction data is not published, `txHash` acts as a blinding factor known only to the sender and the sequencer. `fallbackNonce` is the public, monotonically increasing identifier already assigned to each user withdrawal. Including it prevents multiple withdrawals from the same private transaction from sharing a public tag. Internal deposit bounce-backs retain the canonical `keccak256(address(0) || bytes32(0))` tag.
 
 The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct. The wire format is `ephemeralPubKey (33 bytes) || nonce (12 bytes) || ciphertext (52 bytes) || tag (16 bytes)` totaling 113 bytes.
 
@@ -721,14 +721,14 @@ Unlike user-created encrypted deposits, authenticated-withdrawal sender reveals 
 withdrawalHmacKey = HMAC-SHA256(uint256_be(sequencerEncryptionPrivKey), "tempo-zone-authenticated-withdrawal-derivation-key-v1")
 ```
 
-Here, `uint256_be` is the 32-byte big-endian encoding of the private scalar. Using `withdrawalHmacKey`, the sequencer derives the ECIES ephemeral scalar deterministically from the zone id, `revealTo`, `sender`, and `txHash`, retrying with a counter if the derived value is not a valid secp256k1 scalar. It derives the AES-GCM nonce from the same context plus the resulting ephemeral public key. For the same registered encryption key, zone id, reveal key, sender, and withdrawal transaction hash, `encryptedSender` is therefore byte-for-byte reproducible.
+Here, `uint256_be` is the 32-byte big-endian encoding of the private scalar. Using `withdrawalHmacKey`, the sequencer derives the ECIES ephemeral scalar deterministically from the zone id, `revealTo`, `sender`, `txHash`, and the 8-byte big-endian `fallbackNonce`, retrying with a counter if the derived value is not a valid secp256k1 scalar. It derives the AES-GCM nonce from the same context plus the resulting ephemeral public key. The same withdrawal is therefore byte-for-byte reproducible, while distinct withdrawals from one private transaction use different encryption material.
 
 Two disclosure modes are available:
 
-- **Manual reveal**: The sender shares `txHash` with a verifier off-chain. The verifier checks `keccak256(abi.encodePacked(sender, txHash)) == senderTag`.
-- **Encrypted reveal**: The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)` and verifies against `senderTag`. No off-chain communication needed.
+- **Manual reveal**: The sender shares `txHash` with a verifier off-chain. The verifier reads the public `fallbackNonce` from the withdrawal and checks `keccak256(abi.encodePacked(sender, txHash, fallbackNonce)) == senderTag`.
+- **Encrypted reveal**: The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)`, reads the public `fallbackNonce`, and verifies against `senderTag`. No off-chain communication needed.
 
-During `finalizeWithdrawalBatch`, the outbox recomputes `senderTag` from the sender and `txHash` stored when `requestWithdrawal` executed. The sequencer supplies only `encryptedSender`; this is trusted because a malicious sequencer could provide an incorrect ciphertext or omit it. The plaintext sender commitment remains deterministic and is covered by the same state transition checks as the rest of the withdrawal queue.
+During `finalizeWithdrawalBatch`, the outbox recomputes `senderTag` from the sender, `txHash`, and `fallbackNonce` stored when `requestWithdrawal` executed. The sequencer supplies only `encryptedSender`; this is trusted because a malicious sequencer could provide an incorrect ciphertext or omit it. The plaintext sender commitment remains deterministic and is covered by the same state transition checks as the rest of the withdrawal queue.
 
 For callback withdrawals, `IWithdrawalReceiver.onWithdrawalReceived` receives the source zone ID, source portal, and `bytes32 senderTag` instead of a plaintext sender address.
 
@@ -1508,7 +1508,7 @@ struct WithdrawalBounceBackDeposit {
 
 struct Withdrawal {
     address token;
-    bytes32 senderTag;          // keccak256(abi.encodePacked(sender, txHash))
+    bytes32 senderTag;          // keccak256(abi.encodePacked(sender, txHash, fallbackNonce))
     address to;
     uint128 amount;
     bytes32 memo;

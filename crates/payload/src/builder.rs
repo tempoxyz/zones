@@ -557,7 +557,12 @@ where
                     ))
                 })?;
                 encryptor
-                    .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
+                    .encrypt_sender(
+                        request.revealTo.as_ref(),
+                        request.sender,
+                        request.txHash,
+                        request.fallbackNonce,
+                    )
                     .map(Bytes::from)
                     .ok_or_else(|| {
                         PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(

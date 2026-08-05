@@ -274,7 +274,7 @@ uint64 constant MAX_WITHDRAWAL_CALLBACK_GAS = 10_000_000;
 
 struct Withdrawal {
     address token; // TIP-20 token being withdrawn
-    bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
+    bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash, fallbackNonce))
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     bytes32 memo; // user-provided context
