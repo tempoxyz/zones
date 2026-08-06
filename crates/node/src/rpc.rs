@@ -273,7 +273,7 @@ where
                 Ok(ZoneExecutionWitness {
                     execution_witness: witness,
                     tempo_reads: recorder
-                        .reads()
+                        .take_reads()
                         .into_iter()
                         .map(|read| RpcTempoStorageRead {
                             account: read.account,

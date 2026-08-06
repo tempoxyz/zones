@@ -100,14 +100,9 @@ impl<L1> RecordingL1StorageReader<L1> {
         }
     }
 
-    /// Returns the deduplicated storage reads recorded so far.
-    pub fn reads(&self) -> Vec<TempoStorageRead> {
-        self.reads
-            .lock()
-            .expect("L1 read recorder lock poisoned")
-            .iter()
-            .copied()
-            .collect()
+    /// Takes and returns the deduplicated storage reads recorded so far.
+    pub fn take_reads(&self) -> BTreeSet<TempoStorageRead> {
+        std::mem::take(&mut self.reads.lock().expect("L1 read recorder lock poisoned"))
     }
 }
 
@@ -615,11 +610,14 @@ mod tests {
 
         assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
         assert_eq!(reader.read_l1_storage(account, slot, 11).unwrap(), value);
-        assert_eq!(reader.reads(), vec![TempoStorageRead { account, slot }]);
+        assert_eq!(
+            reader.take_reads(),
+            BTreeSet::from_iter([TempoStorageRead { account, slot }])
+        );
 
         let failing = RecordingL1StorageReader::new(MockL1Reader::failing_storage());
         assert!(failing.read_l1_storage(account, slot, 10).is_err());
-        assert!(failing.reads().is_empty());
+        assert!(failing.take_reads().is_empty());
     }
 
     #[test]
