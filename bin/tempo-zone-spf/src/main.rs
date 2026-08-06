@@ -18,7 +18,6 @@ use clap::{Parser, Subcommand};
 use eyre::{Context, Result, bail, eyre};
 use futures::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
-use serde_json::Value;
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
 use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tempo_primitives::{TempoHeader, TempoTxEnvelope};
@@ -44,13 +43,6 @@ const ZONE_HEAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 type RpcBlock = Block<Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
-
-alloy_sol_types::sol! {
-    interface TempoStateStorageReads {
-        function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
-        function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
-    }
-}
 
 #[derive(Debug, Parser)]
 #[command(name = "tempo-zone-spf", about = "Tempo Zone SPF development tools")]
@@ -297,7 +289,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     timings.record("initial checkpoint", started, ());
 
     let started = start_phase("Zone state witness");
-    let (zone_state_witness, traces) = zone_witnesses(&zone_provider, from_block, to_block).await?;
+    let zone_state_witness = zone_witnesses(&zone_provider, from_block, to_block).await?;
     timings.record("Zone state witness", started, ());
 
     let started = start_phase("Tempo state witness");
@@ -310,7 +302,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         }
         checkpoint_by_zone_block.insert(block.input.number, checkpoint);
     }
-    let mut reads = collect_l1_reads(&traces, &checkpoint_by_zone_block)?;
+    let mut reads = L1Reads::new();
     for block in &extracted {
         if block.input.tempo_header_rlp.is_none() {
             continue;
@@ -922,11 +914,11 @@ async fn zone_witnesses(
     zone: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
-) -> Result<(ZoneStateWitness, Vec<(u64, Value)>)> {
-    let results = stream::iter(from..=to)
+) -> Result<ZoneStateWitness> {
+    let witnesses = stream::iter(from..=to)
         .map(|number| async move {
             let started = Instant::now();
-            debug!(zone_block = number, "requesting execution witness and call trace");
+            debug!(zone_block = number, "requesting execution witness");
             let witness = zone
                 .client()
                 .request::<_, ExecutionWitness>(
@@ -940,26 +932,15 @@ async fn zone_witnesses(
                     "Zone block {number} reads an older BLOCKHASH, which the current SPF witness cannot represent"
                 );
             }
-            let trace = zone
-                .client()
-                .request::<_, Value>(
-                    "debug_traceBlockByNumber",
-                    (
-                        BlockNumberOrTag::Number(number),
-                        serde_json::json!({"tracer": "callTracer"}),
-                    ),
-                )
-                .await
-                .wrap_err_with(|| format!("call trace for Zone block {number}"))?;
             debug!(
                 zone_block = number,
                 state_nodes = witness.state.len(),
                 bytecodes = witness.codes.len(),
                 ancestor_headers = witness.headers.len(),
                 elapsed_ms = started.elapsed().as_millis(),
-                "received execution witness and call trace"
+                "received execution witness"
             );
-            Ok::<_, eyre::Report>((number, witness, trace))
+            Ok::<_, eyre::Report>(witness)
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
@@ -967,81 +948,19 @@ async fn zone_witnesses(
 
     let mut state = BTreeMap::new();
     let mut codes = BTreeMap::new();
-    let mut traces = BTreeMap::new();
-    for (number, witness, trace) in results {
+    for witness in witnesses {
         for node in witness.state {
             state.entry(keccak256(&node)).or_insert(node);
         }
         for code in witness.codes {
             codes.entry(keccak256(&code)).or_insert(code);
         }
-        traces.insert(number, trace);
     }
 
-    Ok((
-        ZoneStateWitness {
-            node_pool: state.into_values().collect(),
-            bytecodes: codes.into_values().collect(),
-        },
-        traces.into_iter().collect(),
-    ))
-}
-
-fn collect_l1_reads(traces: &[(u64, Value)], checkpoints: &BTreeMap<u64, u64>) -> Result<L1Reads> {
-    let mut reads = L1Reads::new();
-    for (zone_block, trace) in traces {
-        let checkpoint = checkpoints
-            .get(zone_block)
-            .copied()
-            .ok_or_else(|| eyre!("missing Tempo checkpoint for Zone block {zone_block}"))?;
-        collect_trace_reads(trace, checkpoint, &mut reads)?;
-    }
-    Ok(reads)
-}
-
-fn collect_trace_reads(value: &Value, checkpoint: u64, reads: &mut L1Reads) -> Result<()> {
-    match value {
-        Value::Array(values) => {
-            for value in values {
-                collect_trace_reads(value, checkpoint, reads)?;
-            }
-        }
-        Value::Object(object) => {
-            if let (Some(to), Some(input)) = (
-                object.get("to").and_then(Value::as_str),
-                object.get("input").and_then(Value::as_str),
-            ) {
-                let to: Address = to.parse().wrap_err("parse call-trace target")?;
-                if to == TEMPO_STATE_ADDRESS {
-                    let input: Bytes = input.parse().wrap_err("parse TempoState trace input")?;
-                    if let Ok(call) =
-                        TempoStateStorageReads::readTempoStorageSlotCall::abi_decode(&input)
-                    {
-                        reads
-                            .entry(checkpoint)
-                            .or_default()
-                            .entry(call.account)
-                            .or_default()
-                            .insert(call.slot);
-                    } else if let Ok(call) =
-                        TempoStateStorageReads::readTempoStorageSlotsCall::abi_decode(&input)
-                    {
-                        reads
-                            .entry(checkpoint)
-                            .or_default()
-                            .entry(call.account)
-                            .or_default()
-                            .extend(call.slots);
-                    }
-                }
-            }
-            for value in object.values() {
-                collect_trace_reads(value, checkpoint, reads)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
+    Ok(ZoneStateWitness {
+        node_pool: state.into_values().collect(),
+        bytecodes: codes.into_values().collect(),
+    })
 }
 
 async fn tempo_state_witness(
@@ -1295,26 +1214,6 @@ fn format_duration(duration: Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::address;
-
-    #[test]
-    fn collects_tempo_storage_reads_from_nested_call_traces() {
-        let account = address!("00000000000000000000000000000000000000aa");
-        let slot = B256::repeat_byte(0x11);
-        let input = TempoStateStorageReads::readTempoStorageSlotCall { account, slot }.abi_encode();
-        let trace = serde_json::json!([{
-            "result": {
-                "to": format!("{TEMPO_STATE_ADDRESS:#x}"),
-                "input": format!("0x{}", const_hex::encode(input)),
-                "calls": []
-            }
-        }]);
-        let checkpoints = BTreeMap::from([(4_u64, 99_u64)]);
-
-        let reads = collect_l1_reads(&[(4, trace)], &checkpoints).unwrap();
-
-        assert!(reads[&99][&account].contains(&slot));
-    }
 
     #[test]
     fn derives_an_exact_counted_zone_range() {
