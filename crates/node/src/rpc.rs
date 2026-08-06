@@ -57,22 +57,18 @@ use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
 use zone_evm::ZoneEvmConfig;
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
-use zone_rpc::types::{TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness};
 use zone_rpc::{
     auth::AuthContext,
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
         LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
-        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneInfoResponse, internal,
+        SequencerProgress, SequencerReadiness, SetLeaderResponse,
+        TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness, ZoneInfoResponse, internal,
         raw_null, raw_zero, to_raw,
     },
 };
 
 use crate::{replication::PeerTipRegistry, role::SharedRoleStatus};
-
-fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(error.code as i32, error.message, error.data)
-}
 
 /// Multi-sequencer handles for the sequencer RPC methods.
 ///
@@ -225,18 +221,18 @@ where
 
 /// Zone-specific debug API backed directly by the node's full `EthApi`.
 #[derive(Clone)]
-pub(crate) struct ZoneDebugApi<E> {
+pub(crate) struct NodeZoneDebugApi<E> {
     eth_api: E,
 }
 
-impl<E> ZoneDebugApi<E> {
+impl<E> NodeZoneDebugApi<E> {
     pub(crate) const fn new(eth_api: E) -> Self {
         Self { eth_api }
     }
 }
 
 #[jsonrpsee::core::async_trait]
-impl<E> ZoneDebugApiServer for ZoneDebugApi<E>
+impl<E> ZoneDebugApi for NodeZoneDebugApi<E>
 where
     E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
 {
@@ -290,6 +286,10 @@ where
             .await
             .map_err(|error| operator_rpc_error(internal(error)))
     }
+}
+
+fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(error.code as i32, error.message, error.data)
 }
 
 async fn zone_tokens(

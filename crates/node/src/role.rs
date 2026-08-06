@@ -34,10 +34,9 @@ use zone_p2p::{
     P2pPeerId,
 };
 use zone_payload::ZonePayloadTypes;
-use zone_rpc::ZoneDebugApiServer;
 use zone_sequencer::{
     ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer, spawn_zone_sequencer_with_prover,
+    resolve_portal_zone_anchor, spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -65,7 +64,7 @@ const GENERATION_RESTART_BACKOFF: Duration = Duration::from_millis(500);
 const GENERATION_EVENT_BACKLOG: usize = 128;
 
 /// Everything a role generation needs to start its tasks.
-pub(crate) struct RoleControllerContext<P, Pool, A> {
+pub(crate) struct RoleControllerContext<P, Pool> {
     pub local_ed25519_public_key: P2pPeerId,
     pub schedule: LeadershipSchedule,
     pub provider: P,
@@ -82,7 +81,7 @@ pub(crate) struct RoleControllerContext<P, Pool, A> {
     pub portal_address: Address,
     /// Sequencer resources constructed unconditionally at startup; activation is gated by
     /// the leader generation. `None` means this node can never lead.
-    pub sequencer: Option<LeaderSequencerDeps<A>>,
+    pub sequencer: Option<LeaderSequencerDeps>,
     /// Tip evidence advertised by peers via backfill completions.
     pub peer_tips: PeerTipRegistry,
     /// Live role/readiness snapshot shared with the status RPC.
@@ -108,10 +107,10 @@ pub struct RoleStatus {
 pub type SharedRoleStatus = Arc<std::sync::Mutex<RoleStatus>>;
 
 /// Leader-only background task dependencies (batch submission, withdrawal processing).
-pub(crate) struct LeaderSequencerDeps<A> {
+pub(crate) struct LeaderSequencerDeps {
     pub config: ZoneSequencerAddOnsConfig,
     pub sequencer_config: ZoneSequencerConfig,
-    pub prover_config: Option<ShadowProverConfig<A>>,
+    pub prover_config: Option<ShadowProverConfig>,
 }
 
 /// Sinks for the long-lived P2P event demultiplexer.
@@ -509,8 +508,8 @@ where
 /// role by the next-anchor rule, and switches role generations.
 /// Observation alone never switches roles — the trigger is consumption progress reaching
 /// the boundary, which this loop tracks by re-reading the local Tempo checkpoint.
-pub(crate) async fn run_role_controller<P, Pool, A>(
-    context: RoleControllerContext<P, Pool, A>,
+pub(crate) async fn run_role_controller<P, Pool>(
+    context: RoleControllerContext<P, Pool>,
     sinks: EventSinks,
 ) where
     P: BlockNumReader
@@ -525,7 +524,6 @@ pub(crate) async fn run_role_controller<P, Pool, A>(
         + Sync
         + 'static,
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
-    A: ZoneDebugApiServer + Clone + Send + Sync + 'static,
 {
     let mut schedule_changes = context.schedule.subscribe();
 
@@ -731,8 +729,8 @@ pub(crate) async fn run_role_controller<P, Pool, A>(
     }
 }
 
-async fn start_generation<P, Pool, A>(
-    context: &RoleControllerContext<P, Pool, A>,
+async fn start_generation<P, Pool>(
+    context: &RoleControllerContext<P, Pool>,
     sinks: &EventSinks,
     desired: DesiredRole,
     id: u64,
@@ -750,7 +748,6 @@ where
         + Sync
         + 'static,
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + Clone + 'static,
-    A: ZoneDebugApiServer + Clone + Send + Sync + 'static,
 {
     let token = CancellationToken::new();
     let mut tasks = JoinSet::new();
@@ -943,27 +940,14 @@ where
             let prover_config = sequencer.prover_config.clone();
             let sequencer_token = token.clone();
             tasks.spawn(async move {
-                let handle = match prover_config {
-                    Some(prover_config) => {
-                        spawn_zone_sequencer_with_prover(
-                            sequencer_config,
-                            signer,
-                            zone_provider,
-                            prover_config,
-                            sequencer_token.clone(),
-                        )
-                        .await
-                    }
-                    None => {
-                        spawn_zone_sequencer(
-                            sequencer_config,
-                            signer,
-                            zone_provider,
-                            sequencer_token.clone(),
-                        )
-                        .await
-                    }
-                };
+                let handle = spawn_zone_sequencer(
+                    sequencer_config,
+                    signer,
+                    zone_provider,
+                    prover_config,
+                    sequencer_token.clone(),
+                )
+                .await;
                 supervise_sequencer_tasks(handle, sequencer_token).await
             });
 
@@ -990,9 +974,9 @@ where
         .ok_or_else(|| eyre::eyre!("no latest block header"))
 }
 
-fn build_engine<P, Pool, A>(
-    context: &RoleControllerContext<P, Pool, A>,
-    sequencer: &LeaderSequencerDeps<A>,
+fn build_engine<P, Pool>(
+    context: &RoleControllerContext<P, Pool>,
+    sequencer: &LeaderSequencerDeps,
     last_header: SealedHeader<TempoHeader>,
 ) -> ZoneEngine
 where

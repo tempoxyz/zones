@@ -130,6 +130,8 @@ pub struct ZoneSequencerHandle {
 ///   submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawals` for each pending withdrawal.
+/// - **Shadow prover** — when `prover_config` is set, validates finalized batch candidates
+///   observationally without delaying or changing settlement.
 ///
 /// Both tasks share a single L1 provider and nonce manager to prevent signing/nonce contention
 /// when submitting concurrent L1 transactions.
@@ -140,6 +142,7 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
+    prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
     let l1_provider = connect_l1_provider(
@@ -149,48 +152,21 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
-    spawn_zone_sequencer_tasks(config, signer, zone_provider, l1_provider, None, shutdown)
-}
-
-/// Spawn all zone sequencer background tasks with shadow SPF validation.
-///
-/// Shadow validation is observational: candidates are queued without delaying or changing L1
-/// settlement, and any prover failure is reported only through logs.
-pub async fn spawn_zone_sequencer_with_prover<P, A>(
-    config: ZoneSequencerConfig,
-    signer: PrivateKeySigner,
-    zone_provider: P,
-    prover_config: ShadowProverConfig<A>,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle
-where
-    P: ZoneSequencerProvider,
-    A: zone_rpc::ZoneDebugApiServer + Send + Sync + 'static,
-{
-    // Build a single shared L1 provider with the sequencer wallet.
-    // Both the batch submitter (inside the zone monitor) and the withdrawal
-    // processor use this provider, ensuring nonces are tracked in one place.
-    let l1_provider = connect_l1_provider(
-        &config.l1_rpc_url,
-        config.retry_connection_interval,
-        signer.clone(),
-    )
-    .await
-    .expect("valid L1 RPC URL");
-
-    let shadow_prover = prover::spawn_shadow_prover(
-        prover_config,
-        config.portal_address,
-        config.batch_anchor_config,
-        zone_provider.clone(),
-        l1_provider.clone(),
-    );
+    let shadow_prover = prover_config.map(|prover_config| {
+        prover::spawn_shadow_prover(
+            prover_config,
+            config.portal_address,
+            config.batch_anchor_config,
+            zone_provider.clone(),
+            l1_provider.clone(),
+        )
+    });
     spawn_zone_sequencer_tasks(
         config,
         signer,
         zone_provider,
         l1_provider,
-        Some(shadow_prover),
+        shadow_prover,
         shutdown,
     )
 }

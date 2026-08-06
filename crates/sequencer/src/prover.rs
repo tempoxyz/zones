@@ -3,6 +3,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
+    sync::Arc,
     time::Instant,
 };
 
@@ -25,7 +26,7 @@ use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info};
 use zone_evm::ZoneEvmConfig;
 use zone_l1::TempoStateExt as _;
-use zone_rpc::{ZoneDebugApiServer, types::TempoStorageRead};
+use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
     BatchOutput, BatchWitness, PublicInputs, SpfConfig, TempoStateWitness, ZoneBlock,
     ZoneStateWitness, prove_zone_batch,
@@ -41,16 +42,16 @@ type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
-pub struct ShadowProverConfig<A> {
+pub struct ShadowProverConfig {
     /// Zone identifier bound into SPF public inputs.
     pub zone_id: u32,
     /// The exact EVM configuration used by the node.
     pub evm_config: ZoneEvmConfig,
     /// In-process Zone debug API used to generate execution witnesses.
-    pub debug_api: A,
+    pub debug_api: Arc<dyn ZoneDebugApi>,
 }
 
-impl<A> fmt::Debug for ShadowProverConfig<A> {
+impl fmt::Debug for ShadowProverConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ShadowProverConfig")
@@ -80,8 +81,8 @@ struct ValidationStats {
     tempo_state_nodes: usize,
 }
 
-struct ProverContext<P, A> {
-    config: ShadowProverConfig<A>,
+struct ProverContext<P> {
+    config: ShadowProverConfig,
     portal: Address,
     anchor_config: BatchAnchorConfig,
     zone_provider: P,
@@ -102,17 +103,13 @@ struct Anchor {
     ancestry_headers: Vec<Bytes>,
 }
 
-pub(crate) fn spawn_shadow_prover<P, A>(
-    config: ShadowProverConfig<A>,
+pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
+    config: ShadowProverConfig,
     portal: Address,
     anchor_config: BatchAnchorConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
-) -> ShadowProver
-where
-    P: ZoneSequencerProvider,
-    A: ZoneDebugApiServer + Send + Sync + 'static,
-{
+) -> ShadowProver {
     info!(
         target: "zone::sequencer::prover",
         zone_id = config.zone_id,
@@ -190,14 +187,10 @@ impl ShadowProver {
     }
 }
 
-async fn validate_candidate<P, A>(
-    context: &ProverContext<P, A>,
+async fn validate_candidate<P: ZoneSequencerProvider>(
+    context: &ProverContext<P>,
     job: &ProverJob,
-) -> Result<ValidationStats>
-where
-    P: ZoneSequencerProvider,
-    A: ZoneDebugApiServer + Send + Sync + 'static,
-{
+) -> Result<ValidationStats> {
     ensure!(
         job.batch.zone_height == job.to,
         "candidate zone height {} does not match range end {}",
@@ -227,7 +220,7 @@ where
     .context("Zone input worker panicked")??;
 
     let (zone_state_witness, tempo_reads) =
-        zone_witnesses(&context.config.debug_api, from, to).await?;
+        zone_witnesses(context.config.debug_api.as_ref(), from, to).await?;
 
     let initial_tempo_header = tempo_header(&context.l1_provider, zone_inputs.initial_tempo_number)
         .await
@@ -472,14 +465,11 @@ fn decode_tempo_header(encoded: &[u8]) -> Result<TempoHeader> {
     Ok(header)
 }
 
-async fn zone_witnesses<A>(
-    debug_api: &A,
+async fn zone_witnesses(
+    debug_api: &dyn ZoneDebugApi,
     from: u64,
     to: u64,
-) -> Result<(ZoneStateWitness, Vec<(u64, TempoStorageRead)>)>
-where
-    A: ZoneDebugApiServer + Send + Sync + 'static,
-{
+) -> Result<(ZoneStateWitness, Vec<(u64, TempoStorageRead)>)> {
     let results = stream::iter(from..=to)
         .map(|number| async move {
             let started = Instant::now();

@@ -594,6 +594,7 @@ where
                 config,
                 signer,
                 provider,
+                None,
                 tokio_util::sync::CancellationToken::new(),
             )
             .await
