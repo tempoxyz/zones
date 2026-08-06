@@ -180,6 +180,11 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         job.batch.zone_height,
         job.to
     );
+    ensure!(
+        job.from != 1 || job.batch.prev_block_hash.is_zero(),
+        "first Zone batch must use the zero portal prev_block_hash sentinel, found {}",
+        job.batch.prev_block_hash
+    );
     let zone_provider = context.zone_provider.clone();
     let evm_config = context.config.evm_config.clone();
     let from = job.from;
@@ -288,7 +293,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         }
     };
 
-    compare_output(&output, &job.batch)?;
+    compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
 
     Ok(ValidationStats {
         witness_bytes: witness_size(&witness),
@@ -312,12 +317,25 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
     let parent_header = provider
         .header_by_number(from - 1)?
         .ok_or_eyre(format!("canonical Zone parent {} not found", from - 1))?;
-    ensure!(
-        parent_header.hash_slow() == expected_prev_hash,
-        "candidate parent hash changed: expected {expected_prev_hash}, found {}",
-        parent_header.hash_slow()
-    );
-    let parent_state = provider.state_by_block_hash(expected_prev_hash)?;
+    let parent_hash = parent_header.hash_slow();
+    // ZonePortal uses zero as its pre-genesis sentinel. SPF receives the real
+    // canonical hash of block 0 as the parent of block 1 instead.
+    if from == 1 {
+        ensure!(
+            expected_prev_hash.is_zero(),
+            "first Zone batch must use the zero portal prev_block_hash sentinel, found {expected_prev_hash}"
+        );
+        ensure!(
+            !parent_hash.is_zero(),
+            "canonical Zone block 0 hash must be non-zero"
+        );
+    } else {
+        ensure!(
+            parent_hash == expected_prev_hash,
+            "candidate parent hash changed: expected {expected_prev_hash}, found {parent_hash}"
+        );
+    }
+    let parent_state = provider.state_by_block_hash(parent_hash)?;
     let initial_tempo = parent_state.tempo_num_hash()?;
 
     let recovered = provider.recovered_block_range(from..=to)?;
@@ -327,7 +345,7 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
         recovered.len()
     );
 
-    let mut expected_parent = expected_prev_hash;
+    let mut expected_parent = parent_hash;
     let mut extracted = Vec::with_capacity(recovered.len());
     let mut state_nodes = BTreeMap::new();
     let mut bytecodes = BTreeMap::new();
@@ -585,12 +603,12 @@ fn merge_nodes(target: &mut Vec<Bytes>, additional: Vec<Bytes>) {
     *target = nodes.into_values().collect();
 }
 
-fn compare_output(output: &BatchOutput, batch: &BatchData) -> Result<()> {
+fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B256) -> Result<()> {
     ensure!(
-        output.block_transition.prevBlockHash == batch.prev_block_hash,
-        "previous Zone block commitment mismatch: SPF {}, candidate {}",
+        output.block_transition.prevBlockHash == expected_prev_hash,
+        "previous Zone block commitment mismatch: SPF {}, canonical parent {}",
         output.block_transition.prevBlockHash,
-        batch.prev_block_hash
+        expected_prev_hash
     );
     ensure!(
         output.block_transition.nextBlockHash == batch.next_block_hash,
