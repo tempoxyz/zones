@@ -9,6 +9,7 @@ import {
     ZONE_MESSENGER_ADDRESS,
     ZoneInfo
 } from "../interfaces/IZone.sol";
+import { EncryptedDepositLib } from "../libraries/EncryptedDeposit.sol";
 import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
@@ -98,7 +99,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
         // Zone portals treat this shared router as the depositor, so sender binding alone can't
         // distinguish withdrawals. Consume each encrypted payload once to prevent replay.
-        bytes32 nullifier = _payloadNullifier(encrypted);
+        bytes32 nullifier = EncryptedDepositLib.payloadNullifier(encrypted);
         if (payloads[nullifier]) {
             revert EncryptedPayloadAlreadyConsumed(nullifier);
         }
@@ -118,16 +119,6 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /*//////////////////////////////////////////////////////////////
                            INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
-
-    /// @dev Excludes Y parity because P and -P have the same ECDH x-coordinate and AES key,
-    ///      making parity a malleable encoding of the same effective encrypted payload.
-    function _payloadNullifier(DepositPayload memory encrypted) internal pure returns (bytes32) {
-        return keccak256(
-            abi.encode(
-                encrypted.ephemeralPubkeyX, encrypted.ciphertext, encrypted.nonce, encrypted.tag
-            )
-        );
-    }
 
     /// @notice Validate the target portal is registered and the token is enabled on it
     function _validateTarget(address targetPortal, address tokenOut) internal view {

@@ -7,6 +7,7 @@ import {
     IZonePortal,
     Role
 } from "../../src/interfaces/IZone.sol";
+import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 enum GatewayFlow {
@@ -36,6 +37,10 @@ contract MockZoneGateway is IWithdrawalReceiver {
     error InvalidOutputToken();
     error UnauthorizedMessenger();
     error UnregisteredGateway();
+    error EncryptedPayloadAlreadyConsumed(bytes32 nullifier);
+
+    /// @notice Encrypted deposit payloads already forwarded by this shared gateway.
+    mapping(bytes32 nullifier => bool consumed) public payloads;
 
     bool public returnToZone = true;
 
@@ -70,6 +75,10 @@ contract MockZoneGateway is IWithdrawalReceiver {
         }
 
         if (!returnToZone) return IWithdrawalReceiver.onWithdrawalReceived.selector;
+
+        bytes32 nullifier = EncryptedDepositLib.payloadNullifier(callback.encrypted);
+        if (payloads[nullifier]) revert EncryptedPayloadAlreadyConsumed(nullifier);
+        payloads[nullifier] = true;
 
         // The mock returns the received token. The production gateway owns conversion semantics.
         if (!ITIP20(token).approve(sourcePortal, amount)) revert ApprovalFailed();

@@ -2679,6 +2679,33 @@ contract ZonePortalTest is BaseTest {
         );
     }
 
+    function test_zoneGateway_rejectsPayloadReplay() public {
+        uint128 amount = 500e6;
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(address(zoneGateway), amount * 2);
+
+        vm.prank(address(messenger));
+        zoneGateway.onWithdrawalReceived(
+            testZoneId,
+            address(portal),
+            bytes32(0),
+            address(pathUSD),
+            amount,
+            _callbackData(GatewayFlow.Deposit)
+        );
+
+        vm.prank(address(messenger));
+        vm.expectRevert(MockZoneGateway.EncryptedPayloadAlreadyConsumed.selector);
+        zoneGateway.onWithdrawalReceived(
+            testZoneId,
+            address(portal),
+            bytes32(uint256(1)),
+            address(pathUSD),
+            amount,
+            _callbackData(GatewayFlow.Deposit)
+        );
+    }
+
     function _enqueueWithdrawal(Withdrawal memory withdrawal) internal {
         bytes32 withdrawalHash = keccak256(abi.encode(withdrawal, EMPTY_SENTINEL));
         vm.roll(block.number + 1);

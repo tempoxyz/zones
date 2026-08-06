@@ -53,6 +53,16 @@ library EncryptedDepositLib {
     /// @notice Thrown when decrypted plaintext does not have the expected length
     error InvalidPlaintextLength(uint256 actual, uint256 expected);
 
+    /// @notice Compute the canonical one-shot nullifier for an encrypted payload.
+    /// @dev Excludes y parity because both compressed encodings derive the same ECDH x-coordinate.
+    function payloadNullifier(DepositPayload memory encrypted) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                encrypted.ephemeralPubkeyX, encrypted.ciphertext, encrypted.nonce, encrypted.tag
+            )
+        );
+    }
+
     /// @notice Compute the queue hash for an encrypted deposit
     /// @dev Matches the queue hash chain format used in DepositQueueLib:
     ///      keccak256(abi.encode(DepositType.Deposit, deposit, prevHash))
