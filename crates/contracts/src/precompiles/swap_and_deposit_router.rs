@@ -21,9 +21,9 @@ crate::sol! {
 
 /// Callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
 ///
-/// This payload tells the router to optionally swap the withdrawn token on L1
-/// and then call `ZonePortal.deposit(...)` with an ECIES-encrypted
-/// `(recipient, memo)` payload.
+/// This payload tells the router to optionally swap the withdrawn token on L1 and then call
+/// `ZonePortal.deposit(...)` with an ECIES-encrypted `(recipient, memo)` payload. The router
+/// treats the encrypted payload hash as a nullifier and accepts each payload at most once.
 #[derive(Debug, Clone)]
 pub struct SwapAndDepositRouterCallback {
     /// Token that should be deposited after the optional L1 swap.

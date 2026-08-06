@@ -27,6 +27,11 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     IStablecoinDEX public immutable stablecoinDEX;
     IZoneFactory public immutable zoneFactory;
 
+    /// @notice Encrypted deposit payloads already forwarded by this router.
+    /// @dev The payload hash acts as a nullifier. A successful callback may consume a payload
+    ///      exactly once, preventing another withdrawal from replaying it through this shared sender.
+    mapping(bytes32 nullifier => bool consumed) public payloads;
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -35,6 +40,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     error InvalidSourcePortal();
     error InvalidTargetPortal();
     error InvalidToken();
+    error EncryptedPayloadAlreadyConsumed(bytes32 nullifier);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -89,6 +95,14 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             address tempoRefundRecipient,
             uint128 minAmountOut
         ) = abi.decode(data, (address, address, uint256, DepositPayload, address, uint128));
+
+        // Zone portals record treat this shared router as the depositor, so sender binding alone
+        // can't distinguish withdrawals. Consume each encrypted payload once to prevent replay.
+        bytes32 nullifier = keccak256(abi.encode(encrypted));
+        if (payloads[nullifier]) {
+            revert EncryptedPayloadAlreadyConsumed(nullifier);
+        }
+        payloads[nullifier] = true;
 
         _validateTarget(targetPortal, tokenOut);
 
