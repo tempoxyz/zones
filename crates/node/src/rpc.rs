@@ -218,14 +218,14 @@ where
     Ok(module)
 }
 
-/// Zone-specific debug API backed by reth's Eth API.
+/// Zone-specific debug API.
 #[derive(Clone)]
-struct ZoneDebugApi<E> {
+pub(crate) struct ZoneDebugApi<E> {
     eth_api: E,
 }
 
 impl<E> ZoneDebugApi<E> {
-    const fn new(eth_api: E) -> Self {
+    pub(crate) const fn new(eth_api: E) -> Self {
         Self { eth_api }
     }
 }
@@ -285,14 +285,6 @@ where
             .await
             .map_err(|error| operator_rpc_error(internal(error)))
     }
-}
-
-/// Build the Zone-specific debug extension installed alongside reth's debug API.
-pub(crate) fn zone_debug_rpc_module<E>(eth_api: E) -> RpcModule<()>
-where
-    E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
-{
-    ZoneDebugApi::new(eth_api).into_rpc().remove_context()
 }
 
 fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {

@@ -330,7 +330,7 @@ where
         self.inner.chain_spec()
     }
 
-    /// Clones this configuration with an isolated Tempo L1 storage-read recorder.
+    /// Clones this configuration with a Tempo L1 storage-read recorder.
     pub fn with_l1_storage_recorder(
         &self,
     ) -> (
