@@ -29,7 +29,7 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::{PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, zone_chain_id};
+use zone_primitives::constants::zone_chain_id;
 use zone_rpc::{ZoneProvider, ZoneProviderConfig};
 use zone_spf::{
     BatchOutput, BatchWitness, Error as SpfError, PublicInputs, SpfConfig, TempoStateWitness,
@@ -154,7 +154,7 @@ struct PortalSnapshot {
 struct ExtractedBlock {
     input: ZoneBlock,
     block_hash: B256,
-    checkpoint_number: Option<u64>,
+    checkpoint_number: u64,
     has_finalization: bool,
     user_transaction_count: usize,
 }
@@ -292,31 +292,6 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     let zone_state_witness = zone_witnesses(&zone_provider, from_block, to_block).await?;
     timings.record("Zone state witness", started, ());
 
-    let started = start_phase("Tempo state witness");
-    let portal = discovery.portal;
-    let mut checkpoint_by_zone_block = BTreeMap::new();
-    let mut checkpoint = initial_tempo_header.number();
-    for block in &extracted {
-        if let Some(imported) = block.checkpoint_number {
-            checkpoint = imported;
-        }
-        checkpoint_by_zone_block.insert(block.input.number, checkpoint);
-    }
-    let mut reads = L1Reads::new();
-    for block in &extracted {
-        let checkpoint = checkpoint_by_zone_block[&block.input.number];
-        // advanceTempo always authenticates the portal deposit-queue head.
-        reads
-            .entry(checkpoint)
-            .or_default()
-            .entry(portal)
-            .or_default()
-            .insert(PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
-    }
-    let initial_tempo_state_witness =
-        tempo_state_witness(&tempo_provider, &initial_tempo_header, reads.clone()).await?;
-    timings.record("Tempo state witness", started, ());
-
     let final_tempo_header = extracted
         .iter()
         .last()
@@ -341,11 +316,15 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         parent_header,
         zone_blocks: extracted.iter().map(|block| block.input.clone()).collect(),
         zone_state_witness,
-        tempo_state_witness: initial_tempo_state_witness,
+        tempo_state_witness: TempoStateWitness {
+            initial_tempo_header_rlp: Bytes::from(alloy_rlp::encode(&initial_tempo_header)),
+            node_pool: Vec::new(),
+        },
         tempo_ancestry_headers,
     };
 
     let started = start_phase("SPF validation");
+    let mut reads = L1Reads::new();
     let output = loop {
         match prove_zone_batch(&spf_config, witness.clone()) {
             Ok(output) => break output,
@@ -836,10 +815,11 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
         }
     }
 
-    let tempo_header_rlp = tempo_header_rlp.ok_or_eyre(format!(
-        "no advanceTempo call in Zone block {}",
-        header.number()
-    ))?;
+    let (tempo_header_rlp, checkpoint_number) =
+        tempo_header_rlp.zip(checkpoint_number).ok_or_eyre(format!(
+            "no advanceTempo call in Zone block {}",
+            header.number()
+        ))?;
 
     let has_finalization = finalize_count.is_some();
     let user_transaction_count = user_transactions.len();
