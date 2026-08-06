@@ -952,7 +952,7 @@ provision_up() {
         --l1.portal-address "$portal" \
         --zone.id "$zone_id" \
         --http --http.addr 127.0.0.1 --http.port 8546 \
-        --http.api eth,net,web3,txpool \
+        --http.api all \
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
         --ws.api eth,net,web3,txpool \
         --metrics 127.0.0.1:9201 \
@@ -987,7 +987,9 @@ provision_up() {
         ZONES_BENCH_L1_SUBMIT_RPC_URLS "$l1_a_rpc,$l1_b_rpc" \
         ZONE_RPC_URL "$zone_rpc" \
         ZONE_WS_RPC_URL "ws://127.0.0.1:8546" \
+        ZONE_PRIVATE_RPC_URL "$zone_redacted_rpc" \
         ZONE_REDACTED_RPC_URL "$zone_redacted_rpc" \
+        ZONES_BENCH_TEMPO_GENESIS "$patched_genesis" \
         ZONES_BENCH_TOKEN "$zone_token" \
         L1_PORTAL_ADDRESS "$portal" \
         ZONES_BENCH_EXPECTED_L1_CHAIN_ID "$chain_a" \

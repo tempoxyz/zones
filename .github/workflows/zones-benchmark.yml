@@ -479,6 +479,9 @@ jobs:
       ZONES_BENCH_CPUSET: 14-15,30-31
       ZONES_BENCH_OUTPUT: target/zones-benchmark/neobank-e2e
       ZONES_BENCH_REPORT: target/zones-benchmark/report-neobank-e2e.json
+      ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-input.json
+      ZONES_BENCH_SPF_REPORT: target/zones-benchmark/spf-report.txt
+      ZONES_BENCH_SPF_SUMMARY: target/zones-benchmark/spf-summary.md
       ZONES_BENCH_TOPOLOGY_ENV: target/zones-benchmark/topology.env
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
@@ -649,7 +652,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
-            --profile profiling -p tempo-zone -p tempo-xtask
+            --profile profiling -p tempo-zone -p tempo-zone-spf -p tempo-xtask
           nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
             '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
             'jemalloc,asm-keccak,keccak-cache-global,otlp' \
@@ -658,6 +661,7 @@ jobs:
             --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
+            echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-spf"
             echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
             echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
@@ -744,7 +748,8 @@ jobs:
           set +a
           for name in \
             L1_RPC_URL L1_WS_RPC_URL ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS \
-            ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_REDACTED_RPC_URL L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
+            ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL ZONE_REDACTED_RPC_URL \
+            ZONES_BENCH_TEMPO_GENESIS L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
             ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
             ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
             ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
@@ -754,6 +759,41 @@ jobs:
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
           contrib/bench/run-neobank-private-flow.sh
+
+      - name: Generate and validate SPF input
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ZONES_BENCH_SPF_OUTPUT")"
+          private_key="$(cast wallet private-key \
+            --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
+            --mnemonic-index 4)"
+          trap 'unset private_key' EXIT
+
+          set +e
+          PRIVATE_KEY="$private_key" taskset --cpu-list "$ZONES_BENCH_CPUSET" \
+            "$SPF_BIN" generate-input \
+            --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
+            --tempo-genesis "$ZONES_BENCH_TEMPO_GENESIS" \
+            --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
+            --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
+            --output "$ZONES_BENCH_SPF_OUTPUT" \
+            > "$ZONES_BENCH_SPF_REPORT" \
+            2> target/zones-benchmark/spf.log
+          spf_status=$?
+          set -e
+
+          {
+            echo "## SPF benchmark"
+            echo
+            if (( spf_status == 0 )); then
+              echo '```text'
+              cat "$ZONES_BENCH_SPF_REPORT"
+              echo '```'
+            else
+              echo "> SPF input generation or local validation failed. See \`spf.log\` in the workflow artifact."
+            fi
+          } > "$ZONES_BENCH_SPF_SUMMARY"
+          exit "$spf_status"
 
       - name: Publish benchmark results
         if: ${{ !cancelled() }}
@@ -812,6 +852,12 @@ jobs:
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
             echo "- Withdrawal scheduler (batch gas / in-flight / Zone blocks / poll): \`$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS\` / \`$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES\` / \`$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS\` / \`${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS}s\`"
           } >> "$summary"
+          if [ -s "$ZONES_BENCH_SPF_SUMMARY" ]; then
+            {
+              echo
+              cat "$ZONES_BENCH_SPF_SUMMARY"
+            } >> "$summary"
+          fi
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect benchmark host metadata
@@ -957,6 +1003,8 @@ jobs:
             target/zones-benchmark/neobank-e2e/
             target/zones-benchmark/*.json
             target/zones-benchmark/*.md
+            target/zones-benchmark/spf.log
+            target/zones-benchmark/spf-report.txt
             target/zones-benchmark/topology/neobank-fixtures.json
             target/zones-benchmark/node-logs/
             target/zones-benchmark/invalid-block-diagnostics/
