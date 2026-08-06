@@ -937,7 +937,7 @@ mod tests {
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Bytes::from([0x01]),
+            tempo_header_rlp: witness.tempo_state_witness.initial_tempo_header_rlp.clone(),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
