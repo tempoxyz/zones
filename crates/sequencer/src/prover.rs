@@ -217,10 +217,8 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
 
     let final_tempo_header = zone_inputs
         .blocks
-        .iter()
-        .rev()
-        .find_map(|block| block.tempo_header_rlp.as_deref())
-        .map(|header| decode_tempo_header(header))
+        .last()
+        .map(|block| decode_tempo_header(&block.tempo_header_rlp))
         .transpose()?
         .unwrap_or_else(|| initial_tempo_header.clone());
     ensure!(
@@ -496,6 +494,11 @@ fn extract_zone_block(block: &RecoveredBlock<Block>) -> Result<ZoneBlock> {
         }
     }
 
+    let tempo_header_rlp = tempo_header_rlp.ok_or_eyre(format!(
+        "no advanceTempo call in Zone block {}",
+        header.number()
+    ))?;
+
     Ok(ZoneBlock {
         number: header.number(),
         parent_hash: header.parent_hash(),
@@ -670,10 +673,7 @@ fn witness_size(witness: &BatchWitness) -> usize {
             .zone_blocks
             .iter()
             .map(|block| {
-                block
-                    .tempo_header_rlp
-                    .as_ref()
-                    .map_or(0, |bytes| bytes.len())
+                block.tempo_header_rlp.len()
                     + block
                         .transactions
                         .iter()

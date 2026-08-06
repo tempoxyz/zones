@@ -36,7 +36,7 @@ use zone_p2p::{
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
     ShadowProverConfig, ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider,
-    resolve_portal_zone_anchor, spawn_zone_sequencer, spawn_zone_sequencer_with_prover,
+    resolve_portal_zone_anchor, spawn_zone_sequencer_with_prover,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
