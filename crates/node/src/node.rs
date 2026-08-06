@@ -88,7 +88,8 @@ use zone_payload::{
 use zone_rpc::ZoneDebugApiServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
-    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer_with_prover,
+    ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,
+    spawn_zone_sequencer_with_prover,
 };
 
 /// Returns a known Tempo chain spec for an L1 chain ID.
@@ -690,14 +691,11 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
-        let prover_config = self
+        let prover_settings = self
             .sequencer_config
             .as_ref()
             .filter(|config| config.enable_prover)
-            .map(|config| ShadowProverConfig {
-                zone_id: config.zone_id,
-                evm_config: ctx.node.evm_config().clone(),
-            });
+            .map(|config| (config.zone_id, ctx.node.evm_config().clone()));
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -730,6 +728,11 @@ where
                 Ok(())
             })
             .await?;
+        let prover_config = prover_settings.map(|(zone_id, evm_config)| ShadowProverConfig {
+            zone_id,
+            evm_config,
+            debug_api: ZoneDebugApi::new(handle.eth_handlers().api.clone()),
+        });
 
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
@@ -1092,14 +1095,14 @@ where
     }
 
     /// Build the leader-generation sequencer dependencies (activated only while leader).
-    fn build_leader_sequencer_deps(
+    fn build_leader_sequencer_deps<A>(
         config: ZoneSequencerAddOnsConfig,
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
         attestation_store: AttestationStore,
-        prover_config: Option<ShadowProverConfig>,
-    ) -> eyre::Result<LeaderSequencerDeps> {
+        prover_config: Option<ShadowProverConfig<A>>,
+    ) -> eyre::Result<LeaderSequencerDeps<A>> {
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
             l1_rpc_url,
@@ -1295,7 +1298,7 @@ where
 
     /// Launch sequencer background tasks: batch submission, withdrawal processing,
     /// and engine shutdown hook.
-    async fn launch_sequencer_tasks(
+    async fn launch_sequencer_tasks<A>(
         config: ZoneSequencerAddOnsConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
         zone_provider: N::Provider,
@@ -1305,8 +1308,11 @@ where
         retry_connection_interval: Duration,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
-        prover_config: Option<ShadowProverConfig>,
-    ) -> eyre::Result<()> {
+        prover_config: Option<ShadowProverConfig<A>>,
+    ) -> eyre::Result<()>
+    where
+        A: ZoneDebugApiServer + Send + Sync + 'static,
+    {
         info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
         let sequencer_config = ZoneSequencerConfig {
             portal_address,
@@ -1323,14 +1329,28 @@ where
         let l1_transaction_signer = config
             .l1_transaction_signer
             .unwrap_or(config.sequencer_signer);
-        let seq_handle = spawn_zone_sequencer_with_prover(
-            sequencer_config,
-            l1_transaction_signer,
-            zone_provider,
-            prover_config,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let seq_handle = match prover_config {
+            Some(prover_config) => {
+                spawn_zone_sequencer_with_prover(
+                    sequencer_config,
+                    l1_transaction_signer,
+                    zone_provider,
+                    prover_config,
+                    shutdown,
+                )
+                .await
+            }
+            None => {
+                spawn_zone_sequencer(
+                    sequencer_config,
+                    l1_transaction_signer,
+                    zone_provider,
+                    shutdown,
+                )
+                .await
+            }
+        };
         info!(target: "reth::cli", "Sequencer tasks spawned");
 
         // Critical task — node shuts down if either exits.

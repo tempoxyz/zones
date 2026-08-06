@@ -142,21 +142,31 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     zone_provider: P,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
-    spawn_zone_sequencer_with_prover(config, signer, zone_provider, None, shutdown).await
+    let l1_provider = connect_l1_provider(
+        &config.l1_rpc_url,
+        config.retry_connection_interval,
+        signer.clone(),
+    )
+    .await
+    .expect("valid L1 RPC URL");
+    spawn_zone_sequencer_tasks(config, signer, zone_provider, l1_provider, None, shutdown)
 }
 
-/// Spawn all zone sequencer background tasks with optional shadow SPF validation.
+/// Spawn all zone sequencer background tasks with shadow SPF validation.
 ///
 /// Shadow validation is observational: candidates are queued without delaying or changing L1
 /// settlement, and any prover failure is reported only through logs.
-pub async fn spawn_zone_sequencer_with_prover<P: ZoneSequencerProvider>(
+pub async fn spawn_zone_sequencer_with_prover<P, A>(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
     zone_provider: P,
-    prover_config: Option<ShadowProverConfig>,
+    prover_config: ShadowProverConfig<A>,
     shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle {
-    let sequencer_address = signer.address();
+) -> ZoneSequencerHandle
+where
+    P: ZoneSequencerProvider,
+    A: zone_rpc::ZoneDebugApiServer + Send + Sync + 'static,
+{
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
@@ -167,6 +177,33 @@ pub async fn spawn_zone_sequencer_with_prover<P: ZoneSequencerProvider>(
     )
     .await
     .expect("valid L1 RPC URL");
+
+    let shadow_prover = prover::spawn_shadow_prover(
+        prover_config,
+        config.portal_address,
+        config.batch_anchor_config,
+        zone_provider.clone(),
+        l1_provider.clone(),
+    );
+    spawn_zone_sequencer_tasks(
+        config,
+        signer,
+        zone_provider,
+        l1_provider,
+        Some(shadow_prover),
+        shutdown,
+    )
+}
+
+fn spawn_zone_sequencer_tasks<P: ZoneSequencerProvider>(
+    config: ZoneSequencerConfig,
+    signer: PrivateKeySigner,
+    zone_provider: P,
+    l1_provider: DynProvider<TempoNetwork>,
+    shadow_prover: Option<prover::ShadowProver>,
+    shutdown: tokio_util::sync::CancellationToken,
+) -> ZoneSequencerHandle {
+    let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
@@ -188,16 +225,6 @@ pub async fn spawn_zone_sequencer_with_prover<P: ZoneSequencerProvider>(
         batch_anchor_config: config.batch_anchor_config,
         attestation_store: config.attestation_store,
     };
-    let shadow_prover = prover_config.map(|prover_config| {
-        prover::spawn_shadow_prover(
-            prover_config,
-            monitor_config.portal_address,
-            monitor_config.batch_anchor_config,
-            zone_provider.clone(),
-            l1_provider.clone(),
-        )
-    });
-
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
         l1_provider.clone(),
