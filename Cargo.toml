@@ -7,6 +7,7 @@ publish = false
 
 [workspace]
 members = [
+  "bin/tempo-zone-prover",
   "bin/tempo-zone-spf",
   "bin/tempo-zone",
   "crates/chainspec",
@@ -214,6 +215,7 @@ futures = "0.3.31"
 indicatif = "0.18"
 itertools = "0.14.0"
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"] }
+libc = "0.2.186"
 metrics = "0.24.3"
 k256 = { version = "0.13.4", features = ["arithmetic", "ecdh"] }
 parking_lot = "0.12.4"

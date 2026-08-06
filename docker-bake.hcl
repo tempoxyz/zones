@@ -7,7 +7,7 @@ variable "VERGEN_GIT_SHA_SHORT" {
 }
 
 group "default" {
-  targets = ["tempo-zone", "tempo-zone-xtask"]
+  targets = ["tempo-zone", "tempo-zone-prover", "tempo-zone-xtask"]
 }
 
 target "docker-metadata" {}
@@ -20,6 +20,16 @@ target "chef" {
   args = {
     RUST_PROFILE = "profiling"
     RUST_FEATURES = "jemalloc"
+  }
+}
+
+target "prover-chef" {
+  dockerfile = "Dockerfile.chef"
+  context = "."
+  platforms = ["linux/amd64"]
+  args = {
+    RUST_PROFILE = "release"
+    RUST_FEATURES = ""
   }
 }
 
@@ -41,6 +51,20 @@ target "_common" {
 target "tempo-zone" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo-zone"
+}
+
+target "tempo-zone-prover" {
+  inherits = ["docker-metadata"]
+  dockerfile = "Dockerfile.prover"
+  context = "."
+  contexts = {
+    chef = "target:prover-chef"
+  }
+  args = {
+    CHEF_IMAGE = "chef"
+    RUST_PROFILE = "release"
+  }
+  platforms = ["linux/amd64"]
 }
 
 target "tempo-zone-xtask" {
