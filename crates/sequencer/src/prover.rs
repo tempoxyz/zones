@@ -289,7 +289,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         }
     };
 
-    compare_output(&output, &job.batch, zone_inputs.parent_header.hash_slow())?;
+    compare_output(&output, &job.batch, witness.parent_header.hash_slow())?;
 
     Ok(ValidationStats {
         witness_bytes: witness_size(&witness),
