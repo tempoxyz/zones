@@ -15,7 +15,7 @@ use alloy_rpc_types_eth::{Block, BlockNumberOrTag, Transaction};
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::SolCall as _;
 use clap::{Parser, Subcommand};
-use eyre::{Context, Result, bail, eyre};
+use eyre::{Context, OptionExt, Result, bail, eyre};
 use futures::{StreamExt, TryStreamExt, stream};
 use serde::Deserialize;
 use tempo_alloy::{TempoNetwork, rpc::TempoHeaderResponse};
@@ -304,9 +304,6 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
     }
     let mut reads = L1Reads::new();
     for block in &extracted {
-        if block.input.tempo_header_rlp.is_none() {
-            continue;
-        }
         let checkpoint = checkpoint_by_zone_block[&block.input.number];
         // advanceTempo always authenticates the portal deposit-queue head.
         reads
@@ -322,9 +319,8 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let final_tempo_header = extracted
         .iter()
-        .rev()
-        .find_map(|block| block.input.tempo_header_rlp.as_ref())
-        .map(|encoded| decode_tempo_header(encoded))
+        .last()
+        .map(|encoded| decode_tempo_header(&encoded.input.tempo_header_rlp))
         .transpose()?
         .unwrap_or_else(|| initial_tempo_header.clone());
 
@@ -839,6 +835,11 @@ fn extract_block(block: RpcBlock) -> Result<ExtractedBlock> {
             ),
         }
     }
+
+    let tempo_header_rlp = tempo_header_rlp.ok_or_eyre(format!(
+        "no advanceTempo call in Zone block {}",
+        header.number()
+    ))?;
 
     let has_finalization = finalize_count.is_some();
     let user_transaction_count = user_transactions.len();

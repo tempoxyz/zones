@@ -137,9 +137,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
         // The EVM environment uses the verifier-selected fork schedule at this
         // block's timestamp. An imported Tempo header changes the L1 reader
         // used by the subsequent system and user execution in this block.
-        if let Some(header) = &block.tempo_header_rlp {
-            tempo_database = tempo_database.with_imported_checkpoint(header)?;
-        }
+        tempo_database = tempo_database.with_imported_checkpoint(&block.tempo_header_rlp)?;
         let executed_block = execution::evm::execute_zone_block(
             config,
             &mut zone_state,
@@ -385,14 +383,6 @@ fn validate_tempo_anchor(
 }
 
 fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> {
-    if block.tempo_header_rlp.is_none()
-        && (!block.deposits.is_empty()
-            || !block.decryptions.is_empty()
-            || !block.enabled_tokens.is_empty())
-    {
-        return Err(Error::TempoInputsWithoutHeader { block_index: index });
-    }
-
     match block.finalize_withdrawal_batch_count {
         Some(count)
             if count != U256::from(block.finalize_withdrawal_batch_encrypted_senders.len()) =>
@@ -947,7 +937,7 @@ mod tests {
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: None,
+            tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -996,7 +986,7 @@ mod tests {
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: None,
+            tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1016,7 +1006,7 @@ mod tests {
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: None,
+            tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),
@@ -1044,7 +1034,7 @@ mod tests {
             parent_hash: witness.parent_header.hash_slow(),
             timestamp: 0,
             beneficiary: Address::ZERO,
-            tempo_header_rlp: Some(Bytes::from([0x01])),
+            tempo_header_rlp: Bytes::from([0x01]),
             deposits: Vec::new(),
             decryptions: Vec::new(),
             enabled_tokens: Vec::new(),

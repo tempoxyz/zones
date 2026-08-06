@@ -77,8 +77,8 @@ pub(crate) fn execute_zone_block(
     } = replay;
     let user_transactions = decode_user_transactions(zone_block_index, &block.transactions)?;
     let mut transactions = Vec::with_capacity(
-        user_transactions.len()
-            + usize::from(block.tempo_header_rlp.is_some())
+        1 // advanceTempo system transaction
+            + user_transactions.len()
             + usize::from(block.finalize_withdrawal_batch_count.is_some()),
     );
     let parent_number = block
@@ -129,14 +129,12 @@ pub(crate) fn execute_zone_block(
         )
     })?;
 
-    if let Some(header) = &block.tempo_header_rlp {
-        transactions.push(execute_advance_tempo(
-            &mut executor,
-            header,
-            block,
-            zone_block_index,
-        )?);
-    }
+    transactions.push(execute_advance_tempo(
+        &mut executor,
+        &block.tempo_header_rlp,
+        block,
+        zone_block_index,
+    )?);
     transactions.extend(execute_user_transactions(
         &mut executor,
         zone_block_index,
@@ -177,17 +175,13 @@ pub(crate) fn next_block_env_attributes(
     block: &ZoneBlock,
 ) -> Result<TempoNextBlockEnvAttributes, Error> {
     let block_gas_limit = parent.inner.gas_limit;
-    let timestamp_millis_part = if let Some(encoded_header) = &block.tempo_header_rlp {
-        let mut encoded = encoded_header.as_ref();
-        let header = TempoHeader::decode(&mut encoded)
-            .map_err(|_| crate::WitnessDatabaseError::InvalidTempoHeader)?;
-        if !encoded.is_empty() {
-            return Err(crate::WitnessDatabaseError::InvalidTempoHeader.into());
-        }
-        header.timestamp_millis_part
-    } else {
-        0
-    };
+
+    let mut encoded = block.tempo_header_rlp.as_ref();
+    let header = TempoHeader::decode(&mut encoded)
+        .map_err(|_| crate::WitnessDatabaseError::InvalidTempoHeader)?;
+    if !encoded.is_empty() {
+        return Err(crate::WitnessDatabaseError::InvalidTempoHeader.into());
+    }
 
     Ok(TempoNextBlockEnvAttributes {
         inner: NextBlockEnvAttributes {
@@ -206,7 +200,7 @@ pub(crate) fn next_block_env_attributes(
         },
         general_gas_limit: 0,
         shared_gas_limit: block_gas_limit,
-        timestamp_millis_part,
+        timestamp_millis_part: header.timestamp_millis_part,
         consensus_context: None,
         subblock_fee_recipients: HashMap::new(),
     })

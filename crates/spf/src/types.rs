@@ -77,9 +77,8 @@ pub struct ZoneBlock {
     pub parent_hash: B256,
     pub timestamp: u64,
     pub beneficiary: Address,
-    /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`, when the
-    /// block imports a new Tempo checkpoint.
-    pub tempo_header_rlp: Option<Bytes>,
+    /// RLP-encoded Tempo header passed to `ZoneInbox.advanceTempo`.
+    pub tempo_header_rlp: Bytes,
     /// Deposits processed by `ZoneInbox.advanceTempo`, in calldata order.
     pub deposits: Vec<QueuedDeposit>,
     /// Encrypted-deposit decryption data, in calldata order.
