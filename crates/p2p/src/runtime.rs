@@ -1680,10 +1680,9 @@ mod tests {
 
     /// Catch-up must reach a reachable quorum follower while the leader is offline.
     ///
-    /// The leader is preferred as the sole source, but a leader that is not connected never
-    /// receives a request, so its outstanding entry is cleared on every attempt and
-    /// `is_unresponsive` never fires. Without widening in the same pass the node would re-pick
-    /// the unreachable leader forever and stay stuck for the whole outage.
+    /// Commonware admission does not prove connectivity, so the offline leader can initially hold
+    /// the sole reservation. Once its inactivity timeout elapses, the request must widen to the
+    /// reachable quorum followers rather than remain stuck for the whole outage.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn backfill_reaches_a_quorum_follower_while_the_leader_is_offline() {
         let addresses = [
