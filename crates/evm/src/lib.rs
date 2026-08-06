@@ -76,52 +76,6 @@ use zone_precompiles::create_outbox_precompile;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
-/// A Tempo L1 storage slot accessed while replaying a Zone block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct TempoStorageRead {
-    /// Tempo account whose storage was accessed.
-    pub account: Address,
-    /// Storage slot that was accessed.
-    pub slot: B256,
-}
-
-/// An [`L1StorageReader`] wrapper that records successful Tempo storage reads.
-#[derive(Clone, Debug)]
-pub struct RecordingL1StorageReader<L1> {
-    inner: L1,
-    reads: Arc<Mutex<BTreeSet<TempoStorageRead>>>,
-}
-
-impl<L1> RecordingL1StorageReader<L1> {
-    fn new(inner: L1) -> Self {
-        Self {
-            inner,
-            reads: Arc::new(Mutex::new(BTreeSet::new())),
-        }
-    }
-
-    /// Takes and returns the deduplicated storage reads recorded so far.
-    pub fn take_reads(&self) -> BTreeSet<TempoStorageRead> {
-        std::mem::take(&mut self.reads.lock().expect("L1 read recorder lock poisoned"))
-    }
-}
-
-impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
-    fn read_l1_storage(
-        &self,
-        account: Address,
-        slot: B256,
-        block_number: u64,
-    ) -> Result<B256, zone_precompiles::L1StateError> {
-        let value = self.inner.read_l1_storage(account, slot, block_number)?;
-        self.reads
-            .lock()
-            .expect("L1 read recorder lock poisoned")
-            .insert(TempoStorageRead { account, slot });
-        Ok(value)
-    }
-}
-
 /// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory<L1 = L1StateProvider> {
@@ -555,6 +509,52 @@ where
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         self.inner.tx_iterator_for_payload(payload)
     }
+}
+
+/// An [`L1StorageReader`] wrapper that records successful Tempo storage reads.
+#[derive(Clone, Debug)]
+pub struct RecordingL1StorageReader<L1> {
+    inner: L1,
+    reads: Arc<Mutex<BTreeSet<TempoStorageRead>>>,
+}
+
+impl<L1> RecordingL1StorageReader<L1> {
+    fn new(inner: L1) -> Self {
+        Self {
+            inner,
+            reads: Arc::new(Mutex::new(BTreeSet::new())),
+        }
+    }
+
+    /// Takes and returns the deduplicated storage reads recorded so far.
+    pub fn take_reads(&self) -> BTreeSet<TempoStorageRead> {
+        std::mem::take(&mut self.reads.lock().expect("L1 read recorder lock poisoned"))
+    }
+}
+
+impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
+    fn read_l1_storage(
+        &self,
+        account: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256, zone_precompiles::L1StateError> {
+        let value = self.inner.read_l1_storage(account, slot, block_number)?;
+        self.reads
+            .lock()
+            .expect("L1 read recorder lock poisoned")
+            .insert(TempoStorageRead { account, slot });
+        Ok(value)
+    }
+}
+
+/// A Tempo L1 storage slot accessed while replaying a Zone block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TempoStorageRead {
+    /// Tempo account whose storage was accessed.
+    pub account: Address,
+    /// Storage slot that was accessed.
+    pub slot: B256,
 }
 
 /// Copies the Zone chain spec and applies the Tempo hardfork conditions from its parent chain.
