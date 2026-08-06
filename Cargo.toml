@@ -160,6 +160,7 @@ reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "fc3f7da
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "fc3f7da" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "fc3f7da" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "fc3f7da" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "fc3f7da" }
 revm = { version = "41.0.0", features = [
   "optional_fee_charge",
 ], default-features = false }
@@ -176,6 +177,7 @@ alloy-primitives = { version = "1.6.0", default-features = false }
 alloy-provider = { version = "2.1.0", default-features = false }
 alloy-rlp = { version = "0.3.15", default-features = false }
 alloy-rpc-client = "2.1.0"
+alloy-rpc-types-debug = "2.1.0"
 alloy-rpc-types-engine = "2.1.0"
 alloy-rpc-types-eth = { version = "2.1.0" }
 alloy-signer = "2.1.0"

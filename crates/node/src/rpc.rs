@@ -24,15 +24,18 @@ use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
+use reth_evm::{ConfigureEvm as _, execute::Executor as _};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
+use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcConvert,
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
-use reth_rpc_eth_types::logs_utils;
+use reth_rpc_eth_types::{EthApiError, logs_utils};
 use reth_storage_api::{BlockNumReader, StateProviderFactory};
+use reth_trie_common::ExecutionWitnessMode;
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoCallBuilderExt as _, TempoHeaderResponse, TempoTransactionRequest},
@@ -42,7 +45,7 @@ use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
-use tempo_primitives::TempoTxEnvelope;
+use tempo_primitives::{TempoPrimitives, TempoTxEnvelope};
 use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
@@ -51,13 +54,15 @@ use zone_l1::TempoStateExt as _;
 
 use alloy_rpc_client::{ConnectionConfig, WebSocketConfig};
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal};
+use zone_evm::ZoneEvmConfig;
 use zone_p2p::{LeadershipSchedule, PeerTip, ZoneManifest};
 use zone_rpc::{
     auth::AuthContext,
     types::{
         ActiveLeaderInfo, AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, JsonRpcError,
         LocalSequencerInfo, PeerTipInfo, SequencerInfoResponse, SequencerPeerInfo,
-        SequencerProgress, SequencerReadiness, SetLeaderResponse, ZoneInfoResponse, internal,
+        SequencerProgress, SequencerReadiness, SetLeaderResponse,
+        TempoStorageRead as RpcTempoStorageRead, ZoneExecutionWitness, ZoneInfoResponse, internal,
         raw_null, raw_zero, to_raw,
     },
 };
@@ -211,6 +216,76 @@ where
         }
     })?;
     Ok(module)
+}
+
+/// Zone-specific debug API backed by reth's Eth API.
+#[derive(Clone)]
+struct ZoneDebugApi<E> {
+    eth_api: E,
+}
+
+impl<E> ZoneDebugApi<E> {
+    const fn new(eth_api: E) -> Self {
+        Self { eth_api }
+    }
+}
+
+#[jsonrpsee::core::async_trait]
+impl<E> ZoneDebugApiServer for ZoneDebugApi<E>
+where
+    E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
+{
+    async fn zone_execution_witness(
+        &self,
+        block_id: BlockNumberOrTag,
+    ) -> RpcResult<ZoneExecutionWitness> {
+        let block = self
+            .eth_api
+            .recovered_block(block_id.into())
+            .await
+            .map_err(|error| operator_rpc_error(internal(error)))?
+            .ok_or_else(|| operator_rpc_error(internal(format!("block {block_id} not found"))))?;
+        let block_number = block.header().number();
+
+        self.eth_api
+            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
+                let (evm_config, recorder) = eth_api.evm_config().with_l1_storage_recorder();
+                let block_executor = evm_config.executor(&mut db);
+                let mode = ExecutionWitnessMode::default();
+                let mut witness_record = ExecutionWitnessRecord::default();
+
+                let _ = block_executor
+                    .execute_with_state_closure(&block, |statedb: &State<_>| {
+                        witness_record.record_executed_state(statedb, mode);
+                    })
+                    .map_err(|error| EthApiError::Internal(error.into()))?;
+
+                let witness = witness_record
+                    .into_execution_witness(&db.database.0, eth_api.provider(), block_number, mode)
+                    .map_err(EthApiError::from)?;
+                Ok(ZoneExecutionWitness {
+                    execution_witness: witness,
+                    tempo_reads: recorder
+                        .reads()
+                        .into_iter()
+                        .map(|read| RpcTempoStorageRead {
+                            account: read.account,
+                            slot: read.slot,
+                        })
+                        .collect(),
+                })
+            })
+            .await
+            .map_err(|error| operator_rpc_error(internal(error)))
+    }
+}
+
+/// Build the Zone-specific debug extension installed alongside reth's debug API.
+pub(crate) fn zone_debug_rpc_module<E>(eth_api: E) -> RpcModule<()>
+where
+    E: FullEthApi<Evm = ZoneEvmConfig, Primitives = TempoPrimitives>,
+{
+    ZoneDebugApi::new(eth_api).into_rpc().remove_context()
 }
 
 fn operator_rpc_error(error: JsonRpcError) -> ErrorObjectOwned {
@@ -1318,6 +1393,23 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zone_execution_witness_serializes_tempo_reads() {
+        let account = Address::repeat_byte(0xaa);
+        let slot = B256::repeat_byte(0xbb);
+        let value = serde_json::to_value(ZoneExecutionWitness {
+            execution_witness: Default::default(),
+            tempo_reads: vec![RpcTempoStorageRead { account, slot }],
+        })
+        .unwrap();
+
+        assert!(value.get("state").is_some());
+        assert_eq!(
+            value["tempo_reads"],
+            serde_json::json!([{ "account": account, "slot": slot }])
+        );
+    }
 
     #[tokio::test]
     async fn operator_rpc_module_exposes_sequencer_methods_without_auth() {

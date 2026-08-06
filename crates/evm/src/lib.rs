@@ -34,7 +34,7 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{Inspector, context::DBErrorMarker, inspector::NoOpInspector},
 };
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_chainspec::EthChainSpec;
 use reth_evm::{
@@ -43,7 +43,12 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use std::{fmt, num::NonZeroU32, sync::Arc};
+use std::{
+    collections::BTreeSet,
+    fmt,
+    num::NonZeroU32,
+    sync::{Arc, Mutex},
+};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{TempoChainSpec, hardfork::TempoHardfork};
 use tempo_evm::{
@@ -70,6 +75,57 @@ use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig};
 use zone_precompiles::create_outbox_precompile;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
+
+/// A Tempo L1 storage slot accessed while replaying a Zone block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TempoStorageRead {
+    /// Tempo account whose storage was accessed.
+    pub account: Address,
+    /// Storage slot that was accessed.
+    pub slot: B256,
+}
+
+/// An [`L1StorageReader`] wrapper that records successful Tempo storage reads.
+#[derive(Clone, Debug)]
+pub struct RecordingL1StorageReader<L1> {
+    inner: L1,
+    reads: Arc<Mutex<BTreeSet<TempoStorageRead>>>,
+}
+
+impl<L1> RecordingL1StorageReader<L1> {
+    fn new(inner: L1) -> Self {
+        Self {
+            inner,
+            reads: Arc::new(Mutex::new(BTreeSet::new())),
+        }
+    }
+
+    /// Returns the deduplicated storage reads recorded so far.
+    pub fn reads(&self) -> Vec<TempoStorageRead> {
+        self.reads
+            .lock()
+            .expect("L1 read recorder lock poisoned")
+            .iter()
+            .copied()
+            .collect()
+    }
+}
+
+impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
+    fn read_l1_storage(
+        &self,
+        account: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256, zone_precompiles::L1StateError> {
+        let value = self.inner.read_l1_storage(account, slot, block_number)?;
+        self.reads
+            .lock()
+            .expect("L1 read recorder lock poisoned")
+            .insert(TempoStorageRead { account, slot });
+        Ok(value)
+    }
+}
 
 /// Zone EVM factory that adapts caller databases and registers the zone-native precompiles.
 #[derive(Debug, Clone)]
@@ -324,6 +380,22 @@ where
     pub fn tempo_chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
     }
+
+    /// Clones this configuration with an isolated Tempo L1 storage-read recorder.
+    pub fn with_l1_storage_recorder(
+        &self,
+    ) -> (
+        ZoneEvmConfig<RecordingL1StorageReader<L1>>,
+        RecordingL1StorageReader<L1>,
+    ) {
+        let reader = RecordingL1StorageReader::new(self.zone_factory.l1_reader.clone());
+        let config = ZoneEvmConfig::from_chain_spec(
+            self.chain_spec.clone(),
+            reader.clone(),
+            self.zone_factory.portal_address,
+        );
+        (config, reader)
+    }
 }
 
 impl ZoneEvmConfig {
@@ -532,6 +604,22 @@ mod tests {
                 MODERATO.tempo_fork_activation(hardfork)
             );
         }
+    }
+
+    #[test]
+    fn l1_storage_recorder_deduplicates_successful_reads_without_block_numbers() {
+        let account = Address::repeat_byte(0xaa);
+        let slot = B256::repeat_byte(0xbb);
+        let value = B256::repeat_byte(0xcc);
+        let reader = RecordingL1StorageReader::new(MockL1Reader::returning(value));
+
+        assert_eq!(reader.read_l1_storage(account, slot, 10).unwrap(), value);
+        assert_eq!(reader.read_l1_storage(account, slot, 11).unwrap(), value);
+        assert_eq!(reader.reads(), vec![TempoStorageRead { account, slot }]);
+
+        let failing = RecordingL1StorageReader::new(MockL1Reader::failing_storage());
+        assert!(failing.read_l1_storage(account, slot, 10).is_err());
+        assert!(failing.reads().is_empty());
     }
 
     #[test]

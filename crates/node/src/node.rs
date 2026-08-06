@@ -15,7 +15,7 @@ use crate::{
     },
     rpc::{
         OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
-        operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
+        operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc, zone_debug_rpc_module,
     },
 };
 use alloy_primitives::{Address, U256};
@@ -507,7 +507,14 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<
+            N,
+            EthApi: reth_rpc_eth_api::helpers::FullEthApi<
+                Evm = ZoneEvmConfig,
+                Primitives = TempoPrimitives,
+                NetworkTypes = TempoNetwork,
+            >,
+        >,
 {
     type Handle = <RpcAddOns<
         N,
@@ -698,9 +705,11 @@ where
         let handle = self
             .inner
             .launch_add_ons_with(ctx, move |container| {
+                let zone_debug_api = zone_debug_rpc_module(container.registry.eth_api().clone());
                 container
                     .modules
                     .merge_configured(operator_zone_api.into_rpc())?;
+                container.modules.merge_configured(zone_debug_api)?;
                 container.modules.merge_http(operator_zone_rpc_module(
                     portal_address,
                     operator_rpc_slot,
@@ -984,7 +993,14 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<
+            N,
+            EthApi: reth_rpc_eth_api::helpers::FullEthApi<
+                Evm = ZoneEvmConfig,
+                Primitives = TempoPrimitives,
+                NetworkTypes = TempoNetwork,
+            >,
+        >,
 {
     /// Start the Commonware network and the long-lived P2P event demultiplexer.
     ///
@@ -1335,8 +1351,14 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    TempoEthApiBuilder<N>:
-        EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<
+            N,
+            EthApi: reth_rpc_eth_api::helpers::FullEthApi<
+                Evm = ZoneEvmConfig,
+                Primitives = TempoPrimitives,
+                NetworkTypes = TempoNetwork,
+            >,
+        >,
 {
     type EthApi = <TempoEthApiBuilder<N> as EthApiBuilder<N>>::EthApi;
 
