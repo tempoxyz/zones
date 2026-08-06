@@ -2842,7 +2842,8 @@ impl WithdrawalArgs {
             amount: args.amount,
             to: Some(args.router),
             memo: B256::ZERO,
-            gas_limit: 2_000_000,
+            // The router's nullifier SSTORE adds callback gas, especially on the real swap path.
+            gas_limit: 2_500_000,
             zone_fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
             reveal_to: alloy_primitives::Bytes::new(),
