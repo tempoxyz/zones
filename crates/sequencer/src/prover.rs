@@ -314,7 +314,23 @@ fn build_zone_inputs<P: ZoneSequencerProvider>(
         .header_by_number(from - 1)?
         .ok_or_eyre(format!("canonical Zone parent {} not found", from - 1))?;
     let parent_hash = parent_header.hash_slow();
-    let parent_hash = validate_batch_parent_hash(from, expected_prev_hash, parent_hash)?;
+    // ZonePortal uses zero as its pre-genesis sentinel. SPF receives the real
+    // canonical hash of block 0 as the parent of block 1 instead.
+    if from == 1 {
+        ensure!(
+            expected_prev_hash.is_zero(),
+            "first Zone batch must use the zero portal prev_block_hash sentinel, found {expected_prev_hash}"
+        );
+        ensure!(
+            !parent_hash.is_zero(),
+            "canonical Zone block 0 hash must be non-zero"
+        );
+    } else {
+        ensure!(
+            parent_hash == expected_prev_hash,
+            "candidate parent hash changed: expected {expected_prev_hash}, found {parent_hash}"
+        );
+    }
     let parent_state = provider.state_by_block_hash(parent_hash)?;
     let initial_tempo = parent_state.tempo_num_hash()?;
 
@@ -583,34 +599,13 @@ fn merge_nodes(target: &mut Vec<Bytes>, additional: Vec<Bytes>) {
     *target = nodes.into_values().collect();
 }
 
-fn validate_batch_parent_hash(
-    from: u64,
-    portal_prev_hash: B256,
-    canonical_parent_hash: B256,
-) -> Result<B256> {
-    // ZonePortal uses zero as its pre-genesis sentinel. SPF receives the real
-    // canonical hash of block 0 as the parent of block 1 instead.
-    if from == 1 {
-        ensure!(
-            portal_prev_hash.is_zero(),
-            "first Zone batch must use the zero portal prev_block_hash sentinel, found {portal_prev_hash}"
-        );
-        ensure!(
-            !canonical_parent_hash.is_zero(),
-            "canonical Zone block 0 hash must be non-zero"
-        );
-    } else {
-        ensure!(
-            canonical_parent_hash == portal_prev_hash,
-            "candidate parent hash changed: expected {portal_prev_hash}, found {canonical_parent_hash}"
-        );
-    }
-
-    Ok(canonical_parent_hash)
-}
-
 fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B256) -> Result<()> {
-    validate_spf_parent_hash(output.block_transition.prevBlockHash, expected_prev_hash)?;
+    ensure!(
+        output.block_transition.prevBlockHash == expected_prev_hash,
+        "previous Zone block commitment mismatch: SPF {}, canonical parent {}",
+        output.block_transition.prevBlockHash,
+        expected_prev_hash
+    );
     ensure!(
         output.block_transition.nextBlockHash == batch.next_block_hash,
         "next Zone block commitment mismatch: SPF {}, candidate {}",
@@ -654,69 +649,6 @@ fn compare_output(output: &BatchOutput, batch: &BatchData, expected_prev_hash: B
         batch.withdrawal_batch_index
     );
     Ok(())
-}
-
-fn validate_spf_parent_hash(spf_prev_hash: B256, canonical_parent_hash: B256) -> Result<()> {
-    ensure!(
-        spf_prev_hash == canonical_parent_hash,
-        "previous Zone block commitment mismatch: SPF {}, canonical parent {}",
-        spf_prev_hash,
-        canonical_parent_hash
-    );
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{validate_batch_parent_hash, validate_spf_parent_hash};
-    use alloy_primitives::B256;
-
-    #[test]
-    fn first_batch_uses_zero_portal_sentinel_but_real_genesis_hash() {
-        let genesis_hash = B256::repeat_byte(0x11);
-
-        assert_eq!(
-            validate_batch_parent_hash(1, B256::ZERO, genesis_hash).unwrap(),
-            genesis_hash
-        );
-    }
-
-    #[test]
-    fn first_batch_rejects_nonzero_portal_prev_hash() {
-        let error = validate_batch_parent_hash(1, B256::repeat_byte(0x22), B256::repeat_byte(0x11))
-            .unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("zero portal prev_block_hash sentinel")
-        );
-    }
-
-    #[test]
-    fn first_batch_rejects_zero_canonical_genesis_hash() {
-        let error = validate_batch_parent_hash(1, B256::ZERO, B256::ZERO).unwrap_err();
-
-        assert!(error.to_string().contains("block 0 hash must be non-zero"));
-    }
-
-    #[test]
-    fn later_batches_match_portal_anchor() {
-        let parent_hash = B256::repeat_byte(0x11);
-
-        assert_eq!(
-            validate_batch_parent_hash(2, parent_hash, parent_hash).unwrap(),
-            parent_hash
-        );
-    }
-
-    #[test]
-    fn spf_transition_must_use_canonical_parent_hash() {
-        let parent_hash = B256::repeat_byte(0x11);
-
-        assert!(validate_spf_parent_hash(parent_hash, parent_hash).is_ok());
-        assert!(validate_spf_parent_hash(B256::repeat_byte(0x22), parent_hash).is_err());
-    }
 }
 
 fn witness_size(witness: &BatchWitness) -> usize {
