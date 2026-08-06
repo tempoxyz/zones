@@ -44,7 +44,7 @@ use reth_evm::{
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use std::{
-    collections::BTreeSet,
+    collections::HashSet,
     fmt,
     num::NonZeroU32,
     sync::{Arc, Mutex},
@@ -515,19 +515,19 @@ where
 #[derive(Clone, Debug)]
 pub struct RecordingL1StorageReader<L1> {
     inner: L1,
-    reads: Arc<Mutex<BTreeSet<TempoStorageRead>>>,
+    reads: Arc<Mutex<HashSet<TempoStorageRead>>>,
 }
 
 impl<L1> RecordingL1StorageReader<L1> {
     fn new(inner: L1) -> Self {
         Self {
             inner,
-            reads: Arc::new(Mutex::new(BTreeSet::new())),
+            reads: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
     /// Takes and returns the deduplicated storage reads recorded so far.
-    pub fn take_reads(&self) -> BTreeSet<TempoStorageRead> {
+    pub fn take_reads(&self) -> HashSet<TempoStorageRead> {
         std::mem::take(&mut self.reads.lock().expect("L1 read recorder lock poisoned"))
     }
 }
@@ -549,7 +549,7 @@ impl<L1: L1StorageReader> L1StorageReader for RecordingL1StorageReader<L1> {
 }
 
 /// A Tempo L1 storage slot accessed while replaying a Zone block.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TempoStorageRead {
     /// Tempo account whose storage was accessed.
     pub account: Address,
@@ -612,7 +612,7 @@ mod tests {
         assert_eq!(reader.read_l1_storage(account, slot, 11).unwrap(), value);
         assert_eq!(
             reader.take_reads(),
-            BTreeSet::from_iter([TempoStorageRead { account, slot }])
+            HashSet::from_iter([TempoStorageRead { account, slot }])
         );
 
         let failing = RecordingL1StorageReader::new(MockL1Reader::failing_storage());
