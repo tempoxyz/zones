@@ -11,9 +11,9 @@ use crate::utils::{
     spawn_sequencer_with_config,
 };
 use alloy::{
-    primitives::{Address, B256, U256},
+    primitives::{Address, B256, U256, keccak256},
     providers::Provider,
-    sol_types::SolCall,
+    sol_types::{SolCall, SolValue},
 };
 use alloy_consensus::Transaction;
 use eyre::WrapErr as _;
@@ -585,6 +585,7 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
         100_000,
         router,
         portal_address,
+        portal_address,
         PATH_USD_ADDRESS,
         account.address(),
         account.address(),
@@ -610,6 +611,7 @@ async fn test_open_mode_unlisted_account_roundtrip() -> eyre::Result<()> {
         &l1,
         callback_amount,
         router,
+        portal_address,
         portal_address,
         PATH_USD_ADDRESS,
         account.address(),
@@ -792,6 +794,7 @@ async fn test_access_and_gateway_modes_are_mutable_and_independent() -> eyre::Re
         100_000,
         router,
         portal_address,
+        portal_address,
         PATH_USD_ADDRESS,
         outsider,
         outsider,
@@ -925,6 +928,7 @@ async fn test_queued_callback_bounces_after_gateway_revocation() -> eyre::Result
         &fixture.l1,
         callback_amount,
         fixture.router,
+        fixture.portal_address,
         fixture.portal_address,
         PATH_USD_ADDRESS,
         fixture.account.address(),
@@ -1075,6 +1079,7 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
         &l1,
         cross_amount,
         router,
+        portal_a,
         portal_b,
         PATH_USD_ADDRESS,
         account_a.address(),
@@ -1119,6 +1124,7 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
         &l1,
         reverse_amount,
         router,
+        portal_b,
         portal_a,
         PATH_USD_ADDRESS,
         account_b.address(),
@@ -1218,8 +1224,26 @@ async fn test_cross_zone_router_tempo_refund_recipient() -> eyre::Result<()> {
     let _seq_a = spawn_sequencer(&l1, &zone_a, portal_a, seq_a_signer.clone()).await;
     let _seq_b = spawn_sequencer(&l1, &zone_b, portal_b, seq_b_signer.clone()).await;
 
+    let callback_id = keccak256(
+        (
+            portal_a,
+            router,
+            portal_b,
+            blacklisted_recipient,
+            cross_amount,
+            B256::ZERO,
+        )
+            .abi_encode(),
+    );
     let (key_index, encrypted) = l1
-        .encrypt_deposit_for_portal(portal_b, router, blacklisted_recipient, B256::ZERO)
+        .encrypt_deposit_for_portal_with_context(
+            portal_b,
+            portal_a,
+            callback_id,
+            router,
+            blacklisted_recipient,
+            B256::ZERO,
+        )
         .await?;
 
     let refund_before = l1.balance_of(PATH_USD_ADDRESS, refund_burner).await?;
@@ -1234,6 +1258,7 @@ async fn test_cross_zone_router_tempo_refund_recipient() -> eyre::Result<()> {
         encrypted,
         tempo_refund_recipient: refund_burner,
         min_amount_out: 0,
+        callback_id,
     });
     alice.withdraw_with(args).await?;
 
@@ -1317,6 +1342,7 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
         RouterDepositArgs {
             amount: fixture.swap_amount,
             router: fixture.router,
+            source_portal: fixture.portal_address,
             token_out: fixture.beta,
             target_portal: fixture.portal_address,
             recipient: fixture.account.address(),
@@ -1419,6 +1445,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_when_target_deposits_
         RouterDepositArgs {
             amount: fixture.swap_amount,
             router: fixture.router,
+            source_portal: fixture.portal_address,
             token_out: fixture.beta,
             target_portal: fixture.portal_address,
             recipient: fixture.account.address(),
@@ -1509,10 +1536,23 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_payload
         .pause_deposits_on_portal(fixture.portal_address, fixture.beta)
         .await?;
 
+    let callback_id = keccak256(
+        (
+            fixture.portal_address,
+            fixture.router,
+            fixture.portal_address,
+            fixture.account.address(),
+            fixture.swap_amount,
+            B256::ZERO,
+        )
+            .abi_encode(),
+    );
     let (key_index, encrypted) = fixture
         .l1
-        .encrypt_deposit_for_portal(
+        .encrypt_deposit_for_portal_with_context(
             fixture.portal_address,
+            fixture.portal_address,
+            callback_id,
             fixture.router,
             fixture.account.address(),
             B256::ZERO,
@@ -1536,6 +1576,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_with_explicit_payload
         encrypted,
         tempo_refund_recipient: fixture.account.address(),
         min_amount_out: expected_beta,
+        callback_id,
     });
     fixture
         .account

@@ -40,6 +40,10 @@ pub struct Deposit {
     pub fee: u128,
     /// Tempo recipient for a failed-deposit refund.
     pub tempo_refund_recipient: Address,
+    /// Source portal for callback deposits, zero for direct deposits.
+    pub source_portal: Address,
+    /// Source-owned callback intent, zero for direct deposits.
+    pub callback_id: B256,
     /// Index of the encryption key used.
     pub key_index: U256,
     /// Ephemeral public key X coordinate.
@@ -63,6 +67,8 @@ impl Deposit {
             amount: event.netAmount,
             fee: event.fee,
             tempo_refund_recipient: event.tempoRefundRecipient,
+            source_portal: event.sourcePortal,
+            callback_id: event.callbackId,
             key_index: event.keyIndex,
             ephemeral_pubkey_x: event.ephemeralPubkeyX,
             ephemeral_pubkey_y_parity: event.ephemeralPubkeyYParity,
@@ -103,6 +109,8 @@ impl L1Deposit {
                     sender: d.sender,
                     amount: d.amount,
                     tempoRefundRecipient: d.tempo_refund_recipient,
+                    sourcePortal: d.source_portal,
+                    callbackId: d.callback_id,
                     keyIndex: d.key_index,
                     encrypted: AbiDepositPayload {
                         ephemeralPubkeyX: d.ephemeral_pubkey_x,
@@ -141,6 +149,8 @@ impl L1Deposit {
                         sender: d.sender,
                         amount: d.amount,
                         tempoRefundRecipient: d.tempo_refund_recipient,
+                        sourcePortal: d.source_portal,
+                        callbackId: d.callback_id,
                         keyIndex: d.key_index,
                         encrypted: AbiDepositPayload {
                             ephemeralPubkeyX: d.ephemeral_pubkey_x,

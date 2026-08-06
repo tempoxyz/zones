@@ -63,6 +63,8 @@ crate::sol! {
         error InvalidRevealTo();
         error InvalidCurrentTxHash();
         error ZeroAmountWithdrawal();
+        error InvalidCallbackIntent();
+        error CallbackIntentOwned(address owner);
         error StaticCallNotAllowed();
 
         // -- View functions --
@@ -93,6 +95,18 @@ crate::sol! {
             uint128 amount,
             bytes32 memo,
             uint64 gasLimit,
+            address zoneFallbackRecipient,
+            bytes calldata data,
+            bytes calldata revealTo
+        ) external;
+
+        function requestWithdrawalWithIntent(
+            address token,
+            address to,
+            uint128 amount,
+            bytes32 memo,
+            uint64 gasLimit,
+            bytes32 callbackId,
             address zoneFallbackRecipient,
             bytes calldata data,
             bytes calldata revealTo

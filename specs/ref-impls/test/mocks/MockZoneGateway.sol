@@ -65,7 +65,8 @@ contract MockZoneGateway is IWithdrawalReceiver {
             revert UnregisteredGateway();
         }
 
-        GatewayCallbackData memory callback = abi.decode(callbackData, (GatewayCallbackData));
+        (bytes32 callbackId, bytes memory gatewayData) = abi.decode(callbackData, (bytes32, bytes));
+        GatewayCallbackData memory callback = abi.decode(gatewayData, (GatewayCallbackData));
         if (callback.outputToken != token) revert InvalidOutputToken();
         if (portal.role(callback.tempoRefundRecipient) != Role.Account) {
             revert IZonePortal.AccountNotAllowed(callback.tempoRefundRecipient);
@@ -83,8 +84,14 @@ contract MockZoneGateway is IWithdrawalReceiver {
         // The mock returns the received token. The production gateway owns conversion semantics.
         if (!ITIP20(token).approve(sourcePortal, amount)) revert ApprovalFailed();
         IZonePortal(sourcePortal)
-            .deposit(
-                token, amount, callback.keyIndex, callback.encrypted, callback.tempoRefundRecipient
+            .depositWithContext(
+                token,
+                amount,
+                callback.keyIndex,
+                callback.encrypted,
+                callback.tempoRefundRecipient,
+                sourcePortal,
+                callbackId
             );
         if (!ITIP20(token).approve(sourcePortal, 0)) revert ApprovalFailed();
 

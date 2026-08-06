@@ -164,8 +164,16 @@ contract SwapAndDepositRouterTest is BaseTest {
         pure
         returns (bytes memory)
     {
+        bytes32 callbackId = keccak256(
+            abi.encode(
+                tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
+            )
+        );
         return abi.encode(
-            tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
+            callbackId,
+            abi.encode(
+                tokenOut, targetPortal, keyIndex, encrypted, tempoRefundRecipient, minAmountOut
+            )
         );
     }
 

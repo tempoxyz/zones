@@ -415,6 +415,8 @@ contract ZoneInboxTest is Test {
             sender: sender,
             amount: amount,
             tempoRefundRecipient: sender,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: keyIndex,
             encrypted: DepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(0x1234)),

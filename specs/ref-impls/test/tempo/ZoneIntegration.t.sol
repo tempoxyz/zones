@@ -118,7 +118,7 @@ contract ZoneIntegrationTest is BaseTest {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(wallet.privateKey, message);
         l1Portal.setSequencerEncryptionKey(x, yParity, v, r, s);
 
-        return abi.encode(
+        bytes memory gatewayData = abi.encode(
             GatewayCallbackData({
                 flow: GatewayFlow.Deposit,
                 outputToken: address(l2ZoneToken),
@@ -137,6 +137,7 @@ contract ZoneIntegrationTest is BaseTest {
                 tempoRefundRecipient: alice
             })
         );
+        return abi.encode(keccak256(gatewayData), gatewayData);
     }
 
     function setUp() public override {
@@ -232,6 +233,8 @@ contract ZoneIntegrationTest is BaseTest {
             sender: deposit.sender,
             amount: deposit.amount,
             tempoRefundRecipient: deposit.tempoRefundRecipient,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: l1Portal.encryptionKeyCount() - 1,
             encrypted: _depositPayload(deposit.to, deposit.memo)
         });
@@ -250,6 +253,8 @@ contract ZoneIntegrationTest is BaseTest {
                 sender: deposits[i].sender,
                 amount: deposits[i].amount,
                 tempoRefundRecipient: deposits[i].tempoRefundRecipient,
+                sourcePortal: address(0),
+                callbackId: bytes32(0),
                 keyIndex: l1Portal.encryptionKeyCount() - 1,
                 encrypted: _depositPayload(deposits[i].to, deposits[i].memo)
             });

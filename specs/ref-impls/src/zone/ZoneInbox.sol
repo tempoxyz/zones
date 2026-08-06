@@ -294,13 +294,19 @@ contract ZoneInbox is IZoneInbox {
                     // using HKDF-SHA256. Binding the sender prevents a valid encrypted payload
                     // from being replayed by another account to dust its hidden recipient.
                     // This is done in Solidity using the SHA256 precompile (0x02)
-                    bytes32 aesKey = _hkdfSha256(
-                        dec.sharedSecret,
-                        "ecies-aes-key",
-                        abi.encodePacked(
+                    bytes memory hkdfInfo = ed.sourcePortal == address(0)
+                        ? abi.encodePacked(
                             tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX, ed.sender
                         )
-                    );
+                        : abi.encodePacked(
+                            tempoPortal,
+                            ed.sourcePortal,
+                            ed.callbackId,
+                            ed.keyIndex,
+                            ed.encrypted.ephemeralPubkeyX,
+                            ed.sender
+                        );
+                    bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", hkdfInfo);
 
                     // Step 3: Decrypt using AES-256-GCM precompile
                     // The GCM tag proves the plaintext matches the ciphertext for this shared secret

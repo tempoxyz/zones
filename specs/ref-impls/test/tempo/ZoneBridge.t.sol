@@ -343,6 +343,8 @@ contract ZoneBridgeTest is BaseTest {
             sender: d.sender,
             amount: d.amount,
             tempoRefundRecipient: d.tempoRefundRecipient,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: l1Portal.encryptionKeyCount() - 1,
             encrypted: _depositPayload(d.to, d.memo)
         });
@@ -371,6 +373,8 @@ contract ZoneBridgeTest is BaseTest {
                 sender: d.sender,
                 amount: d.amount,
                 tempoRefundRecipient: d.tempoRefundRecipient,
+                sourcePortal: address(0),
+                callbackId: bytes32(0),
                 keyIndex: l1Portal.encryptionKeyCount() - 1,
                 encrypted: _depositPayload(d.to, d.memo)
             });
@@ -828,6 +832,8 @@ contract ZoneBridgeTest is BaseTest {
             sender: d.sender,
             amount: d.amount,
             tempoRefundRecipient: d.tempoRefundRecipient,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: l1Portal.encryptionKeyCount() - 1,
             encrypted: _depositPayload(d.to, d.memo)
         });
@@ -948,7 +954,7 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     function _callbackData(GatewayFlow flow) internal view returns (bytes memory) {
-        return abi.encode(
+        bytes memory gatewayData = abi.encode(
             GatewayCallbackData({
                 flow: flow,
                 outputToken: address(l2ZoneToken),
@@ -961,6 +967,7 @@ contract ZoneBridgeTest is BaseTest {
                 tempoRefundRecipient: alice
             })
         );
+        return abi.encode(keccak256(gatewayData), gatewayData);
     }
 
     /// @notice Simulate sequencer observing an encrypted deposit event on L1
@@ -978,6 +985,8 @@ contract ZoneBridgeTest is BaseTest {
             sender: sender,
             amount: netAmount,
             tempoRefundRecipient: sender,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -1286,6 +1295,8 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             amount: netAmount,
             tempoRefundRecipient: alice,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 0,
             encrypted: payload1
         });
@@ -1297,6 +1308,8 @@ contract ZoneBridgeTest is BaseTest {
             sender: bob,
             amount: netAmount,
             tempoRefundRecipient: bob,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 1,
             encrypted: payload2
         });

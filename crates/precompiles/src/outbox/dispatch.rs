@@ -54,6 +54,9 @@ impl ZoneOutbox {
                 requestWithdrawal(call) => mutate_void(call, msg_sender, |sender, call| {
                     self.request_withdrawal(l1, sender, fee_payer, tx_hash, call)
                 }),
+                requestWithdrawalWithIntent(call) => mutate_void(call, msg_sender, |sender, call| {
+                    self.request_withdrawal_with_intent(l1, sender, fee_payer, tx_hash, call)
+                }),
                 enqueueDepositBounceBack(call) => mutate_void(call, msg_sender, |sender, call| self.enqueue_deposit_bounce_back(sender, call)),
                 consumeFallbackRecipient(call) => mutate(call, msg_sender, |sender, call| self.consume_fallback_recipient(sender, call.fallbackNonce)),
                 finalizeWithdrawalBatch(call) => mutate(call, msg_sender, |sender, call| self.finalize_withdrawal_batch(l1, sender, call)),

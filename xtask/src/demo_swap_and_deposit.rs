@@ -17,7 +17,6 @@ use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_R
 use tempo_zone_contracts::{
     DepositPayload, IZoneOutbox, SwapAndDepositRouterCallback, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use zone_precompiles::ecies::encrypt_deposit;
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
@@ -346,16 +345,20 @@ impl DemoSwapAndDeposit {
         );
 
         let portal_contract_seq = ZonePortal::new(portal, &l1_seq);
+        let callback_id =
+            keccak256((portal, router, portal, operator, self.amount, B256::ZERO).abi_encode());
         let callback_data = build_router_callback(
             &portal_contract_seq,
             RouterCallbackRequest {
                 sender: router,
+                source_portal: portal,
                 target_portal: portal,
                 token_out: beta,
                 recipient: operator,
                 tempo_refund_recipient,
                 memo: B256::ZERO,
                 min_amount_out: expected_beta,
+                callback_id,
                 sequencer_private_key: &sequencer_key,
             },
         )
@@ -593,12 +596,14 @@ fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
 
 struct RouterCallbackRequest<'a> {
     sender: Address,
+    source_portal: Address,
     target_portal: Address,
     token_out: Address,
     recipient: Address,
     tempo_refund_recipient: Address,
     memo: B256,
     min_amount_out: u128,
+    callback_id: B256,
     sequencer_private_key: &'a str,
 }
 
@@ -621,7 +626,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
             key.yParity
         )
     })?;
-    let encrypted = encrypt_deposit(
+    let encrypted = zone_precompiles::ecies::encrypt_deposit_with_context(
         &key.x,
         y_parity,
         recipient,
@@ -667,18 +672,20 @@ async fn build_router_callback<P: Provider<TempoNetwork>>(
         )
     })?;
 
-    let encrypted = encrypt_deposit(
+    let encrypted = zone_precompiles::ecies::encrypt_deposit_with_context(
         &key.x,
         y_parity,
         request.recipient,
         request.memo,
         request.sender,
         request.target_portal,
+        request.source_portal,
+        request.callback_id,
         key_index,
     )
     .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
 
-    let callback = SwapAndDepositRouterCallback {
+    let router_data = SwapAndDepositRouterCallback {
         token_out: request.token_out,
         target_portal: request.target_portal,
         key_index,
@@ -693,7 +700,7 @@ async fn build_router_callback<P: Provider<TempoNetwork>>(
         min_amount_out: request.min_amount_out,
     };
 
-    Ok(Bytes::from(callback.abi_encode()))
+    Ok(Bytes::from((request.callback_id, router_data).abi_encode()))
 }
 
 async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(

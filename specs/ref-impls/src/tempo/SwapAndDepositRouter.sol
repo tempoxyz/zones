@@ -88,6 +88,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             revert InvalidSourcePortal();
         }
 
+        (bytes32 callbackId, bytes memory gatewayData) = abi.decode(data, (bytes32, bytes));
         (
             address tokenOut,
             address targetPortal,
@@ -95,7 +96,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             DepositPayload memory encrypted,
             address tempoRefundRecipient,
             uint128 minAmountOut
-        ) = abi.decode(data, (address, address, uint256, DepositPayload, address, uint128));
+        ) = abi.decode(gatewayData, (address, address, uint256, DepositPayload, address, uint128));
 
         // Zone portals treat this shared router as the depositor, so sender binding alone can't
         // distinguish withdrawals. Consume each encrypted payload once to prevent replay.
@@ -111,7 +112,15 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
         ITIP20(tokenOut).approve(targetPortal, amountOut);
         IZonePortal(targetPortal)
-            .deposit(tokenOut, amountOut, keyIndex, encrypted, tempoRefundRecipient);
+            .depositWithContext(
+                tokenOut,
+                amountOut,
+                keyIndex,
+                encrypted,
+                tempoRefundRecipient,
+                sourcePortal,
+                callbackId
+            );
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }

@@ -7,7 +7,7 @@ mod tests;
 use alloc::vec::Vec;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolValue};
 use tempo_precompiles::{
     Result as TempoResult,
     error::TempoPrecompileError,
@@ -53,6 +53,7 @@ pub struct ZoneOutbox {
     pending_withdrawals: Vec<PendingWithdrawal>,
     last_fallback_nonce: u64,
     fallback_recipients: Mapping<u64, Address>,
+    callback_intent_owners: Mapping<B256, Address>,
 }
 
 impl ZoneOutbox {
@@ -164,42 +165,122 @@ impl ZoneOutbox {
         current_tx_hash: B256,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
-        if call.zoneFallbackRecipient.is_zero() {
+        self.request_withdrawal_inner(
+            l1,
+            caller,
+            fee_payer,
+            current_tx_hash,
+            call.token,
+            call.to,
+            call.amount,
+            call.memo,
+            call.gasLimit,
+            B256::ZERO,
+            call.zoneFallbackRecipient,
+            call.data,
+            call.revealTo,
+        )
+    }
+
+    fn request_withdrawal_with_intent<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        fee_payer: Address,
+        current_tx_hash: B256,
+        call: IZoneOutbox::requestWithdrawalWithIntentCall,
+    ) -> ZoneResult<()> {
+        self.request_withdrawal_inner(
+            l1,
+            caller,
+            fee_payer,
+            current_tx_hash,
+            call.token,
+            call.to,
+            call.amount,
+            call.memo,
+            call.gasLimit,
+            call.callbackId,
+            call.zoneFallbackRecipient,
+            call.data,
+            call.revealTo,
+        )
+    }
+
+    fn request_withdrawal_inner<P: L1StorageReader>(
+        &mut self,
+        l1: &L1State<P>,
+        caller: Address,
+        fee_payer: Address,
+        current_tx_hash: B256,
+        token: Address,
+        to: Address,
+        amount: u128,
+        memo: B256,
+        gas_limit: u64,
+        callback_id: B256,
+        zone_fallback_recipient: Address,
+        data: Bytes,
+        reveal_to: Bytes,
+    ) -> ZoneResult<()> {
+        if zone_fallback_recipient.is_zero() {
             return Err(ZoneOutboxError::invalid_fallback_recipient().into());
         }
-        if call.amount == 0 {
+        if amount == 0 {
             return Err(ZoneOutboxError::zero_amount_withdrawal().into());
         }
-        if call.data.len() > MAX_CALLBACK_DATA_SIZE {
+        if data.len() > MAX_CALLBACK_DATA_SIZE {
             return Err(ZoneOutboxError::callback_data_too_large().into());
         }
 
-        validate_gas_limit(call.gasLimit)?;
+        validate_gas_limit(gas_limit)?;
 
         if current_tx_hash.is_zero() {
             return Err(ZoneOutboxError::invalid_current_tx_hash().into());
         }
-        let mut zone_token = TIP20Token::from_address(call.token)?;
+        let mut zone_token = TIP20Token::from_address(token)?;
         if !zone_token.is_initialized()? {
             return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());
         }
-        self.validate_withdrawal_policy(l1, call.token, call.to, call.gasLimit)?;
+        self.validate_withdrawal_policy(l1, token, to, gas_limit)?;
+
+        let is_gateway_callback = gas_limit > 0
+            && l1.read_portal(|portal| &portal.role[to])?
+                == IZonePortal::Role::CallbackGateway as u8;
+        if is_gateway_callback {
+            let Ok((encoded_callback_id, _)) = <(B256, Bytes)>::abi_decode(&data, true) else {
+                return Err(ZoneOutboxError::invalid_callback_intent().into());
+            };
+            if callback_id.is_zero() {
+                callback_id = encoded_callback_id;
+            }
+            if callback_id.is_zero() || encoded_callback_id != callback_id {
+                return Err(ZoneOutboxError::invalid_callback_intent().into());
+            }
+            let owner = self.callback_intent_owners[callback_id].read()?;
+            if owner.is_zero() {
+                self.callback_intent_owners[callback_id].write(caller)?;
+            } else if owner != caller {
+                return Err(ZoneOutboxError::callback_intent_owned(owner).into());
+            }
+        } else if !callback_id.is_zero() {
+            return Err(ZoneOutboxError::invalid_callback_intent().into());
+        }
         self.enforce_withdrawal_block_cap()?;
 
         // If necessary, validate reveal
-        if !call.revealTo.is_empty() && decode_compressed_public_key(&call.revealTo).is_none() {
+        if !reveal_to.is_empty() && decode_compressed_public_key(&reveal_to).is_none() {
             return Err(ZoneOutboxError::invalid_reveal_to().into());
         }
 
-        let fee = self.calculate_fee_unchecked(call.gasLimit)?;
+        let fee = self.calculate_fee_unchecked(gas_limit)?;
         if caller == fee_payer {
-            let total = call
-                .amount
+            let total = amount
                 .checked_add(fee)
                 .ok_or_else(TempoPrecompileError::under_overflow)?;
             self.transfer_and_burn(&mut zone_token, caller, total)?;
         } else {
-            self.transfer_and_burn(&mut zone_token, caller, call.amount)?;
+            self.transfer_and_burn(&mut zone_token, caller, amount)?;
             if fee != 0 {
                 self.transfer_and_burn(&mut zone_token, fee_payer, fee)?;
             }
@@ -211,13 +292,19 @@ impl ZoneOutbox {
             .checked_add(1)
             .ok_or_else(TempoPrecompileError::under_overflow)?;
         self.last_fallback_nonce.write(fallback_nonce)?;
-        self.fallback_recipients[fallback_nonce].write(call.zoneFallbackRecipient)?;
-        self.enqueue(PendingWithdrawal::from_request(
+        self.fallback_recipients[fallback_nonce].write(zone_fallback_recipient)?;
+        self.enqueue(PendingWithdrawal::from_parts(
             caller,
             current_tx_hash,
             fee,
             fallback_nonce,
-            call,
+            token,
+            to,
+            amount,
+            memo,
+            gas_limit,
+            data,
+            reveal_to,
         ))
     }
 
@@ -419,25 +506,31 @@ struct PendingWithdrawal {
 }
 
 impl PendingWithdrawal {
-    fn from_request(
+    fn from_parts(
         sender: Address,
         tx_hash: B256,
         fee: u128,
         fallback_nonce: u64,
-        call: IZoneOutbox::requestWithdrawalCall,
+        token: Address,
+        to: Address,
+        amount: u128,
+        memo: B256,
+        gas_limit: u64,
+        callback_data: Bytes,
+        reveal_to: Bytes,
     ) -> Self {
         Self {
-            token: call.token,
+            token,
             sender,
             tx_hash,
-            to: call.to,
-            amount: call.amount,
+            to,
+            amount,
             fee,
-            memo: call.memo,
-            gas_limit: call.gasLimit,
+            memo,
+            gas_limit,
             fallback_nonce,
-            callback_data: call.data,
-            reveal_to: call.revealTo,
+            callback_data,
+            reveal_to,
         }
     }
 

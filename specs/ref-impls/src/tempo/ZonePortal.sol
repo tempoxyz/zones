@@ -844,7 +844,26 @@ contract ZonePortal is IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        return depositEncrypted(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
+        return _deposit(
+            _token, amount, keyIndex, encrypted, tempoRefundRecipient, address(0), bytes32(0)
+        );
+    }
+
+    function depositWithContext(
+        address _token,
+        uint128 amount,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted,
+        address tempoRefundRecipient,
+        address sourcePortal,
+        bytes32 callbackId
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash)
+    {
+        return _deposit(
+            _token, amount, keyIndex, encrypted, tempoRefundRecipient, sourcePortal, callbackId
+        );
     }
 
     /// @notice Deposit with encrypted recipient and memo
@@ -867,7 +886,9 @@ contract ZonePortal is IZonePortal {
         public
         returns (bytes32 newCurrentDepositQueueHash)
     {
-        return _deposit(_token, amount, keyIndex, encrypted, tempoRefundRecipient);
+        return _deposit(
+            _token, amount, keyIndex, encrypted, tempoRefundRecipient, address(0), bytes32(0)
+        );
     }
 
     function _deposit(
@@ -875,12 +896,17 @@ contract ZonePortal is IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         DepositPayload calldata encrypted,
-        address tempoRefundRecipient
+        address tempoRefundRecipient,
+        address sourcePortal,
+        bytes32 callbackId
     )
         internal
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (tempoRefundRecipient == address(0)) revert InvalidBouncebackRecipient();
+        if ((sourcePortal == address(0)) != (callbackId == bytes32(0))) {
+            revert InvalidCallbackContext();
+        }
         // Enforced gateways may deposit callback returns without also being allowed accounts.
         _requireAllowedDepositor(msg.sender);
         _requireAllowed(tempoRefundRecipient);
@@ -929,6 +955,8 @@ contract ZonePortal is IZonePortal {
             sender: msg.sender,
             amount: netAmount,
             tempoRefundRecipient: tempoRefundRecipient,
+            sourcePortal: sourcePortal,
+            callbackId: callbackId,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -953,6 +981,8 @@ contract ZonePortal is IZonePortal {
             encrypted.nonce,
             encrypted.tag,
             tempoRefundRecipient,
+            sourcePortal,
+            callbackId,
             thisDeposit
         );
     }

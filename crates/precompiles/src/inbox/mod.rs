@@ -381,12 +381,25 @@ fn recover_encrypted_payload(
         return Ok(None);
     }
 
-    let info = hkdf_info(
-        &portal,
-        &deposit.keyIndex,
-        &deposit.encrypted.ephemeralPubkeyX,
-        &deposit.sender,
-    );
+    let info = if deposit.sourcePortal == Address::ZERO {
+        hkdf_info(
+            &portal,
+            &deposit.keyIndex,
+            &deposit.encrypted.ephemeralPubkeyX,
+            &deposit.sender,
+        )
+        .to_vec()
+    } else {
+        crate::ecies::hkdf_info_with_context(
+            &portal,
+            &deposit.sourcePortal,
+            &deposit.callbackId,
+            &deposit.keyIndex,
+            &deposit.encrypted.ephemeralPubkeyX,
+            &deposit.sender,
+        )
+        .to_vec()
+    };
     let key = hkdf_sha256(&decryption.sharedSecret.0, b"ecies-aes-key", &info);
     AesGcmDecrypt::charge_gas(deposit.encrypted.ciphertext.len(), 0)?;
     let (plaintext, valid) = AesGcmDecrypt::decrypt(

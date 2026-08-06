@@ -279,6 +279,8 @@ fn failed_deposit_gas(deposits: usize, token_enablements: usize) -> eyre::Result
         sender: ALICE,
         amount: 1,
         tempoRefundRecipient: ALICE,
+        sourcePortal: Address::ZERO,
+        callbackId: B256::ZERO,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -606,6 +608,8 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
         sender: ALICE,
         amount: 900,
         tempoRefundRecipient: ALICE,
+        sourcePortal: Address::ZERO,
+        callbackId: B256::ZERO,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -694,6 +698,8 @@ fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
         sender: ALICE,
         amount: 500,
         tempoRefundRecipient: ALICE,
+        sourcePortal: Address::ZERO,
+        callbackId: B256::ZERO,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -758,6 +764,8 @@ fn invalid_encrypted_proof_bounces_without_mint() -> eyre::Result<()> {
         sender: ALICE,
         amount: 333,
         tempoRefundRecipient: BOB,
+        sourcePortal: Address::ZERO,
+        callbackId: B256::ZERO,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,
@@ -804,6 +812,8 @@ fn missing_and_extra_decryption_data_revert() -> eyre::Result<()> {
         sender: ALICE,
         amount: 1,
         tempoRefundRecipient: BOB,
+        sourcePortal: Address::ZERO,
+        callbackId: B256::ZERO,
         keyIndex: fixture.key_index,
         encrypted: tempo_zone_contracts::DepositPayload {
             ephemeralPubkeyX: fixture.eph_pub_x,

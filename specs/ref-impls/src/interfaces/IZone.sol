@@ -115,6 +115,8 @@ struct Deposit {
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     address tempoRefundRecipient; // Tempo recipient for a failed-deposit refund
+    address sourcePortal; // Source portal for callback deposits, zero for direct deposits
+    bytes32 callbackId; // Source-owned callback intent, zero for direct deposits
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     DepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -546,6 +548,8 @@ interface IZonePortal {
         bytes12 nonce,
         bytes16 tag,
         address tempoRefundRecipient,
+        address sourcePortal,
+        bytes32 callbackId,
         uint64 depositNumber
     );
 
@@ -636,6 +640,7 @@ interface IZonePortal {
     error TokenAlreadyEnabled();
     error TokenTransferPolicyNotSet();
     error InvalidBouncebackRecipient();
+    error InvalidCallbackContext();
     error InvalidDepositTransition();
     error InvalidSequencerSet();
     error SequencerConfigurationUnchanged();
@@ -909,6 +914,18 @@ interface IZonePortal {
         uint256 keyIndex,
         DepositPayload calldata encrypted,
         address tempoRefundRecipient
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash);
+
+    function depositWithContext(
+        address token,
+        uint128 amount,
+        uint256 keyIndex,
+        DepositPayload calldata encrypted,
+        address tempoRefundRecipient,
+        address sourcePortal,
+        bytes32 callbackId
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -1251,6 +1268,19 @@ interface IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
+        address zoneFallbackRecipient,
+        bytes calldata data,
+        bytes calldata revealTo
+    )
+        external;
+
+    function requestWithdrawalWithIntent(
+        address token,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        bytes32 callbackId,
         address zoneFallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo

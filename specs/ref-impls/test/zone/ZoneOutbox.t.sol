@@ -142,7 +142,7 @@ contract ZoneOutboxTest is Test {
         view
         returns (bytes memory)
     {
-        return abi.encode(
+        bytes memory gatewayData = abi.encode(
             GatewayCallbackData({
                 flow: flow,
                 outputToken: address(zoneToken),
@@ -161,6 +161,7 @@ contract ZoneOutboxTest is Test {
                 tempoRefundRecipient: tempoRefundRecipient
             })
         );
+        return abi.encode(keccak256(gatewayData), gatewayData);
     }
 
     function _emptyEncryptedSenders(uint256 count)
@@ -617,7 +618,13 @@ contract ZoneOutboxTest is Test {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(
-            address(zoneToken), callbackTarget, 500e6, bytes32(0), 100_000, alice, hex"01"
+            address(zoneToken),
+            callbackTarget,
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            _callbackData(GatewayFlow.Deposit, alice)
         );
         vm.stopPrank();
 

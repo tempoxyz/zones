@@ -102,6 +102,8 @@ contract EncryptedDepositLibTest is Test {
             sender: address(0x200),
             amount: amount,
             tempoRefundRecipient: address(0x300),
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 1,
             encrypted: DepositPayload({
                 ephemeralPubkeyX: seed,

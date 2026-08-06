@@ -667,6 +667,8 @@ Receiving contracts must implement `IWithdrawalReceiver` and return `onWithdrawa
 
 The reference `SwapAndDepositRouter` is a shared depositor: every target portal records the router, rather than the source-zone account, as the downstream deposit sender. It therefore derives a canonical nullifier from the encrypted payload's ephemeral public-key x-coordinate, ciphertext, AES-GCM nonce, and authentication tag, and consumes each nullifier at most once. The SEC1 y-parity byte is deliberately excluded: negating the ephemeral point changes its parity but preserves the ECDH x-coordinate and derived AES key, so both encodings must share a nullifier. A copied callback from another withdrawal reverts before swapping or depositing, while any callback failure rolls back the nullifier write so the source withdrawal follows the normal bounce-back path. This closes same-router payload replay without requiring clients to predict a shared sequential nonce.
 
+Gateway callback data is envelope-encoded as `abi.encode(callbackId, gatewayData)`. The source `ZoneOutbox` records the first caller that claims each non-zero `callbackId`; the same caller may retry it after a failed callback, but another source account cannot claim the intent. Callback deposits bind `sourcePortal` and `callbackId` into the ECIES HKDF context in addition to the target portal, key index, ephemeral key, and depositor. This preserves retryability while making a copied callback from another source portal or intent fail authenticated decryption.
+
 A callback target is untrusted, so the messenger reads at most the single word a `bytes4` return occupies and discards a failing callback's revert data instead of propagating it. Copying an oversized response or revert blob would charge quadratic memory-expansion gas to the messenger and to the portal's delivery frame, letting one withdrawal consume far more than the `gasLimit` it declared and priced under `WITHDRAWAL_BASE_GAS`, and thereby starve the remaining items in a `processWithdrawals` batch. Bounding the copy keeps realized delivery cost within `gasLimit` plus fixed overhead, which is what the block-gas-limit headroom above and the sequencer's batch planner both assume.
 
 Closed access mode requires `currentDepositQueueHash` to change, proving only that some deposit was synchronously appended to the source zone. It does not bind that deposit to the callback's token, amount, or recipient; an enforced gateway is trusted to constrain the operation and return the intended result. Open access mode imposes no source-deposit invariant: callback value may enter another zone or leave the zone system entirely. Any callback failure rolls back the self-call and enqueues a bounce-back while advancing the withdrawal FIFO.
@@ -1525,6 +1527,8 @@ struct Deposit {
     address sender;
     uint128 amount;
     address tempoRefundRecipient;
+    address sourcePortal;       // source portal for callback deposits, zero for direct deposits
+    bytes32 callbackId;         // source-owned callback intent, zero for direct deposits
     uint256 keyIndex;
     DepositPayload encrypted;
 }

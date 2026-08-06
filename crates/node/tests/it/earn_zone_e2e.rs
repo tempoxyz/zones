@@ -1350,6 +1350,8 @@ impl EarnZoneFixture {
                     keyIndex: key_index,
                     encrypted,
                     tempoRefundRecipient: user,
+                    sourcePortal: Address::ZERO,
+                    callbackId: B256::ZERO,
                 }
                 .abi_encode()
                 .into(),

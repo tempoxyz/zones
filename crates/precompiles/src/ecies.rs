@@ -141,10 +141,51 @@ pub fn decrypt_deposit(
     key_index: alloy_primitives::U256,
     sender: Address,
 ) -> Option<DecryptedDeposit> {
+    decrypt_deposit_with_context(
+        sequencer_privkey,
+        ephemeral_pub_x,
+        ephemeral_pub_y_parity,
+        ciphertext,
+        nonce,
+        tag,
+        portal_address,
+        Address::ZERO,
+        B256::ZERO,
+        key_index,
+        sender,
+    )
+}
+
+/// Decrypt a deposit whose payload is bound to a source portal and callback intent.
+pub fn decrypt_deposit_with_context(
+    sequencer_privkey: &k256::SecretKey,
+    ephemeral_pub_x: &B256,
+    ephemeral_pub_y_parity: u8,
+    ciphertext: &[u8],
+    nonce: &[u8; 12],
+    tag: &[u8; 16],
+    portal_address: Address,
+    source_portal: Address,
+    callback_id: B256,
+    key_index: alloy_primitives::U256,
+    sender: Address,
+) -> Option<DecryptedDeposit> {
     let proof = compute_ecdh_proof(sequencer_privkey, ephemeral_pub_x, ephemeral_pub_y_parity)?;
 
     // HKDF-SHA256: derive AES key
-    let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x, &sender);
+    let info = if source_portal == Address::ZERO {
+        hkdf_info(&portal_address, &key_index, ephemeral_pub_x, &sender).to_vec()
+    } else {
+        hkdf_info_with_context(
+            &portal_address,
+            &source_portal,
+            &callback_id,
+            &key_index,
+            ephemeral_pub_x,
+            &sender,
+        )
+        .to_vec()
+    };
     let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
     // AES-256-GCM decrypt
@@ -424,6 +465,31 @@ pub fn encrypt_deposit(
     portal_address: Address,
     key_index: alloy_primitives::U256,
 ) -> Option<EncryptedDepositArgs> {
+    encrypt_deposit_with_context(
+        seq_pub_x,
+        seq_pub_y_parity,
+        to,
+        memo,
+        sender,
+        portal_address,
+        Address::ZERO,
+        B256::ZERO,
+        key_index,
+    )
+}
+
+/// Encrypt a deposit payload bound to a source portal and callback intent.
+pub fn encrypt_deposit_with_context(
+    seq_pub_x: &B256,
+    seq_pub_y_parity: u8,
+    to: Address,
+    memo: B256,
+    sender: Address,
+    portal_address: Address,
+    source_portal: Address,
+    callback_id: B256,
+    key_index: alloy_primitives::U256,
+) -> Option<EncryptedDepositArgs> {
     // 1. Recover sequencer public key
     let seq_pub = recover_point(&seq_pub_x.0, seq_pub_y_parity)?;
 
@@ -440,7 +506,19 @@ pub fn encrypt_deposit(
     let shared_secret_x: [u8; 32] = ss_enc.x()?.as_slice().try_into().ok()?;
 
     // 4. HKDF key derivation
-    let info = hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender);
+    let info = if source_portal == Address::ZERO {
+        hkdf_info(&portal_address, &key_index, &eph_pub_x, &sender).to_vec()
+    } else {
+        hkdf_info_with_context(
+            &portal_address,
+            &source_portal,
+            &callback_id,
+            &key_index,
+            &eph_pub_x,
+            &sender,
+        )
+        .to_vec()
+    };
     let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
     // 5. Encrypt plaintext with random nonce
@@ -609,6 +687,26 @@ pub fn hkdf_info(
     info[20..52].copy_from_slice(&key_index.to_be_bytes::<32>());
     info[52..84].copy_from_slice(&eph_pub_x.0);
     info[84..].copy_from_slice(sender.as_slice());
+    info
+}
+
+/// Build callback-bound HKDF info:
+/// `[target_portal(20) | source_portal(20) | callback_id(32) | key_index(32) | eph_pub_x(32) | sender(20)]`.
+pub fn hkdf_info_with_context(
+    target_portal: &Address,
+    source_portal: &Address,
+    callback_id: &B256,
+    key_index: &alloy_primitives::U256,
+    eph_pub_x: &B256,
+    sender: &Address,
+) -> [u8; 156] {
+    let mut info = [0u8; 156];
+    info[..20].copy_from_slice(target_portal.as_slice());
+    info[20..40].copy_from_slice(source_portal.as_slice());
+    info[40..72].copy_from_slice(&callback_id.0);
+    info[72..104].copy_from_slice(&key_index.to_be_bytes::<32>());
+    info[104..136].copy_from_slice(&eph_pub_x.0);
+    info[136..].copy_from_slice(sender.as_slice());
     info
 }
 

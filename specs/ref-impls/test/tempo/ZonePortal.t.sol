@@ -2584,18 +2584,22 @@ contract ZonePortalTest is BaseTest {
         view
         returns (bytes memory)
     {
+        bytes32 callbackId = keccak256(abi.encode(flow, tempoRefundRecipient, minOutputAmount));
         return abi.encode(
-            GatewayCallbackData({
-                flow: flow,
-                outputToken: address(pathUSD),
-                keyIndex: 0,
-                encrypted: _makeDepositPayload(),
-                minVaultAssets: 0,
-                minVaultShares: 0,
-                minOutputAmount: minOutputAmount,
-                actionId: bytes32(0),
-                tempoRefundRecipient: tempoRefundRecipient
-            })
+            callbackId,
+            abi.encode(
+                GatewayCallbackData({
+                    flow: flow,
+                    outputToken: address(pathUSD),
+                    keyIndex: 0,
+                    encrypted: _makeDepositPayload(),
+                    minVaultAssets: 0,
+                    minVaultShares: 0,
+                    minOutputAmount: minOutputAmount,
+                    actionId: bytes32(0),
+                    tempoRefundRecipient: tempoRefundRecipient
+                })
+            )
         );
     }
 
@@ -4370,6 +4374,8 @@ contract ZonePortalTest is BaseTest {
             sender: alice,
             amount: netAmount,
             tempoRefundRecipient: alice,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -4435,6 +4441,8 @@ contract ZonePortalTest is BaseTest {
             sender: alice,
             amount: netAmount,
             tempoRefundRecipient: alice,
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -4454,6 +4462,8 @@ contract ZonePortalTest is BaseTest {
             encrypted.nonce,
             encrypted.tag,
             alice,
+            address(0),
+            bytes32(0),
             1
         );
         portal.deposit(address(pathUSD), depositAmount, 0, encrypted, alice);
@@ -5213,6 +5223,8 @@ contract ZonePortalTest is BaseTest {
                 sender: alice,
                 amount: amount - portal.calculateDepositFee(),
                 tempoRefundRecipient: bob,
+                sourcePortal: address(0),
+                callbackId: bytes32(0),
                 keyIndex: portal.encryptionKeyCount() - 1,
                 encrypted: _depositPayload(bob, bytes32("memo"))
             });
@@ -5237,6 +5249,8 @@ contract ZonePortalTest is BaseTest {
                 sender: alice,
                 amount: amount - portal.calculateDepositFee(),
                 tempoRefundRecipient: bob,
+                sourcePortal: address(0),
+                callbackId: bytes32(0),
                 keyIndex: portal.encryptionKeyCount() - 1,
                 encrypted: _depositPayload(bob, memo)
             });

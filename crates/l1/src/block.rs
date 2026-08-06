@@ -39,7 +39,7 @@ impl L1BlockDeposits {
                     let decryption_key = encryption_keys.key(d.key_index)?;
 
                     // Attempt full ECIES decryption.
-                    let dec = ecies::decrypt_deposit(
+                    let dec = ecies::decrypt_deposit_with_context(
                         &decryption_key,
                         &d.ephemeral_pubkey_x,
                         d.ephemeral_pubkey_y_parity,
@@ -47,6 +47,8 @@ impl L1BlockDeposits {
                         &d.nonce,
                         &d.tag,
                         portal_address,
+                        d.source_portal,
+                        d.callback_id,
                         d.key_index,
                         d.sender,
                     );

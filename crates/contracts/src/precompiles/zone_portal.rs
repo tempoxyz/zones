@@ -47,6 +47,8 @@ crate::sol! {
             address sender;
             uint128 amount;
             address tempoRefundRecipient;
+            address sourcePortal;
+            bytes32 callbackId;
             uint256 keyIndex;
             DepositPayload encrypted;
         }
@@ -84,6 +86,8 @@ crate::sol! {
             bytes12 nonce,
             bytes16 tag,
             address tempoRefundRecipient,
+            address sourcePortal,
+            bytes32 callbackId,
             uint64 depositNumber
         );
 
@@ -262,6 +266,16 @@ crate::sol! {
             uint256 keyIndex,
             DepositPayload calldata encrypted,
             address tempoRefundRecipient
+        ) external returns (bytes32 newCurrentDepositQueueHash);
+
+        function depositWithContext(
+            address token,
+            uint128 amount,
+            uint256 keyIndex,
+            DepositPayload calldata encrypted,
+            address tempoRefundRecipient,
+            address sourcePortal,
+            bytes32 callbackId
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
         function depositEncrypted(

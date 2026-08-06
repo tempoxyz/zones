@@ -2347,6 +2347,26 @@ impl L1TestNode {
         recipient: Address,
         memo: B256,
     ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
+        self.encrypt_deposit_for_portal_with_context(
+            portal_address,
+            Address::ZERO,
+            B256::ZERO,
+            sender,
+            recipient,
+            memo,
+        )
+        .await
+    }
+
+    pub(crate) async fn encrypt_deposit_for_portal_with_context(
+        &self,
+        portal_address: Address,
+        source_portal: Address,
+        callback_id: B256,
+        sender: Address,
+        recipient: Address,
+        memo: B256,
+    ) -> eyre::Result<(U256, tempo_zone_contracts::DepositPayload)> {
         use tempo_zone_contracts::ZonePortal;
         use zone_precompiles::ecies;
 
@@ -2359,13 +2379,15 @@ impl L1TestNode {
         );
         let key_index = key_count - U256::from(1);
 
-        let enc = ecies::encrypt_deposit(
+        let enc = ecies::encrypt_deposit_with_context(
             &key_result.x,
             key_result.yParity,
             recipient,
             memo,
             sender,
             portal_address,
+            source_portal,
+            callback_id,
             key_index,
         )
         .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
@@ -2771,6 +2793,7 @@ pub(crate) struct WithdrawalArgs {
 pub(crate) struct RouterDepositArgs {
     pub amount: u128,
     pub router: Address,
+    pub source_portal: Address,
     pub token_out: Address,
     pub target_portal: Address,
     pub recipient: Address,
@@ -2788,6 +2811,7 @@ pub(crate) struct RouterCallbackArgs {
     pub encrypted: tempo_zone_contracts::DepositPayload,
     pub tempo_refund_recipient: Address,
     pub min_amount_out: u128,
+    pub callback_id: B256,
 }
 
 impl WithdrawalArgs {
@@ -2809,8 +2833,26 @@ impl WithdrawalArgs {
         l1: &L1TestNode,
         args: RouterDepositArgs,
     ) -> eyre::Result<Self> {
+        let callback_id = keccak256(
+            (
+                args.source_portal,
+                args.router,
+                args.target_portal,
+                args.recipient,
+                args.amount,
+                args.memo,
+            )
+                .abi_encode(),
+        );
         let (key_index, encrypted) = l1
-            .encrypt_deposit_for_portal(args.target_portal, args.router, args.recipient, args.memo)
+            .encrypt_deposit_for_portal_with_context(
+                args.target_portal,
+                args.source_portal,
+                callback_id,
+                args.router,
+                args.recipient,
+                args.memo,
+            )
             .await?;
         Ok(Self::swap_and_deposit_via_router_callback(
             RouterCallbackArgs {
@@ -2822,13 +2864,14 @@ impl WithdrawalArgs {
                 encrypted,
                 tempo_refund_recipient: args.tempo_refund_recipient,
                 min_amount_out: args.min_amount_out,
+                callback_id,
             },
         ))
     }
 
     /// Prepared router callback: optionally swap, then deposit into `target_portal`.
     pub(crate) fn swap_and_deposit_via_router_callback(args: RouterCallbackArgs) -> Self {
-        let callback_data = tempo_zone_contracts::SwapAndDepositRouterCallback {
+        let router_data = tempo_zone_contracts::SwapAndDepositRouterCallback {
             token_out: args.token_out,
             target_portal: args.target_portal,
             key_index: args.key_index,
@@ -2837,6 +2880,7 @@ impl WithdrawalArgs {
             min_amount_out: args.min_amount_out,
         }
         .abi_encode();
+        let callback_data = (args.callback_id, router_data).abi_encode();
 
         Self {
             amount: args.amount,
@@ -2859,6 +2903,7 @@ impl WithdrawalArgs {
         l1: &L1TestNode,
         amount: u128,
         router: Address,
+        source_portal: Address,
         target_portal: Address,
         token: Address,
         recipient: Address,
@@ -2869,6 +2914,7 @@ impl WithdrawalArgs {
             RouterDepositArgs {
                 amount,
                 router,
+                source_portal,
                 token_out: token,
                 target_portal,
                 recipient,
@@ -4734,6 +4780,8 @@ impl L1Fixture {
             amount,
             fee: 0,
             tempo_refund_recipient: sender,
+            source_portal: Address::ZERO,
+            callback_id: B256::ZERO,
             key_index: alloy_primitives::U256::ZERO,
             ephemeral_pubkey_x: B256::ZERO,
             ephemeral_pubkey_y_parity: 0x02,

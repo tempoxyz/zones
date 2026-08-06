@@ -137,6 +137,8 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             amount: 100e6,
             tempoRefundRecipient: address(0x200),
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 0,
             encrypted: DepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(1)),
@@ -164,6 +166,8 @@ contract DepositQueueLibTest is Test {
             tempoRefundRecipient: json.readAddress(
                 string.concat(depositRoot, ".tempoRefundRecipient")
             ),
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: json.readUint(string.concat(depositRoot, ".keyIndex")),
             encrypted: DepositPayload({
                 ephemeralPubkeyX: json.readBytes32(
@@ -195,6 +199,8 @@ contract DepositQueueLibTest is Test {
             sender: address(0x300),
             amount: 200e6,
             tempoRefundRecipient: address(0x300),
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 0,
             encrypted: DepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(1)),
@@ -233,6 +239,8 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             amount: 100e6,
             tempoRefundRecipient: address(0x200),
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: 0,
             encrypted: DepositPayload({
                 ephemeralPubkeyX: bytes32(0),
@@ -290,6 +298,8 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             amount: d.amount,
             tempoRefundRecipient: address(0x300),
+            sourcePortal: address(0),
+            callbackId: bytes32(0),
             keyIndex: uint256(seed),
             encrypted: DepositPayload({
                 ephemeralPubkeyX: seed,

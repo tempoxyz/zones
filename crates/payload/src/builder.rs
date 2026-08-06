@@ -10,7 +10,7 @@ use crate::{
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::Evm;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
@@ -887,6 +887,8 @@ mod tests {
                             sender,
                             amount: 300_000,
                             tempoRefundRecipient: sender,
+                            sourcePortal: Address::ZERO,
+                            callbackId: B256::ZERO,
                             keyIndex: U256::ZERO,
                             encrypted: abi::DepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),

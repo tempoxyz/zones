@@ -99,6 +99,9 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Private fallback recipient lookup used when an L1 withdrawal bounces back
     mapping(uint64 fallbackNonce => address zoneFallbackRecipient) internal _zoneFallbackRecipients;
 
+    /// @notice Source account that owns each callback intent. The owner may retry an intent.
+    mapping(bytes32 callbackId => address owner) internal _callbackIntentOwners;
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -118,6 +121,8 @@ contract ZoneOutbox is IZoneOutbox {
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
     error GasLimitTooHigh();
     error OnlyZoneInbox();
+    error InvalidCallbackIntent();
+    error CallbackIntentOwned(address owner);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -192,7 +197,9 @@ contract ZoneOutbox is IZoneOutbox {
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, "");
+        _requestWithdrawal(
+            token, to, amount, memo, gasLimit, bytes32(0), zoneFallbackRecipient, data, ""
+        );
     }
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -221,7 +228,30 @@ contract ZoneOutbox is IZoneOutbox {
     )
         external
     {
-        _requestWithdrawal(token, to, amount, memo, gasLimit, zoneFallbackRecipient, data, revealTo);
+        _requestWithdrawal(
+            token, to, amount, memo, gasLimit, bytes32(0), zoneFallbackRecipient, data, revealTo
+        );
+    }
+
+    /// @notice Request a gateway withdrawal bound to a source-owned callback intent.
+    /// @dev `data` must be `abi.encode(callbackId, gatewayData)`. The same owner may reuse the
+    ///      intent after a failed callback, while another source account cannot claim it.
+    function requestWithdrawalWithIntent(
+        address token,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        bytes32 callbackId,
+        address zoneFallbackRecipient,
+        bytes calldata data,
+        bytes calldata revealTo
+    )
+        external
+    {
+        _requestWithdrawal(
+            token, to, amount, memo, gasLimit, callbackId, zoneFallbackRecipient, data, revealTo
+        );
     }
 
     /// @notice Shared implementation for withdrawal requests with optional sender reveal
@@ -242,6 +272,7 @@ contract ZoneOutbox is IZoneOutbox {
         uint128 amount,
         bytes32 memo,
         uint64 gasLimit,
+        bytes32 callbackId,
         address zoneFallbackRecipient,
         bytes memory data,
         bytes memory revealTo
@@ -261,6 +292,24 @@ contract ZoneOutbox is IZoneOutbox {
         // Bound callback data before queueing.
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        bool isGatewayCallback = gasLimit > 0 && _isZoneGateway(to);
+        if (isGatewayCallback) {
+            (bytes32 encodedCallbackId,) = abi.decode(data, (bytes32, bytes));
+            if (callbackId == bytes32(0)) callbackId = encodedCallbackId;
+            if (callbackId == bytes32(0) || encodedCallbackId != callbackId) {
+                revert InvalidCallbackIntent();
+            }
+
+            address owner = _callbackIntentOwners[callbackId];
+            if (owner == address(0)) {
+                _callbackIntentOwners[callbackId] = msg.sender;
+            } else if (owner != msg.sender) {
+                revert CallbackIntentOwned(owner);
+            }
+        } else if (callbackId != bytes32(0)) {
+            revert InvalidCallbackIntent();
         }
 
         if (gasLimit == 0) {
