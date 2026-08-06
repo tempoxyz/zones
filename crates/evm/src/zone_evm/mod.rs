@@ -1,6 +1,9 @@
 //! Zone runtime EVM and its private execution policies.
 
 pub(crate) mod contract_creation;
+mod validation;
+
+pub use validation::validate_transaction;
 
 use crate::{
     TempoCtx,
@@ -105,8 +108,7 @@ where
         &mut self,
         tx: TempoTxEnv,
     ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
-        if let Err(err) = contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)
-        {
+        if let Err(err) = validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST) {
             return (Err(EVMError::Transaction(err)), tx);
         }
         let (result, tx) = self.inner.validate_pool_transaction(tx);
@@ -147,7 +149,7 @@ where
         &mut self,
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
-        contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
+        validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
         let tx_hash = match tx.execution_context() {
             ExecutionContext::Transaction { tx_hash } => tx_hash,
             ExecutionContext::Simulation => B256::repeat_byte(0xff),
