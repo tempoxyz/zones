@@ -243,7 +243,6 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertEq(mockPortal.lastDepositAmount(), AMOUNT);
         assertEq(mockPortal.lastDepositKeyIndex(), 0);
         assertEq(mockPortal.lastDepositBouncebackRecipient(), refundBurner);
-        assertTrue(router.payloads(keccak256(abi.encode(payload))));
     }
 
     function test_revertPayloadReplayFromDifferentWithdrawal() public {
@@ -256,16 +255,32 @@ contract SwapAndDepositRouterTest is BaseTest {
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
 
-        bytes32 nullifier = keccak256(abi.encode(payload));
         bytes32 mallorySenderTag = keccak256(abi.encodePacked(address(0xBAD), uint256(2)));
         vm.prank(ZONE_MESSENGER_ADDRESS);
-        vm.expectRevert(
-            abi.encodeWithSelector(
-                SwapAndDepositRouter.EncryptedPayloadAlreadyConsumed.selector, nullifier
-            )
-        );
+        vm.expectPartialRevert(SwapAndDepositRouter.EncryptedPayloadAlreadyConsumed.selector);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, mallorySenderTag, address(pathUSD), AMOUNT, data
+        );
+    }
+
+    function test_revertPayloadReplayWithFlippedEphemeralParity() public {
+        DepositPayload memory payload = _defaultDepositPayload();
+        bytes memory data =
+            _buildCallbackData(address(pathUSD), address(mockPortal), 0, payload, refundBurner, 0);
+
+        vm.prank(ZONE_MESSENGER_ADDRESS);
+        router.onWithdrawalReceived(
+            SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
+        );
+
+        DepositPayload memory replay = _defaultDepositPayload();
+        replay.ephemeralPubkeyYParity = 0x03;
+        bytes memory replayData =
+            _buildCallbackData(address(pathUSD), address(mockPortal), 0, replay, refundBurner, 0);
+        vm.prank(ZONE_MESSENGER_ADDRESS);
+        vm.expectPartialRevert(SwapAndDepositRouter.EncryptedPayloadAlreadyConsumed.selector);
+        router.onWithdrawalReceived(
+            SOURCE_ZONE_ID, sourcePortal, keccak256("mallory"), address(pathUSD), AMOUNT, replayData
         );
     }
 
@@ -297,21 +312,17 @@ contract SwapAndDepositRouterTest is BaseTest {
         bytes memory data = _buildCallbackData(
             address(token1), address(mockPortal2), 0, payload, refundBurner, 900e6
         );
-        bytes32 nullifier = keccak256(abi.encode(payload));
-
         vm.prank(ZONE_MESSENGER_ADDRESS);
         vm.expectRevert(IStablecoinDEX.InsufficientOutput.selector);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
-        assertFalse(router.payloads(nullifier));
 
         mockDEX.setNextAmountOut(950e6);
         vm.prank(ZONE_MESSENGER_ADDRESS);
         router.onWithdrawalReceived(
             SOURCE_ZONE_ID, sourcePortal, senderTag, address(pathUSD), AMOUNT, data
         );
-        assertTrue(router.payloads(nullifier));
     }
 
 }

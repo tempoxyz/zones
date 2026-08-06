@@ -23,7 +23,8 @@ crate::sol! {
 ///
 /// This payload tells the router to optionally swap the withdrawn token on L1 and then call
 /// `ZonePortal.deposit(...)` with an ECIES-encrypted `(recipient, memo)` payload. The router
-/// treats the encrypted payload hash as a nullifier and accepts each payload at most once.
+/// derives a canonical nullifier from the payload, excluding the malleable ephemeral-key parity,
+/// and accepts each effective payload at most once.
 #[derive(Debug, Clone)]
 pub struct SwapAndDepositRouterCallback {
     /// Token that should be deposited after the optional L1 swap.

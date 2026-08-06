@@ -28,8 +28,8 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     IZoneFactory public immutable zoneFactory;
 
     /// @notice Encrypted deposit payloads already forwarded by this router.
-    /// @dev The payload hash acts as a nullifier. A successful callback may consume a payload
-    ///      exactly once, preventing another withdrawal from replaying it through this shared sender.
+    /// @dev The canonical payload hash acts as a nullifier. A successful callback may consume a
+    ///      payload exactly once, preventing replay through this shared sender.
     mapping(bytes32 nullifier => bool consumed) public payloads;
 
     /*//////////////////////////////////////////////////////////////
@@ -96,9 +96,9 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             uint128 minAmountOut
         ) = abi.decode(data, (address, address, uint256, DepositPayload, address, uint128));
 
-        // Zone portals record treat this shared router as the depositor, so sender binding alone
-        // can't distinguish withdrawals. Consume each encrypted payload once to prevent replay.
-        bytes32 nullifier = keccak256(abi.encode(encrypted));
+        // Zone portals treat this shared router as the depositor, so sender binding alone can't
+        // distinguish withdrawals. Consume each encrypted payload once to prevent replay.
+        bytes32 nullifier = _payloadNullifier(encrypted);
         if (payloads[nullifier]) {
             revert EncryptedPayloadAlreadyConsumed(nullifier);
         }
@@ -118,6 +118,16 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /*//////////////////////////////////////////////////////////////
                            INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
+
+    /// @dev Excludes Y parity because P and -P have the same ECDH x-coordinate and AES key,
+    ///      making parity a malleable encoding of the same effective encrypted payload.
+    function _payloadNullifier(DepositPayload memory encrypted) internal pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                encrypted.ephemeralPubkeyX, encrypted.ciphertext, encrypted.nonce, encrypted.tag
+            )
+        );
+    }
 
     /// @notice Validate the target portal is registered and the token is enabled on it
     function _validateTarget(address targetPortal, address tokenOut) internal view {
