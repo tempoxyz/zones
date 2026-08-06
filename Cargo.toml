@@ -9,6 +9,7 @@ publish = false
 members = [
   "bin/prover/utils",
   "bin/prover/vsock-proxy",
+  "bin/tempo-zone-prover",
   "bin/tempo-zone",
   "crates/chainspec",
   "crates/contracts",

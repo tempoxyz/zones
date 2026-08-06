@@ -11811,6 +11811,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-zone-prover"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-primitives",
+ "alloy-rlp",
+ "clap",
+ "libc",
+ "reth-trie-common",
+ "serde",
+ "serde_json",
+ "tempo-chainspec",
+ "tempo-primitives",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "zone-chainspec",
+ "zone-spf",
+]
+
+[[package]]
 name = "tempo-zone-prover-utils"
 version = "0.1.0"
 dependencies = [
