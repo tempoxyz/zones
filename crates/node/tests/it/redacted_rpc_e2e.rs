@@ -8,8 +8,9 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, now_secs, start_zone_with_redacted_rpc,
-    start_zone_with_redacted_rpc_l1, start_zone_with_redacted_rpc_l1_with_encryption,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, approve_outbox, now_secs,
+    start_zone_with_redacted_rpc, start_zone_with_redacted_rpc_l1,
+    start_zone_with_redacted_rpc_l1_with_encryption,
 };
 use alloy::{
     primitives::{Address, B256, TxKind, U256, address, hex},
@@ -39,8 +40,8 @@ use tempo_primitives::{
     transaction::{AASigned, Call, PrimitiveSignature, TempoSignature, TempoTransaction},
 };
 use tempo_zone_contracts::{
-    IZoneInbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
-    ZONE_TOKEN_ADDRESS,
+    IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Unauthorized, ZONE_INBOX_ADDRESS,
+    ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
 };
 use tokio::time::sleep;
 use tokio_tungstenite::{
@@ -1170,6 +1171,104 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
     assert_eq!(
         fill_resp["error"]["message"].as_str().unwrap(),
         "contract creation not supported on zones",
+    );
+
+    Ok(())
+}
+
+/// Withdrawal simulations use explicit simulation context without weakening canonical
+/// execution's transaction-hash requirement.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_withdrawal_simulation_uses_execution_context() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_redacted_rpc().await?;
+    let user_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let user = user_signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(user_signer.clone())
+        .connect_http(ctx.zone.http_url().clone());
+    let outbox = IZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+
+    let withdrawal_amount = 250_000u128;
+    let withdrawal_fee = outbox.calculateWithdrawalFee(0).call().await?;
+    let gas_buffer = u128::from(TIP20_TX_GAS)
+        .checked_add(u128::from(WITHDRAWAL_TX_GAS))
+        .expect("test gas buffer should not overflow");
+    let deposit_amount = withdrawal_amount
+        .checked_add(withdrawal_fee)
+        .and_then(|amount| amount.checked_add(gas_buffer))
+        .expect("test deposit amount should not overflow");
+
+    ctx.inject_deposit(PATH_USD_ADDRESS, user, user, deposit_amount)
+        .await?;
+    approve_outbox(&mut ctx.fixture, &ctx.zone, provider.clone()).await?;
+
+    let request = IZoneOutbox::requestWithdrawalCall {
+        token: PATH_USD_ADDRESS,
+        to: user,
+        amount: withdrawal_amount,
+        memo: B256::ZERO,
+        gasLimit: 0,
+        zoneFallbackRecipient: user,
+        data: Default::default(),
+        revealTo: Default::default(),
+    };
+    let params = json!([
+        {
+            "from": format!("{user:#x}"),
+            "to": format!("{ZONE_OUTBOX_ADDRESS:#x}"),
+            "data": format!("0x{}", hex::encode(request.abi_encode())),
+        },
+        "latest"
+    ]);
+
+    let call_response = ctx
+        .call_as_user("eth_call", params.clone(), &user_signer)
+        .await?;
+    assert_eq!(
+        call_response["result"].as_str(),
+        Some("0x"),
+        "withdrawal eth_call should succeed: {call_response}"
+    );
+
+    let estimate_response = ctx
+        .call_as_user("eth_estimateGas", params, &user_signer)
+        .await?;
+    let estimated_gas_hex = estimate_response["result"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("withdrawal gas estimate failed: {estimate_response}"))?;
+    let estimated_gas = u64::from_str_radix(
+        estimated_gas_hex
+            .strip_prefix("0x")
+            .unwrap_or(estimated_gas_hex),
+        16,
+    )?;
+    assert!(estimated_gas > 0, "gas estimate should be non-zero");
+
+    let pending = outbox
+        .requestWithdrawal(
+            PATH_USD_ADDRESS,
+            user,
+            withdrawal_amount,
+            B256::ZERO,
+            0,
+            user,
+            Default::default(),
+            Default::default(),
+        )
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(estimated_gas)
+        .send()
+        .await?;
+    ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
+    let receipt = pending.get_receipt().await?;
+    assert!(
+        receipt.status(),
+        "withdrawal should succeed with the estimated gas limit ({estimated_gas}); receipt used {} gas",
+        receipt.gas_used
     );
 
     Ok(())

@@ -6,7 +6,7 @@ mod tests;
 
 use alloc::vec::Vec;
 
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::SolCall;
 use tempo_precompiles::{
     Result as TempoResult,
@@ -31,6 +31,15 @@ use crate::{
 
 const MAX_CALLBACK_DATA_SIZE: usize = 1024;
 const WITHDRAWAL_BASE_GAS: u64 = 50_000;
+
+/// Execution context required by authenticated withdrawals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WithdrawalExecutionContext {
+    /// A canonical transaction with its signed hash and effective fee payer.
+    Transaction { tx_hash: B256, fee_payer: Address },
+    /// A non-committing simulation with no canonical transaction hash.
+    Simulation { fee_payer: Address },
+}
 
 /// Returns whether `calldata` is a canonical `finalizeWithdrawalBatch` call.
 pub fn is_finalize_withdrawal_batch_calldata(calldata: &[u8]) -> bool {
@@ -160,8 +169,7 @@ impl ZoneOutbox {
         &mut self,
         l1: &L1State<P>,
         caller: Address,
-        fee_payer: Address,
-        current_tx_hash: B256,
+        execution_context: Option<WithdrawalExecutionContext>,
         call: IZoneOutbox::requestWithdrawalCall,
     ) -> ZoneResult<()> {
         if call.zoneFallbackRecipient.is_zero() {
@@ -176,9 +184,26 @@ impl ZoneOutbox {
 
         validate_gas_limit(call.gasLimit)?;
 
-        if current_tx_hash.is_zero() {
-            return Err(ZoneOutboxError::invalid_current_tx_hash().into());
-        }
+        let (current_tx_hash, fee_payer) = match execution_context {
+            Some(WithdrawalExecutionContext::Transaction { tx_hash, fee_payer })
+                if !tx_hash.is_zero() =>
+            {
+                (tx_hash, fee_payer)
+            }
+            Some(WithdrawalExecutionContext::Simulation { fee_payer }) => {
+                // A simulation has no canonical transaction hash, but its discarded storage must
+                // still model the real transaction's zero-to-nonzero SSTORE so gas estimation is
+                // sufficient. This request-derived digest is only ephemeral data; the semantic
+                // context, never the digest value, identifies and authorizes simulation.
+                let mut simulation_request = Vec::with_capacity(20 + call.abi_encoded_size());
+                simulation_request.extend_from_slice(caller.as_slice());
+                simulation_request.extend_from_slice(&call.abi_encode());
+                (keccak256(simulation_request), fee_payer)
+            }
+            Some(WithdrawalExecutionContext::Transaction { .. }) | None => {
+                return Err(ZoneOutboxError::invalid_current_tx_hash().into());
+            }
+        };
         let mut zone_token = TIP20Token::from_address(call.token)?;
         if !zone_token.is_initialized()? {
             return Err(TempoPrecompileError::from(TIP20Error::uninitialized()).into());

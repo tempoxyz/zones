@@ -116,6 +116,15 @@ impl Harness {
         self.call_inner(caller, caller, data, true, false)
     }
 
+    #[rustfmt::skip]
+    fn call_simulation(&mut self, caller: Address, data: impl AsRef<[u8]>) -> PrecompileResult {
+        let _guard = tx_context::set_simulation_if_unset(caller)
+            .expect("test simulation context should be installed");
+        call_precompile(
+            &mut self.ctx, &self.precompile, caller, data.as_ref(), GAS, false, ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_ADDRESS
+        )
+    }
+
     fn call_with_fee_payer(
         &mut self,
         caller: Address,
@@ -342,6 +351,35 @@ fn request_withdrawal_rejects_missing_transaction_hash() -> eyre::Result<()> {
     assert!(
         harness.l1.storage_requests().is_empty(),
         "missing transaction context must be rejected before portal reads"
+    );
+    Ok(())
+}
+
+#[test]
+fn request_withdrawal_accepts_explicit_simulation_context() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let token = harness.token;
+    let call = ZoneOutboxAbi::requestWithdrawalCall {
+        token,
+        to: BOB,
+        amount: 1,
+        memo: B256::ZERO,
+        gasLimit: 0,
+        zoneFallbackRecipient: ALICE,
+        data: Bytes::new(),
+        revealTo: Bytes::new(),
+    };
+    let calldata = call.abi_encode();
+    let result = harness.call_simulation(ALICE, &calldata);
+
+    assert!(!result.expect("simulation precompile call").is_revert());
+    let mut simulation_request = Vec::with_capacity(20 + calldata.len());
+    simulation_request.extend_from_slice(ALICE.as_slice());
+    simulation_request.extend_from_slice(&calldata);
+    assert_eq!(
+        harness.pending()?[0].txHash,
+        keccak256(simulation_request),
+        "discarded simulation state should use a request-derived digest"
     );
     Ok(())
 }
