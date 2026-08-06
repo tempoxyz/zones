@@ -509,6 +509,8 @@ contract ZonePortalTest is BaseTest {
     uint256 internal constant SIGNER_A_KEY = 2;
     uint256 internal constant SIGNER_B_KEY = 3;
     uint256 internal constant SIGNER_C_KEY = 1;
+    uint64 internal constant REJECT_ALL_POLICY_ID = 0;
+    uint64 internal constant ALLOW_ALL_POLICY_ID = 1;
 
     ZonePortal public portal;
     ZoneMessenger public messenger;
@@ -1633,8 +1635,8 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(portal)), amount1 + amount2);
     }
 
-    function test_deposit_enforcesPerTempoBlockCapAcrossDepositTypes() public {
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+    function test_deposit_enforcesUnprocessedQueueCapAcrossDepositTypes() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
         uint64 maximumPublicDeposits = maximum - 20;
         assertEq(maximum, 230);
         _setEncKeyWithPoP(ENC_KEY_1);
@@ -1654,7 +1656,7 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         _deposit(portal, address(pathUSD), bob, amount, bytes32("over cap"), bob);
@@ -1664,14 +1666,70 @@ contract ZonePortalTest is BaseTest {
         assertEq(pathUSD.balanceOf(alice), aliceBalanceAtCapacity);
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceAtCapacity);
 
+        // Advancing the L1 block does not reduce the unprocessed queue.
         vm.roll(block.number + 1);
-        _deposit(portal, address(pathUSD), bob, amount, bytes32("next block"), bob);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("same batch"), bob);
         vm.stopPrank();
+
+        // A stale batch that processes no deposits does not reopen capacity.
+        vm.prank(sequencer);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("batch")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            bytes32(0),
+            "",
+            ""
+        );
+        vm.prank(alice);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
+            )
+        );
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("stale batch"), bob);
+
+        // Processing the queued deposits reopens exactly that much capacity.
+        vm.roll(block.number + 1);
+        vm.prank(sequencer);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("processing batch")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: queueHashAtCapacity,
+                prevDepositNumber: 0,
+                nextDepositNumber: maximumPublicDeposits
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+        vm.prank(alice);
+        _deposit(portal, address(pathUSD), bob, amount, bytes32("after processing"), bob);
 
         assertEq(portal.depositCount(), maximumPublicDeposits + 1);
     }
 
-    function test_withdrawalBounceBack_usesReservedBatchCapacityWithoutBlockingQueue() public {
+    function test_withdrawalBounceBack_usesReservedQueueCapacityWithoutBlockingQueue() public {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
         _deposit(portal, address(pathUSD), alice, 1000e6, bytes32("escrow"), alice);
@@ -1715,7 +1773,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        uint64 maximum = portal.MAX_DEPOSITS_PER_TEMPO_BLOCK();
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
         uint64 maximumPublicDeposits = maximum - uint64(reserve);
         vm.startPrank(alice);
         pathUSD.approve(address(portal), maximum);
@@ -1735,11 +1793,63 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(
             abi.encodeWithSelector(
-                IZonePortal.DepositBlockCapacityExceeded.selector, maximumPublicDeposits
+                IZonePortal.DepositQueueCapacityExceeded.selector, maximumPublicDeposits
             )
         );
         vm.prank(alice);
         _deposit(portal, address(pathUSD), bob, 1, bytes32("reserved"), bob);
+    }
+
+    function test_processWithdrawals_rejectsBatchAboveRemainingDepositCapacity() public {
+        uint64 maximum = portal.MAX_UNPROCESSED_DEPOSITS();
+        uint64 publicDepositLimit = maximum - 20;
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), publicDepositLimit);
+        for (uint256 i; i < publicDepositLimit; ++i) {
+            _deposit(portal, address(pathUSD), bob, 1, bytes32(i), bob);
+        }
+        vm.stopPrank();
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, 1, bytes32("capacity"), 0, alice, "");
+        uint256 attempted = 21;
+        Withdrawal[] memory withdrawals = new Withdrawal[](attempted);
+        bytes32 withdrawalHash = EMPTY_SENTINEL;
+        for (uint256 i = attempted; i > 0; --i) {
+            withdrawals[i - 1] = withdrawal;
+            withdrawalHash = keccak256(abi.encode(withdrawal, withdrawalHash));
+        }
+
+        vm.roll(block.number + 1);
+        _submitBatch(
+            portal,
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("capacity batch")
+            }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            withdrawalHash,
+            "",
+            ""
+        );
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                IZonePortal.WithdrawalBatchCapacityExceeded.selector, attempted, uint64(20)
+            )
+        );
+        portal.processWithdrawals(withdrawals, bytes32(0));
+
+        assertEq(portal.withdrawalQueueHead(), 0);
+        assertEq(portal.withdrawalQueueSlot(0), withdrawalHash);
     }
 
     function test_deposit_hashChainStructure() public {
@@ -3605,6 +3715,49 @@ contract ZonePortalTest is BaseTest {
         assertEq(successfulReceiver.callCount(), callCountBefore);
     }
 
+    function test_withdrawal_receivePolicyBlocked_enqueuesBounceBack() public {
+        uint128 amount = 500e6;
+        address master = 0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266;
+        bytes32 salt = bytes32(uint256(0xabf52baf));
+
+        vm.prank(master);
+        bytes4 masterId = StdPrecompiles.ADDRESS_REGISTRY.registerVirtualMaster(salt);
+        address virtualRecipient = address(
+            bytes20(abi.encodePacked(masterId, bytes10(type(uint80).max), bytes6(uint48(1))))
+        );
+
+        _fundCallbackWithdrawal(amount * 2);
+
+        vm.prank(master);
+        registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+
+        address[2] memory recipients = [master, virtualRecipient];
+        for (uint256 i; i < recipients.length; ++i) {
+            Withdrawal memory withdrawal = _withdrawal(
+                address(pathUSD), alice, recipients[i], amount, bytes32(0), 0, alice, ""
+            );
+            _enqueueWithdrawal(withdrawal);
+
+            uint256 masterBalanceBefore = pathUSD.balanceOf(master);
+            uint256 guardBalanceBefore =
+                pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
+            uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
+            bytes32 depositHashBefore = portal.currentDepositQueueHash();
+            uint64 depositCountBefore = portal.depositCount();
+
+            portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+            assertEq(pathUSD.balanceOf(master), masterBalanceBefore);
+            assertEq(
+                pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore
+            );
+            assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore);
+            assertEq(portal.depositCount(), depositCountBefore + 1);
+            assertNotEq(portal.currentDepositQueueHash(), depositHashBefore);
+            assertEq(portal.withdrawalQueueHead(), portal.withdrawalQueueTail());
+        }
+    }
+
     function test_withdrawal_nonZeroGasLimit_callbackExecuted() public {
         _openPortalModes();
 
@@ -4898,6 +5051,44 @@ contract ZonePortalTest is BaseTest {
         assertEq(claimed, w.amount);
         assertEq(portal.refunds(address(pathUSD), bob), 0);
         assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + w.amount);
+    }
+
+    function test_depositBounceBack_receivePolicyBlocked_parksAndPreservesRefund() public {
+        vm.fee(0);
+        uint128 amount = 250e6;
+        _fundCallbackWithdrawal(amount);
+
+        Withdrawal memory withdrawal =
+            _withdrawal(address(pathUSD), alice, bob, amount, bytes32(0), 0, address(0), "");
+        _enqueueWithdrawal(withdrawal);
+
+        vm.prank(bob);
+        registry.setReceivePolicy(REJECT_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        uint256 guardBalanceBefore = pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS);
+
+        portal.processWithdrawals(_singleWithdrawal(withdrawal), bytes32(0));
+
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore);
+        assertEq(portal.refunds(address(pathUSD), bob), amount);
+
+        vm.prank(bob);
+        vm.expectRevert(IZonePortal.CallbackRejected.selector);
+        portal.claimRefund(address(pathUSD));
+
+        assertEq(portal.refunds(address(pathUSD), bob), amount);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore);
+        assertEq(pathUSD.balanceOf(StdPrecompiles.RECEIVE_POLICY_GUARD_ADDRESS), guardBalanceBefore);
+
+        vm.prank(bob);
+        registry.setReceivePolicy(ALLOW_ALL_POLICY_ID, ALLOW_ALL_POLICY_ID, address(0));
+        vm.prank(bob);
+        assertEq(portal.claimRefund(address(pathUSD)), amount);
+
+        assertEq(portal.refunds(address(pathUSD), bob), 0);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + amount);
     }
 
     /// @notice Submitting a batch reverts once the withdrawal queue is full.

@@ -87,7 +87,8 @@ contract ZoneOutboxTest is Test {
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence)));
+        return
+            keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence), uint64(txSequence)));
     }
 
     function _setModes(bool accessMode, bool gatewayMode) internal {

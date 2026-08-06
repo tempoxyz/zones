@@ -7,12 +7,12 @@ use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::PrecompileResult;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS,
+    PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS, TIP403_REGISTRY_ADDRESS,
     receive_policy_guard::ReceivePolicyGuard,
     storage::{ContractStorage, Handler, StorageCtx},
     test_util::TIP20Setup,
     tip20::{ITIP20, TIP20Token},
-    tip403_registry::{REJECT_ALL_POLICY_ID, TIP403Registry},
+    tip403_registry::{ALLOW_ALL_POLICY_ID, ITIP403Registry, REJECT_ALL_POLICY_ID, TIP403Registry},
     zone_factory::{ZonePortalStorage, zone_portal_slots},
 };
 use tempo_primitives::TempoHeader;
@@ -650,6 +650,89 @@ fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result
             .storage_requests()
             .contains(&(portal, B256::from(slot_x.to_be_bytes()), 1))
     );
+    Ok(())
+}
+
+#[test]
+fn receive_policy_blocked_deposit_enqueues_bounce_back() -> eyre::Result<()> {
+    let mut harness = Harness::new()?;
+    let fixture = EncryptedDepositFixture::new();
+    let decrypted = fixture.decrypt().expect("fixture decrypts");
+    let info = crate::ecies::hkdf_info(&PORTAL, &fixture.key_index, &fixture.eph_pub_x);
+    let key = crate::ecies::hkdf_sha256(&decrypted.proof.shared_secret.0, b"ecies-aes-key", &info);
+    let plaintext = build_plaintext(&fixture.to, &fixture.memo);
+    let (ciphertext, nonce, tag) = encrypt_plaintext(&key, &plaintext);
+    let (sequencer_x, sequencer_y_parity) = compressed_x_and_parity(&fixture.seq_pub);
+
+    let base: U256 = keccak256(B256::from(zone_portal_slots::ENCRYPTION_KEYS)).into();
+    let slot_x = base + fixture.key_index * U256::from(2);
+    harness
+        .l1
+        .insert(PORTAL, slot_x, 1, U256::from_be_bytes(sequencer_x.0));
+    harness.l1.insert(
+        PORTAL,
+        slot_x + U256::ONE,
+        1,
+        U256::from(sequencer_y_parity),
+    );
+
+    let mut storage = test_storage_provider(&mut harness.ctx, u64::MAX, false);
+    StorageCtx::enter(&mut storage, || {
+        TIP403Registry::new().set_receive_policy(
+            fixture.to,
+            ITIP403Registry::setReceivePolicyCall {
+                senderPolicyId: REJECT_ALL_POLICY_ID,
+                tokenFilterId: ALLOW_ALL_POLICY_ID,
+                recoveryAuthority: Address::ZERO,
+            },
+        )
+    })?;
+    drop(storage);
+
+    let deposit = Deposit {
+        token: PATH_USD_ADDRESS,
+        sender: ALICE,
+        amount: 500,
+        tempoRefundRecipient: ALICE,
+        keyIndex: fixture.key_index,
+        encrypted: tempo_zone_contracts::DepositPayload {
+            ephemeralPubkeyX: fixture.eph_pub_x,
+            ephemeralPubkeyYParity: fixture.eph_pub_y_parity,
+            ciphertext: ciphertext.into(),
+            nonce: nonce.into(),
+            tag: tag.into(),
+        },
+    };
+    let expected_hash =
+        keccak256((DepositType::Deposit, deposit.clone(), B256::ZERO).abi_encode_params());
+    harness.set_queue_hash(expected_hash);
+
+    harness.call(
+        Address::ZERO,
+        harness
+            .advance_call(
+                vec![QueuedDeposit {
+                    depositType: DepositType::Deposit,
+                    depositData: deposit.abi_encode().into(),
+                }],
+                vec![DecryptionData {
+                    sharedSecret: decrypted.proof.shared_secret,
+                    sharedSecretYParity: decrypted.proof.shared_secret_y_parity,
+                    cpProof: tempo_zone_contracts::ChaumPedersenProof {
+                        s: decrypted.proof.cp_proof_s,
+                        c: decrypted.proof.cp_proof_c,
+                    },
+                }],
+            )
+            .abi_encode(),
+    )?;
+
+    assert_eq!(harness.balance(PATH_USD_ADDRESS, fixture.to)?, U256::ZERO);
+    assert_eq!(
+        harness.balance(PATH_USD_ADDRESS, RECEIVE_POLICY_GUARD_ADDRESS)?,
+        U256::ZERO
+    );
+    harness.assert_single_bounce_back(PATH_USD_ADDRESS, 500, ALICE)?;
     Ok(())
 }
 

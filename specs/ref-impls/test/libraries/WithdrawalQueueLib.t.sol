@@ -127,6 +127,15 @@ contract WithdrawalQueueLibTest is Test {
         assertFalse(harness.hasWithdrawals());
     }
 
+    function test_enqueue_revertsForEmptySentinel() public {
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        harness.enqueue(EMPTY_SENTINEL);
+
+        assertEq(harness.head(), 0);
+        assertEq(harness.tail(), 0);
+        assertFalse(harness.hasWithdrawals());
+    }
+
     function test_enqueue_mixedEmptyAndNonEmpty() public {
         bytes32 h1 = keccak256("batch1");
         bytes32 h2 = keccak256("batch2");

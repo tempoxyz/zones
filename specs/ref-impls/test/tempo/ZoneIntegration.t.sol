@@ -297,11 +297,13 @@ contract ZoneIntegrationTest is BaseTest {
 
         QueuedDeposit[] memory queuedDeposits = _wrapDeposits(deposits);
         vm.prank(address(0));
-        l2Inbox.advanceTempo("", queuedDeposits, decryptions, new EnabledToken[](0));
+        l2Inbox.advanceTempo(new bytes[](1), queuedDeposits, decryptions, new EnabledToken[](0));
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(sender, zoneTxContext.txHashFor(txSequence)));
+        return keccak256(
+            abi.encodePacked(sender, zoneTxContext.txHashFor(txSequence), uint64(txSequence))
+        );
     }
 
     function _withdrawal(

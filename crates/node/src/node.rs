@@ -14,8 +14,8 @@ use crate::{
         run_role_controller,
     },
     rpc::{
-        OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneRpc, ZoneRpcApi,
-        operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
+        OperatorZoneApi, SequencerRpcContext, ZoneApiServer as _, ZoneDebugApi, ZoneRpc,
+        ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
 use alloy_primitives::{Address, U256};
@@ -85,6 +85,7 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
+use zone_rpc::ZoneDebugApiServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, WithdrawalBatchLimits, ZoneSequencerConfig,
     attestation::AttestationDomain, spawn_zone_sequencer,
@@ -117,8 +118,8 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 /// The encrypted sender payload is hashed into withdrawal data, so ECIES must
 /// not use fresh randomness here. This implementation derives reproducible
 /// encryption material from the sequencer encryption key, zone id, reveal key,
-/// sender, and withdrawal transaction hash, which keeps identical withdrawal
-/// batches byte-for-byte stable across sequencers.
+/// sender, withdrawal transaction hash, and fallback nonce, which keeps identical
+/// withdrawal batches byte-for-byte stable across sequencers.
 struct SequencerWithdrawalRevealEncryptor {
     encryption_key: Arc<SecretKey>,
     zone_id: u32,
@@ -147,6 +148,7 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
         reveal_to: &[u8],
         sender: Address,
         tx_hash: alloy_primitives::B256,
+        fallback_nonce: u64,
     ) -> Option<Vec<u8>> {
         zone_precompiles::ecies::encrypt_authenticated_withdrawal_deterministic(
             &self.encryption_key,
@@ -154,6 +156,7 @@ impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
             reveal_to,
             sender,
             tx_hash,
+            fallback_nonce,
         )
     }
 }
@@ -505,7 +508,14 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<
+            N,
+            EthApi: reth_rpc_eth_api::helpers::FullEthApi<
+                Evm = ZoneEvmConfig,
+                Primitives = TempoPrimitives,
+                NetworkTypes = TempoNetwork,
+            >,
+        >,
 {
     type Handle = <RpcAddOns<
         N,
@@ -699,6 +709,9 @@ where
                 container
                     .modules
                     .merge_configured(operator_zone_api.into_rpc())?;
+                container.modules.merge_configured(
+                    ZoneDebugApi::new(container.registry.eth_api().clone()).into_rpc(),
+                )?;
                 container.modules.merge_http(operator_zone_rpc_module(
                     portal_address,
                     operator_rpc_slot,
@@ -982,7 +995,14 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<
+            N,
+            EthApi: reth_rpc_eth_api::helpers::FullEthApi<
+                Evm = ZoneEvmConfig,
+                Primitives = TempoPrimitives,
+                NetworkTypes = TempoNetwork,
+            >,
+        >,
 {
     /// Start the Commonware network and the long-lived P2P event demultiplexer.
     ///
@@ -1333,8 +1353,14 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    TempoEthApiBuilder<N>:
-        EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<
+            N,
+            EthApi: reth_rpc_eth_api::helpers::FullEthApi<
+                Evm = ZoneEvmConfig,
+                Primitives = TempoPrimitives,
+                NetworkTypes = TempoNetwork,
+            >,
+        >,
 {
     type EthApi = <TempoEthApiBuilder<N> as EthApiBuilder<N>>::EthApi;
 

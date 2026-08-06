@@ -109,7 +109,7 @@ contract ZoneInboxTest is Test {
 
     function _advanceTempo(WithdrawalBounceBackDeposit[] memory deposits) internal {
         inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+            new bytes[](1), _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
     }
 
@@ -121,7 +121,7 @@ contract ZoneInboxTest is Test {
         vm.prank(alice);
         vm.expectRevert(IZoneInbox.OnlySequencer.selector);
         inbox.advanceTempo(
-            "", new QueuedDeposit[](0), new DecryptionData[](0), new EnabledToken[](0)
+            new bytes[](1), new QueuedDeposit[](0), new DecryptionData[](0), new EnabledToken[](0)
         );
     }
 
@@ -138,6 +138,140 @@ contract ZoneInboxTest is Test {
 
         // State should remain at bytes32(0)
         assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+    }
+
+    function test_advanceTempo_singleDeposit() public {
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(bob, bytes32("payment"));
+        (QueuedDeposit memory qd, Deposit memory deposit) = _makeDeposit(alice, 1000e6, 0);
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Deposit, deposit, bytes32(0)));
+
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
+        );
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+        vm.prank(sequencer);
+        inbox.advanceTempo(new bytes[](1), deposits, _makeDecryptions(1), new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), expectedHash);
+        assertEq(zoneToken.balanceOf(bob), 1000e6);
+    }
+
+    function test_advanceTempo_multipleDeposits() public {
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(bob, bytes32("payment"));
+        (QueuedDeposit memory qd1, Deposit memory deposit1) = _makeDeposit(alice, 100e6, 0);
+        (QueuedDeposit memory qd2, Deposit memory deposit2) = _makeDeposit(bob, 200e6, 0);
+        (QueuedDeposit memory qd3, Deposit memory deposit3) = _makeDeposit(alice, 300e6, 0);
+        bytes32 h1 = keccak256(abi.encode(DepositType.Deposit, deposit1, bytes32(0)));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Deposit, deposit2, h1));
+        bytes32 h3 = keccak256(abi.encode(DepositType.Deposit, deposit3, h2));
+
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h3);
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](3);
+        deposits[0] = qd1;
+        deposits[1] = qd2;
+        deposits[2] = qd3;
+        vm.prank(sequencer);
+        inbox.advanceTempo(new bytes[](1), deposits, _makeDecryptions(3), new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), h3);
+        assertEq(zoneToken.balanceOf(bob), 600e6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    HASH CHAIN VALIDATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_advanceTempo_revertsForHashMismatchAndRollsBack() public {
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(bob, bytes32("payment"));
+        (QueuedDeposit memory qd,) = _makeDeposit(alice, 1000e6, 0);
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        // Set a different hash (simulating more deposits pending on Tempo)
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("moreDepositsPending")
+        );
+
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
+        vm.prank(sequencer);
+        inbox.advanceTempo(new bytes[](1), deposits, _makeDecryptions(1), new EnabledToken[](0));
+
+        // The mismatch reverts the whole call, including the checkpoint and mint.
+        assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+        assertEq(zoneToken.balanceOf(bob), 0);
+        assertEq(tempoState.tempoBlockNumber(), GENESIS_TEMPO_BLOCK_NUMBER);
+        assertEq(tempoState.tempoBlockHash(), GENESIS_TEMPO_BLOCK_HASH);
+    }
+
+    function test_advanceTempo_revertsForPartialProcessingAndRollsBack() public {
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(bob, bytes32("payment"));
+        (QueuedDeposit memory qd1, Deposit memory deposit1) = _makeDeposit(alice, 100e6, 0);
+        (QueuedDeposit memory qd2, Deposit memory deposit2) = _makeDeposit(bob, 200e6, 0);
+
+        // Set hash to be for both deposits
+        bytes32 h1 = keccak256(abi.encode(DepositType.Deposit, deposit1, bytes32(0)));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Deposit, deposit2, h1));
+
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
+
+        // Process only one deposit — the final queue hash does not match, so the call reverts.
+        QueuedDeposit[] memory oneDeposit = new QueuedDeposit[](1);
+        oneDeposit[0] = qd1;
+
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
+        vm.prank(sequencer);
+        inbox.advanceTempo(new bytes[](1), oneDeposit, _makeDecryptions(1), new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), bytes32(0));
+        assertEq(zoneToken.balanceOf(alice), 0);
+        assertEq(tempoState.tempoBlockNumber(), GENESIS_TEMPO_BLOCK_NUMBER);
+        assertEq(tempoState.tempoBlockHash(), GENESIS_TEMPO_BLOCK_HASH);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                        INCREMENTAL PROCESSING TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_advanceTempo_incrementalProcessing() public {
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(bob, bytes32("payment"));
+        (QueuedDeposit memory qd1, Deposit memory deposit1) = _makeDeposit(alice, 100e6, 0);
+        (QueuedDeposit memory qd2, Deposit memory deposit2) = _makeDeposit(bob, 200e6, 0);
+
+        bytes32 h1 = keccak256(abi.encode(DepositType.Deposit, deposit1, bytes32(0)));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Deposit, deposit2, h1));
+
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
+
+        QueuedDeposit[] memory batch1 = new QueuedDeposit[](2);
+        batch1[0] = qd1;
+        batch1[1] = qd2;
+        vm.prank(sequencer);
+        inbox.advanceTempo(new bytes[](1), batch1, _makeDecryptions(2), new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), h2);
+
+        // Second batch of deposits
+        (QueuedDeposit memory qd3, Deposit memory deposit3) = _makeDeposit(alice, 500e6, 0);
+
+        bytes32 h3 = keccak256(abi.encode(DepositType.Deposit, deposit3, h2));
+
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h3);
+
+        QueuedDeposit[] memory batch2 = new QueuedDeposit[](1);
+        batch2[0] = qd3;
+        vm.prank(sequencer);
+        inbox.advanceTempo(new bytes[](1), batch2, _makeDecryptions(1), new EnabledToken[](0));
+
+        assertEq(inbox.processedDepositQueueHash(), h3);
+        assertEq(zoneToken.balanceOf(bob), 800e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -295,6 +429,17 @@ contract ZoneInboxTest is Test {
         });
     }
 
+    function _makeDecryptions(uint256 count) internal pure returns (DecryptionData[] memory decs) {
+        decs = new DecryptionData[](count);
+        for (uint256 i; i < count; ++i) {
+            decs[i] = DecryptionData({
+                sharedSecret: bytes32(uint256(0xdeadbeef)),
+                sharedSecretYParity: 0x02,
+                cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            });
+        }
+    }
+
     /// @notice Set up precompile mocks for successful encrypted deposit processing
     function _setupPrecompileMocks(address recipient, bytes32 memo) internal {
         // Deploy dummy code so high-level Solidity calls pass extcodesize check
@@ -351,7 +496,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Verify minting to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), amount);
@@ -401,7 +546,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Invalid encrypted deposits bounce to Tempo via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0);
@@ -455,7 +600,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // Withdrawal bounce-back: bob gets 100e6.
         // Encrypted deposit: recipient gets 200e6
@@ -483,7 +628,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.MissingDecryptionData.selector);
-        inbox.advanceTempo("", deposits, emptyDecs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, emptyDecs, new EnabledToken[](0));
     }
 
     function test_advanceTempo_extraDecryptionData() public {
@@ -499,7 +644,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.ExtraDecryptionData.selector);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -524,10 +669,11 @@ contract ZoneInboxTest is Test {
         );
 
         // Build encrypted deposit
-        (QueuedDeposit memory qd,) = _makeDeposit(alice, amount, 0);
+        (QueuedDeposit memory qd, Deposit memory deposit) = _makeDeposit(alice, amount, 0);
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Deposit, deposit, bytes32(0)));
 
         tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
         );
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
@@ -541,7 +687,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
         assertEq(zoneToken.balanceOf(alice), 0);
     }
 
@@ -617,7 +763,7 @@ contract ZoneInboxTest is Test {
             _setupDepositWithPlaintext(shortPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // WithdrawalBounceBackDeposit should bounce via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0, "sender should not receive a zone mint");
@@ -640,7 +786,7 @@ contract ZoneInboxTest is Test {
             _setupDepositWithPlaintext(longPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // WithdrawalBounceBackDeposit should bounce via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0, "sender should not receive a zone mint");
@@ -658,7 +804,7 @@ contract ZoneInboxTest is Test {
             _setupDepositWithPlaintext(emptyPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // WithdrawalBounceBackDeposit should bounce via the outbox; no zone mint is attempted.
         assertEq(zoneToken.balanceOf(alice), 0, "sender should not receive a zone mint");
@@ -677,7 +823,7 @@ contract ZoneInboxTest is Test {
             _setupDepositWithPlaintext(correctPlaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         // WithdrawalBounceBackDeposit should succeed — minted to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
@@ -693,7 +839,7 @@ contract ZoneInboxTest is Test {
             _setupDepositWithPlaintext(plaintext, true);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         assertEq(zoneToken.balanceOf(outsider), 1000e6);
         assertEq(zoneToken.balanceOf(alice), 0);
@@ -706,7 +852,7 @@ contract ZoneInboxTest is Test {
     )
         internal
     {
-        inbox.advanceTempo("", deposits, decryptions, enabledTokens);
+        inbox.advanceTempo(new bytes[](1), deposits, decryptions, enabledTokens);
     }
 
     function _mockTokenActivation(address token) internal {
@@ -878,7 +1024,7 @@ contract ZoneInboxTest is Test {
         );
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+        inbox.advanceTempo(new bytes[](1), deposits, decs, new EnabledToken[](0));
 
         vm.prank(encryptedRecipient);
         uint128 encryptedRecipientRefunds = inbox.refunds(address(zoneToken), encryptedRecipient);

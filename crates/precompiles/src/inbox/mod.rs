@@ -25,7 +25,7 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS,
     error::TempoPrecompileError,
     storage::{Handler, Mapping, Slot, StorageCtx},
-    tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
+    tip20::{ISSUER_ROLE, ITIP20, TIP20Error, TIP20Token},
     tip403_registry::TIP403Registry,
 };
 use tempo_precompiles_macros::contract;
@@ -255,38 +255,52 @@ impl ZoneInbox {
     /// Mint with Solidity `try/catch` semantics: ordinary reverts are caught while fatal and
     /// out-of-gas failures abort the outer Inbox call.
     fn try_mint(&mut self, token: Address, to: Address, amount: u128) -> ZoneResult<bool> {
-        let checkpoint = self.storage.checkpoint();
-        let result = TIP20Token::from_address(token).and_then(|mut token| {
-            token.mint(
-                ZONE_INBOX_ADDRESS,
-                ITIP20::mintCall {
-                    to,
-                    amount: U256::from(amount),
-                },
-            )
-        });
-        match result {
-            Ok(()) => {
-                checkpoint.commit();
-                Ok(true)
+        let ensure_logic_err = |err: TempoPrecompileError| {
+            if err.is_system_error() {
+                Err(err)
+            } else {
+                Ok(false)
             }
-            Err(error @ (TempoPrecompileError::Fatal(_) | TempoPrecompileError::OutOfGas)) => {
-                Err(error.into())
-            }
-            Err(_) => Ok(false),
+        };
+
+        // TODO: Resolve virtual addresses through `AddressRegistry`precompile once it activates.
+        let can_receive = TIP403Registry::new()
+            .validate_receive_policy(token, ZONE_INBOX_ADDRESS, to)
+            .map(|reason| reason.is_none())
+            .or_else(ensure_logic_err)?;
+
+        if !can_receive {
+            return Ok(false);
         }
+
+        let checkpoint = self.storage.checkpoint();
+        let success = TIP20Token::from_address(token)
+            .and_then(|mut token| {
+                token.mint(
+                    ZONE_INBOX_ADDRESS,
+                    ITIP20::mintCall {
+                        to,
+                        amount: U256::from(amount),
+                    },
+                )
+            })
+            .map(|_| true)
+            .or_else(ensure_logic_err)?;
+
+        if success {
+            checkpoint.commit();
+        }
+
+        Ok(success)
     }
 
     fn claim_refund(&mut self, caller: Address, token: Address) -> ZoneResult<u128> {
         let amount = self.withdrawal_bounce_backs[token][caller].read()?;
+        if !self.try_mint(token, caller, amount)? {
+            return Err(TempoPrecompileError::from(TIP20Error::policy_forbids()).into());
+        }
+
         self.withdrawal_bounce_backs[token][caller].delete()?;
-        TIP20Token::from_address(token)?.mint(
-            ZONE_INBOX_ADDRESS,
-            ITIP20::mintCall {
-                to: caller,
-                amount: U256::from(amount),
-            },
-        )?;
         self.emit_event(ZoneInboxEvent::refund_claimed(caller, token, amount))?;
         Ok(amount)
     }

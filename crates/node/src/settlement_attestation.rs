@@ -1,6 +1,6 @@
 //! Batch-boundary settlement attestation construction and leader-side proposal recovery.
 
-use std::time::Duration;
+use std::{future::Future, time::Duration};
 
 use alloy_consensus::TxReceipt as _;
 use alloy_eips::BlockHashOrNumber;
@@ -340,6 +340,7 @@ pub(crate) async fn collect_leader_settlements<P>(
     provider: P,
     commands: mpsc::Sender<P2pCommand>,
     context: AttestationContext,
+    portal_confirmed_height: u64,
 ) where
     P: PersistedBlockSubscriptions
         + BlockNumReader
@@ -364,19 +365,11 @@ pub(crate) async fn collect_leader_settlements<P>(
         }
     };
 
-    let mut pending_boundary = None;
-    for number in 1..=head {
-        match propose_settlement(&provider, number, &commands, &context).await {
-            Ok(true) => {
-                pending_boundary = Some(number);
-                break;
-            }
-            Ok(false) => {}
-            Err(err) => {
-                debug!(target: "zone::p2p", %err, number, "Skipped non-current settlement boundary during recovery")
-            }
-        }
-    }
+    // Start at the block after the portal-confirmed anchor.
+    let recovery_start = portal_confirmed_height.saturating_add(1);
+    let mut pending_boundary =
+        propose_persisted_settlement_range(&provider, &commands, &context, recovery_start, head)
+            .await;
 
     let mut last_scanned = head;
     let mut retry = tokio::time::interval(Duration::from_secs(5));
@@ -432,7 +425,28 @@ pub(crate) async fn collect_leader_settlements<P>(
                 let number = pending_boundary.expect("guarded by is_some");
                 match propose_settlement(&provider, number, &commands, &context).await {
                     Ok(true) => {}
-                    Ok(false) => pending_boundary = None,
+                    Ok(false) => {
+                        // The retained candidate only failed before we could determine whether it
+                        // was a boundary. Once a retry classifies it as an ordinary block, resume
+                        // the startup scan after it instead of stranding the rest of the range
+                        // behind last_scanned.
+                        let head = match provider.last_block_number() {
+                            Ok(head) => head,
+                            Err(err) => {
+                                debug!(target: "zone::p2p", %err, "Failed reading head while resuming settlement recovery");
+                                continue;
+                            }
+                        };
+                        pending_boundary = propose_persisted_settlement_range(
+                            &provider,
+                            &commands,
+                            &context,
+                            number.saturating_add(1),
+                            head,
+                        )
+                        .await;
+                        last_scanned = head;
+                    }
                     Err(err) => {
                         debug!(target: "zone::p2p", %err, height = number, "Settlement proposal retry is not currently valid");
 
@@ -492,8 +506,19 @@ async fn propose_persisted_settlement_range<P>(
 where
     P: HeaderProvider<Header = TempoHeader> + ReceiptProvider,
 {
+    scan_settlement_range(start, end, |candidate| {
+        propose_settlement(provider, candidate, commands, context)
+    })
+    .await
+}
+
+async fn scan_settlement_range<F, Fut>(start: u64, end: u64, mut propose: F) -> Option<u64>
+where
+    F: FnMut(u64) -> Fut,
+    Fut: Future<Output = eyre::Result<bool>>,
+{
     for candidate in start..=end {
-        match propose_settlement(provider, candidate, commands, context).await {
+        match propose(candidate).await {
             Ok(true) => return Some(candidate),
             Ok(false) => {}
             Err(err) => {
@@ -545,7 +570,89 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use zone_sequencer::attestation::AttestationStore;
+
+    #[tokio::test]
+    async fn startup_recovery_retries_first_erroring_boundary() {
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let failed_once = failed_once.clone();
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                if number % 2 != 0 {
+                    return Ok(false);
+                }
+                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
+                    eyre::bail!("transient proposal failure");
+                }
+                Ok(number == 2)
+            }
+        };
+
+        let pending = scan_settlement_range(1, 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
+
+        let pending = scan_settlement_range(pending.unwrap(), 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2]);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_begins_after_portal_confirmed_height() {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                Ok(number == 360)
+            }
+        };
+
+        let portal_confirmed_height = 240u64;
+        let pending =
+            scan_settlement_range(portal_confirmed_height.saturating_add(1), 360, propose).await;
+
+        assert_eq!(pending, Some(360));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.first(), Some(&241));
+        assert_eq!(calls.last(), Some(&360));
+        assert_eq!(calls.len(), 120);
+    }
+
+    #[tokio::test]
+    async fn startup_recovery_resumes_after_erroring_non_boundary() -> eyre::Result<()> {
+        let failed_once = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let propose = |number| {
+            let failed_once = failed_once.clone();
+            let calls = calls.clone();
+            async move {
+                calls.lock().unwrap().push(number);
+                if number == 2 && !failed_once.swap(true, Ordering::Relaxed) {
+                    eyre::bail!("transient proposal failure");
+                }
+                Ok(number == 4)
+            }
+        };
+
+        let pending = scan_settlement_range(1, 4, propose).await;
+        assert_eq!(pending, Some(2));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2]);
+
+        let number = pending.unwrap();
+        assert!(!propose(number).await?);
+        let pending = scan_settlement_range(number.saturating_add(1), 4, propose).await;
+        assert_eq!(pending, Some(4));
+        assert_eq!(*calls.lock().unwrap(), vec![1, 2, 2, 3, 4]);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn submission_confirmation_wakes_pending_boundary_without_retry_tick() {

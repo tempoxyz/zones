@@ -15,6 +15,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use eyre::WrapErr as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
@@ -34,7 +35,8 @@ use zone_p2p::{
 };
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, spawn_zone_sequencer,
+    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, resolve_portal_zone_anchor,
+    spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -837,6 +839,32 @@ where
             // leader task. Otherwise a transient head-read failure could leave a partial
             // generation classified as Leader without its canonical head writer.
             let last_header = latest_sealed_header(&context.provider)?;
+            let portal_anchor = resolve_portal_zone_anchor(
+                &context.provider,
+                context.portal_address,
+                &context.attestation.l1_provider,
+            )
+            .await
+            .wrap_err("failed to resolve portal-confirmed Zone height for leader recovery")?;
+
+            // The outgoing leader may have one final submitBatch in flight while leadership
+            // rotates. That can make this anchor one boundary stale, but rotations fence the old
+            // leader before promotion, so recovery remains bounded by one configured batch
+            // interval (120 Zone blocks in production) rather than replaying history from genesis.
+
+            // Remove any submitted attestations for the portal-confirmed anchor, so the new leader
+            // can start from here.
+            let portal_confirmed_height = portal_anchor.block_number;
+            info!(
+                target: "zone::role",
+                portal_confirmed_height,
+                portal_block_hash = %portal_anchor.block_hash,
+                "Seeded leader settlement recovery from the portal anchor"
+            );
+            context
+                .attestation
+                .store
+                .remove_submitted(portal_confirmed_height);
 
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
@@ -887,7 +915,12 @@ where
             tasks.spawn(async move {
                 tokio::select! {
                     () = settlement_token.cancelled() => TaskEnd::Ended("settlement-collection (cancelled)"),
-                    () = collect_leader_settlements(provider, commands, attestation) => {
+                    () = collect_leader_settlements(
+                        provider,
+                        commands,
+                        attestation,
+                        portal_confirmed_height,
+                    ) => {
                         TaskEnd::Ended("settlement-collection")
                     }
                 }

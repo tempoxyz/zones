@@ -475,9 +475,23 @@ impl Withdrawal {
         plaintext
     }
 
-    /// Compute the authenticated sender tag `keccak256(sender || tx_hash)`.
-    pub fn sender_tag(sender: Address, tx_hash: B256) -> B256 {
-        keccak256(Self::authenticated_sender_plaintext(sender, tx_hash))
+    /// Compute the authenticated sender tag for one user withdrawal.
+    ///
+    /// The fallback nonce is public on L1 and unique per user withdrawal, so including it keeps
+    /// multiple withdrawals from the same private transaction unlinkable. Deposit bounce-backs
+    /// retain their canonical zero-sender tag.
+    pub fn sender_tag(sender: Address, tx_hash: B256, fallback_nonce: u64) -> B256 {
+        if sender.is_zero() && fallback_nonce == 0 {
+            return keccak256(Self::authenticated_sender_plaintext(
+                Address::ZERO,
+                B256::ZERO,
+            ));
+        }
+
+        let mut preimage = [0u8; 60];
+        preimage[..52].copy_from_slice(&Self::authenticated_sender_plaintext(sender, tx_hash));
+        preimage[52..].copy_from_slice(&fallback_nonce.to_be_bytes());
+        keccak256(preimage)
     }
 
     /// Reconstruct the public L1-facing withdrawal from a zone-side withdrawal request event.
@@ -486,15 +500,9 @@ impl Withdrawal {
         tx_hash: B256,
         encrypted_sender: Bytes,
     ) -> Self {
-        let sender_tag = if event.sender.is_zero() && event.fallbackNonce == 0 {
-            Self::sender_tag(Address::ZERO, B256::ZERO)
-        } else {
-            Self::sender_tag(event.sender, tx_hash)
-        };
-
         Self {
             token: event.token,
-            senderTag: sender_tag,
+            senderTag: Self::sender_tag(event.sender, tx_hash, event.fallbackNonce),
             to: event.to,
             amount: event.amount,
             memo: event.memo,

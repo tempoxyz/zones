@@ -33,9 +33,9 @@ pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_
 pub(crate) type TestContext =
     Context<TempoBlockEnv, TxEnv, CfgEnv<TempoHardfork>, CacheDB<EmptyDB>>;
 
-/// Create an empty test EVM context at the default Tempo hardfork.
+/// Create an empty test EVM context at the 1st Tempo hardfork with zone deployments.
 pub(crate) fn test_context() -> TestContext {
-    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default())
+    Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::T8)
 }
 
 /// Create an EVM-backed precompile storage provider over `ctx`.

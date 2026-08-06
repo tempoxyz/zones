@@ -487,7 +487,7 @@ fn finalize_empty_queue_returns_zero() -> eyre::Result<()> {
 }
 
 #[test]
-fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre::Result<()> {
+fn finalize_withdrawals_match_queue_hash_and_have_unique_sender_tags() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     harness.request(100, ALICE, B256::repeat_byte(1))?;
     harness.request(200, BOB, B256::repeat_byte(2))?;
@@ -496,7 +496,11 @@ fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre
         .iter()
         .map(|pending| Withdrawal {
             token: pending.token,
-            senderTag: Withdrawal::sender_tag(pending.sender, pending.txHash),
+            senderTag: Withdrawal::sender_tag(
+                pending.sender,
+                pending.txHash,
+                pending.fallbackNonce,
+            ),
             to: pending.to,
             amount: pending.amount,
             memo: pending.memo,
@@ -512,6 +516,7 @@ fn finalize_single_and_multiple_withdrawals_match_canonical_queue_hash() -> eyre
         ZoneOutboxAbi::finalizeWithdrawalBatchCall::abi_decode_returns(&output.bytes)?,
         Withdrawal::queue_hash(&expected)
     );
+    assert_ne!(expected[0].senderTag, expected[1].senderTag);
     assert!(harness.pending()?.is_empty());
     Ok(())
 }

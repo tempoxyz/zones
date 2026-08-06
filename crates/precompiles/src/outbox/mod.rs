@@ -480,7 +480,7 @@ impl PendingWithdrawal {
             .into());
         }
 
-        let sender_tag = Withdrawal::sender_tag(self.sender, self.tx_hash);
+        let sender_tag = Withdrawal::sender_tag(self.sender, self.tx_hash, self.fallback_nonce);
         Ok(Withdrawal {
             token: self.token,
             senderTag: sender_tag,

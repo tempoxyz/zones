@@ -73,10 +73,17 @@ pub(crate) struct BackfillRuntimeChannels<Rq = CommonwareReceiver, Rs = Commonwa
     pub(crate) responses: mpsc::Sender<BackfillResponse>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestKind {
+    LeaderOnly,
+    Fallback,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct OutstandingBackfill {
     request_id: u64,
     sent_at: Instant,
+    kind: RequestKind,
 }
 
 impl OutstandingBackfill {
@@ -95,6 +102,7 @@ impl BackfillJob {
     fn begin_request(
         &mut self,
         peers: &[PublicKey],
+        kind: RequestKind,
         now: Instant,
     ) -> Option<(u64, Vec<PublicKey>)> {
         let request_peers = peers
@@ -118,6 +126,7 @@ impl BackfillJob {
                 OutstandingBackfill {
                     request_id,
                     sent_at: now,
+                    kind,
                 },
             );
         }
@@ -146,10 +155,13 @@ impl BackfillJob {
             .is_some_and(|request| request.expired(now))
     }
 
-    fn is_pending(&self, peer: &PublicKey, now: Instant) -> bool {
+    fn is_pending_leader_only(&self, peer: &PublicKey, now: Instant) -> bool {
+        // Keep the leader as the sole source while any leader-only page is still in flight.
+        // The next retry may have a different start after importing a partial page, but it
+        // must still wait for the leader rather than fan out to other peers.
         self.outstanding
             .get(peer)
-            .is_some_and(|request| !request.expired(now))
+            .is_some_and(|request| request.kind == RequestKind::LeaderOnly && !request.expired(now))
     }
 
     fn complete(&mut self, peer: &PublicKey, request_id: u64, now: Instant) -> bool {
@@ -290,21 +302,34 @@ where
         }
         attempts.push(candidates);
 
+        // When a usable leader exists, `attempts` contains a leader-only pass followed
+        // by a pass over all eligible peers. If there's no leader, then go to the peers directly.
+        // The job prevents a peer from receiving duplicate requests while an earlier response
+        // is still in flight.
         for (attempt, sources) in attempts.into_iter().enumerate() {
-            let leader_only = leader_first && attempt == 0;
-            let request = self.job.begin_request(&sources, now);
+            let kind = if leader_first && attempt == 0 {
+                RequestKind::LeaderOnly
+            } else {
+                RequestKind::Fallback
+            };
+
+            // Reserve eligible peers and assign a request ID. Peers with a live outstanding
+            // request are skipped, so each peer has at most one active request.
+            let request = self.job.begin_request(&sources, kind, now);
             let Some((request_id, request_peers)) = request else {
-                debug!(target: "zone::p2p", start, sources = sources.len(), leader_only, "Skipping block backfill request because all eligible peers already have outstanding responses");
-                if leader_only
+                debug!(target: "zone::p2p", start, sources = sources.len(), leader_only = kind == RequestKind::LeaderOnly, "Skipping block backfill request because all eligible peers already have outstanding responses");
+                if kind == RequestKind::LeaderOnly
                     && leader
                         .as_ref()
-                        .is_some_and(|leader| self.job.is_pending(leader, now))
+                        .is_some_and(|leader| self.job.is_pending_leader_only(leader, now))
                 {
                     debug!(target: "zone::p2p", start, "Keeping the backfill leader as the sole source while its request is still pending");
                     break;
                 }
                 continue;
             };
+
+            // Send the request to the selected peers.
             let request_frame = RequestFrame { request_id, start }.encode().to_vec();
             let sent = match self
                 .request_sender
@@ -317,15 +342,20 @@ where
                     return Err(eyre::eyre!("failed requesting block backfill: {err}"));
                 }
             };
+
             self.job.finish_send(request_id, &sent);
             if sent.is_empty() {
-                debug!(target: "zone::p2p", request_id, start, requested = request_peers.len(), leader_only, "Block backfill request reached no peer");
+                debug!(target: "zone::p2p", request_id, start, requested = request_peers.len(), leader_only = kind == RequestKind::LeaderOnly, "Block backfill request reached no peer");
+                // Try the next attempt, if one was constructed.
                 continue;
             }
-            if !leader_only {
+
+            // Record requests sent through the all-peers path. This path is used when no
+            // leader-only request is available (or when the attempt didn't reach a peer).
+            if kind == RequestKind::Fallback {
                 metrics::counter!("zone_p2p_backfill_requests_without_leader_total").increment(1);
             }
-            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), sources = sources.len(), leader_only, "Sent block backfill request");
+            debug!(target: "zone::p2p", request_id, start, connected = sent.len(), requested = request_peers.len(), sources = sources.len(), leader_only = kind == RequestKind::LeaderOnly, "Sent block backfill request");
             break;
         }
         Ok(())
@@ -398,7 +428,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{BACKFILL_RESPONSE_TIMEOUT, BackfillJob};
+    use std::time::Duration;
+
+    use super::{BACKFILL_RESPONSE_TIMEOUT, BackfillJob, RequestKind};
     use crate::protocol::{PeerTip, ResponseFrame};
     use alloy_primitives::B256;
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
@@ -422,17 +454,18 @@ mod tests {
         let now = std::time::Instant::now();
         let mut job = BackfillJob::default();
         let (first, peers) = job
-            .begin_request(std::slice::from_ref(&leader), now)
+            .begin_request(std::slice::from_ref(&leader), RequestKind::LeaderOnly, now)
             .unwrap();
         job.finish_send(first, &peers);
         assert!(!job.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
-        assert!(job.is_pending(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
+        assert!(job.is_pending_leader_only(&leader, now + BACKFILL_RESPONSE_TIMEOUT / 2));
         assert!(job.is_unresponsive(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
-        assert!(!job.is_pending(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
+        assert!(!job.is_pending_leader_only(&leader, now + BACKFILL_RESPONSE_TIMEOUT));
         assert!(!job.complete(&leader, first, now + BACKFILL_RESPONSE_TIMEOUT));
         let (replacement, peers) = job
             .begin_request(
                 std::slice::from_ref(&leader),
+                RequestKind::LeaderOnly,
                 now + BACKFILL_RESPONSE_TIMEOUT,
             )
             .unwrap();
@@ -449,7 +482,9 @@ mod tests {
         let peer = peer(1);
         let now = std::time::Instant::now();
         let mut job = BackfillJob::default();
-        let (request_id, peers) = job.begin_request(std::slice::from_ref(&peer), now).unwrap();
+        let (request_id, peers) = job
+            .begin_request(std::slice::from_ref(&peer), RequestKind::Fallback, now)
+            .unwrap();
         job.finish_send(request_id, &peers);
 
         let mut malformed = vec![1];
@@ -472,5 +507,52 @@ mod tests {
                 tip: tip()
             })
         );
+    }
+
+    #[test]
+    fn leader_only_retry_does_not_fan_out_when_next_page_starts_before_timeout() {
+        let leader = peer(1);
+        let now = std::time::Instant::now();
+        let mut job = BackfillJob::default();
+        let (request_id, peers) = job
+            .begin_request(std::slice::from_ref(&leader), RequestKind::LeaderOnly, now)
+            .unwrap();
+        job.finish_send(request_id, &peers);
+
+        let retry_at = now + BACKFILL_RESPONSE_TIMEOUT / 2;
+        // A partial response can advance the follower to the next page before the leader sends
+        // the completion for this one. The leader reservation must still cover that retry.
+        assert!(job.is_pending_leader_only(&leader, retry_at));
+        assert!(
+            job.begin_request(
+                std::slice::from_ref(&leader),
+                RequestKind::LeaderOnly,
+                retry_at,
+            )
+            .is_none()
+        );
+        assert!(job.is_pending_leader_only(&leader, retry_at));
+    }
+
+    #[test]
+    fn completed_fallback_page_reuses_backup_for_next_page() {
+        let leader = peer(1);
+        let backup = peer(2);
+        let candidates = [leader.clone(), backup.clone()];
+        let now = std::time::Instant::now();
+        let mut job = BackfillJob::default();
+        let (page_one, peers) = job
+            .begin_request(&candidates, RequestKind::Fallback, now)
+            .unwrap();
+        job.finish_send(page_one, &peers);
+        assert!(job.complete(&backup, page_one, now));
+
+        let retry_at = now + Duration::from_secs(1);
+        assert!(!job.is_pending_leader_only(&leader, retry_at));
+        let (page_two, peers) = job
+            .begin_request(&candidates, RequestKind::Fallback, retry_at)
+            .unwrap();
+        assert_eq!(peers, vec![backup.clone()]);
+        assert!(job.complete(&backup, page_two, retry_at));
     }
 }
