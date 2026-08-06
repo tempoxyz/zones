@@ -11729,7 +11729,7 @@ dependencies = [
  "eyre",
  "futures",
  "k256",
- "rand 0.8.7",
+ "rand 0.10.2",
  "reth-evm",
  "rustls",
  "serde",
