@@ -239,6 +239,13 @@ where
         &self,
         block_id: BlockNumberOrTag,
     ) -> RpcResult<ZoneExecutionWitness> {
+        let _permit = self
+            .eth_api
+            .tracing_task_guard()
+            .clone()
+            .acquire_owned()
+            .await;
+
         let block = self
             .eth_api
             .recovered_block(block_id.into())
