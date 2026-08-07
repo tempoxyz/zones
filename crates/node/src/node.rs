@@ -1325,13 +1325,13 @@ where
         let l1_transaction_signer = config
             .l1_transaction_signer
             .unwrap_or(config.sequencer_signer);
-        let shutdown = tokio_util::sync::CancellationToken::new();
+        // Legacy single-sequencer mode: the tasks run for the process lifetime.
         let seq_handle = spawn_zone_sequencer(
             sequencer_config,
             l1_transaction_signer,
             zone_provider,
             prover_config,
-            shutdown,
+            tokio_util::sync::CancellationToken::new(),
         )
         .await;
         info!(target: "reth::cli", "Sequencer tasks spawned");

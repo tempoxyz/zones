@@ -219,7 +219,7 @@ where
     Ok(module)
 }
 
-/// Zone-specific debug API backed directly by the node's full `EthApi`.
+/// Zone-specific debug API.
 #[derive(Clone)]
 pub(crate) struct NodeZoneDebugApi<E> {
     eth_api: E,
