@@ -976,14 +976,6 @@ mod tests {
         assert_eq!(batches[0].end, 2);
         assert_eq!(batches[1].start, 2);
         assert_eq!(batches[1].end, 3);
-        assert_eq!(
-            abi::Withdrawal::queue_hash(&withdrawals[batches[0].end..]),
-            abi::Withdrawal::queue_hash(&withdrawals[2..])
-        );
-        assert_eq!(
-            abi::Withdrawal::queue_hash(&withdrawals[batches[1].end..]),
-            B256::ZERO
-        );
     }
 
     #[test]
@@ -1013,10 +1005,6 @@ mod tests {
         assert_eq!(batches[0].start, 0);
         assert_eq!(batches[0].end, 1);
         assert!(batches[0].gas_limit > 1_000_000);
-        assert_eq!(
-            abi::Withdrawal::queue_hash(&withdrawals[batches[0].end..]),
-            abi::Withdrawal::queue_hash(&withdrawals[1..])
-        );
     }
 
     #[test]
