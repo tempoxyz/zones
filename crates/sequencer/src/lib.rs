@@ -156,7 +156,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
 
     let withdrawal_config = WithdrawalProcessorConfig {
         portal_address: config.portal_address,
-        l1_rpc_url: config.l1_rpc_url.clone(),
         fallback_poll_interval: config.withdrawal_poll_interval,
         sequencer_address,
         batch_limits: config.withdrawal_batch_limits,
