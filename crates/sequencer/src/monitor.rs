@@ -437,7 +437,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         let finalized_batch =
             fetch_finalized_batch(&self.provider, self.config.outbox_address, from, &boundary)
                 .await?;
-        let end_state = self.fetch_block_snapshot(to).await?;
+        let end_state = read_zone_block_snapshot(&self.provider, self.config.inbox_address, to)?;
 
         if !finalized_batch.withdrawals.is_empty() {
             info!(
@@ -465,12 +465,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 
         self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals)
             .await
-    }
-
-    /// Read the zone state at block `to`: tempo block number, processed deposit
-    /// queue hash, and block hash.
-    async fn fetch_block_snapshot(&self, to: u64) -> Result<ZoneBlockSnapshot> {
-        read_zone_block_snapshot(&self.provider, self.config.inbox_address, to)
     }
 
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
