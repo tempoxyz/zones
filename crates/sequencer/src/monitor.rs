@@ -165,6 +165,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         .await
     }
 
+    #[expect(clippy::too_many_arguments)]
     async fn new_with_provider(
         config: ZoneMonitorConfig,
         provider: P,
