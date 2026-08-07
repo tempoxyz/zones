@@ -38,6 +38,7 @@ use reth_storage_api::{BlockNumReader, StateProviderFactory};
 use reth_trie_common::ExecutionWitnessMode;
 use tempo_alloy::{
     TempoNetwork,
+    provider::ext::TempoProviderExt as _,
     rpc::{TempoCallBuilderExt as _, TempoHeaderResponse, TempoTransactionRequest},
 };
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
@@ -1290,23 +1291,44 @@ async fn set_leader(
         });
     }
 
-    // Relay with the individual key on the reserved admin-operations nonce lane and return
-    // immediately. Runtime recovery is configured separately in the manifest; this method only
-    // changes the ordinary on-chain leadership schedule when the operator invokes it.
-    let pending = portal
-        .setLeader(target, expected_epoch)
-        .nonce_key(zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY)
-        .send()
+    // Refetch the committed admin-lane nonce for every attempt. The provider's process-local
+    // nonce cache advances after a send, even when that transaction never lands, which would
+    // otherwise leave every retry queued behind an unfillable 2D-nonce gap.
+    let nonce = relayer
+        .get_transaction_count_with_nonce_key(
+            relayer_address,
+            zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY,
+        )
         .await
         .map_err(internal)?;
-    let tx_hash = *pending.tx_hash();
+    let receipt = tokio::time::timeout(
+        Duration::from_secs(30),
+        portal
+            .setLeader(target, expected_epoch)
+            .nonce_key(zone_sequencer::nonce_keys::ADMIN_OPS_NONCE_KEY)
+            .nonce(nonce)
+            .max_fee_per_gas(tempo_chainspec::constants::gas::TEMPO_T1_BASE_FEE as u128)
+            .max_priority_fee_per_gas(0)
+            .send_sync(),
+    )
+    .await
+    .map_err(|_| JsonRpcError::internal("setLeader confirmation timed out after 30 seconds"))?
+    .map_err(internal)?;
+    let tx_hash = receipt.transaction_hash();
+    if !receipt.status() {
+        metrics::counter!("zone_set_leader_submissions_total", "result" => "reverted").increment(1);
+        return Err(JsonRpcError::internal(format!(
+            "setLeader transaction {tx_hash} reverted on L1"
+        )));
+    }
     metrics::counter!("zone_set_leader_submissions_total", "result" => "submitted").increment(1);
     tracing::info!(
         target: "zone::rpc",
         %target,
         %tx_hash,
+        nonce,
         expected_epoch,
-        "Relayed setLeader to the ZonePortal"
+        "Confirmed setLeader on the ZonePortal"
     );
     Ok(SetLeaderResponse {
         status: "submitted".to_owned(),
