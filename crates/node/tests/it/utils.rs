@@ -1257,10 +1257,10 @@ impl ZoneTestNode {
                 .with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         let p2p_enabled = p2p_config.is_some();
-        if p2p_enabled && !is_local_dummy_l1 {
-            // Multi-sequencer harness nodes run against a synthetic L1 RPC that cannot serve
-            // storage reads: every read must come from the seeded cache. Bounded retries turn
-            // a missed seed into a fast, visible failure instead of a silent retry spin.
+        if p2p_enabled && !is_local_dummy_l1 && portal_address.is_zero() {
+            // Synthetic multi-sequencer harness nodes run against an RPC that cannot serve
+            // storage reads: every read must come from the seeded cache. A real Portal must
+            // retain normal L1 retry behavior for its independent attestation reconstruction.
             zone_node = zone_node.with_l1_state_provider_retry_limits(0, NonZeroU32::MIN);
         }
         let mut leadership = None;
@@ -1272,6 +1272,8 @@ impl ZoneTestNode {
                 schedule.publish(p2p_config.manifest().bootstrap_leadership())?;
             }
             leadership = Some(schedule);
+            let l1_transaction_signer = p2p_config.block_attestation_signer();
+            let zone_id = p2p_config.zone_id();
             // Every multi-sequencer node holds complete sequencer resources; the role
             // controller decides at runtime whether this node's engine and sequencer
             // background tasks are active.
@@ -1279,8 +1281,8 @@ impl ZoneTestNode {
                 .with_p2p(p2p_config)
                 .with_sequencer(ZoneSequencerAddOnsConfig {
                     sequencer_signer: sequencer_signer.clone(),
-                    l1_transaction_signer: None,
-                    zone_id: 0,
+                    l1_transaction_signer,
+                    zone_id,
                     zone_poll_interval: Duration::from_secs(1),
                     batch_anchor_config: Default::default(),
                     withdrawal_poll_interval: Duration::from_secs(5),
@@ -1944,6 +1946,25 @@ impl L1TestNode {
         sequencer: Address,
         config: ZoneCreationConfig,
     ) -> eyre::Result<Address> {
+        self.create_zone_with_admin_sequencers_and_config(
+            factory_address,
+            admin,
+            vec![sequencer],
+            1,
+            config,
+        )
+        .await
+    }
+
+    /// Create a zone with an explicit on-chain settlement signer set and threshold.
+    pub(crate) async fn create_zone_with_admin_sequencers_and_config(
+        &self,
+        factory_address: Address,
+        admin: Address,
+        sequencers: Vec<Address>,
+        threshold: u8,
+        config: ZoneCreationConfig,
+    ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
         use tempo_zone_contracts::ZoneFactory;
 
@@ -1956,8 +1977,8 @@ impl L1TestNode {
                 gatewayMode: config.gateway_mode,
                 allowedAccounts: config.allowed_accounts,
                 zoneGateways: config.zone_gateways,
-                sequencers: vec![sequencer],
-                threshold: 1,
+                sequencers,
+                threshold,
                 rpcUrl: String::new(),
             },
         };
@@ -3540,6 +3561,202 @@ impl P2pCluster {
         }
         reference.ok_or_else(|| eyre::eyre!("cluster is empty"))
     }
+}
+
+/// A real Tempo L1 and Portal paired with three P2P quorum nodes. Unlike [`P2pCluster`], this
+/// fixture exercises settlement against the actual `ZonePortal` contract rather than synthetic
+/// L1 cache injection.
+pub(crate) struct RealP2pCluster {
+    pub(crate) l1: L1TestNode,
+    pub(crate) portal_address: Address,
+    pub(crate) nodes: Vec<ZoneTestNode>,
+    pub(crate) attestation_signers: Vec<PrivateKeySigner>,
+}
+
+impl RealP2pCluster {
+    /// Wait for every node to independently execute through `height`.
+    pub(crate) async fn wait_all_at(&self, height: u64, timeout: Duration) -> eyre::Result<()> {
+        for node in &self.nodes {
+            node.wait_for_block_number(height, timeout).await?;
+        }
+        Ok(())
+    }
+
+    /// Assert all nodes have the same canonical block at `height`.
+    pub(crate) async fn assert_same_block(
+        &self,
+        height: u64,
+    ) -> eyre::Result<alloy_rpc_types_eth::Header> {
+        let mut reference: Option<alloy_rpc_types_eth::Header> = None;
+        for (index, node) in self.nodes.iter().enumerate() {
+            let block = node
+                .provider()
+                .get_block_by_number(BlockNumberOrTag::Number(height))
+                .await?
+                .ok_or_else(|| eyre::eyre!("node {index} is missing block {height}"))?;
+            match &reference {
+                None => reference = Some(block.header),
+                Some(reference) => eyre::ensure!(
+                    block.header.hash == reference.hash,
+                    "node {index} diverges at height {height}: {} != {}",
+                    block.header.hash,
+                    reference.hash,
+                ),
+            }
+        }
+        reference.ok_or_else(|| eyre::eyre!("cluster is empty"))
+    }
+}
+
+/// Start a three-member P2P quorum against a real Tempo L1 and a Portal registered with the
+/// exact per-node attestation keys. The short interval keeps tests focused on the first real
+/// batch boundary instead of ordinary long-running block production.
+pub(crate) async fn start_real_p2p_cluster(
+    withdrawal_batch_interval_blocks: u64,
+) -> eyre::Result<RealP2pCluster> {
+    start_real_p2p_cluster_with_active_nodes(withdrawal_batch_interval_blocks, 3).await
+}
+
+/// Start a three-member P2P quorum against a real Tempo L1, launching only `active_nodes` of
+/// its configured members. This lets an integration test prove that a reachable 2-of-3 quorum
+/// settles without waiting for the offline third member.
+pub(crate) async fn start_real_p2p_cluster_with_active_nodes(
+    withdrawal_batch_interval_blocks: u64,
+    active_nodes: usize,
+) -> eyre::Result<RealP2pCluster> {
+    eyre::ensure!(
+        (2..=3).contains(&active_nodes),
+        "real P2P test cluster requires two or three active nodes, got {active_nodes}"
+    );
+
+    fn available_address() -> eyre::Result<SocketAddr> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        Ok(listener.local_addr()?)
+    }
+
+    let l1 = L1TestNode::start().await?;
+    let addresses = [
+        available_address()?,
+        available_address()?,
+        available_address()?,
+    ];
+    let identities = [
+        Ed25519PrivateKey::from_seed(301),
+        Ed25519PrivateKey::from_seed(302),
+        Ed25519PrivateKey::from_seed(303),
+    ];
+    let public_keys = identities.each_ref().map(|key| key.public_key());
+    let attestation_keys = [301_u64, 302, 303].map(|key| format!("0x{key:064x}"));
+    let attestation_signers = attestation_keys
+        .each_ref()
+        .map(|key| key.parse::<PrivateKeySigner>().expect("valid test signer"));
+
+    let factory = l1.native_zone_factory().await?;
+    let portal_address = l1
+        .create_zone_with_admin_sequencers_and_config(
+            factory,
+            l1.admin_address(),
+            attestation_signers
+                .iter()
+                .map(PrivateKeySigner::address)
+                .collect(),
+            2,
+            ZoneCreationConfig::open(),
+        )
+        .await?;
+    for signer in &attestation_signers {
+        // Tempo's test genesis funds only the dev key. Settlement is submitted from the
+        // individual registered quorum key, so each member needs a gas balance of its own.
+        l1.fund_user(signer.address(), 10_000_000).await?;
+    }
+    let encryption_key = SecretKey::from(attestation_signers[0].credential());
+    l1.set_sequencer_encryption_key_with_signer(
+        portal_address,
+        &encryption_key,
+        attestation_signers[0].clone(),
+    )
+    .await?;
+
+    let portal = ZonePortal::new(portal_address, l1.provider());
+    let zone_id = portal.zoneId().call().await?;
+    let (genesis, _) = build_l1_anchored_genesis(l1.http_url(), portal_address).await?;
+    let chain_id = next_unique_chain_id();
+
+    let config_dir = std::env::temp_dir().join(format!(
+        "tempo-zone-real-p2p-test-{}-{}",
+        std::process::id(),
+        next_unique_chain_id()
+    ));
+    std::fs::create_dir_all(&config_dir)?;
+    let manifest_path = config_dir.join("manifest.toml");
+    let mut manifest = format!(
+        "zone_id = {zone_id}\nsequencer_set_version = 0\nleader_ed25519_public_key = \"{}\"\n",
+        const_hex::encode_prefixed(public_keys[0].as_ref())
+    );
+    for (index, ((public_key, signer), address)) in public_keys
+        .iter()
+        .zip(&attestation_signers)
+        .zip(addresses)
+        .enumerate()
+    {
+        manifest.push_str(&format!(
+            "\n[[nodes]]\nname = \"node-{index}\"\ned25519_public_key = \"{}\"\nsecp256k1_address = \"{}\"\naddress = \"{address}\"\n",
+            const_hex::encode_prefixed(public_key.as_ref()),
+            signer.address(),
+        ));
+    }
+    std::fs::write(&manifest_path, manifest)?;
+
+    let mut configs = Vec::with_capacity(3);
+    for (index, role) in [(0, Role::Leader), (1, Role::Follower), (2, Role::Follower)] {
+        let key_path = config_dir.join(format!("node-{index}.key"));
+        std::fs::write(
+            &key_path,
+            const_hex::encode_prefixed(identities[index].encode().as_ref()),
+        )?;
+        let secp256k1_key_path = config_dir.join(format!("node-{index}-secp256k1.key"));
+        std::fs::write(&secp256k1_key_path, &attestation_keys[index])?;
+        configs.push(P2pConfig::load(
+            &manifest_path,
+            &key_path,
+            Some(&secp256k1_key_path),
+            addresses[index],
+            false,
+            zone_id,
+            Some(role),
+        )?);
+    }
+    let _ = std::fs::remove_dir_all(&config_dir);
+
+    let mut nodes = Vec::with_capacity(active_nodes);
+    for (index, config) in configs.into_iter().take(active_nodes).enumerate() {
+        let additional_decryption_keys = if index == 0 {
+            Vec::new()
+        } else {
+            vec![SecretKey::from(attestation_signers[0].credential())]
+        };
+        nodes.push(
+            ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval_and_decryption_keys(
+                l1.ws_url().to_string(),
+                portal_address,
+                chain_id,
+                Some(genesis.clone()),
+                attestation_signers[index].clone(),
+                withdrawal_batch_interval_blocks,
+                Some(config),
+                false,
+                additional_decryption_keys,
+            )
+            .await?,
+        );
+    }
+
+    Ok(RealP2pCluster {
+        l1,
+        portal_address,
+        nodes,
+        attestation_signers: attestation_signers.to_vec(),
+    })
 }
 
 /// Start a three-node multi-sequencer cluster with identical genesis state and authenticated
