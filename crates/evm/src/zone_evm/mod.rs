@@ -7,7 +7,7 @@ use crate::{
     database::{L1OverlayDB, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use revm::context::{
     DBErrorMarker,
     result::{EVMError, ResultAndState},
@@ -25,14 +25,13 @@ type TempoResult = ResultAndState<TempoHaltReason>;
 type AdaptedEvmError<E> = EVMError<ZoneDbError<E>, TempoInvalidTransaction>;
 type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 
-fn install_execution_context(tx: &TempoTxEnv) -> Option<tx_context::TransactionContextGuard> {
+fn install_transaction_context(tx: &TempoTxEnv) -> tx_context::TransactionContextGuard {
     let fee_payer = tx.fee_payer().unwrap_or(tx.caller);
-    match tx.execution_context() {
-        ExecutionContext::Transaction { tx_hash } => {
-            tx_context::set_current_transaction_if_unset(tx_hash, fee_payer)
-        }
-        ExecutionContext::Simulation => tx_context::set_simulation_if_unset(fee_payer),
-    }
+    let tx_hash = match tx.execution_context() {
+        ExecutionContext::Transaction { tx_hash } => tx_hash,
+        ExecutionContext::Simulation => B256::repeat_byte(0xff),
+    };
+    tx_context::set_current_transaction(tx_hash, fee_payer)
 }
 
 /// Zone runtime EVM.
@@ -173,7 +172,7 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
-        let _tx_context_guard = install_execution_context(&tx);
+        let _tx_context_guard = install_transaction_context(&tx);
         self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 
@@ -221,9 +220,8 @@ fn map_adapter_error<E: core::error::Error + DBErrorMarker>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ZoneEvmFactory;
-    use alloy_evm::{EvmEnv, EvmFactory};
-    use alloy_primitives::{B256, TxKind, U256, keccak256};
+    use alloy_evm::EvmEnv;
+    use alloy_primitives::U256;
     use revm::{
         context::result::{ExecutionResult, HaltReason, Output, ResultGas, SuccessReason},
         database::EmptyDB,
@@ -231,8 +229,7 @@ mod tests {
         primitives::AddressMap,
         state::{Account, EvmStorageSlot},
     };
-    use tempo_precompiles::{PATH_USD_ADDRESS, TIP403_REGISTRY_ADDRESS};
-    use tempo_zone_contracts::ZONE_TX_CONTEXT_ADDRESS;
+    use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
     use zone_precompiles::test_utils::MockL1Reader;
 
     fn test_evm() -> ZoneEvm<EmptyDB, NoOpInspector, MockL1Reader> {
@@ -283,39 +280,5 @@ mod tests {
 
             assert!(matches!(result, Err(EVMError::CustomAny(_))));
         }
-    }
-
-    #[test]
-    fn transaction_hash_is_available_only_for_transactions() {
-        let caller = Address::repeat_byte(0x42);
-        let calldata = Bytes::copy_from_slice(&keccak256("currentTxHash()")[..4]);
-        let transaction = |execution_context| TempoTxEnv {
-            inner: revm::context::TxEnv {
-                caller,
-                kind: TxKind::Call(ZONE_TX_CONTEXT_ADDRESS),
-                data: calldata.clone(),
-                gas_limit: 100_000,
-                ..Default::default()
-            },
-            fee_token: Some(PATH_USD_ADDRESS),
-            execution_context,
-            ..Default::default()
-        };
-        let factory = ZoneEvmFactory::new(MockL1Reader::default(), Address::ZERO);
-        let mut evm = factory.create_evm(EmptyDB::default(), EvmEnv::default());
-
-        let simulated = evm
-            .transact_raw(transaction(ExecutionContext::Simulation))
-            .expect("simulation should execute");
-        assert!(matches!(simulated.result, ExecutionResult::Revert { .. }));
-
-        let tx_hash = B256::repeat_byte(0x11);
-        let transaction_result = evm
-            .transact_raw(transaction(ExecutionContext::Transaction { tx_hash }))
-            .expect("transaction should execute");
-        let ExecutionResult::Success { output, .. } = transaction_result.result else {
-            panic!("transaction context should be available")
-        };
-        assert_eq!(output.data(), tx_hash.as_slice());
     }
 }
