@@ -14,8 +14,7 @@ use crate::{
     auth::AuthContext,
     subscription::BoxWsSubscriptionFut,
     types::{
-        BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MethodTier,
-        classify_method,
+        BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, Method, MethodTier,
     },
 };
 
@@ -234,13 +233,13 @@ impl<'de> serde::Deserialize<'de> for CallParams {
 /// Convert an API result into a JSON-RPC response, logging failures.
 fn api_result(
     id: Value,
-    method: &str,
+    method: Method,
     res: Result<Box<RawValue>, JsonRpcError>,
 ) -> JsonRpcResponse {
     match res {
         Ok(v) => JsonRpcResponse::success(id, v),
         Err(e) => {
-            warn!(target: "zone::rpc", err = %e, method, "RPC call failed");
+            warn!(target: "zone::rpc", err = %e, method = method.name(), "RPC call failed");
             JsonRpcResponse::error(id, e)
         }
     }
@@ -248,9 +247,9 @@ fn api_result(
 
 /// Dispatch a single JSON-RPC request through the redacted zone RPC pipeline.
 ///
-/// Enforces a strict whitelist of allowed methods (see [`classify_method`]) and
-/// rejects anything unknown or disabled. Individual handlers may apply
-/// additional per-method access checks.
+/// Enforces the strict whitelist and access policy in the typed method registry and rejects
+/// anything unknown or disabled. Individual handlers may apply additional per-method access
+/// checks.
 pub async fn dispatch(
     req: &JsonRpcRequest,
     auth: &AuthContext,
@@ -258,12 +257,12 @@ pub async fn dispatch(
 ) -> JsonRpcResponse {
     let id = req.id.clone();
 
-    let tier = match classify_method(&req.method) {
-        Some(tier) => tier,
+    let method = match Method::from_name(&req.method) {
+        Some(method) => method,
         None => return JsonRpcResponse::error(id, JsonRpcError::method_not_found()),
     };
 
-    match tier {
+    match method.tier() {
         MethodTier::Disabled => {
             return JsonRpcResponse::error(id, JsonRpcError::method_disabled());
         }
@@ -276,80 +275,94 @@ pub async fn dispatch(
     // Raw params JSON — handlers deserialize directly, no intermediate Vec<Value>.
     let raw = req.params.as_deref().map(|p| p.get()).unwrap_or("[]");
 
-    match req.method.as_str() {
+    match method {
         // Simple passthrough methods (no params, no auth scoping)
-        "eth_blockNumber" => api_result(id, "eth_blockNumber", api.block_number().await),
-        "eth_chainId" => api_result(id, "eth_chainId", api.chain_id().await),
-        "eth_gasPrice" => api_result(id, "eth_gasPrice", api.gas_price().await),
-        "eth_maxPriorityFeePerGas" => api_result(
-            id,
-            "eth_maxPriorityFeePerGas",
-            api.max_priority_fee_per_gas().await,
-        ),
-        "net_version" => api_result(id, "net_version", api.net_version().await),
-        "net_listening" => api_result(id, "net_listening", crate::types::to_raw(&true)),
-        "eth_syncing" => api_result(id, "eth_syncing", api.syncing().await),
-        "eth_coinbase" => api_result(id, "eth_coinbase", api.coinbase().await),
-        "web3_sha3" => handle_web3_sha3(id, raw).await,
-        "web3_clientVersion" => api_result(
-            id,
-            "web3_clientVersion",
-            crate::types::to_raw(&"tempo-zone/v0.1.0"),
-        ),
+        Method::EthBlockNumber => api_result(id, method, api.block_number().await),
+        Method::EthChainId => api_result(id, method, api.chain_id().await),
+        Method::EthGasPrice => api_result(id, method, api.gas_price().await),
+        Method::EthMaxPriorityFeePerGas => {
+            api_result(id, method, api.max_priority_fee_per_gas().await)
+        }
+        Method::NetVersion => api_result(id, method, api.net_version().await),
+        Method::NetListening => api_result(id, method, crate::types::to_raw(&true)),
+        Method::EthSyncing => api_result(id, method, api.syncing().await),
+        Method::EthCoinbase => api_result(id, method, api.coinbase().await),
+        Method::Web3Sha3 => handle_web3_sha3(id, raw).await,
+        Method::Web3ClientVersion => {
+            api_result(id, method, crate::types::to_raw(&"tempo-zone/v0.1.0"))
+        }
 
         // Fee history
-        "eth_feeHistory" => handle_fee_history(id, raw, api).await,
+        Method::EthFeeHistory => handle_fee_history(id, raw, api).await,
 
         // Scoped state queries
-        "eth_getBalance" => handle_get_balance(id, raw, auth, api).await,
-        "eth_getTransactionCount" => handle_get_transaction_count(id, raw, auth, api).await,
+        Method::EthGetBalance => handle_get_balance(id, raw, auth, api).await,
+        Method::EthGetTransactionCount => handle_get_transaction_count(id, raw, auth, api).await,
 
         // Block queries
-        "eth_getBlockByNumber" => handle_get_block_by_number(id, raw, auth, api).await,
-        "eth_getBlockByHash" => handle_get_block_by_hash(id, raw, auth, api).await,
+        Method::EthGetBlockByNumber => handle_get_block_by_number(id, raw, auth, api).await,
+        Method::EthGetBlockByHash => handle_get_block_by_hash(id, raw, auth, api).await,
 
         // Transaction queries
-        "eth_getTransactionByHash" => handle_get_transaction_by_hash(id, raw, auth, api).await,
-        "eth_getTransactionReceipt" => handle_get_transaction_receipt(id, raw, auth, api).await,
+        Method::EthGetTransactionByHash => handle_get_transaction_by_hash(id, raw, auth, api).await,
+        Method::EthGetTransactionReceipt => {
+            handle_get_transaction_receipt(id, raw, auth, api).await
+        }
 
         // Simulation
-        "eth_call" => handle_call(id, raw, auth, api).await,
-        "eth_estimateGas" => handle_estimate_gas(id, raw, auth, api).await,
+        Method::EthCall => handle_call(id, raw, auth, api).await,
+        Method::EthEstimateGas => handle_estimate_gas(id, raw, auth, api).await,
 
         // Transaction preparation & submission
-        "eth_fillTransaction" => handle_fill_transaction(id, raw, auth, api).await,
-        "eth_sendRawTransaction" => handle_send_raw_transaction(id, raw, auth, api).await,
-        "eth_sendRawTransactionSync" => handle_send_raw_transaction_sync(id, raw, auth, api).await,
+        Method::EthFillTransaction => handle_fill_transaction(id, raw, auth, api).await,
+        Method::EthSendRawTransaction => handle_send_raw_transaction(id, raw, auth, api).await,
+        Method::EthSendRawTransactionSync => {
+            handle_send_raw_transaction_sync(id, raw, auth, api).await
+        }
 
         // Log & filter queries
-        "eth_getLogs" => handle_get_logs(id, raw, auth, api).await,
-        "eth_newFilter" => handle_new_filter(id, raw, auth, api).await,
-        "eth_getFilterLogs" => handle_get_filter_logs(id, raw, auth, api).await,
-        "eth_getFilterChanges" => handle_get_filter_changes(id, raw, auth, api).await,
-        "eth_newBlockFilter" => handle_new_block_filter(id, auth, api).await,
-        "eth_uninstallFilter" => handle_uninstall_filter(id, raw, auth, api).await,
-        "zone_getAuthorizationTokenInfo" => api_result(
+        Method::EthGetLogs => handle_get_logs(id, raw, auth, api).await,
+        Method::EthNewFilter => handle_new_filter(id, raw, auth, api).await,
+        Method::EthGetFilterLogs => handle_get_filter_logs(id, raw, auth, api).await,
+        Method::EthGetFilterChanges => handle_get_filter_changes(id, raw, auth, api).await,
+        Method::EthNewBlockFilter => handle_new_block_filter(id, auth, api).await,
+        Method::EthUninstallFilter => handle_uninstall_filter(id, raw, auth, api).await,
+        Method::ZoneGetAuthorizationTokenInfo => api_result(
             id,
-            "zone_getAuthorizationTokenInfo",
+            method,
             api.zone_get_authorization_token_info(auth.clone()).await,
         ),
-        "zone_getZoneInfo" => api_result(
-            id,
-            "zone_getZoneInfo",
-            api.zone_get_zone_info(auth.clone()).await,
-        ),
-        "zone_getEncryptionKey" => api_result(
-            id,
-            "zone_getEncryptionKey",
-            api.zone_get_encryption_key(auth.clone()).await,
-        ),
-        _ => {
-            // Method is whitelisted but not yet implemented via direct API
-            JsonRpcResponse::error(
-                id,
-                JsonRpcError::internal("method not yet implemented in redacted RPC"),
-            )
+        Method::ZoneGetZoneInfo => {
+            api_result(id, method, api.zone_get_zone_info(auth.clone()).await)
         }
+        Method::ZoneGetEncryptionKey => {
+            api_result(id, method, api.zone_get_encryption_key(auth.clone()).await)
+        }
+        Method::EthGetCode
+        | Method::EthGetStorageAt
+        | Method::EthGetBlockReceipts
+        | Method::EthSendTransaction
+        | Method::EthCreateAccessList
+        | Method::EthGetBlockTransactionCountByNumber
+        | Method::EthGetBlockTransactionCountByHash
+        | Method::EthGetTransactionByBlockNumberAndIndex
+        | Method::EthGetTransactionByBlockHashAndIndex
+        | Method::EthGetUncleCountByBlockNumber
+        | Method::EthGetUncleCountByBlockHash
+        | Method::EthGetProof
+        | Method::EthNewPendingTransactionFilter
+        | Method::EthGetUncleByBlockNumberAndIndex
+        | Method::EthGetUncleByBlockHashAndIndex
+        | Method::EthMining
+        | Method::EthHashrate
+        | Method::EthGetWork
+        | Method::EthSubmitWork
+        | Method::EthSubmitHashrate
+        | Method::EthSubscribe
+        | Method::EthUnsubscribe
+        | Method::AdminWildcard
+        | Method::DebugWildcard
+        | Method::TxpoolWildcard => unreachable!("non-public methods return before dispatch"),
     }
 }
 
@@ -360,7 +373,7 @@ async fn handle_web3_sha3(id: Value, raw: &str) -> JsonRpcResponse {
         Err(resp) => return resp,
     };
 
-    api_result(id, "web3_sha3", crate::types::to_raw(&keccak256(data)))
+    api_result(id, Method::Web3Sha3, crate::types::to_raw(&keccak256(data)))
 }
 
 /// Handle `eth_getBlockByNumber`. Rejects `full=true` for non-sequencer callers.
@@ -386,7 +399,7 @@ async fn handle_get_block_by_number(
 
     api_result(
         id,
-        "eth_getBlockByNumber",
+        Method::EthGetBlockByNumber,
         api.block_by_number(number, full, auth.clone()).await,
     )
 }
@@ -409,7 +422,7 @@ async fn handle_get_block_by_hash(
 
     api_result(
         id,
-        "eth_getBlockByHash",
+        Method::EthGetBlockByHash,
         api.block_by_hash(hash, full, auth.clone()).await,
     )
 }
@@ -428,7 +441,7 @@ async fn handle_get_transaction_by_hash(
 
     api_result(
         id,
-        "eth_getTransactionByHash",
+        Method::EthGetTransactionByHash,
         api.transaction_by_hash(hash, auth.clone()).await,
     )
 }
@@ -447,7 +460,7 @@ async fn handle_get_transaction_receipt(
 
     api_result(
         id,
-        "eth_getTransactionReceipt",
+        Method::EthGetTransactionReceipt,
         api.transaction_receipt(hash, auth.clone()).await,
     )
 }
@@ -475,7 +488,7 @@ async fn handle_call(
 
     api_result(
         id,
-        "eth_call",
+        Method::EthCall,
         api.call(request, block, state_override, auth.clone()).await,
     )
 }
@@ -503,7 +516,7 @@ async fn handle_estimate_gas(
 
     api_result(
         id,
-        "eth_estimateGas",
+        Method::EthEstimateGas,
         api.estimate_gas(request, block, state_override, auth.clone())
             .await,
     )
@@ -524,7 +537,7 @@ async fn handle_fill_transaction(
 
     api_result(
         id,
-        "eth_fillTransaction",
+        Method::EthFillTransaction,
         api.fill_transaction(request, auth.clone()).await,
     )
 }
@@ -543,7 +556,7 @@ async fn handle_send_raw_transaction(
 
     api_result(
         id,
-        "eth_sendRawTransaction",
+        Method::EthSendRawTransaction,
         api.send_raw_transaction(data, auth.clone()).await,
     )
 }
@@ -563,7 +576,7 @@ async fn handle_send_raw_transaction_sync(
 
     api_result(
         id,
-        "eth_sendRawTransactionSync",
+        Method::EthSendRawTransactionSync,
         api.send_raw_transaction_sync(data, auth.clone()).await,
     )
 }
@@ -582,7 +595,7 @@ async fn handle_fee_history(id: Value, raw: &str, api: &dyn ZoneRpcApi) -> JsonR
 
     api_result(
         id,
-        "eth_feeHistory",
+        Method::EthFeeHistory,
         api.fee_history(block_count, newest_block, reward_percentiles)
             .await,
     )
@@ -604,7 +617,7 @@ async fn handle_get_balance(
 
     api_result(
         id,
-        "eth_getBalance",
+        Method::EthGetBalance,
         api.get_balance(address, block, auth.clone()).await,
     )
 }
@@ -625,7 +638,7 @@ async fn handle_get_transaction_count(
 
     api_result(
         id,
-        "eth_getTransactionCount",
+        Method::EthGetTransactionCount,
         api.get_transaction_count(address, block, auth.clone())
             .await,
     )
@@ -643,7 +656,11 @@ async fn handle_get_logs(
         Err(resp) => return resp,
     };
 
-    api_result(id, "eth_getLogs", api.get_logs(filter, auth.clone()).await)
+    api_result(
+        id,
+        Method::EthGetLogs,
+        api.get_logs(filter, auth.clone()).await,
+    )
 }
 
 /// Handle `eth_newFilter`.
@@ -660,7 +677,7 @@ async fn handle_new_filter(
 
     api_result(
         id,
-        "eth_newFilter",
+        Method::EthNewFilter,
         api.new_filter(filter, auth.clone()).await,
     )
 }
@@ -679,7 +696,7 @@ async fn handle_get_filter_logs(
 
     api_result(
         id,
-        "eth_getFilterLogs",
+        Method::EthGetFilterLogs,
         api.get_filter_logs(filter_id, auth.clone()).await,
     )
 }
@@ -698,7 +715,7 @@ async fn handle_get_filter_changes(
 
     api_result(
         id,
-        "eth_getFilterChanges",
+        Method::EthGetFilterChanges,
         api.get_filter_changes(filter_id, auth.clone()).await,
     )
 }
@@ -711,7 +728,7 @@ async fn handle_new_block_filter(
 ) -> JsonRpcResponse {
     api_result(
         id,
-        "eth_newBlockFilter",
+        Method::EthNewBlockFilter,
         api.new_block_filter(auth.clone()).await,
     )
 }
@@ -730,7 +747,7 @@ async fn handle_uninstall_filter(
 
     api_result(
         id,
-        "eth_uninstallFilter",
+        Method::EthUninstallFilter,
         api.uninstall_filter(filter_id, auth.clone()).await,
     )
 }
@@ -750,7 +767,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::types::to_raw;
+    use crate::{
+        metrics::canonical_method_label,
+        types::{classify_method, to_raw},
+    };
 
     #[derive(Default)]
     struct MockZoneRpcApi;
@@ -1012,27 +1032,69 @@ mod tests {
         assert_eq!(err.message, "expected [request, block?, stateOverride?]");
     }
     #[tokio::test]
-    async fn classifies_spec_disabled_and_restricted_methods() {
+    async fn registered_methods_keep_policy_dispatch_and_metrics_aligned() {
         let api = MockZoneRpcApi::default();
 
-        for method in [
-            "eth_getProof",
-            "eth_newPendingTransactionFilter",
-            "eth_getUncleByBlockNumberAndIndex",
-            "eth_getUncleByBlockHashAndIndex",
-            "eth_getWork",
+        for &method in Method::ALL {
+            let name = method.name();
+            assert_eq!(Method::from_name(name), Some(method), "method: {name}");
+            assert_eq!(classify_method(name), Some(method.tier()), "method: {name}");
+            assert_eq!(canonical_method_label(name), name, "method: {name}");
+
+            let response = dispatch(&request(name, json!([])), &auth(), &api).await;
+            match method.tier() {
+                MethodTier::Public => {
+                    if let Some(error) = response.error {
+                        assert!(
+                            ![-32601, -32005, -32006].contains(&error.code),
+                            "public method {name} was rejected by dispatch policy: {error}"
+                        );
+                    }
+                }
+                MethodTier::Restricted => {
+                    let error = response
+                        .error
+                        .expect("restricted method must return an error");
+                    assert_eq!(error.code, -32005, "method: {name}");
+                    assert_eq!(error.message, "Sequencer only", "method: {name}");
+                }
+                MethodTier::Disabled => {
+                    let error = response
+                        .error
+                        .expect("disabled method must return an error");
+                    assert_eq!(error.code, -32006, "method: {name}");
+                    assert_eq!(error.message, "Method disabled", "method: {name}");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_and_unknown_methods_preserve_error_and_metric_behavior() {
+        let api = MockZoneRpcApi::default();
+
+        for (name, label) in [
+            ("admin_peers", "admin_*"),
+            ("debug_accountRange", "debug_*"),
+            ("txpool_contentFrom", "txpool_*"),
         ] {
-            let resp = dispatch(&request(method, json!([])), &auth(), &api).await;
-            let err = resp.error.expect("method should be disabled");
-            assert_eq!(err.code, -32006);
-            assert_eq!(err.message, "Method disabled");
+            assert_eq!(classify_method(name), Some(MethodTier::Restricted));
+            assert_eq!(canonical_method_label(name), label);
+            let response = dispatch(&request(name, json!([])), &auth(), &api).await;
+            let error = response
+                .error
+                .expect("wildcard method must return an error");
+            assert_eq!(error.code, -32005, "method: {name}");
+            assert_eq!(error.message, "Sequencer only", "method: {name}");
         }
 
-        for method in ["debug_accountRange", "txpool_contentFrom", "admin_peers"] {
-            let resp = dispatch(&request(method, json!([])), &auth(), &api).await;
-            let err = resp.error.expect("method should be sequencer-only");
-            assert_eq!(err.code, -32005);
-            assert_eq!(err.message, "Sequencer only");
+        for name in ["eth_someNewMethod", "foo_bar", "zone_getDepositStatus", ""] {
+            assert_eq!(classify_method(name), None, "method: {name}");
+            assert_eq!(canonical_method_label(name), "unknown", "method: {name}");
+            let response = dispatch(&request(name, json!([])), &auth(), &api).await;
+            let error = response.error.expect("unknown method must return an error");
+            assert_eq!(error.code, -32601, "method: {name}");
+            assert_eq!(error.message, "Method not found", "method: {name}");
         }
     }
 }

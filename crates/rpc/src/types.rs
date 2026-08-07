@@ -357,80 +357,127 @@ pub enum MethodTier {
     Disabled,
 }
 
+macro_rules! define_methods {
+    ($($variant:ident => ($name:literal, $tier:ident)),+ $(,)?) => {
+        /// JSON-RPC method recognized by the redacted RPC.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        pub(crate) enum Method {
+            $($variant,)+
+            AdminWildcard,
+            DebugWildcard,
+            TxpoolWildcard,
+        }
+
+        impl Method {
+            #[cfg(test)]
+            pub(crate) const ALL: &'static [Self] = &[
+                $(Self::$variant,)+
+                Self::AdminWildcard,
+                Self::DebugWildcard,
+                Self::TxpoolWildcard,
+            ];
+
+            /// Parse a raw JSON-RPC method name into the authoritative method registry.
+            pub(crate) fn from_name(name: &str) -> Option<Self> {
+                match name {
+                    $($name => Some(Self::$variant),)+
+                    _ if name.starts_with("admin_") => Some(Self::AdminWildcard),
+                    _ if name.starts_with("debug_") => Some(Self::DebugWildcard),
+                    _ if name.starts_with("txpool_") => Some(Self::TxpoolWildcard),
+                    _ => None,
+                }
+            }
+
+            /// Canonical method name, also used as the bounded metrics label.
+            pub(crate) const fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)+
+                    Self::AdminWildcard => "admin_*",
+                    Self::DebugWildcard => "debug_*",
+                    Self::TxpoolWildcard => "txpool_*",
+                }
+            }
+
+            /// Access tier enforced before dispatch.
+            pub(crate) const fn tier(self) -> MethodTier {
+                match self {
+                    $(Self::$variant => MethodTier::$tier,)+
+                    Self::AdminWildcard | Self::DebugWildcard | Self::TxpoolWildcard => {
+                        MethodTier::Restricted
+                    }
+                }
+            }
+        }
+    };
+}
+
+define_methods! {
+    EthBlockNumber => ("eth_blockNumber", Public),
+    EthChainId => ("eth_chainId", Public),
+    EthGasPrice => ("eth_gasPrice", Public),
+    EthGetBalance => ("eth_getBalance", Public),
+    EthGetTransactionCount => ("eth_getTransactionCount", Public),
+    EthCall => ("eth_call", Public),
+    EthEstimateGas => ("eth_estimateGas", Public),
+    EthFeeHistory => ("eth_feeHistory", Public),
+    EthMaxPriorityFeePerGas => ("eth_maxPriorityFeePerGas", Public),
+    EthGetBlockByNumber => ("eth_getBlockByNumber", Public),
+    EthGetBlockByHash => ("eth_getBlockByHash", Public),
+    EthSyncing => ("eth_syncing", Public),
+    EthCoinbase => ("eth_coinbase", Public),
+    NetVersion => ("net_version", Public),
+    NetListening => ("net_listening", Public),
+    Web3ClientVersion => ("web3_clientVersion", Public),
+    Web3Sha3 => ("web3_sha3", Public),
+    ZoneGetAuthorizationTokenInfo => ("zone_getAuthorizationTokenInfo", Public),
+    ZoneGetZoneInfo => ("zone_getZoneInfo", Public),
+    ZoneGetEncryptionKey => ("zone_getEncryptionKey", Public),
+    EthGetTransactionByHash => ("eth_getTransactionByHash", Public),
+    EthGetTransactionReceipt => ("eth_getTransactionReceipt", Public),
+    EthGetLogs => ("eth_getLogs", Public),
+    EthGetFilterLogs => ("eth_getFilterLogs", Public),
+    EthGetFilterChanges => ("eth_getFilterChanges", Public),
+    EthNewFilter => ("eth_newFilter", Public),
+    EthNewBlockFilter => ("eth_newBlockFilter", Public),
+    EthUninstallFilter => ("eth_uninstallFilter", Public),
+    EthFillTransaction => ("eth_fillTransaction", Public),
+    EthSendRawTransaction => ("eth_sendRawTransaction", Public),
+    EthSendRawTransactionSync => ("eth_sendRawTransactionSync", Public),
+    EthGetCode => ("eth_getCode", Restricted),
+    EthGetStorageAt => ("eth_getStorageAt", Restricted),
+    EthGetBlockReceipts => ("eth_getBlockReceipts", Restricted),
+    EthSendTransaction => ("eth_sendTransaction", Restricted),
+    EthCreateAccessList => ("eth_createAccessList", Restricted),
+    EthGetBlockTransactionCountByNumber => ("eth_getBlockTransactionCountByNumber", Restricted),
+    EthGetBlockTransactionCountByHash => ("eth_getBlockTransactionCountByHash", Restricted),
+    EthGetTransactionByBlockNumberAndIndex => (
+        "eth_getTransactionByBlockNumberAndIndex",
+        Restricted
+    ),
+    EthGetTransactionByBlockHashAndIndex => (
+        "eth_getTransactionByBlockHashAndIndex",
+        Restricted
+    ),
+    EthGetUncleCountByBlockNumber => ("eth_getUncleCountByBlockNumber", Restricted),
+    EthGetUncleCountByBlockHash => ("eth_getUncleCountByBlockHash", Restricted),
+    EthGetProof => ("eth_getProof", Disabled),
+    EthNewPendingTransactionFilter => ("eth_newPendingTransactionFilter", Disabled),
+    EthGetUncleByBlockNumberAndIndex => ("eth_getUncleByBlockNumberAndIndex", Disabled),
+    EthGetUncleByBlockHashAndIndex => ("eth_getUncleByBlockHashAndIndex", Disabled),
+    EthMining => ("eth_mining", Disabled),
+    EthHashrate => ("eth_hashrate", Disabled),
+    EthGetWork => ("eth_getWork", Disabled),
+    EthSubmitWork => ("eth_submitWork", Disabled),
+    EthSubmitHashrate => ("eth_submitHashrate", Disabled),
+    EthSubscribe => ("eth_subscribe", Disabled),
+    EthUnsubscribe => ("eth_unsubscribe", Disabled),
+}
+
 /// Classify a JSON-RPC method into its access tier.
 ///
 /// Returns `None` if the method is unknown.
 pub fn classify_method(method: &str) -> Option<MethodTier> {
-    match method {
-        // Public read methods — no privacy redaction needed
-        "eth_blockNumber"
-        | "eth_chainId"
-        | "eth_gasPrice"
-        | "eth_getBalance"
-        | "eth_getTransactionCount"
-        | "eth_call"
-        | "eth_estimateGas"
-        | "eth_feeHistory"
-        | "eth_maxPriorityFeePerGas"
-        | "eth_getBlockByNumber"
-        | "eth_getBlockByHash"
-        | "eth_syncing"
-        | "eth_coinbase"
-        | "net_version"
-        | "net_listening"
-        | "web3_clientVersion"
-        | "web3_sha3"
-        | "zone_getAuthorizationTokenInfo"
-        | "zone_getZoneInfo"
-        | "zone_getEncryptionKey" => Some(MethodTier::Public),
-
-        // Fetch-then-check: public but redacted based on caller identity
-        "eth_getTransactionByHash"
-        | "eth_getTransactionReceipt"
-        | "eth_getLogs"
-        | "eth_getFilterLogs"
-        | "eth_getFilterChanges"
-        | "eth_newFilter"
-        | "eth_newBlockFilter"
-        | "eth_uninstallFilter" => Some(MethodTier::Public),
-
-        // Transaction preparation: public (scoped to caller's account)
-        "eth_fillTransaction" => Some(MethodTier::Public),
-
-        // Transaction submission: public (caller sends their own txs)
-        "eth_sendRawTransaction" | "eth_sendRawTransactionSync" => Some(MethodTier::Public),
-
-        // Sequencer-only — raw state inspection and full block data bypass privacy scoping
-        "eth_getCode"
-        | "eth_getStorageAt"
-        | "eth_getBlockReceipts"
-        | "eth_sendTransaction"
-        | "eth_createAccessList"
-        | "eth_getBlockTransactionCountByNumber"
-        | "eth_getBlockTransactionCountByHash"
-        | "eth_getTransactionByBlockNumberAndIndex"
-        | "eth_getTransactionByBlockHashAndIndex"
-        | "eth_getUncleCountByBlockNumber"
-        | "eth_getUncleCountByBlockHash" => Some(MethodTier::Restricted),
-
-        // Disabled (mempool observation, mining, subscriptions not supported via HTTP)
-        "eth_getProof"
-        | "eth_newPendingTransactionFilter"
-        | "eth_getUncleByBlockNumberAndIndex"
-        | "eth_getUncleByBlockHashAndIndex"
-        | "eth_mining"
-        | "eth_hashrate"
-        | "eth_getWork"
-        | "eth_submitWork"
-        | "eth_submitHashrate"
-        | "eth_subscribe"
-        | "eth_unsubscribe" => Some(MethodTier::Disabled),
-
-        _ if method.starts_with("admin_") => Some(MethodTier::Restricted),
-        _ if method.starts_with("debug_") => Some(MethodTier::Restricted),
-        _ if method.starts_with("txpool_") => Some(MethodTier::Restricted),
-        _ => None,
-    }
+    Method::from_name(method).map(Method::tier)
 }
 
 /// Pre-serialized JSON `null`.

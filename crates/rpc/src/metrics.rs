@@ -8,7 +8,7 @@ use reth_metrics::{
     metrics::{Counter, Histogram},
 };
 
-use crate::types::classify_method;
+use crate::types::Method;
 
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_redacted_rpc_calls")]
@@ -47,13 +47,9 @@ pub(crate) struct ZoneProviderMetrics {
 
 /// Normalize JSON-RPC method names into the fixed label set used by metrics.
 pub(crate) fn canonical_method_label(method: &str) -> &str {
-    match classify_method(method) {
-        Some(_) if method.starts_with("admin_") => "admin_*",
-        Some(_) if method.starts_with("debug_") => "debug_*",
-        Some(_) if method.starts_with("txpool_") => "txpool_*",
-        Some(_) => method,
-        None => "unknown",
-    }
+    Method::from_name(method)
+        .map(Method::name)
+        .unwrap_or("unknown")
 }
 
 #[cfg(test)]
