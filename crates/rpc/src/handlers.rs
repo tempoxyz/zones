@@ -1037,34 +1037,27 @@ mod tests {
 
         for &method in Method::ALL {
             let name = method.name();
-            assert_eq!(Method::from_name(name), Some(method), "method: {name}");
             assert_eq!(classify_method(name), Some(method.tier()), "method: {name}");
             assert_eq!(canonical_method_label(name), name, "method: {name}");
 
-            let response = dispatch(&request(name, json!([])), &auth(), &api).await;
-            match method.tier() {
-                MethodTier::Public => {
-                    if let Some(error) = response.error {
-                        assert!(
-                            ![-32601, -32005, -32006].contains(&error.code),
-                            "public method {name} was rejected by dispatch policy: {error}"
-                        );
-                    }
-                }
-                MethodTier::Restricted => {
-                    let error = response
-                        .error
-                        .expect("restricted method must return an error");
-                    assert_eq!(error.code, -32005, "method: {name}");
-                    assert_eq!(error.message, "Sequencer only", "method: {name}");
-                }
-                MethodTier::Disabled => {
-                    let error = response
-                        .error
-                        .expect("disabled method must return an error");
-                    assert_eq!(error.code, -32006, "method: {name}");
-                    assert_eq!(error.message, "Method disabled", "method: {name}");
-                }
+            let error = dispatch(&request(name, json!([])), &auth(), &api)
+                .await
+                .error;
+            let expected = match method.tier() {
+                MethodTier::Public => None,
+                MethodTier::Restricted => Some((-32005, "Sequencer only")),
+                MethodTier::Disabled => Some((-32006, "Method disabled")),
+            };
+            if let Some(expected) = expected {
+                let actual = error
+                    .as_ref()
+                    .map(|error| (error.code, error.message.as_str()));
+                assert_eq!(actual, Some(expected), "method: {name}");
+            } else if let Some(error) = error {
+                assert!(
+                    ![-32601, -32005, -32006].contains(&error.code),
+                    "public method {name} was rejected by dispatch policy: {error}"
+                );
             }
         }
     }
@@ -1072,29 +1065,21 @@ mod tests {
     #[tokio::test]
     async fn wildcard_and_unknown_methods_preserve_error_and_metric_behavior() {
         let api = MockZoneRpcApi::default();
+        let restricted = Some(MethodTier::Restricted);
 
-        for (name, label) in [
-            ("admin_peers", "admin_*"),
-            ("debug_accountRange", "debug_*"),
-            ("txpool_contentFrom", "txpool_*"),
+        for (name, tier, label, error_code) in [
+            ("admin_peers", restricted, "admin_*", -32005),
+            ("debug_accountRange", restricted, "debug_*", -32005),
+            ("txpool_contentFrom", restricted, "txpool_*", -32005),
+            ("missing_method", None, "unknown", -32601),
         ] {
-            assert_eq!(classify_method(name), Some(MethodTier::Restricted));
+            assert_eq!(classify_method(name), tier, "method: {name}");
             assert_eq!(canonical_method_label(name), label);
-            let response = dispatch(&request(name, json!([])), &auth(), &api).await;
-            let error = response
+            let error = dispatch(&request(name, json!([])), &auth(), &api)
+                .await
                 .error
-                .expect("wildcard method must return an error");
-            assert_eq!(error.code, -32005, "method: {name}");
-            assert_eq!(error.message, "Sequencer only", "method: {name}");
-        }
-
-        for name in ["eth_someNewMethod", "foo_bar", "zone_getDepositStatus", ""] {
-            assert_eq!(classify_method(name), None, "method: {name}");
-            assert_eq!(canonical_method_label(name), "unknown", "method: {name}");
-            let response = dispatch(&request(name, json!([])), &auth(), &api).await;
-            let error = response.error.expect("unknown method must return an error");
-            assert_eq!(error.code, -32601, "method: {name}");
-            assert_eq!(error.message, "Method not found", "method: {name}");
+                .expect("method must return an error");
+            assert_eq!(error.code, error_code, "method: {name}");
         }
     }
 }

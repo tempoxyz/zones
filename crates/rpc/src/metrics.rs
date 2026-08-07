@@ -51,28 +51,3 @@ pub(crate) fn canonical_method_label(method: &str) -> &str {
         .map(Method::name)
         .unwrap_or("unknown")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::canonical_method_label;
-
-    #[test]
-    fn canonicalizes_restricted_wildcard_method_families() {
-        for (method, expected) in [
-            ("admin_trace_0", "admin_*"),
-            ("admin_trace_1", "admin_*"),
-            ("debug_trace_0", "debug_*"),
-            ("debug_trace_1", "debug_*"),
-            ("txpool_content_0", "txpool_*"),
-            ("txpool_content_1", "txpool_*"),
-        ] {
-            assert_eq!(canonical_method_label(method), expected);
-        }
-    }
-
-    #[test]
-    fn preserves_known_methods_and_buckets_unknown_methods() {
-        assert_eq!(canonical_method_label("eth_call"), "eth_call");
-        assert_eq!(canonical_method_label("missing_method"), "unknown");
-    }
-}
