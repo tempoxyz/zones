@@ -4,7 +4,6 @@
 //! Unlike the Tempo L1 `TempoBlockExecutor`, this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
-use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
     block::{
@@ -21,7 +20,7 @@ use tempo_revm::evm::TempoContext;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::state::L1StateProvider;
 use zone_precompiles::{
-    ADVANCE_TEMPO_SELECTOR, L1StorageReader, is_finalize_withdrawal_batch_calldata, tx_context,
+    ADVANCE_TEMPO_SELECTOR, L1StorageReader, is_finalize_withdrawal_batch_calldata,
 };
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -207,10 +206,6 @@ where
 
         let next_phase = self.phase.validate_transaction(recovered.tx())?;
 
-        let _tx_context_guard = tx_context::set_current_transaction(
-            *recovered.tx().tx_hash(),
-            tx_env.fee_payer().unwrap_or(tx_env.caller),
-        );
         let result = self
             .inner
             .execute_transaction_without_commit((tx_env, recovered));

@@ -3289,7 +3289,6 @@ impl ZoneAccount {
                 args.data,
                 args.reveal_to,
             )
-            .gas(WITHDRAWAL_TX_GAS)
             .send()
             .await?
             .get_receipt()
