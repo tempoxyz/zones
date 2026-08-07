@@ -6,31 +6,28 @@
 
 use alloy_consensus::TxReceipt;
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256, b256};
+use alloy_primitives::{Address, B256};
 use alloy_rpc_types_eth::{Filter, FilterSet, Log};
+use alloy_sol_types::SolEvent;
 use tempo_alloy::rpc::TempoTransactionReceipt;
+use tempo_contracts::precompiles::ITIP20;
 
 use crate::types::JsonRpcError;
 
 /// `Transfer(address,address,uint256)`
-pub const TRANSFER_TOPIC: B256 =
-    b256!("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
+pub const TRANSFER_TOPIC: B256 = ITIP20::Transfer::SIGNATURE_HASH;
 
 /// `Approval(address,address,uint256)`
-pub const APPROVAL_TOPIC: B256 =
-    b256!("0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925");
+pub const APPROVAL_TOPIC: B256 = ITIP20::Approval::SIGNATURE_HASH;
 
 /// `TransferWithMemo(address,address,uint256,bytes32)`
-pub const TRANSFER_WITH_MEMO_TOPIC: B256 =
-    b256!("0x57bc7354aa85aed339e000bccffabbc529466af35f0772c8f8ee1145927de7f0");
+pub const TRANSFER_WITH_MEMO_TOPIC: B256 = ITIP20::TransferWithMemo::SIGNATURE_HASH;
 
 /// `Mint(address,uint256)`
-pub const MINT_TOPIC: B256 =
-    b256!("0x0f6798a560793a54c3bcfe86a93cde1e73087d944c0ea20544137d4121396885");
+pub const MINT_TOPIC: B256 = ITIP20::Mint::SIGNATURE_HASH;
 
 /// `Burn(address,uint256)`
-pub const BURN_TOPIC: B256 =
-    b256!("0xcc16f5dbb4873280815c1ee09dbd06736cffcc184412cf7a71a0fdb75d397ca5");
+pub const BURN_TOPIC: B256 = ITIP20::Burn::SIGNATURE_HASH;
 
 /// All whitelisted TIP-20 event topic hashes.
 pub const WHITELISTED_TOPICS: [B256; 5] = [
@@ -281,28 +278,6 @@ mod tests {
             fee_token: None,
             fee_payer: from,
         }
-    }
-
-    // ---------------------------------------------------------------
-    // Verify topic hashes match the Solidity event signatures
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn topic_hashes_match_signatures() {
-        assert_eq!(
-            TRANSFER_TOPIC,
-            keccak256(b"Transfer(address,address,uint256)")
-        );
-        assert_eq!(
-            APPROVAL_TOPIC,
-            keccak256(b"Approval(address,address,uint256)")
-        );
-        assert_eq!(
-            TRANSFER_WITH_MEMO_TOPIC,
-            keccak256(b"TransferWithMemo(address,address,uint256,bytes32)")
-        );
-        assert_eq!(MINT_TOPIC, keccak256(b"Mint(address,uint256)"));
-        assert_eq!(BURN_TOPIC, keccak256(b"Burn(address,uint256)"));
     }
 
     // ---------------------------------------------------------------

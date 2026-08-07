@@ -29,6 +29,7 @@ alloy-rpc-types-debug.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-signer.workspace = true
 alloy-signer-local.workspace = true
+alloy-sol-types.workspace = true
 
 # rpc server
 axum = { workspace = true, features = ["ws"] }
