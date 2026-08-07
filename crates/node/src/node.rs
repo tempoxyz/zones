@@ -571,12 +571,11 @@ where
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
         // The CLI rejects a zero portal address. Programmatic test/dev nodes use it as an
         // explicit sentinel because they have no on-chain portal to bind against.
-        let zone_id = if self.portal_address.is_zero() {
+        if self.portal_address.is_zero() {
             warn!(
                 target: "reth::cli",
                 "Skipping portal-bound zone identity validation for a zero-address test/dev portal"
             );
-            self.redacted_rpc_config.zone_id
         } else {
             let portal_zone_id = ZonePortal::new(self.portal_address, &l1_provider)
                 .zoneId()
@@ -605,9 +604,7 @@ where
                 validate_configured_zone_id("P2P manifest", config.zone_id(), portal_zone_id)?;
             }
             validate_zone_chain_id(l1_chain_id, portal_zone_id, chain_id)?;
-            portal_zone_id
-        };
-        self.redacted_rpc_config.zone_id = zone_id;
+        }
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
@@ -663,7 +660,7 @@ where
             let attestation_domain = AttestationDomain {
                 l1_chain_id,
                 portal_address: self.portal_address,
-                zone_id,
+                zone_id: config.zone_id(),
                 sequencer_set_version: config.sequencer_set_version(),
             };
             let anchor_config = self
@@ -774,7 +771,7 @@ where
         let operator_rpc_slot = sequencer_rpc_slot.clone();
         let operator_rpc_provider = provider.clone();
         let operator_zone_api = OperatorZoneApi::new(
-            zone_id,
+            self.redacted_rpc_config.zone_id,
             chain_id,
             self.portal_address,
             l1_provider.clone(),
