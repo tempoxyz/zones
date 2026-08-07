@@ -145,6 +145,9 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
     prover_config: Option<ShadowProverConfig>,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> ZoneSequencerHandle {
+    // Build a single shared L1 provider with the sequencer wallet.
+    // Both the batch submitter (inside the zone monitor) and the withdrawal
+    // processor use this provider, ensuring nonces are tracked in one place.
     let l1_provider = connect_l1_provider(
         &config.l1_rpc_url,
         config.retry_connection_interval,
