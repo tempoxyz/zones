@@ -45,7 +45,10 @@ pub struct AuthContext {
 /// The last 29 bytes are always the fixed fields; everything before is the variable-length signature.
 ///
 /// See `docs/pages/protocol/privacy/rpc.md` — "Transport" and "Message" sections.
-#[derive(Debug, Clone)]
+///
+/// This type intentionally does not implement [`Debug`](std::fmt::Debug) because its signature is
+/// an authentication credential that must not be exposed in logs.
+#[derive(Clone)]
 pub struct AuthorizationToken {
     /// Spec version (must be 0).
     pub version: u8,
