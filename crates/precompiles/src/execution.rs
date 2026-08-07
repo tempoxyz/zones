@@ -29,7 +29,10 @@ use tempo_precompiles::{
     dispatch::selector_from_calldata,
     error::TempoPrecompileError,
     input_cost,
-    storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    storage::{
+        PrecompileStorageProvider, StorageCtx, actions::StorageActions,
+        evm::EvmPrecompileStorageProvider,
+    },
     storage_credits::NonCreditableSlots,
 };
 
@@ -135,6 +138,11 @@ pub(crate) fn create_precompile(
         )
         .with_actions(env.actions.clone())
         .with_non_creditable_slots(env.non_creditable_slots.clone());
+        if fixed_gas.is_some() {
+            // The fixed charge replaces storage-dependent pricing. Do not let the call mint,
+            // consume, or schedule TIP-1060 credits whose variable charges are discarded below.
+            storage.set_tip1060_storage_credits(false);
+        }
 
         let mut result = StorageCtx::enter(&mut storage, || match rules.admit(data, caller) {
             CallCheck::Continue => execute(data, caller),
@@ -149,6 +157,9 @@ pub(crate) fn create_precompile(
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
+            // T4+ precompiles propagate SSTORE refunds separately from gas_used. Retaining them
+            // would make the effective fixed charge depend on the touched storage slots.
+            output.gas_refunded = 0;
         }
         result
     })
@@ -179,6 +190,7 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+    use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address)>>>;
@@ -260,6 +272,49 @@ mod tests {
             Some((calldata.into(), Some([0xde, 0xad, 0xbe, 0xef]), caller))
         );
         assert_eq!(*recorded_execute.borrow(), Some((calldata.into(), caller)));
+    }
+
+    #[test]
+    fn fixed_gas_disables_storage_credits_and_discards_refunds() {
+        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        cfg.spec = TempoHardfork::T8;
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let storage_owner = Address::repeat_byte(0x33);
+        let credit_slot = U256::from_be_slice(storage_owner.as_slice());
+        let observed_credit_state = Rc::new(Cell::new(U256::MAX));
+        let execute_credit_state = observed_credit_state.clone();
+        let precompile = create_precompile(
+            "FixedGasAccountingTest",
+            &env,
+            RecordingRules(Rc::new(RefCell::new(None))),
+            move |_, _| {
+                let mut storage = StorageCtx::default();
+                storage
+                    .sstore(storage_owner, U256::ZERO, U256::ONE)
+                    .unwrap();
+                execute_credit_state
+                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
+
+                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
+                storage.refund_gas(4_800);
+                let mut output = storage.success_output(Bytes::new());
+                output.gas_refunded = storage.gas_refunded();
+                Ok(output)
+            },
+        );
+
+        let mut ctx = test_context();
+        let output = precompile
+            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
+            .unwrap();
+
+        assert_eq!(output.gas_used, FIXED_GAS);
+        assert_eq!(output.gas_refunded, 0);
+        assert_eq!(observed_credit_state.get(), U256::ZERO);
     }
 
     #[test]
