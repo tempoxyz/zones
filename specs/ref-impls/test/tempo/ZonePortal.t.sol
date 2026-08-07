@@ -650,7 +650,11 @@ contract ZonePortalTest is BaseTest {
         _activateSequencerSet(portal, signers, quorum);
     }
 
-    function _activateSequencerSet(ZonePortal target, address[] memory signers, uint8 quorum)
+    function _activateSequencerSet(
+        ZonePortal target,
+        address[] memory signers,
+        uint8 quorum
+    )
         internal
     {
         // The portal rejects a set that drops the active leader, so rotation is three steps:
@@ -869,12 +873,17 @@ contract ZonePortalTest is BaseTest {
         });
     }
 
-    function _assertSettlementStateUnchanged(ZonePortal target, PortalSettlementState memory before)
+    function _assertSettlementStateUnchanged(
+        ZonePortal target,
+        PortalSettlementState memory before
+    )
         internal
         view
     {
         assertEq(target.blockHash(), before.blockHash, "Portal block hash changed after rejection");
-        assertEq(target.zoneHeight(), before.zoneHeight, "Portal zone height changed after rejection");
+        assertEq(
+            target.zoneHeight(), before.zoneHeight, "Portal zone height changed after rejection"
+        );
         assertEq(
             target.withdrawalBatchIndex(),
             before.withdrawalBatchIndex,
@@ -916,24 +925,39 @@ contract ZonePortalTest is BaseTest {
         _assertSettlementStateUnchanged(target, before);
     }
 
-    function _mutatedAttestation(SettlementAttestationInput memory attestation, uint256 mutation)
+    function _mutatedAttestation(
+        SettlementAttestationInput memory attestation,
+        uint256 mutation
+    )
         internal
         pure
         returns (SettlementAttestationInput memory)
     {
-        if (mutation == 0) attestation.zoneId += 1;
-        else if (mutation == 1) attestation.sequencerSetVersion += 1;
-        else if (mutation == 2) attestation.zoneHeight += 1;
-        else if (mutation == 3) attestation.withdrawalBatchIndex += 1;
-        else if (mutation == 4) attestation.verifier = address(0xBEEF);
-        else if (mutation == 5) attestation.tempoBlockNumber += 1;
-        else if (mutation == 6) attestation.anchorBlockNumber += 1;
-        else if (mutation == 7) attestation.anchorBlockHash = keccak256("wrong-anchor-hash");
-        else if (mutation == 8) attestation.blockTransition.nextBlockHash = keccak256("wrong-tip");
-        else if (mutation == 9) {
+        if (mutation == 0) {
+            attestation.zoneId += 1;
+        } else if (mutation == 1) {
+            attestation.sequencerSetVersion += 1;
+        } else if (mutation == 2) {
+            attestation.zoneHeight += 1;
+        } else if (mutation == 3) {
+            attestation.withdrawalBatchIndex += 1;
+        } else if (mutation == 4) {
+            attestation.verifier = address(0xBEEF);
+        } else if (mutation == 5) {
+            attestation.tempoBlockNumber += 1;
+        } else if (mutation == 6) {
+            attestation.anchorBlockNumber += 1;
+        } else if (mutation == 7) {
+            attestation.anchorBlockHash = keccak256("wrong-anchor-hash");
+        } else if (mutation == 8) {
+            attestation.blockTransition.nextBlockHash = keccak256("wrong-tip");
+        } else if (mutation == 9) {
             attestation.depositQueueTransition.nextProcessedHash = keccak256("wrong-deposit-hash");
-        } else if (mutation == 10) attestation.withdrawalQueueHash = keccak256("wrong-withdrawal-hash");
-        else if (mutation == 11) attestation.verifierConfig = hex"01";
+        } else if (mutation == 10) {
+            attestation.withdrawalQueueHash = keccak256("wrong-withdrawal-hash");
+        } else if (mutation == 11) {
+            attestation.verifierConfig = hex"01";
+        }
         return attestation;
     }
 
