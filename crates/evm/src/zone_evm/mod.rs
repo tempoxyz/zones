@@ -25,15 +25,6 @@ type TempoResult = ResultAndState<TempoHaltReason>;
 type AdaptedEvmError<E> = EVMError<ZoneDbError<E>, TempoInvalidTransaction>;
 type ZoneEvmError<E> = EVMError<E, TempoInvalidTransaction>;
 
-fn install_transaction_context(tx: &TempoTxEnv) -> tx_context::TransactionContextGuard {
-    let fee_payer = tx.fee_payer().unwrap_or(tx.caller);
-    let tx_hash = match tx.execution_context() {
-        ExecutionContext::Transaction { tx_hash } => tx_hash,
-        ExecutionContext::Simulation => B256::repeat_byte(0xff),
-    };
-    tx_context::set_current_transaction(tx_hash, fee_payer)
-}
-
 /// Zone runtime EVM.
 ///
 /// Execution uses an anchored database adapter internally while the public [`Evm::DB`] remains the
@@ -172,7 +163,12 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
-        let _tx_context_guard = install_transaction_context(&tx);
+        let tx_hash = match tx.execution_context() {
+            ExecutionContext::Transaction { tx_hash } => tx_hash,
+            ExecutionContext::Simulation => B256::repeat_byte(0xff),
+        };
+        let _tx_context_guard =
+            tx_context::set_current_transaction(tx_hash, tx.fee_payer().unwrap_or(tx.caller));
         self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 

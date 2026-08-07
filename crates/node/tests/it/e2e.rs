@@ -23,8 +23,8 @@ use tempo_zone_contracts::{
 use zone_l1::ChainTempoStateExt;
 
 use crate::utils::{
-    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, ZoneTestNode, approve_outbox,
-    leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
+    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
+    approve_outbox, leader_p2p_config, local_dev_zone_account, poll_until, seed_fixture_for_zone,
     start_chain_id_rpc, start_local_p2p_cluster, start_local_zone_with_fixture,
 };
 
@@ -1361,12 +1361,13 @@ async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<(
     Ok(())
 }
 
-/// Reject an L2 withdrawal estimate with an over-cap callback gas limit.
+/// Submit a signed L2 withdrawal request with an over-cap callback gas limit.
 ///
-/// This exercises the RPC simulation path and verifies the discarded estimate does not enter the
-/// pending withdrawal queue.
+/// This exercises the RPC transaction path: the transaction is accepted into a
+/// zone block, reverts in `IZoneOutbox`, and does not enter the pending
+/// withdrawal queue.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_withdrawal_estimation_rejects_over_max_callback_gas() -> eyre::Result<()> {
+async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
@@ -1395,7 +1396,7 @@ async fn test_withdrawal_estimation_rejects_over_max_callback_gas() -> eyre::Res
         .await?;
     let max_callback_gas = outbox.MAX_WITHDRAWAL_GAS_LIMIT().call().await?;
 
-    outbox
+    let withdrawal_pending = outbox
         .requestWithdrawal(
             PATH_USD_ADDRESS,
             dev_address,
@@ -1407,9 +1408,16 @@ async fn test_withdrawal_estimation_rejects_over_max_callback_gas() -> eyre::Res
             Bytes::new(),
         )
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .estimate_gas()
-        .await
-        .expect_err("over-cap withdrawal gas estimate should revert");
+        .gas(WITHDRAWAL_TX_GAS)
+        .send()
+        .await?;
+
+    fixture.inject_empty_block(zone.deposit_queue());
+    let withdrawal_receipt = withdrawal_pending.get_receipt().await?;
+    assert!(
+        !withdrawal_receipt.status(),
+        "over-cap withdrawal request should revert on L2"
+    );
 
     let pending_after = outbox
         .pendingWithdrawalsCount()
@@ -1418,7 +1426,7 @@ async fn test_withdrawal_estimation_rejects_over_max_callback_gas() -> eyre::Res
         .await?;
     assert_eq!(
         pending_after, pending_before,
-        "reverted withdrawal estimate must not enter the pending queue"
+        "reverted withdrawal must not enter the pending queue"
     );
 
     Ok(())
