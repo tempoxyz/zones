@@ -228,7 +228,7 @@ jobs:
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
-          INPUT_TEMPO_REF: a80c1438241e9edd67d8a96c6c07d3697fcf77d8
+          INPUT_TEMPO_REF: c40ff801741d28ab74452db261f5b6ffe4ec334a
           INPUT_TXGEN_REF: 072877b673f60b5f559f17da098296f1841b6732
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
