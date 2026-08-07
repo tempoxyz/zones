@@ -157,8 +157,7 @@ pub(crate) fn create_precompile(
         });
         if let (Ok(output), Some(gas)) = (&mut result, fixed_gas) {
             output.gas_used = gas;
-            // T4+ precompiles propagate SSTORE refunds separately from gas_used. Retaining them
-            // would make the effective fixed charge depend on the touched storage slots.
+            // Disable refunds to not leak any data about previous storage values. 
             output.gas_refunded = 0;
         }
         result
