@@ -340,6 +340,51 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         futures::future::try_join_all(futs).await
     }
 
+    /// Returns all sequencer addresses currently registered on this [`ZonePortal`].
+    ///
+    /// Calls [`sequencerCount`](ZonePortal::sequencerCountCall) followed by a Multicall3
+    /// batch of [`sequencerAt`](ZonePortal::sequencerAtCall) reads.
+    pub async fn sequencers(
+        &self,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        self.sequencers_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+    }
+
+    /// Returns all sequencer addresses registered at `block_id`.
+    ///
+    /// The index reads go through Multicall3 so they execute in a single EVM call and observe
+    /// one state snapshot even when `block_id` is a moving tag like `latest`.
+    pub async fn sequencers_at(
+        &self,
+        block_id: alloy_rpc_types_eth::BlockId,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self
+            .sequencerCount()
+            .block(block_id)
+            .call()
+            .await?
+            .to::<u64>();
+        if count == 0 {
+            return Ok(alloc::vec::Vec::new());
+        }
+        let mut multicall = self
+            .provider()
+            .multicall()
+            .dynamic::<ZonePortal::sequencerAtCall>()
+            .block(block_id);
+        for i in 0..count {
+            multicall = multicall.add_dynamic(self.sequencerAt(alloy_primitives::U256::from(i)));
+        }
+        multicall.aggregate().await.map_err(|err| match err {
+            alloy_provider::MulticallError::TransportError(err) => err.into(),
+            alloy_provider::MulticallError::DecodeError(err) => err.into(),
+            err => {
+                alloy_provider::transport::TransportErrorKind::custom_str(&err.to_string()).into()
+            }
+        })
+    }
+
     /// Fetches the active sequencer encryption key and its index from one L1 snapshot.
     ///
     /// Reads the current L1 block number, then pins an atomic

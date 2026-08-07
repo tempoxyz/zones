@@ -7,7 +7,7 @@ use crate::{
     database::{L1OverlayDB, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use revm::context::{
     DBErrorMarker,
     result::{EVMError, ResultAndState},
@@ -16,9 +16,9 @@ use tempo_evm::{
     TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, TempoPoolValidationResult,
     evm::TempoEvm,
 };
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
+use tempo_revm::{ExecutionContext, TempoInvalidTransaction, TempoTxEnv};
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::L1StorageReader;
+use zone_precompiles::{L1StorageReader, tx_context};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type TempoResult = ResultAndState<TempoHaltReason>;
@@ -163,6 +163,12 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
+        let tx_hash = match tx.execution_context() {
+            ExecutionContext::Transaction { tx_hash } => tx_hash,
+            ExecutionContext::Simulation => B256::repeat_byte(0xff),
+        };
+        let _tx_context_guard =
+            tx_context::set_current_transaction(tx_hash, tx.fee_payer().unwrap_or(tx.caller));
         self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 
