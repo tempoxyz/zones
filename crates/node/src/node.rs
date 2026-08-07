@@ -724,8 +724,7 @@ where
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
             &handle,
-            self.l1_config.l1_rpc_url.clone(),
-            self.l1_config.retry_connection_interval,
+            l1_provider.clone(),
             self.l1_config.portal_address,
             self.l1_config.enabled_tokens.clone(),
             chain_id,
@@ -1251,31 +1250,25 @@ where
     async fn launch_redacted_rpc(
         config: ZoneRedactedRpcConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
-        l1_rpc_url: String,
-        retry_connection_interval: Duration,
+        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
         portal_address: Address,
         enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
-        let zone_rpc_url = handle
-            .rpc_server_handles
-            .rpc
-            .http_url()
-            .expect("HTTP RPC server must be enabled for redacted RPC");
         let redacted_rpc_config = zone_rpc::RedactedRpcConfig {
             listen_addr: ([0, 0, 0, 0], config.redacted_rpc_port).into(),
-            l1_rpc_url,
-            zone_rpc_url,
-            retry_connection_interval,
             zone_id: config.zone_id,
             chain_id,
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
         };
-        let api: Arc<dyn ZoneRpcApi> = Arc::new(
-            ZoneRpc::new(eth_handlers, redacted_rpc_config.clone(), enabled_tokens).await?,
-        );
+        let api: Arc<dyn ZoneRpcApi> = Arc::new(ZoneRpc::new(
+            eth_handlers,
+            redacted_rpc_config.clone(),
+            enabled_tokens,
+            l1_provider,
+        ));
         let local_addr = start_redacted_rpc(redacted_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Redacted zone RPC server started");
 

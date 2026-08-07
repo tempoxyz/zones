@@ -622,7 +622,7 @@ type RpcApiFactory = dyn Fn(zone_node::rpc::RedactedRpcConfig) -> RpcApiFuture +
 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
-    l1_provider: DynProvider,
+    l1_provider: DynProvider<TempoNetwork>,
     portal_address: Address,
     deposit_queue: DepositQueue,
     enabled_tokens: EnabledTokenRegistry,
@@ -1227,7 +1227,9 @@ impl ZoneTestNode {
             "wss" => l1_http_url.set_scheme("https").expect("valid HTTPS scheme"),
             _ => {}
         }
-        let l1_provider = ProviderBuilder::new().connect_http(l1_http_url).erased();
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http(l1_http_url)
+            .erased();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(zone_node::genesis::GENESIS_TEMPLATE_JSON)
@@ -1386,13 +1388,18 @@ impl ZoneTestNode {
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
         let rpc_enabled_tokens = enabled_tokens.clone();
+        let rpc_l1_provider = l1_provider.clone();
         let rpc_api_factory = Arc::new(move |config: zone_node::rpc::RedactedRpcConfig| {
             let eth_handlers = eth_handlers.clone();
             let enabled_tokens = rpc_enabled_tokens.clone();
+            let l1_provider = rpc_l1_provider.clone();
             Box::pin(async move {
-                Ok(Arc::new(
-                    zone_node::rpc::ZoneRpc::new(eth_handlers, config, enabled_tokens).await?,
-                ) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
+                Ok(Arc::new(zone_node::rpc::ZoneRpc::new(
+                    eth_handlers,
+                    config,
+                    enabled_tokens,
+                    l1_provider,
+                )) as Arc<dyn zone_node::rpc::ZoneRpcApi>)
             })
                 as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone_node::rpc::ZoneRpcApi>>>>>
         });
@@ -4253,9 +4260,6 @@ pub(crate) async fn start_zone_with_redacted_rpc() -> eyre::Result<RedactedRpcTe
 
     let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
-        l1_rpc_url: DUMMY_L1_URL.to_string(),
-        zone_rpc_url: zone.http_url().to_string(),
-        retry_connection_interval: Duration::from_millis(100),
         zone_id: 0,
         chain_id,
         max_auth_token_validity: zone_node::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
@@ -4297,9 +4301,6 @@ async fn start_zone_with_redacted_rpc_l1_inner() -> eyre::Result<RedactedRpcL1Te
 
     let config = zone_node::rpc::RedactedRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
-        l1_rpc_url: l1.http_url().to_string(),
-        zone_rpc_url: zone.http_url().to_string(),
-        retry_connection_interval: Duration::from_millis(100),
         zone_id: 1,
         chain_id,
         max_auth_token_validity: zone_node::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,

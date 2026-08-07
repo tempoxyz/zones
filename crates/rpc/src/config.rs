@@ -2,17 +2,13 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-/// Configuration for the redacted zone RPC server.
+/// Listener, authentication, and zone metadata configuration for the redacted RPC server.
+///
+/// Runtime L1 and local-node providers are injected separately by the node assembly.
 #[derive(Debug, Clone)]
 pub struct RedactedRpcConfig {
     /// Address to listen on for the redacted RPC server.
     pub listen_addr: SocketAddr,
-    /// Tempo L1 RPC URL used by zone-specific RPC methods that inspect portal logs.
-    pub l1_rpc_url: String,
-    /// Zone L2 RPC URL used by zone-specific RPC methods that inspect L2 events.
-    pub zone_rpc_url: String,
-    /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
-    pub retry_connection_interval: Duration,
     /// The zone's numeric identifier.
     pub zone_id: u32,
     /// The zone's chain ID.
