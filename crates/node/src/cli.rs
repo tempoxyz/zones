@@ -12,7 +12,7 @@ use reth_tracing::tracing::info;
 use zeroize::Zeroizing;
 use zone_chainspec::{ZoneChainSpec, ZoneChainSpecParser};
 use zone_evm::ZoneEvmConfig;
-use zone_p2p::{P2pConfig, Role};
+use zone_p2p::{MAX_TRANSACTION_MESSAGE_SIZE, P2pConfig, Role};
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
@@ -140,11 +140,15 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         }
 
         let manifest_mode = p2p_config.is_some();
+        validate_p2p_transaction_size_limit(
+            manifest_mode,
+            builder.config().txpool.max_tx_input_bytes,
+        )?;
         if manifest_mode {
             // Replicate only durable blocks. Persist every block immediately so followers can
             // acknowledge each block without waiting for Reth's in-memory buffer to fill.
             builder.config_mut().engine.persistence_threshold = 0;
-            builder.config_mut().engine.memory_block_buffer_target = 0;
+            builder.config_mut().engine.memory_block_buffer_target = Some(0);
         }
         // Every promotable node constructs all the sequencer resources: activation is gated at
         // runtime by the leadership schedule, so a quorum follower must be able to become a
@@ -167,6 +171,8 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
         } else {
             None
         };
+        let additional_decryption_keys =
+            load_decryption_keys(args.deposit_decryption_keys_file.as_deref()).await?;
 
         builder.config_mut().network.discovery.disable_discovery = true;
         builder.config_mut().rpc.disable_auth_server = true;
@@ -187,6 +193,9 @@ fn run_node(mut cli: Cli<ZoneChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
                 args.redacted_rpc_max_auth_token_validity_secs,
             ),
         });
+        if !additional_decryption_keys.is_empty() {
+            node = node.with_deposit_decryption_keys(additional_decryption_keys);
+        }
 
         if should_sequence_blocks {
             let sequencer_signer = sequencer_signer
@@ -255,6 +264,40 @@ async fn load_sequencer_signer(
         .map_err(|_| eyre::eyre!("invalid sequencer key from {source}"))
 }
 
+async fn load_decryption_keys(
+    key_file: Option<&std::path::Path>,
+) -> eyre::Result<Vec<k256::SecretKey>> {
+    let Some(path) = key_file else {
+        return Ok(Vec::new());
+    };
+    let path = path.to_path_buf();
+    let display_path = path.display().to_string();
+    let contents = tokio::task::spawn_blocking(move || std::fs::read_to_string(path))
+        .await
+        .map_err(|err| eyre::eyre!("decryption key reader task failed for {display_path}: {err}"))?
+        .map_err(|err| eyre::eyre!("failed to read decryption keys from {display_path}: {err}"))?;
+    let contents = Zeroizing::new(contents);
+    let mut keys = Vec::new();
+    for (line_index, value) in contents.lines().enumerate() {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let signer = value.parse::<PrivateKeySigner>().map_err(|_| {
+            eyre::eyre!(
+                "invalid decryption key on line {} of {display_path}",
+                line_index + 1
+            )
+        })?;
+        keys.push(k256::SecretKey::from(signer.credential()));
+    }
+    eyre::ensure!(
+        !keys.is_empty(),
+        "decryption key file {display_path} contains no keys"
+    );
+    Ok(keys)
+}
+
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
@@ -295,6 +338,14 @@ pub struct ZoneArgs {
         conflicts_with = "sequencer_key"
     )]
     pub sequencer_key_file: Option<PathBuf>,
+
+    /// File containing additional deposit decryption keys, one hex key per line.
+    #[arg(
+        long = "deposit-decryption-keys-file",
+        env = "DEPOSIT_DECRYPTION_KEYS_FILE",
+        value_name = "PATH"
+    )]
+    pub deposit_decryption_keys_file: Option<PathBuf>,
 
     /// Path to the static multi-sequencer manifest. Its presence activates
     /// multi-sequencer mode and makes the manifest authoritative for role selection.
@@ -485,6 +536,19 @@ fn sequencer_enabled(cli_flag: bool, p2p_config: Option<&P2pConfig>) -> bool {
     cli_flag || p2p_config.is_some_and(|config| !config.is_rpc_only())
 }
 
+fn validate_p2p_transaction_size_limit(
+    manifest_mode: bool,
+    max_tx_input_bytes: usize,
+) -> eyre::Result<()> {
+    if manifest_mode {
+        eyre::ensure!(
+            max_tx_input_bytes <= MAX_TRANSACTION_MESSAGE_SIZE,
+            "--txpool.max-tx-input-bytes ({max_tx_input_bytes}) exceeds the multi-sequencer P2P transaction limit ({MAX_TRANSACTION_MESSAGE_SIZE})"
+        );
+    }
+    Ok(())
+}
+
 fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
     let url: url::Url = l1_rpc_url
         .parse()
@@ -512,8 +576,8 @@ mod tests {
     use clap::Parser as _;
 
     use super::{
-        Role, ZoneArgs, ZoneCli, load_sequencer_signer, sequencer_enabled, validate_l1_rpc_url,
-        validate_portal_address,
+        Role, ZoneArgs, ZoneCli, load_decryption_keys, load_sequencer_signer, sequencer_enabled,
+        validate_l1_rpc_url, validate_p2p_transaction_size_limit, validate_portal_address,
     };
     use zone_sequencer::MAX_WITHDRAWAL_BATCH_GAS;
 
@@ -560,6 +624,26 @@ mod tests {
 
         assert!(args.validate_zone_id(expected).is_ok());
         assert!(args.validate_zone_id(expected + 1).is_err());
+    }
+
+    #[test]
+    fn manifest_mode_rejects_a_txpool_limit_above_the_p2p_wire_limit() {
+        assert!(
+            validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE,)
+                .is_ok()
+        );
+        let error =
+            validate_p2p_transaction_size_limit(true, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE + 1)
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("exceeds the multi-sequencer P2P transaction limit")
+        );
+        assert!(
+            validate_p2p_transaction_size_limit(false, zone_p2p::MAX_TRANSACTION_MESSAGE_SIZE + 1,)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -612,6 +696,34 @@ mod tests {
             "0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf"
                 .parse::<alloy_primitives::Address>()
                 .unwrap()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loads_additional_decryption_keys_one_per_line() {
+        let path =
+            std::env::temp_dir().join(format!("tempo-zone-decryption-keys-{}", std::process::id()));
+        std::fs::write(
+            &path,
+            concat!(
+                "0000000000000000000000000000000000000000000000000000000000000001\n",
+                "\n",
+                "0000000000000000000000000000000000000000000000000000000000000002\n"
+            ),
+        )
+        .unwrap();
+
+        let keys = load_decryption_keys(Some(&path)).await.unwrap();
+        std::fs::remove_file(path).unwrap();
+
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            keys[0].to_bytes().as_slice(),
+            alloy_primitives::B256::with_last_byte(1).as_slice()
+        );
+        assert_eq!(
+            keys[1].to_bytes().as_slice(),
+            alloy_primitives::B256::with_last_byte(2).as_slice()
         );
     }
 

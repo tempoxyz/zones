@@ -38,6 +38,16 @@ scenario:
         chain: zone
       save: zone_before_deposit
 
+    - invoke:
+        chain: l1
+        action: prepare_encrypted_deposit
+        with:
+          recipient: "${ZONES_BENCH_SEQUENCER_ADDRESS}"
+          zoneId: ${ZONES_BENCH_EXPECTED_ZONE_ID}
+          portalAddress: "${L1_PORTAL_ADDRESS}"
+          memo: "0x0000000000000000000000000000000000000000000000000000000000000000"
+      save: encryption
+
     - submit:
         chain: l1
         template: bootstrap_deposit
@@ -46,9 +56,9 @@ scenario:
           call:
             args:
               - "${ZONES_BENCH_TOKEN}"
-              - "${ZONES_BENCH_SEQUENCER_ADDRESS}"
               - ${ZONES_BENCH_BOOTSTRAP_DEPOSIT_AMOUNT}
-              - { random_bytes: 32 }
+              - { var: encryption.keyIndex }
+              - { var: encryption.encrypted }
               - { var: account.address }
       save: bootstrap_deposit
 
@@ -62,7 +72,6 @@ scenario:
         where:
           sender: { var: account.address }
           token: "${ZONES_BENCH_TOKEN}"
-          to: "${ZONES_BENCH_SEQUENCER_ADDRESS}"
       save: deposit_made
 
     - wait_log:
@@ -77,6 +86,6 @@ scenario:
           to: "${ZONES_BENCH_SEQUENCER_ADDRESS}"
           token: "${ZONES_BENCH_TOKEN}"
           amount: { var: deposit_made.args.netAmount }
-          memo: { var: deposit_made.args.memo }
+          memo: "0x0000000000000000000000000000000000000000000000000000000000000000"
         max_block_range: 1000
       save: deposit_processed

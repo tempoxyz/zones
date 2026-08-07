@@ -20,7 +20,7 @@ use tempo_zone_contracts::{
     IZoneInbox, IZoneOutbox, TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS,
     ZONE_OUTBOX_ADDRESS,
 };
-use zone_l1::{ChainTempoStateExt, L1Deposit, L1PortalEvents};
+use zone_l1::ChainTempoStateExt;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TIP20_TX_GAS, WITHDRAWAL_TX_GAS, ZoneTestNode,
@@ -95,7 +95,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let recipient = address!("0x0000000000000000000000000000000000005678");
     let amount = 1_000_000_u128;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, depositor, recipient, amount);
-    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
+    let observed = fixture.portal_events_from_deposits(std::slice::from_ref(&deposit));
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
     follower
         .l1_block_tracker()
@@ -126,7 +126,7 @@ async fn test_p2p_follower_tracks_leader_balance() -> eyre::Result<()> {
     let transfer_recipient = address!("0x0000000000000000000000000000000000009abc");
     fixture.seed_no_receive_policy(transfer_recipient)?;
     let sender_deposit = fixture.make_deposit(PATH_USD_ADDRESS, sender, sender, amount);
-    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(sender_deposit.clone())]);
+    let observed = fixture.portal_events_from_deposits(std::slice::from_ref(&sender_deposit));
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![sender_deposit]);
     follower
         .l1_block_tracker()
@@ -277,7 +277,7 @@ async fn test_p2p_follower_enforces_policy_change_at_anchor_block() -> eyre::Res
     // --- Block 1: fund Alice while pathUSD is still allow-all (anchor L1#1). ---
     let deposit_amount: u128 = 1_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, alice, alice, deposit_amount);
-    let observed = L1PortalEvents::from_deposits(vec![L1Deposit::Regular(deposit.clone())]);
+    let observed = fixture.portal_events_from_deposits(std::slice::from_ref(&deposit));
     let anchor = fixture.inject_deposits(leader.deposit_queue(), vec![deposit]);
     leader
         .wait_for_balance(
@@ -714,7 +714,7 @@ async fn test_tempo_state_advances_with_l1_blocks() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify that TempoAdvanced and DepositProcessed events are emitted on
+/// Verify that TempoAdvanced and encrypted-deposit events are emitted on
 /// the ZoneInbox when processing deposits.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
@@ -757,7 +757,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
         "should have a TempoAdvanced event with depositsProcessed == 1"
     );
 
-    // Query DepositProcessed events
+    // Query encrypted deposit events
     let deposit_processed_filter = zone_inbox.DepositProcessed_filter().from_block(0);
     let deposit_processed_events = deposit_processed_filter.query().await?;
 
@@ -768,15 +768,9 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
 
     // Verify the deposit event details
     let (dp_event, _) = &deposit_processed_events[0];
-    assert_eq!(dp_event.sender, sender, "DepositProcessed sender mismatch");
-    assert_eq!(
-        dp_event.to, recipient,
-        "DepositProcessed recipient mismatch"
-    );
-    assert_eq!(
-        dp_event.amount, deposit_amount,
-        "DepositProcessed amount mismatch"
-    );
+    assert_eq!(dp_event.sender, sender, "deposit sender mismatch");
+    assert_eq!(dp_event.to, recipient, "deposit recipient mismatch");
+    assert_eq!(dp_event.amount, deposit_amount, "deposit amount mismatch");
 
     Ok(())
 }
@@ -994,7 +988,6 @@ async fn submit_withdrawals(
                 )
                 .nonce(nonce + offset as u64)
                 .gas_price(TEMPO_T0_BASE_FEE as u128)
-                .gas(WITHDRAWAL_TX_GAS)
                 .send()
                 .await?,
         );

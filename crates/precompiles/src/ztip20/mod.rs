@@ -2,20 +2,16 @@
 //!
 //! `TIP20Token` remains the source of truth for token and TIP403 policy behavior.
 //! Before forwarding a call to Tempo, `TIP20Rules` applies only zone-specific checks:
-//! privacy-gated reads, fixed gas for selected selectors, and bridge mint/burn callers.
+//! privacy-gated reads, fixed gas for selected selectors, and blocked system/admin entry points.
 //!
 //! Accepted calldata and callers are forwarded unchanged to Tempo. Ordinary token state remains
 //! Zone-local while the EVM context's database adapter exposes selected policy values from the
 //! finalized Tempo L1 state.
 
 use alloy_primitives::Address;
-use alloy_sol_types::{SolCall, SolError};
-use tempo_precompiles::{
-    dispatch::selector_from_calldata,
-    tip20::{IRolesAuth, ITIP20},
-};
+use alloy_sol_types::{SolCall, SolError, SolInterface};
+use tempo_precompiles::tip20::{IRolesAuth, ITIP20};
 use tempo_zone_contracts::Unauthorized;
-use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 use crate::{
     execution::{CallCheck, CallRules},
@@ -40,14 +36,8 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
     ITIP20::transferWithMemoCall::SELECTOR,
     ITIP20::transferFromWithMemoCall::SELECTOR,
     ITIP20::approveCall::SELECTOR,
+    ITIP20::permitCall::SELECTOR,
 ];
-
-fn decode_and_check<C: SolCall>(args: &[u8], check: impl FnOnce(C) -> CallCheck) -> CallCheck {
-    match C::abi_decode_raw(args) {
-        Ok(decoded) => check(decoded),
-        Err(_) => CallCheck::Continue,
-    }
-}
 
 /// Zone-specific rules applied before forwarding to upstream `TIP20Token`.
 #[derive(Clone)]
@@ -68,54 +58,84 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
             .then_some(TIP20_FIXED_TRANSFER_GAS)
     }
 
-    /// Apply zone privacy and bridge-path checks before upstream execution.
+    /// Apply zone privacy and selector restrictions before upstream execution.
     fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Some(selector) = selector_from_calldata(data) else {
+        if let Ok(call) = ITIP20::ITIP20Calls::abi_decode(data) {
+            return match call {
+                ITIP20::ITIP20Calls::balanceOf(call) => {
+                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
+                }
+                ITIP20::ITIP20Calls::allowance(call) => {
+                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
+                }
+                ITIP20::ITIP20Calls::nonces(call) => {
+                    check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+                }
+                // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
+                ITIP20::ITIP20Calls::mint(_)
+                | ITIP20::ITIP20Calls::mintWithMemo(_)
+                | ITIP20::ITIP20Calls::burn(_)
+                | ITIP20::ITIP20Calls::burnWithMemo(_)
+                // Rewards are deprecated and disabled.
+                | ITIP20::ITIP20Calls::globalRewardPerToken(_)
+                | ITIP20::ITIP20Calls::userRewardInfo(_)
+                | ITIP20::ITIP20Calls::getPendingRewards(_)
+                | ITIP20::ITIP20Calls::distributeReward(_)
+                | ITIP20::ITIP20Calls::setRewardRecipient(_)
+                | ITIP20::ITIP20Calls::claimRewards(_)
+                | ITIP20::ITIP20Calls::optedInSupply(_)
+                // Admin methods are disabled as TIP20 admin is the ZoneInbox.
+                | ITIP20::ITIP20Calls::setSupplyCap(_)
+                | ITIP20::ITIP20Calls::setLogoURI(_)
+                | ITIP20::ITIP20Calls::pause(_)
+                | ITIP20::ITIP20Calls::unpause(_)
+                | ITIP20::ITIP20Calls::setNextQuoteToken(_)
+                | ITIP20::ITIP20Calls::completeQuoteTokenUpdate(_)
+                | ITIP20::ITIP20Calls::changeTransferPolicyId(_)
+                | ITIP20::ITIP20Calls::burnBlocked(_) => {
+                    CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                }
+                ITIP20::ITIP20Calls::name(_)
+                | ITIP20::ITIP20Calls::symbol(_)
+                | ITIP20::ITIP20Calls::decimals(_)
+                | ITIP20::ITIP20Calls::currency(_)
+                | ITIP20::ITIP20Calls::totalSupply(_)
+                | ITIP20::ITIP20Calls::supplyCap(_)
+                | ITIP20::ITIP20Calls::transferPolicyId(_)
+                | ITIP20::ITIP20Calls::paused(_)
+                | ITIP20::ITIP20Calls::logoURI(_)
+                | ITIP20::ITIP20Calls::quoteToken(_)
+                | ITIP20::ITIP20Calls::nextQuoteToken(_)
+                | ITIP20::ITIP20Calls::PAUSE_ROLE(_)
+                | ITIP20::ITIP20Calls::UNPAUSE_ROLE(_)
+                | ITIP20::ITIP20Calls::ISSUER_ROLE(_)
+                | ITIP20::ITIP20Calls::BURN_BLOCKED_ROLE(_)
+                | ITIP20::ITIP20Calls::transferFrom(_)
+                | ITIP20::ITIP20Calls::transfer(_)
+                | ITIP20::ITIP20Calls::approve(_)
+                | ITIP20::ITIP20Calls::transferWithMemo(_)
+                | ITIP20::ITIP20Calls::transferFromWithMemo(_)
+                | ITIP20::ITIP20Calls::permit(_)
+                | ITIP20::ITIP20Calls::DOMAIN_SEPARATOR(_) => CallCheck::Continue,
+            };
+        }
+
+        let Ok(call) = IRolesAuth::IRolesAuthCalls::abi_decode(data) else {
+            // Preserve the upstream error and gas behavior for malformed or unknown calldata.
             return CallCheck::Continue;
         };
-        let args = &data[4..];
 
-        match selector {
-            ITIP20::mintCall::SELECTOR | ITIP20::mintWithMemoCall::SELECTOR => {
-                self.check_auth(caller, &[ZONE_INBOX_ADDRESS])
-            }
-            ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
-                self.check_auth(caller, &[ZONE_OUTBOX_ADDRESS])
-            }
-            ITIP20::balanceOfCall::SELECTOR => {
-                decode_and_check::<ITIP20::balanceOfCall>(args, |call| {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
-                })
-            }
-            ITIP20::allowanceCall::SELECTOR => {
-                decode_and_check::<ITIP20::allowanceCall>(args, |call| {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
-                })
-            }
-            ITIP20::noncesCall::SELECTOR => decode_and_check::<ITIP20::noncesCall>(args, |call| {
-                check_caller_or_sequencer(&self.l1, caller, &[call.owner])
-            }),
-            IRolesAuth::hasRoleCall::SELECTOR => {
-                decode_and_check::<IRolesAuth::hasRoleCall>(args, |call| {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.account])
-                })
-            }
-            ITIP20::globalRewardPerTokenCall::SELECTOR
-            | ITIP20::userRewardInfoCall::SELECTOR
-            | ITIP20::getPendingRewardsCall::SELECTOR => {
+        // Intentionally exhaustive: an upstream ABI addition must be classified here.
+        match call {
+            // All mutating role calls are disabled on zones.
+            IRolesAuth::IRolesAuthCalls::grantRole(_)
+            | IRolesAuth::IRolesAuthCalls::revokeRole(_)
+            | IRolesAuth::IRolesAuthCalls::renounceRole(_)
+            | IRolesAuth::IRolesAuthCalls::setRoleAdmin(_) => {
                 CallCheck::Revert(Unauthorized {}.abi_encode().into())
             }
-            _ => CallCheck::Continue,
-        }
-    }
-}
-
-impl<P: L1StorageReader> TIP20Rules<P> {
-    fn check_auth(&self, caller: Address, auths: &[Address]) -> CallCheck {
-        if auths.contains(&caller) {
-            CallCheck::Continue
-        } else {
-            CallCheck::Revert(Unauthorized {}.abi_encode().into())
+            IRolesAuth::IRolesAuthCalls::hasRole(_)
+            | IRolesAuth::IRolesAuthCalls::getRoleAdmin(_) => CallCheck::Continue,
         }
     }
 }
@@ -132,10 +152,14 @@ mod tests {
         PATH_USD_ADDRESS,
         storage::{Handler, StorageCtx},
         test_util::TIP20Setup,
-        tip20::{IRolesAuth, ISSUER_ROLE, ITIP20, TIP20Token},
+        tip20::{
+            IRolesAuth, ISSUER_ROLE, ITIP20,
+            ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token,
+        },
         zone_factory::ZonePortalStorage as ZonePortal,
     };
     use tempo_zone_contracts::Unauthorized;
+    use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     use crate::{
         TempoState,
@@ -289,15 +313,28 @@ mod tests {
             assert_allowed(&rules, nonce.clone(), owner);
             assert_allowed(&rules, nonce.clone(), sequencer);
             assert_unauthorized(&rules, nonce, outsider);
-
-            let role = IRolesAuth::hasRoleCall {
-                account: owner,
-                role: *ISSUER_ROLE,
-            };
-            assert_allowed(&rules, role.clone(), owner);
-            assert_allowed(&rules, role.clone(), sequencer);
-            assert_unauthorized(&rules, role, outsider);
         });
+    }
+
+    #[test]
+    fn role_metadata_reads_are_allowed() {
+        let caller = Address::repeat_byte(0x11);
+        let account = Address::repeat_byte(0x22);
+        let rules = rules();
+
+        assert_allowed(
+            &rules,
+            IRolesAuth::hasRoleCall {
+                account,
+                role: *ISSUER_ROLE,
+            },
+            caller,
+        );
+        assert_allowed(
+            &rules,
+            IRolesAuth::getRoleAdminCall { role: *ISSUER_ROLE },
+            caller,
+        );
     }
 
     #[test]
@@ -309,6 +346,71 @@ mod tests {
         assert_unauthorized(&rules, ITIP20::globalRewardPerTokenCall {}, caller);
         assert_unauthorized(&rules, ITIP20::userRewardInfoCall { account }, caller);
         assert_unauthorized(&rules, ITIP20::getPendingRewardsCall { account }, caller);
+    }
+
+    #[test]
+    fn token_admin_calls_are_disallowed() {
+        let caller = Address::repeat_byte(0x11);
+        let account = Address::repeat_byte(0x22);
+        let rules = rules();
+
+        assert_unauthorized(
+            &rules,
+            ITIP20::changeTransferPolicyIdCall { newPolicyId: 1 },
+            caller,
+        );
+        assert_unauthorized(
+            &rules,
+            ITIP20::setSupplyCapCall {
+                newSupplyCap: U256::MAX,
+            },
+            caller,
+        );
+        assert_unauthorized(
+            &rules,
+            ITIP20::setLogoURICall {
+                newLogoURI: "https://example.com/token.svg".to_owned(),
+            },
+            caller,
+        );
+        assert_unauthorized(&rules, ITIP20::pauseCall {}, caller);
+        assert_unauthorized(&rules, ITIP20::unpauseCall {}, caller);
+        assert_unauthorized(
+            &rules,
+            ITIP20::setNextQuoteTokenCall {
+                newQuoteToken: account,
+            },
+            caller,
+        );
+        assert_unauthorized(&rules, ITIP20::completeQuoteTokenUpdateCall {}, caller);
+        assert_unauthorized(
+            &rules,
+            ITIP20::burnBlockedCall {
+                from: account,
+                amount: U256::ONE,
+            },
+            caller,
+        );
+    }
+
+    #[test]
+    fn role_mutations_are_disallowed() {
+        let caller = Address::repeat_byte(0x11);
+        let account = Address::repeat_byte(0x22);
+        let role = *ISSUER_ROLE;
+        let rules = rules();
+
+        assert_unauthorized(&rules, IRolesAuth::grantRoleCall { role, account }, caller);
+        assert_unauthorized(&rules, IRolesAuth::revokeRoleCall { role, account }, caller);
+        assert_unauthorized(&rules, IRolesAuth::renounceRoleCall { role }, caller);
+        assert_unauthorized(
+            &rules,
+            IRolesAuth::setRoleAdminCall {
+                role,
+                adminRole: role,
+            },
+            caller,
+        );
     }
 
     #[test]
@@ -481,49 +583,51 @@ mod tests {
     }
 
     #[test]
-    fn bridge_auth_rules_and_allowed_paths() -> eyre::Result<()> {
+    fn external_mint_and_burn_calls_are_disallowed() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
-        let rules = rules();
-        assert_unauthorized(
-            &rules,
-            ITIP20::mintCall {
-                to: harness.bob,
-                amount: U256::ONE,
-            },
-            ZONE_OUTBOX_ADDRESS,
-        );
-        assert_unauthorized(
-            &rules,
-            ITIP20::burnCall { amount: U256::ONE },
-            ZONE_INBOX_ADDRESS,
-        );
+        let calls = [
+            (
+                ZONE_INBOX_ADDRESS,
+                ITIP20::mintCall {
+                    to: harness.bob,
+                    amount: U256::ONE,
+                }
+                .abi_encode(),
+            ),
+            (
+                ZONE_INBOX_ADDRESS,
+                ITIP20::mintWithMemoCall {
+                    to: harness.bob,
+                    amount: U256::ONE,
+                    memo: Default::default(),
+                }
+                .abi_encode(),
+            ),
+            (
+                ZONE_OUTBOX_ADDRESS,
+                ITIP20::burnCall { amount: U256::ONE }.abi_encode(),
+            ),
+            (
+                ZONE_OUTBOX_ADDRESS,
+                ITIP20::burnWithMemoCall {
+                    amount: U256::ONE,
+                    memo: Default::default(),
+                }
+                .abi_encode(),
+            ),
+        ];
 
-        let inbox_mint = harness.call(
-            ZONE_INBOX_ADDRESS,
-            ITIP20::mintCall {
-                to: harness.bob,
-                amount: U256::from(50_000u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(inbox_mint.is_success());
-        assert_eq!(harness.balance_of(harness.bob)?, U256::from(50_000u64));
+        for (caller, calldata) in calls {
+            let result = harness.call(caller, calldata.into(), 100_000, false)?;
+            assert!(result.is_revert());
+            assert_eq!(result.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+        }
 
-        let outbox_burn = harness.call(
-            ZONE_OUTBOX_ADDRESS,
-            ITIP20::burnCall {
-                amount: U256::from(10_000u64),
-            }
-            .abi_encode()
-            .into(),
-            100_000,
-            false,
-        )?;
-        assert!(outbox_burn.is_success());
-        assert_eq!(harness.balance_of(ZONE_OUTBOX_ADDRESS)?, U256::ZERO);
+        assert_eq!(harness.balance_of(harness.bob)?, U256::ZERO);
+        assert_eq!(
+            harness.balance_of(ZONE_OUTBOX_ADDRESS)?,
+            U256::from(10_000u64)
+        );
 
         Ok(())
     }
@@ -531,17 +635,41 @@ mod tests {
     #[test]
     fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
+        // Craft a successful allowance return whose first four bytes collide with the upstream
+        // error selector, exercising the redaction filter's revert-status guard.
+        let mut allowance_bytes = [0u8; 32];
+        allowance_bytes[..4].copy_from_slice(&TIP20InsufficientBalance::SELECTOR);
+        allowance_bytes[31] = 1;
+        let allowance = U256::from_be_bytes(allowance_bytes);
+
         harness.call(
             harness.alice,
             ITIP20::approveCall {
                 spender: harness.spender,
-                amount: U256::from(1_000_001u64),
+                amount: allowance,
             }
             .abi_encode()
             .into(),
             TIP20_FIXED_TRANSFER_GAS,
             false,
         )?;
+
+        let allowance_result = harness.call(
+            harness.alice,
+            ITIP20::allowanceCall {
+                owner: harness.alice,
+                spender: harness.spender,
+            }
+            .abi_encode()
+            .into(),
+            100_000,
+            true,
+        )?;
+        assert!(allowance_result.is_success());
+        assert_eq!(
+            allowance_result.bytes,
+            Bytes::copy_from_slice(&allowance_bytes)
+        );
 
         let result = harness.call(
             harness.spender,

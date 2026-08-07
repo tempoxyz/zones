@@ -37,6 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     AttestationStore, ZoneSequencerProvider,
     abi::{self, NO_QUEUE_INDEX, ZonePortal},
+    resolve_portal_zone_anchor,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, FinalizedBatchLog, ZoneBlockSnapshot,
         fetch_finalized_batch, fetch_finalized_batch_boundaries, read_zone_block_snapshot,
@@ -178,13 +179,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         );
         batch_submitter.set_attestation_store(config.attestation_store.clone());
 
-        let prev_zone_block_hash = batch_submitter
-            .read_portal_block_hash()
-            .await
-            .wrap_err("failed to read portal block hash during zone monitor startup")?;
-
-        let last_submitted_zone_block =
-            Self::resolve_zone_block_number(&provider, prev_zone_block_hash)?;
+        let portal_anchor = resolve_portal_zone_anchor(
+            &provider,
+            config.portal_address,
+            batch_submitter.l1_provider(),
+        )
+        .await
+        .wrap_err("failed to resolve portal-confirmed zone block during zone monitor startup")?;
+        let prev_zone_block_hash = portal_anchor.block_hash;
+        let last_submitted_zone_block = portal_anchor.block_number;
         let previous_snapshot = Self::snapshot_at_or_genesis(
             &provider,
             config.inbox_address,
@@ -666,14 +669,15 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
             let store = self.withdrawal_store.lock();
             store.summary()
         };
-        let portal_hash = self
-            .batch_submitter
-            .read_portal_block_hash()
-            .await
-            .wrap_err("failed to read portal state during resync")?;
-        let last_submitted_zone_block =
-            Self::resolve_zone_block_number(&self.provider, portal_hash)
-                .wrap_err("failed to resolve portal-confirmed zone block")?;
+        let portal_anchor = resolve_portal_zone_anchor(
+            &self.provider,
+            self.config.portal_address,
+            self.batch_submitter.l1_provider(),
+        )
+        .await
+        .wrap_err("failed to resolve portal-confirmed zone block during resync")?;
+        let portal_hash = portal_anchor.block_hash;
+        let last_submitted_zone_block = portal_anchor.block_number;
         let previous_snapshot = Self::snapshot_at_or_genesis(
             &self.provider,
             self.config.inbox_address,
@@ -726,24 +730,6 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
         }
 
         Ok(last_submitted_zone_block)
-    }
-
-    /// Resolve the portal anchor against the local canonical chain.
-    ///
-    /// A missing non-zero anchor is a consistency error. Treating it as genesis could make the
-    /// sequencer construct a transition from state that the portal has already superseded.
-    fn resolve_zone_block_number(provider: &P, zone_block_hash: B256) -> Result<u64> {
-        if zone_block_hash.is_zero() {
-            return Ok(0);
-        }
-
-        match provider.block_number(zone_block_hash) {
-            Ok(Some(number)) => Ok(number),
-            Ok(None) => Err(eyre::eyre!(
-                "portal block hash {zone_block_hash} is not canonical in the Zone node"
-            )),
-            Err(error) => Err(error.into()),
-        }
     }
 
     fn snapshot_at_or_genesis(
@@ -1007,8 +993,9 @@ mod tests {
         };
 
         assert!(
-            err.to_string()
-                .contains("failed to read portal block hash during zone monitor startup")
+            err.to_string().contains(
+                "failed to resolve portal-confirmed zone block during zone monitor startup"
+            )
         );
         assert!(l1.read_q().is_empty());
     }
@@ -1235,7 +1222,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("failed to read portal state during resync")
+                .contains("failed to resolve portal-confirmed zone block during resync")
         );
         assert_eq!(monitor.last_submitted_zone_block, 10);
         assert_eq!(monitor.latest_observed_zone_block, 50);

@@ -123,23 +123,11 @@ case "$ZONES_BENCH_RECIPIENT_MODE" in
     *) die "ZONES_BENCH_RECIPIENT_MODE must be existing or random" ;;
 esac
 case "$ZONES_BENCH_NEOBANK_PRESET" in
-    direct-lifecycle)
-        scenario_file=direct-lifecycle-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
-        leases_per_journey=1
-        ;;
     encrypted-deposit)
         scenario_file=encrypted-deposit-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
         leases_per_journey=1
-        ;;
-    third-party-recipient)
-        scenario_file=third-party-recipient-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
-        leases_per_journey=2
         ;;
     full-journey)
         scenario_file=private-flow-scenario.yml
@@ -151,12 +139,6 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
         scenario_file=private-withdrawal-scenario.yml
         base_token_label=dlusd
         expected_base_token="$ZONES_BENCH_DLUSD"
-        leases_per_journey=1
-        ;;
-    rewards-redemption)
-        scenario_file=rewards-redemption-scenario.yml
-        base_token_label=pathusd
-        expected_base_token="$ZONES_BENCH_PATHUSD"
         leases_per_journey=1
         ;;
     slippage-bounce)
@@ -180,8 +162,8 @@ case "$ZONES_BENCH_NEOBANK_PRESET" in
     *) die "unsupported neobank preset: $ZONES_BENCH_NEOBANK_PRESET" ;;
 esac
 case "$ZONES_BENCH_SWAP_MECHANISM" in
-    direct-swap|simple|stablecoin-dex) ;;
-    *) die "ZONES_BENCH_SWAP_MECHANISM must be direct-swap, simple, or stablecoin-dex" ;;
+    direct-swap) ;;
+    *) die "current Earn only supports ZONES_BENCH_SWAP_MECHANISM=direct-swap" ;;
 esac
 [[ "${ZONES_BENCH_TOKEN,,}" == "${expected_base_token,,}" ]] ||
     die "ZONES_BENCH_TOKEN must match the $base_token_label token for $ZONES_BENCH_NEOBANK_PRESET"

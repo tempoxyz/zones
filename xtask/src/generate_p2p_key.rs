@@ -18,7 +18,7 @@ pub(crate) struct GenerateP2pKey {
 
 impl GenerateP2pKey {
     pub(crate) fn run(self) -> eyre::Result<()> {
-        let key = PrivateKey::random(&mut rand::thread_rng());
+        let key = PrivateKey::random(rand::rng());
         let mut options = OpenOptions::new();
         options.write(true).create(true).truncate(self.force);
         if self.force {

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import {
-    EncryptedDepositPayload,
+    DepositPayload,
     IZoneOutbox,
     IZonePortal,
     LastBatch,
@@ -87,7 +87,8 @@ contract ZoneOutboxTest is Test {
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
-        return keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence)));
+        return
+            keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence), uint64(txSequence)));
     }
 
     function _setModes(bool accessMode, bool gatewayMode) internal {
@@ -146,7 +147,7 @@ contract ZoneOutboxTest is Test {
                 flow: flow,
                 outputToken: address(zoneToken),
                 keyIndex: 0,
-                encrypted: EncryptedDepositPayload({
+                encrypted: DepositPayload({
                     ephemeralPubkeyX: bytes32(uint256(1)),
                     ephemeralPubkeyYParity: 0x02,
                     ciphertext: new bytes(64),
@@ -1143,21 +1144,15 @@ contract ZoneOutboxTest is Test {
                           ZERO AMOUNT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_requestWithdrawal_zeroAmount() public {
+    function test_requestWithdrawal_zeroAmount_reverts() public {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 0);
+        vm.expectRevert(ZoneOutbox.ZeroAmountWithdrawal.selector);
         outbox.requestWithdrawal(address(zoneToken), bob, 0, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(_pendingWithdrawalsCount(), 1);
-
-        // Should still produce valid hash
-        Withdrawal memory w = _withdrawal(1, alice, bob, 0, bytes32(0), 0, alice, "");
-        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
-
-        bytes32 hash = _finalizeWithdrawalBatch(1);
-
-        assertEq(hash, expectedHash);
+        assertEq(_pendingWithdrawalsCount(), 0);
+        assertEq(outbox.lastFallbackNonce(), 0);
     }
 
     /*//////////////////////////////////////////////////////////////

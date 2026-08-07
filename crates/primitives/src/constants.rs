@@ -92,6 +92,29 @@ pub const PORTAL_GATEWAY_MODE_SLOT: B256 = PORTAL_ENFORCEMENT_MODES_SLOT;
 /// ZoneInbox storage slot 0: `processedDepositQueueHash` (bytes32).
 pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
 
+/// ZoneInbox storage slot 1: `processedDepositNumber` (uint64, lower 8 bytes).
+pub const ZONE_INBOX_PROCESSED_NUMBER_SLOT: U256 = {
+    let mut le = [0u8; 32];
+    le[0] = 1;
+    U256::from_le_bytes(le)
+};
+
+/// ZoneOutbox storage slot 1: `_withdrawalQueueHash` (bytes32).
+///
+/// Slot 0 is packed `(tempoGasRate, nextWithdrawalIndex)`.
+pub const ZONE_OUTBOX_LAST_BATCH_HASH_SLOT: U256 = {
+    let mut le = [0u8; 32];
+    le[0] = 1;
+    U256::from_le_bytes(le)
+};
+
+/// ZoneOutbox storage slot 2: `_withdrawalBatchIndex` (uint64, lower 8 bytes).
+pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
+    let mut le = [0u8; 32];
+    le[0] = 2;
+    U256::from_le_bytes(le)
+};
+
 /// Base offset for deriving **mainnet** zone chain IDs.
 ///
 /// Each zone gets a unique EIP-155 chain ID derived from its on-chain zone ID
@@ -104,7 +127,7 @@ pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
 /// # Range safety
 ///
 /// EIP-2294 and ENSIP-11 reserve bit 31 (`0x8000_0000`) for coin-type flags,
-/// making chain IDs ≥ 2^31 (2,147,483,647) unsafe in parts of the ecosystem
+/// making chain IDs ≥ 2^31 (2,147,483,648) unsafe in parts of the ecosystem
 /// (ENS multi-chain address resolution, some JavaScript tooling that uses
 /// 32-bit integers, etc.).
 ///

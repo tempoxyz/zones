@@ -1,11 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {
-    DepositType,
-    EncryptedDeposit,
-    EncryptedDepositPayload
-} from "../../src/interfaces/IZone.sol";
+import { Deposit, DepositPayload, DepositType } from "../../src/interfaces/IZone.sol";
 import {
     ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE,
     EncryptedDepositLib
@@ -26,14 +22,7 @@ contract EncryptedDepositHarness {
         return EncryptedDepositLib.decodePlaintext(plaintext);
     }
 
-    function queueHash(
-        EncryptedDeposit memory deposit,
-        bytes32 prevHash
-    )
-        external
-        pure
-        returns (bytes32)
-    {
+    function queueHash(Deposit memory deposit, bytes32 prevHash) external pure returns (bytes32) {
         return EncryptedDepositLib.queueHash(deposit, prevHash);
     }
 
@@ -76,11 +65,11 @@ contract EncryptedDepositLibTest is Test {
 
     /// @notice Verifies deposit queue hashing matches the typed ABI encoding.
     function test_queueHash_matchesTypedEncoding() public view {
-        EncryptedDeposit memory deposit = _makeEncryptedDeposit(100e6, bytes32("ciphertext"));
+        Deposit memory deposit = _makeEncryptedDeposit(100e6, bytes32("ciphertext"));
         bytes32 prevHash = keccak256("previous");
 
         bytes32 actual = harness.queueHash(deposit, prevHash);
-        bytes32 expected = keccak256(abi.encode(DepositType.Encrypted, deposit, prevHash));
+        bytes32 expected = keccak256(abi.encode(DepositType.Deposit, deposit, prevHash));
 
         assertEq(actual, expected);
     }
@@ -101,20 +90,20 @@ contract EncryptedDepositLibTest is Test {
     )
         internal
         pure
-        returns (EncryptedDeposit memory)
+        returns (Deposit memory)
     {
         bytes memory ciphertext = new bytes(64);
         for (uint256 i = 0; i < ciphertext.length; i++) {
             ciphertext[i] = bytes1(uint8(uint256(keccak256(abi.encode(seed, i)))));
         }
 
-        return EncryptedDeposit({
+        return Deposit({
             token: address(0x1000),
             sender: address(0x200),
             amount: amount,
             tempoRefundRecipient: address(0x300),
             keyIndex: 1,
-            encrypted: EncryptedDepositPayload({
+            encrypted: DepositPayload({
                 ephemeralPubkeyX: seed,
                 ephemeralPubkeyYParity: 0x02,
                 ciphertext: ciphertext,

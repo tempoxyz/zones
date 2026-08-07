@@ -1,14 +1,16 @@
 //! Privacy-enforced log filtering for the zone's redacted RPC.
 //!
-//! Only whitelisted TIP-20 event logs are returned to callers, and only when
-//! the caller's address appears in an eligible indexed topic position for that
-//! event type. This prevents users from observing other users' token activity.
+//! Only whitelisted TIP-20 and receipt-recovery event logs are returned to callers. A caller must
+//! appear in an eligible indexed topic or, for `TransferBlocked`, be a stakeholder encoded in the
+//! claim receipt. This prevents users from observing other users' token activity.
 
 use alloy_consensus::TxReceipt;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, b256};
 use alloy_rpc_types_eth::{Filter, FilterSet, Log};
+use alloy_sol_types::SolEvent;
 use tempo_alloy::rpc::TempoTransactionReceipt;
+use tempo_contracts::precompiles::{IReceivePolicyGuard, RECEIVE_POLICY_GUARD_ADDRESS};
 
 use crate::types::JsonRpcError;
 
@@ -32,16 +34,25 @@ pub const MINT_TOPIC: B256 =
 pub const BURN_TOPIC: B256 =
     b256!("0xcc16f5dbb4873280815c1ee09dbd06736cffcc184412cf7a71a0fdb75d397ca5");
 
-/// All whitelisted TIP-20 event topic hashes.
-pub const WHITELISTED_TOPICS: [B256; 5] = [
+/// `TransferBlocked(address,address,uint64,uint256,uint8,bytes)`.
+pub const TRANSFER_BLOCKED_TOPIC: B256 = IReceivePolicyGuard::TransferBlocked::SIGNATURE_HASH;
+
+/// All event topic hashes exposed by the redacted RPC.
+pub const WHITELISTED_TOPICS: [B256; 6] = [
     TRANSFER_TOPIC,
     APPROVAL_TOPIC,
     TRANSFER_WITH_MEMO_TOPIC,
     MINT_TOPIC,
     BURN_TOPIC,
+    TRANSFER_BLOCKED_TOPIC,
 ];
 
-const TWO_PARTY_TOPICS: [B256; 3] = [TRANSFER_TOPIC, APPROVAL_TOPIC, TRANSFER_WITH_MEMO_TOPIC];
+const TWO_PARTY_TOPICS: [B256; 4] = [
+    TRANSFER_TOPIC,
+    APPROVAL_TOPIC,
+    TRANSFER_WITH_MEMO_TOPIC,
+    TRANSFER_BLOCKED_TOPIC,
+];
 const CALLER_SCOPED_FILTER_ERROR: &str =
     "private log filter must include authenticated caller in topic1 or topic2";
 
@@ -53,6 +64,8 @@ const CALLER_SCOPED_FILTER_ERROR: &str =
 /// - **Approval**: topic1 (owner) or topic2 (spender)
 /// - **Mint**: topic1 (to)
 /// - **Burn**: topic1 (from)
+/// - **TransferBlocked**: the indexed receiver, or the originator/recovery authority encoded in
+///   the receipt
 pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
     let topics = log.topics();
     let topic0 = match topics.first() {
@@ -61,6 +74,10 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
     };
 
     let caller_word = B256::left_padding_from(caller.as_slice());
+
+    if *topic0 == TRANSFER_BLOCKED_TOPIC {
+        return is_transfer_blocked_caller_eligible(log, caller);
+    }
 
     if *topic0 == TRANSFER_TOPIC || *topic0 == APPROVAL_TOPIC || *topic0 == TRANSFER_WITH_MEMO_TOPIC
     {
@@ -72,6 +89,26 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
     } else {
         false
     }
+}
+
+/// Returns whether the authenticated caller is a stakeholder in a receipt-bearing
+/// `ReceivePolicyGuard.TransferBlocked` log.
+fn is_transfer_blocked_caller_eligible(log: &Log, caller: &Address) -> bool {
+    if log.address() != RECEIVE_POLICY_GUARD_ADDRESS {
+        return false;
+    }
+
+    let Ok(event) = IReceivePolicyGuard::TransferBlocked::decode_log(&log.inner) else {
+        return false;
+    };
+    let event = event.data;
+    let Ok(receipt) = IReceivePolicyGuard::ClaimReceiptV1::try_from(event.receipt) else {
+        return false;
+    };
+
+    *caller == event.receiver
+        || *caller == receipt.originator
+        || (receipt.recoveryAuthority != Address::ZERO && *caller == receipt.recoveryAuthority)
 }
 
 /// Filters logs to only those the caller is allowed to see.
@@ -131,7 +168,7 @@ pub fn filter_receipt_logs(mut receipt: TempoTransactionReceipt) -> TempoTransac
     receipt
 }
 
-/// Scopes a user-supplied filter to only match enabled zone token addresses.
+/// Scopes a user-supplied filter to enabled zone tokens and the receive-policy guard.
 pub fn scope_filter_addresses(
     filter: &mut Filter,
     zone_tokens: &[Address],
@@ -139,13 +176,15 @@ pub fn scope_filter_addresses(
     let requested_addresses: Vec<Address> = filter.address.iter().copied().collect();
 
     if requested_addresses.is_empty() {
-        filter.address = FilterSet::from(zone_tokens.to_vec());
+        let mut allowed_addresses = zone_tokens.to_vec();
+        allowed_addresses.push(RECEIVE_POLICY_GUARD_ADDRESS);
+        filter.address = FilterSet::from(allowed_addresses);
         return Ok(());
     }
 
     if requested_addresses
         .iter()
-        .all(|address| zone_tokens.contains(address))
+        .all(|address| zone_tokens.contains(address) || *address == RECEIVE_POLICY_GUARD_ADDRESS)
     {
         Ok(())
     } else {
@@ -153,7 +192,7 @@ pub fn scope_filter_addresses(
     }
 }
 
-/// Scopes a user-supplied filter to only match whitelisted TIP-20 event topics.
+/// Scopes a user-supplied filter to only match whitelisted event topics.
 ///
 /// Intersects the user's requested topic0 with [`WHITELISTED_TOPICS`].
 /// If the user omitted topic0, restricts to the whitelisted set.
@@ -195,8 +234,16 @@ pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<
 
     let caller_word = B256::left_padding_from(caller.as_slice());
     if filter.topics[1].contains(&caller_word) {
-        filter.topics[1] = FilterSet::from(caller_word);
-        return Ok(());
+        let topic0 = filter.topics[0]
+            .iter()
+            .copied()
+            .filter(|topic| *topic != TRANSFER_BLOCKED_TOPIC)
+            .collect::<Vec<_>>();
+        if !topic0.is_empty() {
+            filter.topics[0] = FilterSet::from(topic0);
+            filter.topics[1] = FilterSet::from(caller_word);
+            return Ok(());
+        }
     }
 
     if filter.topics[2].contains(&caller_word) {
@@ -219,8 +266,9 @@ pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<
 mod tests {
     use super::*;
     use alloy_consensus::ReceiptWithBloom;
-    use alloy_primitives::{Address, Bytes, LogData, TxHash, address, keccak256};
+    use alloy_primitives::{Address, Bytes, LogData, TxHash, U256, address, keccak256};
     use alloy_rpc_types_eth::TransactionReceipt;
+    use alloy_sol_types::SolValue;
     use tempo_alloy::rpc::TempoTransactionReceipt;
     use tempo_primitives::{TempoReceipt, TempoTxType};
 
@@ -248,6 +296,37 @@ mod tests {
         log.transaction_hash = Some(tx_hash);
         log.transaction_index = Some(42);
         log.log_index = Some(log_index);
+        log
+    }
+
+    fn make_transfer_blocked_log(
+        emitter: Address,
+        receiver: Address,
+        originator: Address,
+        recovery_authority: Address,
+    ) -> Log {
+        let token = address!("0x20c0000000000000000000000000000000000001");
+        let receipt = IReceivePolicyGuard::ClaimReceiptV1::new(
+            token,
+            recovery_authority,
+            originator,
+            receiver,
+            1_234,
+            42,
+            1,
+            IReceivePolicyGuard::InboundKind::TRANSFER,
+            B256::ZERO,
+        );
+        let event = IReceivePolicyGuard::TransferBlocked {
+            token,
+            receiver,
+            blockedNonce: receipt.blockedNonce,
+            amount: U256::from(100),
+            receiptVersion: receipt.version,
+            receipt: receipt.abi_encode().into(),
+        };
+        let mut log = make_log(emitter, Vec::new());
+        log.inner.data = event.encode_log_data();
         log
     }
 
@@ -303,6 +382,10 @@ mod tests {
         );
         assert_eq!(MINT_TOPIC, keccak256(b"Mint(address,uint256)"));
         assert_eq!(BURN_TOPIC, keccak256(b"Burn(address,uint256)"));
+        assert_eq!(
+            TRANSFER_BLOCKED_TOPIC,
+            keccak256(b"TransferBlocked(address,address,uint64,uint256,uint8,bytes)")
+        );
     }
 
     // ---------------------------------------------------------------
@@ -459,6 +542,36 @@ mod tests {
         let other = address!("0x0000000000000000000000000000000000000002");
         let log = make_log(Address::ZERO, vec![BURN_TOPIC, caller_word(&other)]);
         assert!(!is_caller_eligible(&log, &caller));
+    }
+
+    // ---------------------------------------------------------------
+    // is_caller_eligible — TransferBlocked
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn transfer_blocked_visibility_is_receipt_scoped() {
+        let receiver = address!("0x0000000000000000000000000000000000000001");
+        let originator = address!("0x0000000000000000000000000000000000000002");
+        let recovery = address!("0x0000000000000000000000000000000000000003");
+        let outsider = address!("0x0000000000000000000000000000000000000004");
+        let log =
+            make_transfer_blocked_log(RECEIVE_POLICY_GUARD_ADDRESS, receiver, originator, recovery);
+
+        assert!(is_log_visible(&log, &receiver));
+        assert!(is_log_visible(&log, &originator));
+        assert!(is_log_visible(&log, &recovery));
+        assert!(!is_log_visible(&log, &outsider));
+
+        let filtered = filter_receipt_logs(make_receipt(originator, vec![log.clone()]));
+        assert_eq!(filtered.inner.logs().len(), 1);
+
+        let mut spoofed = log.clone();
+        spoofed.inner.address = Address::ZERO;
+        assert!(!is_log_visible(&spoofed, &receiver));
+
+        let mut malformed = log;
+        malformed.inner.data.data = Bytes::new();
+        assert!(!is_log_visible(&malformed, &receiver));
     }
 
     // ---------------------------------------------------------------
@@ -743,7 +856,8 @@ mod tests {
 
         scope_filter_for_caller(&mut filter, &caller).unwrap();
 
-        assert_eq!(filter.topics[0].len(), WHITELISTED_TOPICS.len());
+        assert!(!filter.topics[0].contains(&TRANSFER_BLOCKED_TOPIC));
+        assert_eq!(filter.topics[0].len(), WHITELISTED_TOPICS.len() - 1);
         assert_eq!(filter.topics[1], FilterSet::from(caller_topic));
         assert_eq!(filter.topics[2], FilterSet::from(other_topic));
     }
@@ -755,13 +869,17 @@ mod tests {
         let caller_topic = caller_word(&caller);
         let other_topic = caller_word(&other);
         let mut filter = Filter::default();
-        filter.topics[0] = FilterSet::from(vec![TRANSFER_TOPIC, MINT_TOPIC]);
+        filter.topics[0] =
+            FilterSet::from(vec![TRANSFER_TOPIC, TRANSFER_BLOCKED_TOPIC, MINT_TOPIC]);
         filter.topics[1] = FilterSet::from(other_topic);
         filter.topics[2] = FilterSet::from(vec![caller_topic, caller_word(&other)]);
 
         scope_filter_for_caller(&mut filter, &caller).unwrap();
 
-        assert_eq!(filter.topics[0], FilterSet::from(TRANSFER_TOPIC));
+        assert_eq!(
+            filter.topics[0],
+            FilterSet::from(vec![TRANSFER_TOPIC, TRANSFER_BLOCKED_TOPIC])
+        );
         assert_eq!(filter.topics[1], FilterSet::from(other_topic));
         assert_eq!(filter.topics[2], FilterSet::from(caller_topic));
     }
@@ -805,20 +923,23 @@ mod tests {
 
         assert!(filter.address.contains(&token_a));
         assert!(filter.address.contains(&token_b));
-        assert_eq!(filter.address.len(), 2);
+        assert!(filter.address.contains(&RECEIVE_POLICY_GUARD_ADDRESS));
+        assert_eq!(filter.address.len(), 3);
     }
 
     #[test]
-    fn scope_filter_addresses_allows_enabled_token_address() {
+    fn scope_filter_addresses_allows_enabled_addresses() {
         let token = address!("0x00000000000000000000000000000000000000aa");
-        let mut filter = Filter {
-            address: FilterSet::from(token),
-            ..Default::default()
-        };
+        for address in [token, RECEIVE_POLICY_GUARD_ADDRESS] {
+            let mut filter = Filter {
+                address: FilterSet::from(address),
+                ..Default::default()
+            };
 
-        scope_filter_addresses(&mut filter, &[token]).unwrap();
+            scope_filter_addresses(&mut filter, &[token]).unwrap();
 
-        assert_eq!(filter.address, FilterSet::from(token));
+            assert_eq!(filter.address, FilterSet::from(address));
+        }
     }
 
     #[test]

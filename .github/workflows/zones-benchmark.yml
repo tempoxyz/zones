@@ -14,11 +14,8 @@ on:
         options:
           - encrypted-deposit
           - private-withdrawal
-          - rewards-redemption
           - full-journey
           - slippage-bounce
-          - third-party-recipient
-          - direct-lifecycle
           - swapped-lifecycle
           - swapped-redemption
       accounts:
@@ -78,8 +75,6 @@ on:
         default: direct-swap
         options:
           - direct-swap
-          - simple
-          - stablecoin-dex
       recipient-mode:
         description: Reuse funded recipients or use fresh recipients where the selected flow permits.
         type: choice
@@ -233,24 +228,21 @@ jobs:
           INPUT_SETUP_SETTLEMENT_TIMEOUT_SECS: ${{ inputs.setup-settlement-timeout-secs || '120' }}
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
-          INPUT_TEMPO_REF: a55a6395567f529f03fa88bc457584fa8ed89af8
-          INPUT_TXGEN_REF: 072877b673f60b5f559f17da098296f1841b6732
+          INPUT_TEMPO_REF: de760926aa6520c5e1cdb85f453c206057ea0e72
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
+          INPUT_TXGEN_REF="$(git ls-remote https://github.com/tempoxyz/txgen HEAD | awk '{print $1}')"
+
           neobank_preset="$INPUT_PRESET"
           case "$neobank_preset" in
-            encrypted-deposit|private-withdrawal|rewards-redemption|full-journey|\
-            slippage-bounce|third-party-recipient|direct-lifecycle|\
+            encrypted-deposit|private-withdrawal|full-journey|slippage-bounce|\
             swapped-lifecycle|swapped-redemption) ;;
             *) echo "::error::unsupported neobank preset: $neobank_preset"; exit 1 ;;
           esac
           leases_per_journey=1
-          if [ "$neobank_preset" = third-party-recipient ]; then
-            leases_per_journey=2
-          fi
 
           if [ -z "$INPUT_SEED" ]; then
             INPUT_SEED=$((10#$RUN_ID * 100000 + 10#$RUN_ATTEMPT))
@@ -298,8 +290,8 @@ jobs:
             fi
           done
           case "$INPUT_SWAP_MECHANISM" in
-            direct-swap|simple|stablecoin-dex) ;;
-            *) echo "::error::swap-mechanism must be direct-swap, simple, or stablecoin-dex"; exit 1 ;;
+            direct-swap) ;;
+            *) echo "::error::current Earn only supports swap-mechanism=direct-swap"; exit 1 ;;
           esac
           case "$INPUT_RECIPIENT_MODE" in
             existing|random) ;;
@@ -380,39 +372,20 @@ jobs:
             echo "::error::accounts cannot exceed the cached funded-account capacity of 10000"
             exit 1
           fi
-          if [[ "$INPUT_SWAP_MECHANISM" =~ ^(direct-swap|simple)$ ]] && (( swap_liquidity >= 1000000000000000 )); then
-            echo "::error::$INPUT_SWAP_MECHANISM liquidity must be below the Bridge controller absolute mint limit of 1000000000000000"
-            exit 1
-          fi
-          if [ "$INPUT_SWAP_MECHANISM" = stablecoin-dex ] && (( swap_liquidity < 100000000 )); then
-            echo "::error::stablecoin-dex liquidity must be at least its 100000000 minimum order amount"
-            exit 1
-          fi
           required_swap_uses=0
           case "$neobank_preset" in
-            full-journey|swapped-lifecycle)
-              if [ "$INPUT_SWAP_MECHANISM" = stablecoin-dex ]; then
-                required_swap_uses=$INPUT_COUNT
-              else
-                required_swap_uses=$INPUT_MAX_CONCURRENT
-              fi
-              ;;
+            full-journey|swapped-lifecycle) required_swap_uses=$INPUT_MAX_CONCURRENT ;;
             private-withdrawal|swapped-redemption)
               setup_journeys_per_account=$(((INPUT_COUNT + INPUT_ACCOUNTS - 1) / INPUT_ACCOUNTS))
-              setup_position_uses=$((INPUT_ACCOUNTS * setup_journeys_per_account))
-              if [ "$INPUT_SWAP_MECHANISM" = direct-swap ]; then
-                callback_reservation=$((1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
-                callbacks_per_batch=$(((10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS - 500000) / callback_reservation))
-                if (( callbacks_per_batch == 0 )); then
-                  callbacks_per_batch=1
-                fi
-                setup_batch_uses=$((callbacks_per_batch * setup_journeys_per_account))
-                required_swap_uses=$INPUT_MAX_CONCURRENT
-                if (( setup_batch_uses > required_swap_uses )); then
-                  required_swap_uses=$setup_batch_uses
-                fi
-              else
-                required_swap_uses=$setup_position_uses
+              callback_reservation=$((1750000 + 10#$INPUT_CALLBACK_GAS_LIMIT))
+              callbacks_per_batch=$(((10#$INPUT_WITHDRAWAL_MAX_BATCH_GAS - 500000) / callback_reservation))
+              if (( callbacks_per_batch == 0 )); then
+                callbacks_per_batch=1
+              fi
+              setup_batch_uses=$((callbacks_per_batch * setup_journeys_per_account))
+              required_swap_uses=$INPUT_MAX_CONCURRENT
+              if (( setup_batch_uses > required_swap_uses )); then
+                required_swap_uses=$setup_batch_uses
               fi
               ;;
             slippage-bounce) required_swap_uses=1 ;;
@@ -516,30 +489,15 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
-      - name: Resolve pinned Earn revision
-        id: earn-revision
-        run: |
-          set -euo pipefail
-          earn_revision="$(tr -d '\r\n' < contrib/bench/earn-revision.lock)"
-          [[ "$earn_revision" =~ ^[0-9a-f]{40}$ ]]
-          echo "sha=$earn_revision" >> "$GITHUB_OUTPUT"
-
       - name: Check out Earn contracts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
-          ref: ${{ steps.earn-revision.outputs.sha }}
+          ref: main
           path: earn
           ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
           persist-credentials: false
           submodules: true
-
-      - name: Verify pinned Earn revision
-        env:
-          EXPECTED_EARN_REVISION: ${{ steps.earn-revision.outputs.sha }}
-        run: |
-          set -euo pipefail
-          test "$(git -C earn rev-parse HEAD)" = "$EXPECTED_EARN_REVISION"
 
       - name: Prepare persistent topology control path
         env:
@@ -717,30 +675,14 @@ jobs:
             --skip script \
             --no-lint \
             --out "$GITHUB_WORKSPACE/specs/ref-impls/benchmark-out"
-          forge build \
-            --root earn \
-            --skip test \
-            --skip script \
-            --no-lint \
-            --out "$GITHUB_WORKSPACE/specs/ref-impls/benchmark-out" \
-            vendor/bridge/auth-registry/AuthRegistry.sol \
-            vendor/bridge/direct-swaps/direct-swaps/DirectSwapV2.sol \
-            vendor/bridge/direct-swaps/token-handler/ReserveLedgerWrappedHandler.sol \
-            vendor/bridge/tip20-controller/TIP20Controller.sol
           test -s specs/ref-impls/benchmark-out/SingleZoneEarnRouter.sol/SingleZoneEarnRouter.json
-          test -s specs/ref-impls/benchmark-out/SingleZoneBridgeEarnRouter.sol/SingleZoneBridgeEarnRouter.json
-          test -s specs/ref-impls/benchmark-out/SingleZoneMinimalEarnRouter.sol/SingleZoneMinimalEarnRouter.json
           test -s specs/ref-impls/benchmark-out/EarnVault.sol/EarnVault.json
           test -s specs/ref-impls/benchmark-out/EarnFees.sol/EarnFees.json
           test -s specs/ref-impls/benchmark-out/EarnFactory.sol/EarnFactory.json
           test -s specs/ref-impls/benchmark-out/EarnContributionController.sol/EarnContributionController.json
           test -s specs/ref-impls/benchmark-out/ERC4626Engine.sol/ERC4626Engine.json
           test -s specs/ref-impls/benchmark-out/Simple4626Vault.sol/Simple4626Vault.json
-          test -s specs/ref-impls/benchmark-out/DirectSwapV2.sol/DirectSwapV2.json
-          test -s specs/ref-impls/benchmark-out/TIP20Controller.sol/TIP20Controller.json
-          test -s specs/ref-impls/benchmark-out/ReserveLedgerWrappedHandler.sol/ReserveLedgerWrappedHandler.json
-          test -s specs/ref-impls/benchmark-out/AuthRegistry.sol/AuthRegistry.json
-          test -s specs/ref-impls/benchmark-out/ERC1967Proxy.sol/ERC1967Proxy.json
+          test -s specs/ref-impls/benchmark-out/DemoTokenAuthority.sol/DemoTokenAuthority.json
 
       - name: Prepare or restore persistent Tempo L1 baseline
         run: |
@@ -767,7 +709,7 @@ jobs:
             echo "ZONES_BENCH_L1_CACHE_GENERATION=$ZONES_BENCH_L1_CACHE_GENERATION"
           } >> "$GITHUB_ENV"
 
-      - name: Install pinned txgen
+      - name: Install latest txgen
         run: |
           set -euo pipefail
           cargo_bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"

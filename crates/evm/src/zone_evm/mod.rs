@@ -7,7 +7,7 @@ use crate::{
     database::{L1OverlayDB, ZoneDbError},
 };
 use alloy_evm::{Database, Evm, EvmEnv, precompiles::PrecompilesMap, revm::Inspector};
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, B256, Bytes};
 use revm::context::{
     DBErrorMarker,
     result::{EVMError, ResultAndState},
@@ -16,9 +16,9 @@ use tempo_evm::{
     TempoBlockEnv, TempoHaltReason, TempoPoolValidationEvm, TempoPoolValidationResult,
     evm::TempoEvm,
 };
-use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
+use tempo_revm::{ExecutionContext, TempoInvalidTransaction, TempoTxEnv};
 use zone_l1::state::L1StateProvider;
-use zone_precompiles::L1StorageReader;
+use zone_precompiles::{L1StorageReader, tx_context};
 use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type TempoResult = ResultAndState<TempoHaltReason>;
@@ -105,6 +105,25 @@ where
         &mut self,
         tx: TempoTxEnv,
     ) -> (TempoPoolValidationResult<DB::Error>, TempoTxEnv) {
+        let has_eip7702_authorizations = !tx.inner.authorization_list.is_empty();
+        let has_tempo_authorizations = tx
+            .tempo_tx_env
+            .as_ref()
+            .is_some_and(|env| !env.tempo_authorization_list.is_empty());
+        if has_eip7702_authorizations || has_tempo_authorizations {
+            return (
+                Err(EVMError::Transaction(
+                    TempoInvalidTransaction::CallsValidation(
+                        "authorization lists are not supported",
+                    ),
+                )),
+                tx,
+            );
+        }
+        if let Err(err) = contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)
+        {
+            return (Err(EVMError::Transaction(err)), tx);
+        }
         let (result, tx) = self.inner.validate_pool_transaction(tx);
         let result = result.map_err(map_adapter_error);
         self.clear_l1_overlay_state();
@@ -144,6 +163,12 @@ where
         tx: Self::Tx,
     ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
         contract_creation::validate_transaction(&tx, CONTRACT_DEPLOYER_ALLOWLIST)?;
+        let tx_hash = match tx.execution_context() {
+            ExecutionContext::Transaction { tx_hash } => tx_hash,
+            ExecutionContext::Simulation => B256::repeat_byte(0xff),
+        };
+        let _tx_context_guard =
+            tx_context::set_current_transaction(tx_hash, tx.fee_payer().unwrap_or(tx.caller));
         self.execute_and_sanitize(|evm| evm.transact_raw(tx))
     }
 

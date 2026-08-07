@@ -7,9 +7,10 @@
 //! # Call ordering
 //!
 //! 1. Direct-call-only rules reject delegate calls before storage access.
-//! 2. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
-//! 3. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
-//! 4. Forward the original calldata and caller, applying any configured fixed gas charge.
+//! 2. Reject calls that cannot cover the calldata input cost before admission rules decode it.
+//! 3. Decode the selector and reject calls that cannot cover a configured fixed gas charge.
+//! 4. Apply [`CallRules`] admission checks using calldata, caller metadata, and anchored state.
+//! 5. Forward the original calldata and caller, applying any configured fixed gas charge.
 //!
 //! Admission-rule rejections include calldata input gas, while early delegate-call rejection is
 //! unmetered. Calls without a fixed charge retain normal provider metering, and successful
@@ -27,6 +28,7 @@ use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost,
     dispatch::selector_from_calldata,
     error::TempoPrecompileError,
+    input_cost,
     storage::{StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
     storage_credits::NonCreditableSlots,
 };
@@ -107,6 +109,13 @@ pub(crate) fn create_precompile(
         }
 
         let (data, caller) = (input.data, input.caller);
+        if input.gas < input_cost(data.len()) {
+            return Ok(PrecompileOutput::halt(
+                PrecompileHalt::OutOfGas,
+                input.reservoir,
+            ));
+        }
+
         let fixed_gas = rules.fixed_gas(selector_from_calldata(data));
         if fixed_gas.is_some_and(|gas| input.gas < gas) {
             return Ok(PrecompileOutput::halt(

@@ -62,6 +62,7 @@ crate::sol! {
         error TooManyWithdrawalsThisBlock();
         error InvalidRevealTo();
         error InvalidCurrentTxHash();
+        error ZeroAmountWithdrawal();
         error StaticCallNotAllowed();
 
         // -- View functions --

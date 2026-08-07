@@ -15,6 +15,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use eyre::WrapErr as _;
 use reth_chain_state::PersistedBlockSubscriptions;
 use reth_node_api::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
@@ -27,11 +28,15 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
 use tracing::{debug, error, info, warn};
 use zone_chainspec::ZoneChainSpec;
-use zone_l1::{DepositQueue, L1BlockTracker, TempoStateExt as _};
-use zone_p2p::{LeadershipSchedule, P2pCommand, P2pEvent, P2pPeerId};
+use zone_l1::{DepositQueue, EncryptionKeyRing, L1BlockTracker, TempoStateExt as _};
+use zone_p2p::{
+    BackfillCommand, BackfillRequest, BackfillResponse, LeadershipSchedule, P2pCommand, P2pEvent,
+    P2pPeerId,
+};
 use zone_payload::ZonePayloadTypes;
 use zone_sequencer::{
-    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, spawn_zone_sequencer,
+    ZoneSequencerConfig, ZoneSequencerHandle, ZoneSequencerProvider, resolve_portal_zone_anchor,
+    spawn_zone_sequencer,
 };
 use zone_transaction_pool_alias::TempoPooledTransaction;
 
@@ -42,7 +47,7 @@ mod zone_transaction_pool_alias {
 use crate::{
     EngineExit, ProductionPermit, ZoneEngine, ZoneSequencerAddOnsConfig,
     replication::{
-        AttestationContext, BackfillRequest, PeerTipRegistry, broadcast_persisted_blocks,
+        AttestationContext, PeerTipRegistry, broadcast_persisted_blocks,
         collect_follower_settlement_signatures, run_follower_block_sync,
     },
     settlement_attestation::collect_leader_settlements,
@@ -69,7 +74,9 @@ pub(crate) struct RoleControllerContext<P, Pool> {
     pub chain_spec: Arc<ZoneChainSpec>,
     pub deposit_queue: DepositQueue,
     pub l1_block_tracker: L1BlockTracker,
+    pub encryption_keys: EncryptionKeyRing,
     pub commands: mpsc::Sender<P2pCommand>,
+    pub backfill_commands: mpsc::Sender<BackfillCommand>,
     pub attestation: AttestationContext,
     pub portal_address: Address,
     /// Sequencer resources constructed unconditionally at startup; activation is gated by
@@ -118,19 +125,27 @@ pub(crate) struct EventSinks {
 struct GenerationSinks {
     sync: Option<mpsc::Sender<P2pEvent>>,
     transactions: Option<mpsc::Sender<P2pEvent>>,
+    backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
 }
 
 impl EventSinks {
-    fn install(&self, sync: mpsc::Sender<P2pEvent>, transactions: Option<mpsc::Sender<P2pEvent>>) {
+    fn install(
+        &self,
+        sync: mpsc::Sender<P2pEvent>,
+        transactions: Option<mpsc::Sender<P2pEvent>>,
+        backfill_responses: Option<mpsc::Sender<BackfillResponse>>,
+    ) {
         let mut sinks = self.inner.lock().expect("poisoned");
         sinks.sync = Some(sync);
         sinks.transactions = transactions;
+        sinks.backfill_responses = backfill_responses;
     }
 
     fn clear(&self) {
         let mut sinks = self.inner.lock().expect("poisoned");
         sinks.sync = None;
         sinks.transactions = None;
+        sinks.backfill_responses = None;
     }
 
     fn sink_for(&self, event: &P2pEvent) -> Option<mpsc::Sender<P2pEvent>> {
@@ -141,41 +156,27 @@ impl EventSinks {
             sinks.sync.clone()
         }
     }
+
+    fn backfill_response_sink(&self) -> Option<mpsc::Sender<BackfillResponse>> {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .backfill_responses
+            .clone()
+    }
 }
 
-/// Long-lived P2P event demultiplexer.
+/// Long-lived P2P event demultiplexer for non-backfill protocols.
 ///
-/// Owns the single event receiver for the process lifetime. Backfill requests are
-/// generation-independent — every role serves the same canonical provider — so they go to
-/// the process-lifetime backfill server, never to a role generation; dropping one would
-/// suppress the requesting peer until its response timeout and stall a leadership handoff.
-/// Every other event is forwarded to the active generation's substream, and events arriving
-/// between generations are dropped because the successor re-derives its state from the
-/// provider and schedule. Generation delivery is deliberately non-blocking: when a generation
-/// falls behind, dropping recoverable events is preferable to blocking process-lifetime backfill
-/// serving behind generation-local backpressure.
+/// It owns the generic event receiver for the process lifetime and forwards events to the active
+/// generation's substream. Events arriving between generations are dropped because the successor
+/// re-derives its state from the provider and schedule. Generation delivery is deliberately
+/// non-blocking so a slow generation cannot block process-lifetime protocol work.
 pub(crate) async fn route_events_to_generations(
     mut events: mpsc::Receiver<P2pEvent>,
     sinks: EventSinks,
-    backfill: mpsc::Sender<BackfillRequest>,
 ) {
     while let Some(event) = events.recv().await {
-        if let P2pEvent::BackfillRequested {
-            peer,
-            request_id,
-            start,
-        } = event
-        {
-            if let Err(err) = backfill.try_send(BackfillRequest {
-                peer,
-                request_id,
-                start,
-            }) {
-                metrics::counter!("zone_leadership_backfill_requests_dropped_total").increment(1);
-                warn!(target: "zone::role", %err, start, "Dropped a block backfill request because the serving queue is unavailable");
-            }
-            continue;
-        }
         let Some(sink) = sinks.sink_for(&event) else {
             metrics::counter!("zone_leadership_events_dropped_between_generations_total")
                 .increment(1);
@@ -185,9 +186,8 @@ pub(crate) async fn route_events_to_generations(
         match sink.try_send(event) {
             Ok(()) => {}
             Err(mpsc::error::TrySendError::Full(_)) => {
-                // Live blocks and backfill responses are recovered by the follower's periodic
-                // backfill probe; transaction forwarding reconciles from the pool. Never let a
-                // slow generation block the process-lifetime backfill request path.
+                // Live blocks are recovered by the follower's periodic backfill probe, and
+                // transaction forwarding reconciles from the pool. Keep this router non-blocking.
                 metrics::counter!("zone_leadership_events_dropped_backpressure_total").increment(1);
                 debug!(
                     target: "zone::role",
@@ -204,6 +204,48 @@ pub(crate) async fn route_events_to_generations(
         }
     }
     error!(target: "zone::role", "P2P event channel closed");
+}
+
+/// Routes process-lifetime backfill requests to the canonical provider server.
+pub(crate) async fn route_backfill_requests(
+    mut requests: mpsc::Receiver<BackfillRequest>,
+    backfill: mpsc::Sender<BackfillRequest>,
+) {
+    while let Some(request) = requests.recv().await {
+        let start = request.start;
+        if let Err(err) = backfill.try_send(request) {
+            metrics::counter!("zone_leadership_backfill_requests_dropped_total").increment(1);
+            warn!(target: "zone::role", %err, start, "Dropped a block backfill request because the serving queue is unavailable");
+        }
+    }
+    error!(target: "zone::role", "Typed P2P backfill request channel closed");
+}
+
+/// Routes accepted backfill responses to the currently active follower generation.
+pub(crate) async fn route_backfill_responses(
+    mut responses: mpsc::Receiver<BackfillResponse>,
+    sinks: EventSinks,
+) {
+    while let Some(response) = responses.recv().await {
+        let Some(sink) = sinks.backfill_response_sink() else {
+            metrics::counter!("zone_leadership_events_dropped_between_generations_total")
+                .increment(1);
+            debug!(target: "zone::role", "Dropping backfill response with no active follower consumer");
+            continue;
+        };
+        match sink.try_send(response) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                metrics::counter!("zone_leadership_events_dropped_backpressure_total").increment(1);
+                debug!(target: "zone::role", "Dropping backfill response because the generation sink is full");
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                metrics::counter!("zone_leadership_events_dropped_between_generations_total")
+                    .increment(1);
+            }
+        }
+    }
+    error!(target: "zone::role", "Typed P2P backfill response channel closed");
 }
 
 /// The role a generation runs, derived from the next-anchor rule.
@@ -415,9 +457,11 @@ where
     P: BlockNumReader + HeaderProvider<Header = TempoHeader>,
 {
     if let Some(recovery) = schedule.forced_recovery().filter(|recovery| {
-        recovery.is_active()
-            && &recovery.leader == local
+        &recovery.leader == local
             && next_anchor >= recovery.recovery_start_tempo_block
+            && recovery
+                .portal_activation_tempo_block
+                .is_none_or(|activation| next_anchor < activation)
     }) {
         let local_height = match provider.best_block_number() {
             Ok(height) => height,
@@ -719,12 +763,14 @@ where
         DesiredRole::Follower { epoch } => {
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, Some(transactions_tx));
+            let (backfill_tx, backfill_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
+            sinks.install(sync_tx, Some(transactions_tx), Some(backfill_tx));
 
             let follower_token = token.clone();
             let provider = context.provider.clone();
             let engine = context.engine_handle.clone();
             let commands = context.commands.clone();
+            let backfill_commands = context.backfill_commands.clone();
             let tracker = context.l1_block_tracker.clone();
             let queue = context.deposit_queue.clone();
             let attestation = context.attestation.clone();
@@ -736,6 +782,8 @@ where
                     engine,
                     sync_rx,
                     commands,
+                    backfill_commands,
+                    backfill_rx,
                     tracker,
                     queue,
                     attestation,
@@ -791,10 +839,36 @@ where
             // leader task. Otherwise a transient head-read failure could leave a partial
             // generation classified as Leader without its canonical head writer.
             let last_header = latest_sealed_header(&context.provider)?;
+            let portal_anchor = resolve_portal_zone_anchor(
+                &context.provider,
+                context.portal_address,
+                &context.attestation.l1_provider,
+            )
+            .await
+            .wrap_err("failed to resolve portal-confirmed Zone height for leader recovery")?;
+
+            // The outgoing leader may have one final submitBatch in flight while leadership
+            // rotates. That can make this anchor one boundary stale, but rotations fence the old
+            // leader before promotion, so recovery remains bounded by one configured batch
+            // interval (120 Zone blocks in production) rather than replaying history from genesis.
+
+            // Remove any submitted attestations for the portal-confirmed anchor, so the new leader
+            // can start from here.
+            let portal_confirmed_height = portal_anchor.block_number;
+            info!(
+                target: "zone::role",
+                portal_confirmed_height,
+                portal_block_hash = %portal_anchor.block_hash,
+                "Seeded leader settlement recovery from the portal anchor"
+            );
+            context
+                .attestation
+                .store
+                .remove_submitted(portal_confirmed_height);
 
             let (sync_tx, sync_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
             let (transactions_tx, transactions_rx) = mpsc::channel(GENERATION_EVENT_BACKLOG);
-            sinks.install(sync_tx, Some(transactions_tx));
+            sinks.install(sync_tx, Some(transactions_tx), None);
 
             // Canonical head writer: the engine with the per-anchor production permit.
             let engine = build_engine(context, sequencer, last_header);
@@ -841,7 +915,12 @@ where
             tasks.spawn(async move {
                 tokio::select! {
                     () = settlement_token.cancelled() => TaskEnd::Ended("settlement-collection (cancelled)"),
-                    () = collect_leader_settlements(provider, commands, attestation) => {
+                    () = collect_leader_settlements(
+                        provider,
+                        commands,
+                        attestation,
+                        portal_confirmed_height,
+                    ) => {
                         TaskEnd::Ended("settlement-collection")
                     }
                 }
@@ -900,7 +979,6 @@ fn build_engine<P, Pool>(
 where
     P: Clone,
 {
-    let sequencer_key = k256::SecretKey::from(sequencer.config.sequencer_signer.credential());
     ZoneEngine::new(
         context.chain_spec.clone(),
         context.engine_handle.clone(),
@@ -909,7 +987,7 @@ where
         context.l1_block_tracker.clone(),
         last_header,
         sequencer.config.sequencer_signer.address(),
-        sequencer_key,
+        context.encryption_keys.clone(),
         context.portal_address,
     )
     .with_production_permit(ProductionPermit::new(
@@ -920,19 +998,19 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{future::pending, net::SocketAddr, time::Duration};
+    use std::{future::pending, time::Duration};
 
     use commonware_cryptography::{Signer as _, ed25519::PrivateKey};
     use reth_provider::test_utils::MockEthProvider;
     use tempo_primitives::TempoPrimitives;
     use tokio::sync::{mpsc, oneshot};
     use tokio_util::sync::CancellationToken;
-    use zone_p2p::P2pEvent;
+    use zone_p2p::{BackfillRequest, BackfillResponse};
     use zone_sequencer::ZoneSequencerHandle;
 
     use super::{
-        EventSinks, TaskEnd, latest_sealed_header, route_events_to_generations,
-        supervise_sequencer_tasks,
+        EventSinks, TaskEnd, latest_sealed_header, route_backfill_requests,
+        route_backfill_responses, supervise_sequencer_tasks,
     };
 
     struct DropSignal(Option<oneshot::Sender<()>>);
@@ -1050,29 +1128,16 @@ mod tests {
     /// losing it leaves the requester blocked behind the P2P backfill response timeout.
     #[tokio::test]
     async fn backfill_request_bypasses_generation_sinks() {
-        let sinks = EventSinks::default();
-        let (network_events, event_rx) = mpsc::channel(1);
+        let (network_requests, request_rx) = mpsc::channel(1);
         let (backfill_tx, mut backfill_rx) = mpsc::channel(1);
-        let router = tokio::spawn(route_events_to_generations(
-            event_rx,
-            sinks.clone(),
-            backfill_tx,
-        ));
+        let router = tokio::spawn(route_backfill_requests(request_rx, backfill_tx));
         let peer = PrivateKey::from_seed(1).public_key();
 
-        network_events
-            .send(P2pEvent::BackfillRequested {
+        network_requests
+            .send(BackfillRequest {
                 peer: peer.clone(),
                 request_id: 7,
                 start: 42,
-            })
-            .await
-            .unwrap();
-        // A generation-specific event with no installed sink is dropped, not deferred.
-        network_events
-            .send(P2pEvent::Started {
-                ed25519_public_key: peer.clone(),
-                listen: SocketAddr::from(([127, 0, 0, 1], 9000)),
             })
             .await
             .unwrap();
@@ -1085,7 +1150,7 @@ mod tests {
         assert_eq!(request.request_id, 7);
         assert_eq!(request.start, 42);
 
-        drop(network_events);
+        drop(network_requests);
         tokio::time::timeout(Duration::from_secs(1), router)
             .await
             .expect("event router did not stop")
@@ -1093,61 +1158,51 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn backfill_request_bypasses_saturated_generation_sink() {
+    async fn backfill_response_drops_on_generation_backpressure() {
         let sinks = EventSinks::default();
-        let (generation_tx, mut generation_rx) = mpsc::channel(1);
-        sinks.install(generation_tx, None);
-
-        let (network_events, event_rx) = mpsc::channel(4);
-        let (backfill_tx, mut backfill_rx) = mpsc::channel(1);
-        let router = tokio::spawn(route_events_to_generations(event_rx, sinks, backfill_tx));
+        let (generation_response_tx, mut generation_response_rx) = mpsc::channel(1);
+        sinks.install(mpsc::channel(1).0, None, Some(generation_response_tx));
+        let (network_responses, response_rx) = mpsc::channel(4);
+        let router = tokio::spawn(route_backfill_responses(response_rx, sinks));
         let peer = PrivateKey::from_seed(1).public_key();
 
-        // The first event fills the generation sink. The second must be dropped instead of
-        // parking the router ahead of the process-lifetime backfill request.
-        for port in [9000, 9001] {
-            network_events
-                .send(P2pEvent::Started {
-                    ed25519_public_key: peer.clone(),
-                    listen: SocketAddr::from(([127, 0, 0, 1], port)),
-                })
-                .await
-                .unwrap();
-        }
-        network_events
-            .send(P2pEvent::BackfillRequested {
+        network_responses
+            .send(BackfillResponse::Completed {
                 peer: peer.clone(),
-                request_id: 8,
-                start: 43,
+                tip: zone_p2p::PeerTip {
+                    zone_height: 1,
+                    zone_hash: alloy_primitives::B256::ZERO,
+                    tempo_block_number: 1,
+                    tempo_block_hash: alloy_primitives::B256::ZERO,
+                },
+            })
+            .await
+            .unwrap();
+        network_responses
+            .send(BackfillResponse::Completed {
+                peer,
+                tip: zone_p2p::PeerTip {
+                    zone_height: 2,
+                    zone_hash: alloy_primitives::B256::ZERO,
+                    tempo_block_number: 2,
+                    tempo_block_hash: alloy_primitives::B256::ZERO,
+                },
             })
             .await
             .unwrap();
 
-        let request = tokio::time::timeout(Duration::from_secs(1), backfill_rx.recv())
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), generation_response_rx.recv())
             .await
-            .expect("generation backpressure blocked the backfill request")
-            .expect("backfill serving channel closed");
-        assert_eq!(request.peer, peer);
-        assert_eq!(request.request_id, 8);
-        assert_eq!(request.start, 43);
+            .expect("the first backfill response was not forwarded")
+            .expect("generation response channel closed");
+        assert!(
+            matches!(forwarded, BackfillResponse::Completed { tip, .. } if tip.zone_height == 1)
+        );
 
-        drop(network_events);
+        drop(network_responses);
         tokio::time::timeout(Duration::from_secs(1), router)
             .await
             .expect("event router did not stop")
             .expect("event router task panicked");
-
-        let forwarded = generation_rx
-            .recv()
-            .await
-            .expect("the first generation event should have been forwarded");
-        assert!(matches!(
-            forwarded,
-            P2pEvent::Started { listen, .. } if listen.port() == 9000
-        ));
-        assert!(
-            generation_rx.try_recv().is_err(),
-            "the event that encountered backpressure should have been dropped"
-        );
     }
 }

@@ -112,6 +112,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error ZeroAmountWithdrawal();
     error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
@@ -251,6 +252,7 @@ contract ZoneOutbox is IZoneOutbox {
         if (zoneFallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
+        if (amount == 0) revert ZeroAmountWithdrawal();
 
         if (!_isEnabledToken(token)) {
             revert IZonePortal.TokenNotEnabled();
@@ -433,9 +435,7 @@ contract ZoneOutbox is IZoneOutbox {
 
                 Withdrawal memory w = Withdrawal({
                     token: pendingWithdrawal.token,
-                    senderTag: keccak256(
-                        abi.encodePacked(pendingWithdrawal.sender, pendingWithdrawal.txHash)
-                    ),
+                    senderTag: _senderTag(pendingWithdrawal),
                     to: pendingWithdrawal.to,
                     amount: pendingWithdrawal.amount,
                     memo: pendingWithdrawal.memo,
@@ -464,6 +464,23 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Emit event for observability (proof reads from state, not events)
         emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
+    }
+
+    /// @dev Include the public per-withdrawal nonce so requests from one private transaction do
+    ///      not share a tag. Preserve the existing canonical tag for deposit bounce-backs.
+    function _senderTag(PendingWithdrawal memory pendingWithdrawal)
+        internal
+        pure
+        returns (bytes32)
+    {
+        if (pendingWithdrawal.sender == address(0) && pendingWithdrawal.fallbackNonce == 0) {
+            return keccak256(abi.encodePacked(pendingWithdrawal.sender, pendingWithdrawal.txHash));
+        }
+        return keccak256(
+            abi.encodePacked(
+                pendingWithdrawal.sender, pendingWithdrawal.txHash, pendingWithdrawal.fallbackNonce
+            )
+        );
     }
 
     /// @notice Number of pending withdrawals
