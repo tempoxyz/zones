@@ -19,8 +19,6 @@ use crate::{
     },
 };
 
-const WEB3_CLIENT_VERSION: &str = concat!("tempo-zone/v", env!("CARGO_PKG_VERSION"));
-
 /// Interface to the underlying reth EthApi for the redacted zone RPC.
 ///
 /// Implementations are responsible for:
@@ -42,6 +40,9 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `net_version` — returns the network ID as a decimal string.
     fn net_version(&self) -> BoxFut<'_>;
+
+    /// `web3_clientVersion` — returns the native node client version.
+    fn client_version(&self) -> BoxFut<'_>;
 
     /// `eth_syncing` — returns sync status from the upstream node.
     fn syncing(&self) -> BoxFut<'_>;
@@ -293,11 +294,7 @@ pub async fn dispatch(
         "eth_syncing" => api_result(id, "eth_syncing", api.syncing().await),
         "eth_coinbase" => api_result(id, "eth_coinbase", api.coinbase().await),
         "web3_sha3" => handle_web3_sha3(id, raw).await,
-        "web3_clientVersion" => api_result(
-            id,
-            "web3_clientVersion",
-            crate::types::to_raw(&WEB3_CLIENT_VERSION),
-        ),
+        "web3_clientVersion" => api_result(id, "web3_clientVersion", api.client_version().await),
 
         // Fee history
         "eth_feeHistory" => handle_fee_history(id, raw, api).await,
@@ -773,6 +770,9 @@ mod tests {
         stub!(block_number);
         stub!(chain_id);
         stub!(net_version);
+        fn client_version(&self) -> BoxFut<'_> {
+            Box::pin(async { to_raw(&"tempo-zone/vtest/test-target") })
+        }
         stub!(gas_price);
         stub!(max_priority_fee_per_gas);
         stub!(fee_history, _block_count: u64, _newest_block: BlockNumberOrTag, _reward_percentiles: Option<Vec<f64>>);
@@ -909,13 +909,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatches_web3_client_version_from_package_version() {
+    async fn dispatches_web3_client_version_from_api() {
         let api = MockZoneRpcApi::default();
         let response = dispatch(&request("web3_clientVersion", json!([])), &auth(), &api).await;
 
         assert_eq!(
             serde_json::from_str::<Value>(response.result.as_ref().unwrap().get()).unwrap(),
-            concat!("tempo-zone/v", env!("CARGO_PKG_VERSION"))
+            "tempo-zone/vtest/test-target"
         );
     }
 

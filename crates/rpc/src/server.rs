@@ -372,6 +372,7 @@ mod tests {
         stub!(block_number);
         stub!(chain_id);
         stub!(net_version);
+        stub!(client_version);
         stub!(syncing);
         stub!(coinbase);
         stub!(gas_price);

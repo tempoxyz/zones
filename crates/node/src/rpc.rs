@@ -27,7 +27,8 @@ use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObject
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
-use reth_rpc::{EthFilter, eth::filter::EthFilterError};
+use reth_rpc::{EthFilter, Web3Api, eth::filter::EthFilterError};
+use reth_rpc_api::Web3ApiServer;
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcConvert,
@@ -757,6 +758,14 @@ where
         Box::pin(async move {
             let chain_id = EthApiSpec::chain_id(&self.eth.api);
             to_raw(&chain_id.to_string())
+        })
+    }
+
+    fn client_version(&self) -> BoxFut<'_> {
+        Box::pin(async move {
+            let web3 = Web3Api::new(self.eth.api.network().clone());
+            let client_version = web3.client_version().await.map_err(internal)?;
+            to_raw(&client_version)
         })
     }
 

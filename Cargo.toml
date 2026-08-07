@@ -156,6 +156,7 @@ reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4
   "optional-checks",
 ] }
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
+reth-rpc-api = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
 reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "10aa6a512ba7c4f5f01ff489b1f513da0745821f" }
@@ -243,6 +244,8 @@ reqwest = { version = "0.13", default-features = false, features = [
 tokio-tungstenite = "0.28"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+vergen = { version = "10.0.1", features = ["build", "cargo", "emit_and_set"] }
+vergen-git2 = "10.0.1"
 zeroize = "1.9.0"
 
 # Keep Commonware aligned with the revision used by upstream Tempo. Cargo does
