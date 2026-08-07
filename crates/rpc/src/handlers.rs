@@ -19,6 +19,8 @@ use crate::{
     },
 };
 
+const WEB3_CLIENT_VERSION: &str = concat!("tempo-zone/v", env!("CARGO_PKG_VERSION"));
+
 /// Interface to the underlying reth EthApi for the redacted zone RPC.
 ///
 /// Implementations are responsible for:
@@ -294,7 +296,7 @@ pub async fn dispatch(
         "web3_clientVersion" => api_result(
             id,
             "web3_clientVersion",
-            crate::types::to_raw(&"tempo-zone/v0.1.0"),
+            crate::types::to_raw(&WEB3_CLIENT_VERSION),
         ),
 
         // Fee history
@@ -903,6 +905,17 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Value>(sha3.result.as_ref().unwrap().get()).unwrap(),
             "0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatches_web3_client_version_from_package_version() {
+        let api = MockZoneRpcApi::default();
+        let response = dispatch(&request("web3_clientVersion", json!([])), &auth(), &api).await;
+
+        assert_eq!(
+            serde_json::from_str::<Value>(response.result.as_ref().unwrap().get()).unwrap(),
+            concat!("tempo-zone/v", env!("CARGO_PKG_VERSION"))
         );
     }
 
