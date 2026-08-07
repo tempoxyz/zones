@@ -32,7 +32,7 @@ use std::{
 };
 
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, U256};
 use alloy_provider::{DynProvider, Provider};
 use futures::{StreamExt, stream::FuturesUnordered};
 use parking_lot::Mutex;
@@ -251,23 +251,6 @@ impl Default for WithdrawalStore {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Compute the remaining queue hash after removing the first `processed_count` withdrawals.
-///
-/// This value is passed as `remainingQueue` to `processWithdrawals` on the portal contract.
-///
-/// - If `processed_count >= withdrawals.len()`, returns `B256::ZERO` (no remaining items).
-/// - Otherwise, computes the hash chain over `withdrawals[processed_count..]` via
-///   [`abi::Withdrawal::queue_hash`].
-pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count: usize) -> B256 {
-    if processed_count >= withdrawals.len() {
-        return B256::ZERO;
-    }
-
-    let remaining = &withdrawals[processed_count..];
-
-    abi::Withdrawal::queue_hash(remaining)
 }
 
 // ---------------------------------------------------------------------------
@@ -589,7 +572,7 @@ impl WithdrawalProcessor {
                 let nonce = first_nonce + submitted as u64;
                 let absolute_start = offset + batch.start;
                 let batch_withdrawals = withdrawals[batch.start..batch.end].to_vec();
-                let remaining_queue = compute_remaining_queue(withdrawals, batch.end);
+                let remaining_queue = abi::Withdrawal::queue_hash(&withdrawals[batch.end..]);
 
                 for (item_index, withdrawal) in batch_withdrawals.iter().enumerate() {
                     if withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT {
@@ -862,7 +845,7 @@ enum SubmitOutcome {
 mod tests {
     use super::*;
     use crate::abi::EMPTY_SENTINEL;
-    use alloy_primitives::{Bytes, U256, address, keccak256};
+    use alloy_primitives::{B256, Bytes, U256, address, keccak256};
     use alloy_provider::{Provider, ProviderBuilder};
     use alloy_sol_types::SolValue;
     use alloy_transport::mock::Asserter;
@@ -947,34 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn remaining_queue_single_item_is_hash() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
-        let expected = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
-        assert_eq!(compute_remaining_queue(&[w], 0), expected);
-    }
-
-    #[test]
-    fn remaining_queue_all_consumed() {
-        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
-        assert_eq!(
-            compute_remaining_queue(std::slice::from_ref(&w), 1),
-            B256::ZERO
-        );
-        assert_eq!(compute_remaining_queue(&[w], 5), B256::ZERO);
-    }
-
-    #[test]
-    fn remaining_queue_partial() {
-        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
-        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000043"), 200);
-        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000044"), 300);
-
-        let remaining = compute_remaining_queue(&[w0, w1.clone(), w2.clone()], 1);
-        let expected = abi::Withdrawal::queue_hash(&[w1, w2]);
-        assert_eq!(remaining, expected);
-    }
-
-    #[test]
     fn withdrawal_gas_limits_are_classified_and_bounded() {
         let at_cap = PROCESS_WITHDRAWAL_TX_OVERHEAD_GAS
             + process_withdrawal_item_gas(MAX_WITHDRAWAL_GAS_LIMIT, 1);
@@ -1022,11 +977,11 @@ mod tests {
         assert_eq!(batches[1].start, 2);
         assert_eq!(batches[1].end, 3);
         assert_eq!(
-            compute_remaining_queue(&withdrawals, batches[0].end),
+            abi::Withdrawal::queue_hash(&withdrawals[batches[0].end..]),
             abi::Withdrawal::queue_hash(&withdrawals[2..])
         );
         assert_eq!(
-            compute_remaining_queue(&withdrawals, batches[1].end),
+            abi::Withdrawal::queue_hash(&withdrawals[batches[1].end..]),
             B256::ZERO
         );
     }
@@ -1059,7 +1014,7 @@ mod tests {
         assert_eq!(batches[0].end, 1);
         assert!(batches[0].gas_limit > 1_000_000);
         assert_eq!(
-            compute_remaining_queue(&withdrawals, batches[0].end),
+            abi::Withdrawal::queue_hash(&withdrawals[batches[0].end..]),
             abi::Withdrawal::queue_hash(&withdrawals[1..])
         );
     }
