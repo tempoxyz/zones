@@ -229,11 +229,12 @@ jobs:
           INPUT_DRAIN_TIMEOUT: ${{ inputs.drain-timeout || '300' }}
           INPUT_SEED: ${{ inputs.seed || '' }}
           INPUT_TEMPO_REF: c40ff801741d28ab74452db261f5b6ffe4ec334a
-          INPUT_TXGEN_REF: 072877b673f60b5f559f17da098296f1841b6732
           RUN_ID: ${{ github.run_id }}
           RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
+
+          INPUT_TXGEN_REF="$(git ls-remote https://github.com/tempoxyz/txgen HEAD | awk '{print $1}')"
 
           neobank_preset="$INPUT_PRESET"
           case "$neobank_preset" in
@@ -708,7 +709,7 @@ jobs:
             echo "ZONES_BENCH_L1_CACHE_GENERATION=$ZONES_BENCH_L1_CACHE_GENERATION"
           } >> "$GITHUB_ENV"
 
-      - name: Install pinned txgen
+      - name: Install latest txgen
         run: |
           set -euo pipefail
           cargo_bin_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
