@@ -1258,8 +1258,6 @@ where
         chain_id: u64,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
-        // Public redacted-RPC traffic must not share the L1 client used by promotion,
-        // settlement, or subscriber control-plane tasks.
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &l1_rpc_url,

@@ -567,7 +567,6 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::RedactedRpcConfig,
     enabled_tokens: EnabledTokenRegistry,
-    /// L1 client isolated from node control-plane traffic.
     l1_provider: DynProvider<TempoNetwork>,
     /// Maps filter IDs to the authenticated account that created them.
     /// The reth filter registry remains the source of truth for filter liveness.
@@ -575,7 +574,7 @@ pub struct ZoneRpc<Api: EthApiTypes> {
 }
 
 impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
-    /// Wrap reth's [`EthHandlers`] (api + filter + pubsub) and an isolated L1 provider.
+    /// Wrap reth's [`EthHandlers`] (api + filter + pubsub) and an L1 provider.
     pub fn new(
         eth: EthHandlers<Api>,
         config: zone_rpc::RedactedRpcConfig,
