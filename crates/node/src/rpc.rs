@@ -25,7 +25,6 @@ use eyre::WrapErr;
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
-use reth_network_api::NetworkInfo;
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
@@ -762,16 +761,7 @@ where
     }
 
     fn client_version(&self) -> BoxFut<'_> {
-        Box::pin(async move {
-            let status = self
-                .eth
-                .api
-                .network()
-                .network_status()
-                .await
-                .map_err(internal)?;
-            to_raw(&status.client_version)
-        })
+        Box::pin(async { to_raw(&crate::version::client_version()) })
     }
 
     fn syncing(&self) -> BoxFut<'_> {

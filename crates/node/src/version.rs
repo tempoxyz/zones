@@ -1,6 +1,8 @@
 use std::{borrow::Cow, env};
 
-use reth_node_core::version::{RethCliVersionConsts, try_init_version_metadata};
+use reth_node_core::version::{
+    RethCliVersionConsts, try_init_version_metadata, version_metadata as global_version_metadata,
+};
 
 /// Sets version information for Tempo Zone globally.
 ///
@@ -8,6 +10,11 @@ use reth_node_core::version::{RethCliVersionConsts, try_init_version_metadata};
 pub fn init_version_metadata() {
     try_init_version_metadata(version_metadata())
         .expect("Version metadata should be generated in `build.rs`");
+}
+
+/// The globally configured Tempo Zone client identity.
+pub fn client_version() -> &'static str {
+    global_version_metadata().p2p_client_version.as_ref()
 }
 
 /// The version information for Tempo Zone.
@@ -49,6 +56,7 @@ mod tests {
 
     #[test]
     fn uses_tempo_zone_version_defaults() {
+        init_version_metadata();
         let metadata = version_metadata();
 
         assert_eq!(metadata.name_client, "Tempo Zone");
@@ -70,5 +78,7 @@ mod tests {
                 env::consts::OS
             )
         );
+        assert_eq!(client_version(), metadata.p2p_client_version);
+        assert_ne!(client_version(), "reth-test");
     }
 }

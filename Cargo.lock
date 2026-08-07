@@ -13731,7 +13731,6 @@ dependencies = [
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",
- "reth-network-api",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
