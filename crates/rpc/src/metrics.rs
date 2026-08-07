@@ -25,7 +25,7 @@ pub(crate) struct RedactedRpcCallMetrics {
 
 impl RedactedRpcCallMetrics {
     pub(crate) fn new_for(method: &str) -> Self {
-        Self::new_with_labels(&[("method", canonical_method_label(method).to_string())])
+        Self::new_with_labels(&[("method", Method::metric_label(method).to_string())])
     }
 }
 
@@ -43,11 +43,4 @@ pub(crate) struct ZoneProviderMetrics {
     pub(crate) token_refresh_attempts_total: Counter,
     /// Number of redacted RPC provider token refresh failures.
     pub(crate) token_refresh_failures_total: Counter,
-}
-
-/// Normalize JSON-RPC method names into the fixed label set used by metrics.
-pub(crate) fn canonical_method_label(method: &str) -> &str {
-    Method::from_name(method)
-        .map(Method::name)
-        .unwrap_or("unknown")
 }

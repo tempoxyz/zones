@@ -398,6 +398,11 @@ macro_rules! define_methods {
                 }
             }
 
+            /// Normalize a raw method name into the bounded metrics label set.
+            pub(crate) fn metric_label(name: &str) -> &'static str {
+                Self::from_name(name).map(Self::name).unwrap_or("unknown")
+            }
+
             /// Access tier enforced before dispatch.
             pub(crate) const fn tier(self) -> MethodTier {
                 match self {

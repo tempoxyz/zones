@@ -767,10 +767,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::{
-        metrics::canonical_method_label,
-        types::{classify_method, to_raw},
-    };
+    use crate::types::{classify_method, to_raw};
 
     #[derive(Default)]
     struct MockZoneRpcApi;
@@ -1038,7 +1035,7 @@ mod tests {
         for &method in Method::ALL {
             let name = method.name();
             assert_eq!(classify_method(name), Some(method.tier()), "method: {name}");
-            assert_eq!(canonical_method_label(name), name, "method: {name}");
+            assert_eq!(Method::metric_label(name), name, "method: {name}");
 
             let error = dispatch(&request(name, json!([])), &auth(), &api)
                 .await
@@ -1074,7 +1071,7 @@ mod tests {
             ("missing_method", None, "unknown", -32601),
         ] {
             assert_eq!(classify_method(name), tier, "method: {name}");
-            assert_eq!(canonical_method_label(name), label);
+            assert_eq!(Method::metric_label(name), label);
             let error = dispatch(&request(name, json!([])), &auth(), &api)
                 .await
                 .error
