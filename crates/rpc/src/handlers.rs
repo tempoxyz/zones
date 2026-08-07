@@ -13,9 +13,7 @@ use tracing::warn;
 use crate::{
     auth::AuthContext,
     subscription::BoxWsSubscriptionFut,
-    types::{
-        BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, Method, MethodTier,
-    },
+    types::{BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, Method},
 };
 
 /// Interface to the underlying reth EthApi for the redacted zone RPC.
@@ -62,8 +60,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_getBalance(address, block)` — returns the balance of an account.
     ///
-    /// Returns `0x0` for non-sequencer callers querying an address that does
-    /// not match `auth.caller`.
+    /// Returns `0x0` when querying an address that does not match `auth.caller`.
     fn get_balance(
         &self,
         address: Address,
@@ -73,8 +70,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_getTransactionCount(address, block)` — returns the nonce.
     ///
-    /// Returns `0x0` for non-sequencer callers querying an address that does
-    /// not match `auth.caller`.
+    /// Returns `0x0` when querying an address that does not match `auth.caller`.
     fn get_transaction_count(
         &self,
         address: Address,
@@ -104,7 +100,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     ///
     /// Enforces that `from` equals the authenticated account (sets it if omitted,
     /// rejects with `-32004` on mismatch). State/block overrides are rejected
-    /// with `-32602` for non-sequencer callers.
+    /// with `-32602`.
     fn call(
         &self,
         request: TempoTransactionRequest,
@@ -116,7 +112,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `eth_estimateGas(request, block, state_override)` — estimates gas for a transaction.
     ///
     /// Same `from`-enforcement as [`call`](Self::call). State overrides are
-    /// rejected with `-32602` for non-sequencer callers.
+    /// rejected with `-32602`.
     fn estimate_gas(
         &self,
         request: TempoTransactionRequest,
@@ -247,9 +243,8 @@ fn api_result(
 
 /// Dispatch a single JSON-RPC request through the redacted zone RPC pipeline.
 ///
-/// Enforces the strict whitelist and access policy in the typed method registry and rejects
-/// anything unknown or disabled. Individual handlers may apply additional per-method access
-/// checks.
+/// Enforces the strict allowlist in the typed method registry. Individual handlers may apply
+/// additional per-method access checks.
 pub async fn dispatch(
     req: &JsonRpcRequest,
     auth: &AuthContext,
@@ -261,16 +256,6 @@ pub async fn dispatch(
         Some(method) => method,
         None => return JsonRpcResponse::error(id, JsonRpcError::method_not_found()),
     };
-
-    match method.tier() {
-        MethodTier::Disabled => {
-            return JsonRpcResponse::error(id, JsonRpcError::method_disabled());
-        }
-        MethodTier::Restricted => {
-            return JsonRpcResponse::error(id, JsonRpcError::sequencer_only());
-        }
-        _ => {}
-    }
 
     // Raw params JSON — handlers deserialize directly, no intermediate Vec<Value>.
     let raw = req.params.as_deref().map(|p| p.get()).unwrap_or("[]");
@@ -338,31 +323,6 @@ pub async fn dispatch(
         Method::ZoneGetEncryptionKey => {
             api_result(id, method, api.zone_get_encryption_key(auth.clone()).await)
         }
-        Method::EthGetCode
-        | Method::EthGetStorageAt
-        | Method::EthGetBlockReceipts
-        | Method::EthSendTransaction
-        | Method::EthCreateAccessList
-        | Method::EthGetBlockTransactionCountByNumber
-        | Method::EthGetBlockTransactionCountByHash
-        | Method::EthGetTransactionByBlockNumberAndIndex
-        | Method::EthGetTransactionByBlockHashAndIndex
-        | Method::EthGetUncleCountByBlockNumber
-        | Method::EthGetUncleCountByBlockHash
-        | Method::EthGetProof
-        | Method::EthNewPendingTransactionFilter
-        | Method::EthGetUncleByBlockNumberAndIndex
-        | Method::EthGetUncleByBlockHashAndIndex
-        | Method::EthMining
-        | Method::EthHashrate
-        | Method::EthGetWork
-        | Method::EthSubmitWork
-        | Method::EthSubmitHashrate
-        | Method::EthSubscribe
-        | Method::EthUnsubscribe
-        | Method::AdminWildcard
-        | Method::DebugWildcard
-        | Method::TxpoolWildcard => unreachable!("non-public methods return before dispatch"),
     }
 }
 
@@ -376,7 +336,7 @@ async fn handle_web3_sha3(id: Value, raw: &str) -> JsonRpcResponse {
     api_result(id, Method::Web3Sha3, crate::types::to_raw(&keccak256(data)))
 }
 
-/// Handle `eth_getBlockByNumber`. Rejects `full=true` for non-sequencer callers.
+/// Handle `eth_getBlockByNumber`. Rejects `full=true` on the redacted RPC.
 async fn handle_get_block_by_number(
     id: Value,
     raw: &str,
@@ -466,7 +426,7 @@ async fn handle_get_transaction_receipt(
 }
 
 /// Handle `eth_call`. Enforces `from` matches the authenticated account and
-/// rejects state overrides for non-sequencer callers.
+/// rejects state overrides.
 async fn handle_call(
     id: Value,
     raw: &str,
@@ -601,8 +561,8 @@ async fn handle_fee_history(id: Value, raw: &str, api: &dyn ZoneRpcApi) -> JsonR
     )
 }
 
-/// Handle `eth_getBalance`. Returns `0x0` for non-sequencer callers querying
-/// a different address (checked in API impl, no timing leak since check is pre-fetch).
+/// Handle `eth_getBalance`. Returns `0x0` when querying a different address
+/// (checked in API impl, no timing leak since check is pre-fetch).
 async fn handle_get_balance(
     id: Value,
     raw: &str,
@@ -622,8 +582,8 @@ async fn handle_get_balance(
     )
 }
 
-/// Handle `eth_getTransactionCount`. Returns `0x0` for non-sequencer callers
-/// querying a different address (checked in API impl, no timing leak).
+/// Handle `eth_getTransactionCount`. Returns `0x0` when querying a different address
+/// (checked in API impl, no timing leak).
 async fn handle_get_transaction_count(
     id: Value,
     raw: &str,
@@ -767,7 +727,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::types::{classify_method, to_raw};
+    use crate::types::to_raw;
 
     #[derive(Default)]
     struct MockZoneRpcApi;
@@ -860,13 +820,6 @@ mod tests {
 
     #[tokio::test]
     async fn redacted_rpc_excludes_operator_sequencer_methods() {
-        use crate::types::classify_method;
-
-        // Both are served by the node's public HTTP module, not the private tiered
-        // dispatcher, so they must not classify and must not dispatch here.
-        assert_eq!(classify_method("zone_getSequencerInfo"), None);
-        assert_eq!(classify_method("zone_setLeader"), None);
-
         let api = MockZoneRpcApi::default();
         let excluded = dispatch(&request("zone_setLeader", json!([])), &auth(), &api).await;
         assert_eq!(excluded.error.unwrap().code, -32601);
@@ -945,7 +898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_pending_transaction_filter_endpoint() {
+    async fn does_not_expose_pending_transaction_filter_endpoint() {
         let api = MockZoneRpcApi::default();
 
         let resp = dispatch(
@@ -956,7 +909,7 @@ mod tests {
         .await;
 
         assert!(resp.result.is_none());
-        assert_eq!(resp.error.as_ref().unwrap().code, -32006);
+        assert_eq!(resp.error.as_ref().unwrap().code, -32601);
     }
 
     #[tokio::test]
@@ -1029,54 +982,46 @@ mod tests {
         assert_eq!(err.message, "expected [request, block?, stateOverride?]");
     }
     #[tokio::test]
-    async fn registered_methods_keep_policy_dispatch_and_metrics_aligned() {
+    async fn registered_methods_are_dispatchable_and_have_bounded_metric_labels() {
         let api = MockZoneRpcApi::default();
 
         for &method in Method::ALL {
             let name = method.name();
-            assert_eq!(classify_method(name), Some(method.tier()), "method: {name}");
+            assert_eq!(Method::from_name(name), Some(method), "method: {name}");
             assert_eq!(Method::metric_label(name), name, "method: {name}");
 
-            let error = dispatch(&request(name, json!([])), &auth(), &api)
+            if let Some(error) = dispatch(&request(name, json!([])), &auth(), &api)
                 .await
-                .error;
-            let expected = match method.tier() {
-                MethodTier::Public => None,
-                MethodTier::Restricted => Some((-32005, "Sequencer only")),
-                MethodTier::Disabled => Some((-32006, "Method disabled")),
-            };
-            if let Some(expected) = expected {
-                let actual = error
-                    .as_ref()
-                    .map(|error| (error.code, error.message.as_str()));
-                assert_eq!(actual, Some(expected), "method: {name}");
-            } else if let Some(error) = error {
+                .error
+            {
                 assert!(
                     ![-32601, -32005, -32006].contains(&error.code),
-                    "public method {name} was rejected by dispatch policy: {error}"
+                    "registered method {name} was rejected by dispatch policy: {error}"
                 );
             }
         }
     }
 
     #[tokio::test]
-    async fn wildcard_and_unknown_methods_preserve_error_and_metric_behavior() {
+    async fn unregistered_methods_are_not_found_and_share_the_unknown_metric_label() {
         let api = MockZoneRpcApi::default();
-        let restricted = Some(MethodTier::Restricted);
 
-        for (name, tier, label, error_code) in [
-            ("admin_peers", restricted, "admin_*", -32005),
-            ("debug_accountRange", restricted, "debug_*", -32005),
-            ("txpool_contentFrom", restricted, "txpool_*", -32005),
-            ("missing_method", None, "unknown", -32601),
+        for name in [
+            "eth_getCode",
+            "eth_getProof",
+            "admin_peers",
+            "debug_accountRange",
+            "txpool_contentFrom",
+            "missing_method",
         ] {
-            assert_eq!(classify_method(name), tier, "method: {name}");
-            assert_eq!(Method::metric_label(name), label);
+            assert_eq!(Method::from_name(name), None, "method: {name}");
+            assert_eq!(Method::metric_label(name), "unknown");
             let error = dispatch(&request(name, json!([])), &auth(), &api)
                 .await
                 .error
                 .expect("method must return an error");
-            assert_eq!(error.code, error_code, "method: {name}");
+            assert_eq!(error.code, -32601, "method: {name}");
+            assert_eq!(error.message, "Method not found", "method: {name}");
         }
     }
 }

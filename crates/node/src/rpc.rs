@@ -543,26 +543,23 @@ async fn prune_filter_owners<Api: EthApiTypes + 'static>(
 ///
 /// This is the privacy enforcement layer for the zone's JSON-RPC surface.
 /// Only methods explicitly routed through [`ZoneRpcApi`] are reachable —
-/// everything else is rejected by the dispatcher's [`classify_method`]
-/// whitelist, so this struct effectively acts as an **enforced allowlist**
+/// everything else is rejected by the dispatcher's typed method registry,
+/// so this struct effectively acts as an **enforced allowlist**
 /// of Ethereum JSON-RPC endpoints.
 ///
 /// For every allowed endpoint it applies typed privacy checks *before*
 /// serializing to JSON:
 ///
 /// - **Block redaction** — zeroing `logsBloom` and clearing transaction
-///   lists for non-sequencer callers.
+///   lists on the redacted RPC.
 /// - **Sender-scoped access** — returning `null` for transactions and
 ///   receipts not owned by the authenticated caller.
 /// - **`from`-enforcement** — `eth_call` / `eth_estimateGas` may only
 ///   simulate from the authenticated account (`-32004` on mismatch,
-///   auto-set when omitted); state overrides are rejected for
-///   non-sequencer callers (`-32602`).
+///   auto-set when omitted); state overrides are rejected (`-32602`).
 /// - **Sender verification** — `eth_sendRawTransaction` checks that the
 ///   recovered transaction sender matches the authenticated account
 ///   (`-32003` on mismatch).
-///
-/// [`classify_method`]: zone_rpc::types::classify_method
 pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::RedactedRpcConfig,
@@ -1400,7 +1397,7 @@ fn apply_public_fee_policy(request: &mut TempoTransactionRequest) {
     }
 }
 
-/// Strip privacy-sensitive fields from a block for non-sequencer callers.
+/// Strip privacy-sensitive fields from a block returned by the redacted RPC.
 fn redact_block(block: &mut RpcBlock) {
     redact_header(&mut block.header);
     block.transactions = BlockTransactions::Hashes(Vec::new());
