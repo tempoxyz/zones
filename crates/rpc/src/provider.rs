@@ -121,11 +121,11 @@ fn build_provider_with_token(
     blob.push(sig.v() as u8);
     blob.extend_from_slice(&fields);
 
+    let mut auth_header = reqwest::header::HeaderValue::from_str(&hex::encode(&blob))?;
+    auth_header.set_sensitive(true);
+
     let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(
-        X_AUTHORIZATION_TOKEN,
-        reqwest::header::HeaderValue::from_str(&hex::encode(&blob))?,
-    );
+    headers.insert(X_AUTHORIZATION_TOKEN, auth_header);
 
     let client = reqwest::Client::builder()
         .default_headers(headers)
