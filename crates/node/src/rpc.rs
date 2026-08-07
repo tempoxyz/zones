@@ -25,10 +25,10 @@ use eyre::WrapErr;
 use futures::StreamExt;
 use jsonrpsee::{RpcModule, core::RpcResult, proc_macros::rpc, types::ErrorObjectOwned};
 use reth_evm::{ConfigureEvm as _, execute::Executor as _};
+use reth_network_api::NetworkInfo;
 use reth_provider::{CanonStateSubscriptions, HeaderProvider};
 use reth_revm::{db::State, witness::ExecutionWitnessRecord};
-use reth_rpc::{EthFilter, Web3Api, eth::filter::EthFilterError};
-use reth_rpc_api::Web3ApiServer;
+use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcConvert,
@@ -763,9 +763,14 @@ where
 
     fn client_version(&self) -> BoxFut<'_> {
         Box::pin(async move {
-            let web3 = Web3Api::new(self.eth.api.network().clone());
-            let client_version = web3.client_version().await.map_err(internal)?;
-            to_raw(&client_version)
+            let status = self
+                .eth
+                .api
+                .network()
+                .network_status()
+                .await
+                .map_err(internal)?;
+            to_raw(&status.client_version)
         })
     }
 
