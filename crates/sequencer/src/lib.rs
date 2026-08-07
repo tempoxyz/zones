@@ -31,7 +31,7 @@ pub mod withdrawals;
 
 pub use attestation::AttestationStore;
 pub use encryption_key::register_encryption_key;
-pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState, spawn_zone_monitor};
+pub use monitor::{ZoneMonitorConfig, ZoneMonitorSharedState};
 pub use prover::ShadowProverConfig;
 pub use settlement::{
     BatchAnchorConfig, BatchData, BatchSubmitter, PortalZoneAnchor, resolve_portal_zone_anchor,
@@ -164,24 +164,6 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
             l1_provider.clone(),
         )
     });
-    spawn_zone_sequencer_tasks(
-        config,
-        signer,
-        zone_provider,
-        l1_provider,
-        shadow_prover,
-        shutdown,
-    )
-}
-
-fn spawn_zone_sequencer_tasks<P: ZoneSequencerProvider>(
-    config: ZoneSequencerConfig,
-    signer: PrivateKeySigner,
-    zone_provider: P,
-    l1_provider: DynProvider<TempoNetwork>,
-    shadow_prover: Option<prover::ShadowProver>,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> ZoneSequencerHandle {
     let sequencer_address = signer.address();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
@@ -217,7 +199,7 @@ fn spawn_zone_sequencer_tasks<P: ZoneSequencerProvider>(
         withdrawal_notify,
         withdrawal_repair_notify,
     );
-    let monitor_handle = monitor::spawn_zone_monitor_with_prover(
+    let monitor_handle = monitor::spawn_zone_monitor(
         monitor_config,
         zone_provider,
         l1_provider,

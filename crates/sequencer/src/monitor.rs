@@ -780,26 +780,7 @@ impl<P: ZoneSequencerProvider> ZoneMonitor<P> {
 /// boundaries to the ZonePortal on Tempo L1. Local state only advances on successful submission.
 ///
 /// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
-pub fn spawn_zone_monitor<P: ZoneSequencerProvider>(
-    config: ZoneMonitorConfig,
-    zone_provider: P,
-    l1_provider: DynProvider<TempoNetwork>,
-    signer: PrivateKeySigner,
-    shared_state: ZoneMonitorSharedState,
-    shutdown: tokio_util::sync::CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    spawn_zone_monitor_with_prover(
-        config,
-        zone_provider,
-        l1_provider,
-        signer,
-        shared_state,
-        None,
-        shutdown,
-    )
-}
-
-pub(crate) fn spawn_zone_monitor_with_prover<P: ZoneSequencerProvider>(
+pub(crate) fn spawn_zone_monitor<P: ZoneSequencerProvider>(
     config: ZoneMonitorConfig,
     zone_provider: P,
     l1_provider: DynProvider<TempoNetwork>,
