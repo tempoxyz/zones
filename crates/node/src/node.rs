@@ -724,7 +724,8 @@ where
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,
             &handle,
-            l1_provider.clone(),
+            self.l1_config.l1_rpc_url.clone(),
+            self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
             self.l1_config.enabled_tokens.clone(),
             chain_id,
@@ -1250,12 +1251,22 @@ where
     async fn launch_redacted_rpc(
         config: ZoneRedactedRpcConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
-        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
+        l1_rpc_url: String,
+        retry_connection_interval: Duration,
         portal_address: Address,
         enabled_tokens: EnabledTokenRegistry,
         chain_id: u64,
     ) -> eyre::Result<()> {
         let eth_handlers = handle.eth_handlers().clone();
+        // Public redacted-RPC traffic must not share the L1 client used by promotion,
+        // settlement, or subscriber control-plane tasks.
+        let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_with_config(
+                &l1_rpc_url,
+                rpc_connection_config(retry_connection_interval),
+            )
+            .await?
+            .erased();
         let redacted_rpc_config = zone_rpc::RedactedRpcConfig {
             listen_addr: ([0, 0, 0, 0], config.redacted_rpc_port).into(),
             zone_id: config.zone_id,

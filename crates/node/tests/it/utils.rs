@@ -1228,6 +1228,9 @@ impl ZoneTestNode {
             _ => {}
         }
         let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http(l1_http_url.clone())
+            .erased();
+        let redacted_l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http(l1_http_url)
             .erased();
 
@@ -1388,7 +1391,7 @@ impl ZoneTestNode {
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
         let rpc_enabled_tokens = enabled_tokens.clone();
-        let rpc_l1_provider = l1_provider.clone();
+        let rpc_l1_provider = redacted_l1_provider;
         let rpc_api_factory = Arc::new(move |config: zone_node::rpc::RedactedRpcConfig| {
             let eth_handlers = eth_handlers.clone();
             let enabled_tokens = rpc_enabled_tokens.clone();
