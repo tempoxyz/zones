@@ -7,7 +7,6 @@ pub use zone_rpc::*;
 
 use std::{
     collections::{HashMap, HashSet},
-    future::Future,
     sync::{Arc, Weak},
     time::Duration,
 };
@@ -49,8 +48,8 @@ use tempo_contracts::precompiles::{
 };
 use tempo_primitives::{TempoPrimitives, TempoTxEnvelope};
 use tokio::{
-    sync::{Mutex, Semaphore},
-    time::{MissedTickBehavior, interval, timeout},
+    sync::Mutex,
+    time::{MissedTickBehavior, interval},
 };
 use zone_l1::{TempoStateExt as _, state::EnabledTokenRegistry};
 
@@ -488,8 +487,6 @@ where
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
-const MAX_CONCURRENT_REDACTED_L1_REQUESTS: usize = 16;
-const REDACTED_L1_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_WS_FRAME_AND_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
 
 fn filter_not_found_error() -> JsonRpcError {
@@ -501,20 +498,6 @@ fn map_eth_filter_error(err: EthFilterError) -> JsonRpcError {
         EthFilterError::FilterNotFound(_) => filter_not_found_error(),
         other => internal(other),
     }
-}
-
-/// Run one public L1-backed request with bounded concurrency and a deadline.
-async fn bounded_l1_request<T>(
-    permits: &Semaphore,
-    request_timeout: Duration,
-    request: impl Future<Output = Result<T, JsonRpcError>>,
-) -> Result<T, JsonRpcError> {
-    let _permit = permits
-        .try_acquire()
-        .map_err(|_| JsonRpcError::internal("redacted RPC L1 request concurrency limit reached"))?;
-    timeout(request_timeout, request)
-        .await
-        .map_err(|_| JsonRpcError::internal("redacted RPC L1 request timed out"))?
 }
 
 fn stale_filter_owner_ids(
@@ -586,7 +569,6 @@ pub struct ZoneRpc<Api: EthApiTypes> {
     enabled_tokens: EnabledTokenRegistry,
     /// L1 client isolated from node control-plane traffic.
     l1_provider: DynProvider<TempoNetwork>,
-    l1_request_permits: Semaphore,
     /// Maps filter IDs to the authenticated account that created them.
     /// The reth filter registry remains the source of truth for filter liveness.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
@@ -605,7 +587,6 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             config,
             enabled_tokens,
             l1_provider,
-            l1_request_permits: Semaphore::new(MAX_CONCURRENT_REDACTED_L1_REQUESTS),
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
         };
         rpc.spawn_filter_owner_pruner();
@@ -1192,16 +1173,12 @@ where
                 .map_err(internal)?
                 .tempo_block_number()
                 .map_err(internal)?;
-            let info = bounded_l1_request(
-                &self.l1_request_permits,
-                REDACTED_L1_REQUEST_TIMEOUT,
-                zone_info(
-                    self.config.zone_id,
-                    self.config.chain_id,
-                    self.config.zone_portal,
-                    tempo_block_number,
-                    &self.l1_provider,
-                ),
+            let info = zone_info(
+                self.config.zone_id,
+                self.config.chain_id,
+                self.config.zone_portal,
+                tempo_block_number,
+                &self.l1_provider,
             )
             .await?;
             to_raw(&info)
@@ -1210,12 +1187,7 @@ where
 
     fn zone_get_encryption_key(&self, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            let key = bounded_l1_request(
-                &self.l1_request_permits,
-                REDACTED_L1_REQUEST_TIMEOUT,
-                encryption_key(self.config.zone_portal, &self.l1_provider),
-            )
-            .await?;
+            let key = encryption_key(self.config.zone_portal, &self.l1_provider).await?;
             to_raw(&key)
         })
     }
@@ -1447,38 +1419,6 @@ mod tests {
             value["tempo_reads"],
             serde_json::json!([{ "account": account, "slot": slot }])
         );
-    }
-
-    #[tokio::test]
-    async fn bounded_l1_request_rejects_when_at_capacity() {
-        let permits = Semaphore::new(1);
-        let _permit = permits.acquire().await.expect("semaphore should be open");
-
-        let error = bounded_l1_request(&permits, Duration::from_secs(1), async {
-            Ok::<(), JsonRpcError>(())
-        })
-        .await
-        .expect_err("a request above the concurrency limit should fail");
-
-        assert_eq!(
-            error.message,
-            "redacted RPC L1 request concurrency limit reached"
-        );
-    }
-
-    #[tokio::test]
-    async fn bounded_l1_request_times_out() {
-        let permits = Semaphore::new(1);
-
-        let error = bounded_l1_request(
-            &permits,
-            Duration::ZERO,
-            std::future::pending::<Result<(), JsonRpcError>>(),
-        )
-        .await
-        .expect_err("a request beyond its deadline should fail");
-
-        assert_eq!(error.message, "redacted RPC L1 request timed out");
     }
 
     #[tokio::test]
