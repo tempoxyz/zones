@@ -1,8 +1,5 @@
 use alloy_primitives::{Address, B256, hex, keccak256};
-use std::{
-    fmt,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::AuthError;
 
@@ -48,6 +45,9 @@ pub struct AuthContext {
 /// The last 29 bytes are always the fixed fields; everything before is the variable-length signature.
 ///
 /// See `docs/pages/protocol/privacy/rpc.md` — "Transport" and "Message" sections.
+///
+/// This type intentionally does not implement [`Debug`](std::fmt::Debug) because its signature is
+/// an authentication credential that must not be exposed in logs.
 #[derive(Clone)]
 pub struct AuthorizationToken {
     /// Spec version (must be 0).
@@ -64,20 +64,6 @@ pub struct AuthorizationToken {
     pub signature: Vec<u8>,
     /// The signing digest (keccak256 of the packed message).
     pub digest: B256,
-}
-
-impl fmt::Debug for AuthorizationToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AuthorizationToken")
-            .field("version", &self.version)
-            .field("zone_id", &self.zone_id)
-            .field("chain_id", &self.chain_id)
-            .field("issued_at", &self.issued_at)
-            .field("expires_at", &self.expires_at)
-            .field("signature", &"<redacted>")
-            .field("digest", &self.digest)
-            .finish()
-    }
 }
 
 impl AuthorizationToken {
@@ -201,27 +187,4 @@ pub fn parse_auth_header(header_value: &str) -> Result<AuthorizationToken, AuthE
     let hex_str = header_value.strip_prefix("0x").unwrap_or(header_value);
     let blob = hex::decode(hex_str).map_err(|_| AuthError::InvalidHex)?;
     AuthorizationToken::parse(&blob)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn authorization_token_debug_redacts_signature() {
-        let signature = vec![0xde, 0xad, 0xbe, 0xef];
-        let token = AuthorizationToken {
-            version: 0,
-            zone_id: 1,
-            chain_id: 2,
-            issued_at: 3,
-            expires_at: 4,
-            signature,
-            digest: B256::ZERO,
-        };
-
-        let debug = format!("{token:?}");
-        assert!(debug.contains("signature: \"<redacted>\""));
-        assert!(!debug.contains("222, 173, 190, 239"));
-    }
 }
