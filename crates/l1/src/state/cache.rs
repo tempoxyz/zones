@@ -101,6 +101,11 @@ impl L1StateCacheInner {
         }
     }
 
+    /// Returns whether receipt processing has established contiguous coverage at `block_number`.
+    pub fn has_coverage_at(&self, block_number: u64) -> bool {
+        self.coverage.contains(&block_number)
+    }
+
     /// Returns the cached value for a storage slot at the given block number.
     ///
     /// An exact-height value is always valid. A value inherited from an earlier height is returned

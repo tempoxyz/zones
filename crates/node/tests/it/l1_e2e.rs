@@ -368,6 +368,27 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
         portal.lastProcessedDepositNumber().call().await?,
     );
 
+    // A newly started subscriber initializes its cache from the zone's L1 genesis anchor, not
+    // from block zero. Its first non-contiguous coverage update resets the cache, which used to
+    // race with the forged entry below and silently erase it. Wait for every member to complete
+    // that initial backfill before choosing a future anchor to corrupt.
+    let covered_l1_block = cluster.l1.provider().get_block_number().await?;
+    for node in &cluster.nodes {
+        poll_until(
+            L1_TIMEOUT,
+            Duration::from_millis(50),
+            "initial L1 cache coverage",
+            || async {
+                Ok(node
+                    .l1_state_cache()
+                    .lock()
+                    .has_coverage_at(covered_l1_block)
+                    .then_some(()))
+            },
+        )
+        .await?;
+    }
+
     let divergent_anchor = cluster.l1.provider().get_block_number().await? + 2;
     cluster.nodes[1].l1_state_cache().lock().set(
         cluster.portal_address,
