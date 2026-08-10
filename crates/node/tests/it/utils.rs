@@ -1287,9 +1287,6 @@ impl ZoneTestNode {
         let (chain_id, zone_id) = if portal_address.is_zero() {
             (chain_id, 0)
         } else {
-            let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect(&l1_ws_url)
-                .await?;
             let parent_chain_id = l1_provider.get_chain_id().await?;
             let zone_id = ZonePortal::new(portal_address, &l1_provider)
                 .zoneId()

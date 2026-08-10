@@ -758,11 +758,6 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
-        let prover_settings = self
-            .sequencer_config
-            .as_ref()
-            .filter(|config| config.enable_prover)
-            .map(|config| (config.zone_id, ctx.node.evm_config().clone()));
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -800,6 +795,7 @@ where
             .as_ref()
             .filter(|config| config.enable_prover)
             .map(|config| ShadowProverConfig {
+                parent_chain_id: l1_chain_id,
                 zone_id: config.zone_id,
                 chain_spec: provider.chain_spec(),
                 debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),

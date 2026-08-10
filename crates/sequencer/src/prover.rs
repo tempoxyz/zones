@@ -43,6 +43,8 @@ type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 /// Node-owned inputs required to validate canonical Zone blocks with the SPF.
 #[derive(Clone)]
 pub struct ShadowProverConfig {
+    /// Parent Tempo chain ID bound into SPF public inputs.
+    pub parent_chain_id: u64,
     /// Zone identifier bound into SPF public inputs.
     pub zone_id: u32,
     /// Chain spec used to configure the SPF.
@@ -55,6 +57,7 @@ impl fmt::Debug for ShadowProverConfig {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ShadowProverConfig")
+            .field("parent_chain_id", &self.parent_chain_id)
             .field("zone_id", &self.zone_id)
             .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
@@ -271,15 +274,9 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     let reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
     let tempo_state_witness =
         tempo_state_witness(&context.l1_provider, &initial_tempo_header, reads).await?;
-    let parent_chain_id = context
-        .l1_provider
-        .get_chain_id()
-        .await
-        .context("fetch parent Tempo chain ID")?;
-
     let witness = BatchWitness {
         public_inputs: PublicInputs {
-            parent_chain_id,
+            parent_chain_id: context.config.parent_chain_id,
             zone_id: context.config.zone_id,
             portal: context.portal,
             tempo_block_number: final_tempo_header.number(),
