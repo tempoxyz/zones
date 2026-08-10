@@ -182,6 +182,7 @@ mod tests {
         cell::{Cell, RefCell},
         rc::Rc,
     };
+    use tempo_contracts::precompiles::STORAGE_CREDITS_ADDRESS;
 
     const FIXED_GAS: u64 = 123;
     type RuleRecord = Rc<RefCell<Option<(Bytes, Option<[u8; 4]>, Address, Address)>>>;
@@ -270,6 +271,50 @@ mod tests {
             ))
         );
         assert_eq!(*recorded_execute.borrow(), Some((calldata.into(), caller)));
+    }
+
+    #[test]
+    #[ignore = "TODO: re-enable once zones allow user transfers"]
+    fn fixed_gas_disables_storage_credits_and_discards_refunds() {
+        let mut cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        cfg.spec = TempoHardfork::T8;
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
+        let storage_owner = Address::repeat_byte(0x33);
+        let credit_slot = U256::from_be_slice(storage_owner.as_slice());
+        let observed_credit_state = Rc::new(Cell::new(U256::MAX));
+        let execute_credit_state = observed_credit_state.clone();
+        let precompile = create_precompile(
+            "FixedGasAccountingTest",
+            &env,
+            RecordingRules(Rc::new(RefCell::new(None))),
+            move |_, _| {
+                let mut storage = StorageCtx::default();
+                storage
+                    .sstore(storage_owner, U256::ZERO, U256::ONE)
+                    .unwrap();
+                execute_credit_state
+                    .set(storage.tload(STORAGE_CREDITS_ADDRESS, credit_slot).unwrap());
+
+                // Model an ordinary SSTORE refund reported by an upstream T4+ precompile.
+                storage.refund_gas(4_800);
+                let mut output = storage.success_output(Bytes::new());
+                output.gas_refunded = storage.gas_refunded();
+                Ok(output)
+            },
+        );
+
+        let mut ctx = test_context();
+        let output = precompile
+            .call(input(&mut ctx, &[], Address::ZERO, FIXED_GAS))
+            .unwrap();
+
+        assert_eq!(output.gas_used, FIXED_GAS);
+        assert_eq!(output.gas_refunded, 0);
+        assert_eq!(observed_credit_state.get(), U256::ZERO);
     }
 
     #[test]
