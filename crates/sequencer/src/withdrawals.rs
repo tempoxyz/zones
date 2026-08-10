@@ -357,16 +357,16 @@ impl WithdrawalProcessor {
                 }
             }
 
+            if let Err(e) = self.process_queue().await {
+                error!(error = %e, "Withdrawal processing cycle failed");
+            }
+
             if let Err(error) = self.refresh_sequencer_pathusd_balance().await {
                 warn!(
                     %error,
                     sequencer = %self.config.sequencer_address,
                     "Failed to refresh sequencer PathUSD balance metric"
                 );
-            }
-
-            if let Err(e) = self.process_queue().await {
-                error!(error = %e, "Withdrawal processing cycle failed");
             }
         }
     }
