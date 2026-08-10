@@ -18,7 +18,7 @@ use crate::{
         ZoneRpcApi, operator_zone_rpc_module, rpc_connection_config, start_redacted_rpc,
     },
 };
-use alloy_chains::NamedChain;
+use alloy_chains::Chain;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
@@ -108,20 +108,6 @@ fn tempo_chain_spec_for_l1(chain_id: u64) -> Option<Arc<TempoChainSpec>> {
             .any(|id| id.trim().parse() == Ok(chain_id))
             .then(|| DEV.clone()),
     })
-}
-
-/// Resolve Alloy's chain metadata for a supported Tempo L1 chain ID.
-///
-/// Custom Tempo dev chain IDs use Tempo's block-time hint while retaining their configured ID
-/// for transaction signing and protocol domain separation.
-fn alloy_chain_for_tempo_l1(chain_id: u64) -> Option<NamedChain> {
-    tempo_chain_spec_for_l1(chain_id)?;
-    Some(
-        NamedChain::try_from(chain_id)
-            .ok()
-            .filter(|chain| chain.is_tempo())
-            .unwrap_or(NamedChain::Tempo),
-    )
 }
 
 /// Network primitives for Zone Nodes
@@ -560,8 +546,7 @@ where
             .await?
             .erased();
         let l1_chain_id = l1_provider.get_chain_id().await?;
-        let l1_chain = alloy_chain_for_tempo_l1(l1_chain_id)
-            .ok_or_else(|| eyre::eyre!("unsupported parent Tempo chain ID {l1_chain_id}"))?;
+        let l1_chain = Chain::from_id(l1_chain_id);
 
         self.resolve_and_seed_tokens(&l1_provider, tempo_block_number)
             .await?;
@@ -664,18 +649,24 @@ where
             let relayer = match individual_signer {
                 Some(signer) => {
                     use tempo_alloy::provider::ext::TempoProviderBuilderExt as _;
-                    Some(
+                    let provider =
                         alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                             .with_nonce_key_filler()
-                            .with_chain(l1_chain)
                             .wallet(alloy_network::EthereumWallet::from(signer))
                             .connect_with_config(
                                 &self.l1_config.l1_rpc_url,
                                 rpc_connection_config(self.l1_config.retry_connection_interval),
                             )
                             .await?
-                            .erased(),
-                    )
+                            .erased();
+                    if !provider.client().is_local()
+                        && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
+                    {
+                        provider
+                            .client()
+                            .set_poll_interval(avg_block_time.mul_f32(0.6));
+                    }
+                    Some(provider)
                 }
                 None => None,
             };
@@ -1120,7 +1111,7 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        l1_chain: NamedChain,
+        l1_chain: Chain,
         attestation_store: AttestationStore,
         prover_config: Option<ShadowProverConfig>,
     ) -> eyre::Result<LeaderSequencerDeps> {
@@ -1330,7 +1321,7 @@ where
         l1_rpc_url: String,
         portal_address: Address,
         retry_connection_interval: Duration,
-        l1_chain: NamedChain,
+        l1_chain: Chain,
         sequencer_addr: Address,
         attestation_store: Option<AttestationStore>,
         prover_config: Option<ShadowProverConfig>,
@@ -1746,24 +1737,11 @@ mod tests {
         assert_eq!(tempo_chain_spec_for_l1(1337).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31337).unwrap().chain().id(), 1337);
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
-        assert_eq!(alloy_chain_for_tempo_l1(4217), Some(NamedChain::Tempo));
-        assert_eq!(
-            alloy_chain_for_tempo_l1(42431),
-            Some(NamedChain::TempoModerato)
-        );
-        assert_eq!(alloy_chain_for_tempo_l1(1337), Some(NamedChain::Tempo));
-        assert_eq!(alloy_chain_for_tempo_l1(31337), Some(NamedChain::Tempo));
-        assert_eq!(alloy_chain_for_tempo_l1(999_999), None);
 
         // SAFETY: test-only env mutation; no other test reads this variable.
         unsafe { std::env::set_var("ZONE_L1_DEV_CHAIN_IDS", "31318, 31319") };
         assert_eq!(tempo_chain_spec_for_l1(31318).unwrap().chain().id(), 1337);
         assert_eq!(tempo_chain_spec_for_l1(31319).unwrap().chain().id(), 1337);
-        assert_eq!(
-            alloy_chain_for_tempo_l1(31318),
-            Some(NamedChain::TempoDevnet)
-        );
-        assert_eq!(alloy_chain_for_tempo_l1(31319), Some(NamedChain::Tempo));
         assert!(tempo_chain_spec_for_l1(999_999).is_none());
         unsafe { std::env::remove_var("ZONE_L1_DEV_CHAIN_IDS") };
     }

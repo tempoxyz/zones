@@ -5,7 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_chains::NamedChain;
+use alloy_chains::Chain;
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
@@ -95,7 +95,7 @@ pub struct ZoneSequencerConfig {
     /// Tempo L1 RPC URL.
     pub l1_rpc_url: String,
     /// Resolved Tempo L1 chain used to configure chain-aware provider behavior.
-    pub l1_chain: NamedChain,
+    pub l1_chain: Chain,
     /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
     pub retry_connection_interval: Duration,
     /// Fallback interval for reconciling the canonical Zone head.
@@ -221,18 +221,24 @@ pub async fn spawn_zone_sequencer<P: ZoneSequencerProvider>(
 /// Build the shared L1 provider used by all sequencer-side L1 transaction tasks.
 async fn connect_l1_provider(
     l1_rpc_url: &str,
-    l1_chain: NamedChain,
+    l1_chain: Chain,
     retry_connection_interval: Duration,
     signer: PrivateKeySigner,
 ) -> TransportResult<DynProvider<TempoNetwork>> {
     let wallet = alloy_network::EthereumWallet::from(signer);
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
         .with_nonce_key_filler()
-        .with_chain(l1_chain)
         .wallet(wallet)
         .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
         .await?
         .erased();
+    if !provider.client().is_local()
+        && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
+    {
+        provider
+            .client()
+            .set_poll_interval(avg_block_time.mul_f32(0.6));
+    }
 
     Ok(provider)
 }
@@ -261,11 +267,18 @@ mod tests {
         );
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .with_nonce_key_filler()
-            .with_chain(NamedChain::TempoModerato)
             .wallet(alloy_network::EthereumWallet::from(
                 PrivateKeySigner::random(),
             ))
             .connect_client(client);
+        let l1_chain = Chain::from_id(42431);
+        if !provider.client().is_local()
+            && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
+        {
+            provider
+                .client()
+                .set_poll_interval(avg_block_time.mul_f32(0.6));
+        }
 
         assert_eq!(
             provider.client().poll_interval(),
@@ -335,7 +348,7 @@ mod tests {
 
         let provider = connect_l1_provider(
             &url,
-            NamedChain::TempoModerato,
+            Chain::from_id(42431),
             Duration::from_millis(10),
             PrivateKeySigner::random(),
         )
