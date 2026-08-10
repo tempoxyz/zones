@@ -323,6 +323,7 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
 
     let witness = BatchWitness {
         public_inputs: PublicInputs {
+            parent_chain_id: discovery.tempo_chain_id,
             zone_id: discovery.zone_id,
             portal: discovery.portal,
             tempo_block_number: final_tempo_header.number(),
@@ -433,7 +434,7 @@ async fn discover(
         },
         read_portal_snapshot(tempo, portal_address),
     )?;
-    let expected_chain_id = zone_chain_id(zone_id);
+    let expected_chain_id = zone_chain_id(tempo_chain_id, zone_id)?;
     if actual_zone_chain_id != expected_chain_id {
         bail!(
             "Zone portal reports Zone ID {zone_id}, which requires chain ID {expected_chain_id}, but the unrestricted Zone RPC reports {actual_zone_chain_id}"

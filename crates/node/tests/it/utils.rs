@@ -3505,7 +3505,7 @@ pub(crate) async fn start_local_zone_with_fixture_and_withdrawal_batch_interval(
     let zone = ZoneTestNode::launch_with_genesis_and_withdrawal_batch_interval(
         DUMMY_L1_URL.to_string(),
         Address::ZERO,
-        zone_primitives::constants::zone_chain_id(zone_id),
+        zone_primitives::constants::zone_chain_id(1_337, zone_id)?,
         Some(genesis),
         signer,
         withdrawal_batch_interval_blocks,

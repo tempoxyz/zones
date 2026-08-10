@@ -86,8 +86,8 @@ use zone_payload::{
     DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, WithdrawalRevealEncryptor, ZonePayloadAttributes,
     ZonePayloadFactory, ZonePayloadTypes,
 };
-use zone_rpc::ZoneDebugApiRpcServer;
 use zone_primitives::constants::zone_chain_id;
+use zone_rpc::ZoneDebugApiRpcServer;
 use zone_sequencer::{
     AttestationStore, BatchAnchorConfig, ShadowProverConfig, WithdrawalBatchLimits,
     ZoneSequencerConfig, attestation::AttestationDomain, spawn_zone_sequencer,

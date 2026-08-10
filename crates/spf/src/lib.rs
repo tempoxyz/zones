@@ -150,6 +150,7 @@ pub fn prove_zone_batch(config: &SpfConfig, witness: BatchWitness) -> Result<Bat
             execution::evm::BlockReplayContext {
                 parent: &previous_header,
                 block_index,
+                parent_chain_id: witness.public_inputs.parent_chain_id,
                 zone_id: witness.public_inputs.zone_id,
             },
             block,
@@ -406,6 +407,9 @@ fn validate_system_inputs(block: &ZoneBlock, index: usize) -> Result<(), Error> 
 /// Errors emitted by the stateless state transition function.
 #[derive(thiserror::Error, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Error {
+    /// The verifier-bound parent and Zone IDs cannot produce a valid chain ID.
+    #[error(transparent)]
+    ZoneChainId(#[from] zone_primitives::constants::ZoneChainIdError),
     /// The Zone MPT witness did not prove one of its supplied reads.
     #[error(transparent)]
     MptValidation(#[from] StatelessSparseTrieError),
@@ -609,6 +613,7 @@ mod tests {
 
         BatchWitness {
             public_inputs: PublicInputs {
+                parent_chain_id: 1_337,
                 zone_id: 1,
                 portal: Address::repeat_byte(0x11),
                 tempo_block_number: 2,
@@ -805,6 +810,7 @@ mod tests {
         tempo_database: TempoWitnessDatabase,
         parent: &TempoHeader,
         block: &ZoneBlock,
+        parent_chain_id: u64,
         zone_id: u32,
     ) -> Result<alloy_evm::EvmEnv<TempoHardfork, TempoBlockEnv>, Error> {
         let attributes = next_block_env_attributes(config.chain_spec().as_ref(), parent, block)?;
@@ -818,7 +824,7 @@ mod tests {
 
         // ZoneEvmConfig applies these overrides after delegating environment
         // construction to TempoEvmConfig. Keep replay identical to production.
-        env.cfg_env.chain_id = zone_chain_id(zone_id);
+        env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
         Ok(env)
     }
 
@@ -1025,12 +1031,17 @@ mod tests {
             tempo_database,
             &witness.parent_header,
             &block,
+            witness.public_inputs.parent_chain_id,
             witness.public_inputs.zone_id,
         )
         .unwrap();
         assert_eq!(
             env.cfg_env.chain_id,
-            zone_primitives::constants::zone_chain_id(witness.public_inputs.zone_id)
+            zone_primitives::constants::zone_chain_id(
+                witness.public_inputs.parent_chain_id,
+                witness.public_inputs.zone_id,
+            )
+            .unwrap()
         );
         assert_eq!(env.block_env.inner.basefee, 0);
     }

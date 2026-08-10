@@ -271,9 +271,15 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
     let reads = collect_l1_reads(tempo_reads, &zone_inputs.checkpoint_by_zone_block)?;
     let tempo_state_witness =
         tempo_state_witness(&context.l1_provider, &initial_tempo_header, reads).await?;
+    let parent_chain_id = context
+        .l1_provider
+        .get_chain_id()
+        .await
+        .context("fetch parent Tempo chain ID")?;
 
     let witness = BatchWitness {
         public_inputs: PublicInputs {
+            parent_chain_id,
             zone_id: context.config.zone_id,
             portal: context.portal,
             tempo_block_number: final_tempo_header.number(),

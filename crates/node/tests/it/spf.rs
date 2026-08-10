@@ -104,6 +104,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
 
     let witness = BatchWitness {
         public_inputs: PublicInputs {
+            parent_chain_id: 1_337,
             zone_id: ZONE_ID,
             portal: Address::ZERO,
             tempo_block_number: second_tempo_block.header.number(),
@@ -224,6 +225,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
     let sequencer = built_block.header.beneficiary;
     let witness = BatchWitness {
         public_inputs: PublicInputs {
+            parent_chain_id: 1_337,
             zone_id: ZONE_ID,
             portal: Address::ZERO,
             tempo_block_number: l1_block.header.number(),

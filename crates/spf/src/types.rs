@@ -53,6 +53,8 @@ impl SpfConfig {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "serde", serde(rename_all = "camelCase"))]
 pub struct PublicInputs {
+    /// Parent Tempo chain ID used to domain-separate the Zone EVM chain ID.
+    pub parent_chain_id: u64,
     /// Zone identifier from which the SPF derives the EVM chain ID.
     pub zone_id: u32,
     /// Tempo ZonePortal whose state governs L1-backed Zone execution.

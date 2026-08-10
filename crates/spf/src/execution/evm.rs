@@ -53,6 +53,7 @@ pub(crate) struct ExecutedZoneBlock {
 pub(crate) struct BlockReplayContext<'a> {
     pub(crate) parent: &'a TempoHeader,
     pub(crate) block_index: usize,
+    pub(crate) parent_chain_id: u64,
     pub(crate) zone_id: u32,
 }
 
@@ -70,6 +71,7 @@ pub(crate) fn execute_zone_block(
     let BlockReplayContext {
         parent,
         block_index: zone_block_index,
+        parent_chain_id,
         zone_id,
     } = replay;
     let user_transactions = decode_user_transactions(zone_block_index, &block.transactions)?;
@@ -100,8 +102,8 @@ pub(crate) fn execute_zone_block(
     let mut env = evm_config
         .next_evm_env(parent, &attributes)
         .map_err(|_| Error::EvmEnvironment)?;
-    // The Zone ID is verifier-bound independently of the parent Tempo chain specification.
-    env.cfg_env.chain_id = zone_chain_id(zone_id);
+    // The parent and Zone IDs are verifier-bound independently of the local chain specification.
+    env.cfg_env.chain_id = zone_chain_id(parent_chain_id, zone_id)?;
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;
     let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm(&mut *zone_state, env);
