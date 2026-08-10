@@ -28,11 +28,14 @@ jobs:
         with:
           token: ${{ steps.app-token.outputs.token }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Sync main with upstream
+        env:
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           git remote add upstream https://github.com/tempoxyz/zones.git
           git fetch upstream main
           git checkout main
           git reset --hard upstream/main
-          git push origin main --force
+          git push "https://x-access-token:${APP_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" main --force
