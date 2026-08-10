@@ -59,17 +59,17 @@ pub(crate) struct DemoSwapAndDeposit {
     zone_rpc_url: String,
 
     /// Private key (hex) for the operator / demo wallet.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Portal admin private key (hex). Needed to enable tokens on the portal.
     /// If not set, reads adminKey from zone.json, then falls back to sequencer
     /// key for legacy zones.
-    #[arg(long, env = "ADMIN_KEY")]
+    #[arg(long, env = "ADMIN_KEY", hide_env_values = true)]
     admin_key: Option<String>,
 
     /// Sequencer private key (hex). Needed to encrypt the routed deposit payload.
-    #[arg(long, env = "SEQUENCER_KEY")]
+    #[arg(long, env = "SEQUENCER_KEY", hide_env_values = true)]
     sequencer_key: Option<String>,
 
     /// SwapAndDepositRouter address. Falls back to zone.json.

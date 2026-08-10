@@ -34,7 +34,7 @@ pub(crate) struct SpamDeposits {
     portal: Address,
 
     /// Private key (hex) of the funding/whale account.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Total number of deposits to send.

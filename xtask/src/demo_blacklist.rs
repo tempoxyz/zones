@@ -96,17 +96,17 @@ pub(crate) struct DemoBlacklist {
     portal: Address,
 
     /// Private key (hex) of the token admin / depositor.
-    #[arg(long, env = "PRIVATE_KEY")]
+    #[arg(long, env = "PRIVATE_KEY", hide_env_values = true)]
     private_key: String,
 
     /// Portal admin private key (hex). If not set, reads adminKey from the
     /// explicit or auto-discovered zone.json, then falls back to SEQUENCER_KEY /
     /// sequencerKey for legacy zones.
-    #[arg(long, env = "ADMIN_KEY")]
+    #[arg(long, env = "ADMIN_KEY", hide_env_values = true)]
     admin_key: Option<String>,
 
     /// Sequencer private key (hex). Legacy fallback for zones where admin == sequencer.
-    #[arg(long, env = "SEQUENCER_KEY")]
+    #[arg(long, env = "SEQUENCER_KEY", hide_env_values = true)]
     sequencer_key: Option<String>,
 
     /// Path to zone directory containing zone.json. If omitted, scans

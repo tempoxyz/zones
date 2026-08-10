@@ -270,7 +270,12 @@ mod command {
 
         /// Dev private key (hex): L1 fee payer, portal admin, and zone sequencer. Funded via
         /// `tempo_fundAddress` when the L1 supports it.
-        #[arg(long = "dev.key", env = "DEV_KEY", default_value = DEFAULT_DEV_KEY)]
+        #[arg(
+            long = "dev.key",
+            env = "DEV_KEY",
+            hide_env_values = true,
+            default_value = DEFAULT_DEV_KEY
+        )]
         dev_key: String,
 
         /// Initial TIP-20 token enabled on the portal. Defaults to pathUSD.
@@ -389,6 +394,8 @@ mod command {
                 &self.datadir.join("zone.json"),
                 serde_json::to_string_pretty(&zone_json)?.as_bytes(),
             )?;
+            let sequencer_key_path = self.datadir.join("sequencer.key");
+            super::write_owner_only(&sequencer_key_path, self.dev_key.as_bytes())?;
 
             println!("Zone provisioned!");
             println!("  Zone ID:      {}", provisioned.zone_id);
@@ -442,8 +449,8 @@ mod command {
                 "--log.file.directory",
                 &self.datadir.join("logs").display().to_string(),
                 "--sequencer",
-                "--sequencer-key",
-                &self.dev_key,
+                "--sequencer-key-file",
+                &sequencer_key_path.display().to_string(),
             ]
             .map(str::to_owned)
             .to_vec();
@@ -521,6 +528,7 @@ mod command {
     }
 }
 
+#[cfg(feature = "cli")]
 fn write_owner_only(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
     #[cfg(unix)]
     {

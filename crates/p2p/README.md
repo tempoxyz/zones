@@ -180,11 +180,11 @@ Use each node's own key files and listener address. Quorum followers use their i
 secp256k1 keys to sign settlement attestations after importing and validating blocks.
 
 An rpc-follower is started with **neither** key: it omits `--secp256k1.key` (it never signs an
-attestation) and `--sequencer-key`/`--sequencer-key-file` (it never produces a block). The shared
+attestation) and `--sequencer-key-file` (it never produces a block). The shared
 sequencer key is also the zone's ECIES private key for encrypted deposits, so provisioning it on
 the internet-facing standby would put deposit recipients and memos within reach of a host
-compromise. Startup rejects either flag on an `rpc_only` node rather than ignoring it.
-This key is independent from the shared `--sequencer-key`; reusing that shared key
+compromise. Startup rejects that key-file flag on an `rpc_only` node rather than ignoring it.
+This key is independent from the shared `--sequencer-key-file`; reusing that shared key
 would collapse several nodes into one recoverable quorum identity.
 The `--sequencer` flag conflicts with `--sequencer.manifest` because the
 manifest determines whether the node starts the sequencer tasks.
