@@ -1,8 +1,12 @@
-use std::io;
+use std::{io, path::PathBuf, sync::Arc};
 
+use alloy_genesis::Genesis;
 use clap::Parser;
-use tempo_zone_prover::{DEFAULT_MAX_REQUEST_BYTES, DEFAULT_VSOCK_PORT};
+use tempo_chainspec::TempoChainSpec;
+use tempo_zone_prover::{DEFAULT_MAX_REQUEST_BYTES, DEFAULT_VSOCK_PORT, TrustedChainSpecs};
 use tracing_subscriber::EnvFilter;
+
+const EMBEDDED_TEMPO_GENESIS: &str = "/etc/tempo/genesis/genesis.json";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -22,6 +26,15 @@ struct Cli {
     )]
     max_request_bytes: usize,
 
+    /// Trusted custom Tempo genesis JSON file. May be specified more than once.
+    #[arg(
+        long,
+        env = "SPF_TEMPO_GENESIS",
+        value_name = "PATH",
+        value_delimiter = ','
+    )]
+    tempo_genesis: Vec<PathBuf>,
+
     /// Tracing filter. Can also be set with RUST_LOG.
     #[arg(long, env = "RUST_LOG", default_value = "tempo_zone_prover=info")]
     log_filter: String,
@@ -35,15 +48,83 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with_writer(io::stderr)
         .try_init()?;
 
+    let mut tempo_genesis = cli.tempo_genesis.clone();
+    let embedded_genesis = PathBuf::from(EMBEDDED_TEMPO_GENESIS);
+    if embedded_genesis.is_file() && !tempo_genesis.contains(&embedded_genesis) {
+        tempo_genesis.push(embedded_genesis);
+    }
+    let specs = load_trusted_chain_specs(&tempo_genesis)?;
+
     #[cfg(target_os = "linux")]
-    return linux::serve(cli.port, cli.max_request_bytes)
+    return linux::serve(cli.port, cli.max_request_bytes, specs)
         .await
         .map_err(Into::into);
 
     #[cfg(not(target_os = "linux"))]
     {
-        let _ = cli;
+        let _ = (cli, specs);
         Err("AF_VSOCK service is supported only on Linux".into())
+    }
+}
+
+fn load_trusted_chain_specs(paths: &[PathBuf]) -> io::Result<TrustedChainSpecs> {
+    let mut specs = TrustedChainSpecs::default();
+    for path in paths {
+        let raw = std::fs::read(path)?;
+        let genesis = serde_json::from_slice::<Genesis>(&raw).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("parse Tempo genesis {}: {error}", path.display()),
+            )
+        })?;
+        let chain_id = genesis.config.chain_id;
+        specs
+            .insert(chain_id, Arc::new(TempoChainSpec::from_genesis(genesis)))
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        tracing::info!(chain_id, path = %path.display(), "loaded trusted custom Tempo genesis");
+    }
+
+    Ok(specs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_repeated_custom_genesis_arguments() {
+        let cli = Cli::try_parse_from([
+            "tempo-zone-prover",
+            "--tempo-genesis",
+            "first.json",
+            "--tempo-genesis",
+            "second.json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.tempo_genesis,
+            [PathBuf::from("first.json"), PathBuf::from("second.json")]
+        );
+    }
+
+    #[test]
+    fn loads_custom_genesis_files() {
+        let directory =
+            std::env::temp_dir().join(format!("tempo-zone-prover-genesis-{}", std::process::id()));
+        std::fs::create_dir(&directory).unwrap();
+        let mut genesis = Genesis::default();
+        genesis.config.chain_id = 31_318;
+        std::fs::write(
+            directory.join("custom.json"),
+            serde_json::to_vec(&genesis).unwrap(),
+        )
+        .unwrap();
+
+        let specs = load_trusted_chain_specs(&[directory.join("custom.json")]).unwrap();
+
+        std::fs::remove_dir_all(directory).unwrap();
+        assert!(specs.supports(31_318));
     }
 }
 
@@ -56,10 +137,15 @@ mod linux {
 
     use super::*;
     use tempo_zone_prover::{
-        frame_error_response, process_payload, read_frame, serialize_response, write_frame,
+        frame_error_response, process_payload_with_specs, read_frame, serialize_response,
+        write_frame,
     };
 
-    pub(super) async fn serve(port: u32, maximum: usize) -> io::Result<()> {
+    pub(super) async fn serve(
+        port: u32,
+        maximum: usize,
+        specs: TrustedChainSpecs,
+    ) -> io::Result<()> {
         let listener = VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))?;
         info!(
             port,
@@ -79,7 +165,7 @@ mod linux {
             match read_frame(&mut connection, maximum).await {
                 Ok(payload) => {
                     let request_bytes = payload.len();
-                    let response = process_payload(&payload);
+                    let response = process_payload_with_specs(&payload, &specs);
                     let encoded = serialize_response(&response);
                     if let Err(error) = write_frame(&mut connection, &encoded).await {
                         warn!(%error, "failed to write SPF response");

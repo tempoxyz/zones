@@ -11,6 +11,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+alloy-genesis.workspace = true
 zone-chainspec.workspace = true
 zone-spf.workspace = true
 

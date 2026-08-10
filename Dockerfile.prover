@@ -15,7 +15,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-
     cargo build --locked --profile ${RUST_PROFILE} --bin tempo-zone-prover \
     && /app/target/${RUST_PROFILE}/tempo-zone-prover --help >/dev/null
 
+FROM scratch AS tempo-genesis
+
 FROM debian:bookworm-slim@sha256:4724b8cc51e33e398f0e2e15e18d5ec2851ff0c2280647e1310bc1642182655d
+
+COPY --from=tempo-genesis / /etc/tempo/genesis/
 
 WORKDIR /data
 COPY --from=builder /app/target/release/tempo-zone-prover /usr/local/bin/tempo-zone-prover

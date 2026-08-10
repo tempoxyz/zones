@@ -1,9 +1,9 @@
 //! Versioned request protocol for the Tempo Zone prover service.
 
-use std::{io, sync::Arc};
+use std::{collections::HashMap, io, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use tempo_chainspec::spec::chainspec_from_chain_id;
+use tempo_chainspec::{TempoChainSpec, spec::chainspec_from_chain_id};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_spf::{BatchOutput, BatchWitness, SpfConfig, prove_zone_batch};
@@ -66,6 +66,49 @@ pub enum FrameError {
     Io(String),
 }
 
+/// Tempo chain specifications trusted by this prover in addition to built-in networks.
+#[derive(Debug, Default)]
+pub struct TrustedChainSpecs {
+    custom: HashMap<u64, Arc<TempoChainSpec>>,
+}
+
+impl TrustedChainSpecs {
+    /// Registers an immutable custom chain specification by chain ID.
+    pub fn insert(
+        &mut self,
+        chain_id: u64,
+        spec: Arc<TempoChainSpec>,
+    ) -> Result<(), TrustedChainSpecError> {
+        if chainspec_from_chain_id(chain_id).is_some() {
+            return Err(TrustedChainSpecError::BuiltIn(chain_id));
+        }
+        if self.custom.insert(chain_id, spec).is_some() {
+            return Err(TrustedChainSpecError::Duplicate(chain_id));
+        }
+        Ok(())
+    }
+
+    fn resolve(&self, chain_id: u64) -> Option<Arc<TempoChainSpec>> {
+        self.custom
+            .get(&chain_id)
+            .cloned()
+            .or_else(|| chainspec_from_chain_id(chain_id))
+    }
+
+    /// Returns whether this prover supports the supplied Tempo chain ID.
+    pub fn supports(&self, chain_id: u64) -> bool {
+        self.resolve(chain_id).is_some()
+    }
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TrustedChainSpecError {
+    #[error("Tempo chain ID {0} is built in and cannot be overridden")]
+    BuiltIn(u64),
+    #[error("duplicate custom Tempo chain ID {0}")]
+    Duplicate(u64),
+}
+
 pub async fn read_frame(
     reader: &mut (impl AsyncRead + Unpin),
     maximum: usize,
@@ -94,6 +137,10 @@ pub async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), payload: &[u8])
 }
 
 pub fn process_payload(payload: &[u8]) -> VerifyResponse {
+    process_payload_with_specs(payload, &TrustedChainSpecs::default())
+}
+
+pub fn process_payload_with_specs(payload: &[u8], specs: &TrustedChainSpecs) -> VerifyResponse {
     let request = match serde_json::from_slice::<VerifyRequest>(payload) {
         Ok(request) => request,
         Err(error) => {
@@ -116,7 +163,7 @@ pub fn process_payload(payload: &[u8]) -> VerifyResponse {
         );
     }
 
-    let Some(tempo_spec) = chainspec_from_chain_id(request.tempo_chain_id) else {
+    let Some(tempo_spec) = specs.resolve(request.tempo_chain_id) else {
         return error_response(
             Some(request.request_id),
             ErrorCode::UnsupportedChain,
@@ -299,6 +346,43 @@ mod tests {
                 ..
             } if id == "spf-test"
         ));
+    }
+
+    #[test]
+    fn accepts_a_configured_custom_chain() {
+        let chain_id = 31_318;
+        let mut genesis = alloy_genesis::Genesis::default();
+        genesis.config.chain_id = chain_id;
+        let mut specs = TrustedChainSpecs::default();
+        specs
+            .insert(chain_id, Arc::new(TempoChainSpec::from_genesis(genesis)))
+            .unwrap();
+        let request = VerifyRequest {
+            version: PROTOCOL_VERSION,
+            request_id: "custom-chain-test".into(),
+            tempo_chain_id: chain_id,
+            witness: empty_witness(),
+        };
+
+        let response = process_payload_with_specs(&serde_json::to_vec(&request).unwrap(), &specs);
+
+        assert!(matches!(
+            response,
+            VerifyResponse::Error {
+                request_id: Some(id),
+                code: ErrorCode::VerificationFailed,
+                ..
+            } if id == "custom-chain-test"
+        ));
+    }
+
+    #[test]
+    fn custom_chains_cannot_override_builtins() {
+        let error = TrustedChainSpecs::default()
+            .insert(42_431, tempo_chainspec::spec::MODERATO.clone())
+            .unwrap_err();
+
+        assert_eq!(error, TrustedChainSpecError::BuiltIn(42_431));
     }
 
     fn empty_witness() -> BatchWitness {

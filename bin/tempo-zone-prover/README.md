@@ -21,13 +21,17 @@ Requests use this envelope:
 }
 ```
 
-`witness` is the serde representation of `zone_spf::BatchWitness`. Only chain IDs compiled into
-Tempo are accepted; a request cannot supply its own chain specification. Responses have
+`witness` is the serde representation of `zone_spf::BatchWitness`. The prover accepts chain IDs
+compiled into Tempo plus custom genesis files configured by the enclave operator through repeated
+`--tempo-genesis` arguments. A request cannot supply its own chain specification. Responses have
 `status: "ok"` with a `zone_spf::BatchOutput`, or `status: "error"` with a stable `code` and a
 diagnostic `message`.
 
 Set `SPF_VSOCK_PORT` or pass `--port` to change the port. The maximum request payload defaults to
 512 MiB and can be changed with `SPF_MAX_REQUEST_BYTES` or `--max-request-bytes`.
+Set `SPF_TEMPO_GENESIS` to a comma-separated list or pass `--tempo-genesis` repeatedly for trusted
+Tempo genesis JSON files. Each custom chain ID must be unique and cannot override a built-in Tempo
+network.
 
 ## Image and EIF
 
