@@ -1,12 +1,10 @@
 //! Versioned request protocol for the Tempo Zone prover service.
 
-use std::{
-    io::{self, Read, Write},
-    sync::Arc,
-};
+use std::{io, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use tempo_chainspec::spec::chainspec_from_chain_id;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use zone_chainspec::ZoneChainSpec;
 use zone_spf::{BatchOutput, BatchWitness, SpfConfig, prove_zone_batch};
 
@@ -68,9 +66,12 @@ pub enum FrameError {
     Io(String),
 }
 
-pub fn read_frame(reader: &mut impl Read, maximum: usize) -> Result<Vec<u8>, FrameError> {
+pub async fn read_frame(
+    reader: &mut (impl AsyncRead + Unpin),
+    maximum: usize,
+) -> Result<Vec<u8>, FrameError> {
     let mut header = [0_u8; 4];
-    read_exact_or_truncated(reader, &mut header)?;
+    read_exact_or_truncated(reader, &mut header).await?;
     let length = u32::from_be_bytes(header) as usize;
     if length > maximum {
         return Err(FrameError::TooLarge {
@@ -80,16 +81,16 @@ pub fn read_frame(reader: &mut impl Read, maximum: usize) -> Result<Vec<u8>, Fra
     }
 
     let mut payload = vec![0_u8; length];
-    read_exact_or_truncated(reader, &mut payload)?;
+    read_exact_or_truncated(reader, &mut payload).await?;
     Ok(payload)
 }
 
-pub fn write_frame(writer: &mut impl Write, payload: &[u8]) -> io::Result<()> {
+pub async fn write_frame(writer: &mut (impl AsyncWrite + Unpin), payload: &[u8]) -> io::Result<()> {
     let length = u32::try_from(payload.len())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "response frame exceeds 4 GiB"))?;
-    writer.write_all(&length.to_be_bytes())?;
-    writer.write_all(payload)?;
-    writer.flush()
+    writer.write_all(&length.to_be_bytes()).await?;
+    writer.write_all(payload).await?;
+    writer.flush().await
 }
 
 pub fn process_payload(payload: &[u8]) -> VerifyResponse {
@@ -161,9 +162,12 @@ fn error_response(request_id: Option<String>, code: ErrorCode, message: String) 
     }
 }
 
-fn read_exact_or_truncated(reader: &mut impl Read, buffer: &mut [u8]) -> Result<(), FrameError> {
-    match reader.read_exact(buffer) {
-        Ok(()) => Ok(()),
+async fn read_exact_or_truncated(
+    reader: &mut (impl AsyncRead + Unpin),
+    buffer: &mut [u8],
+) -> Result<(), FrameError> {
+    match reader.read_exact(buffer).await {
+        Ok(_) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Err(FrameError::Truncated),
         Err(error) => Err(FrameError::Io(error.to_string())),
     }
@@ -171,8 +175,6 @@ fn read_exact_or_truncated(reader: &mut impl Read, buffer: &mut [u8]) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
-
     use alloy_consensus::Header;
     use alloy_primitives::{Address, B256, Bytes};
     use reth_trie_common::EMPTY_ROOT_HASH;
@@ -181,23 +183,23 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn frame_round_trip() {
+    #[tokio::test]
+    async fn frame_round_trip() {
         let payload = br#"{"version":1}"#;
         let mut encoded = Vec::new();
-        write_frame(&mut encoded, payload).unwrap();
+        write_frame(&mut encoded, payload).await.unwrap();
 
         assert_eq!(
-            read_frame(&mut Cursor::new(encoded), 1024).unwrap(),
+            read_frame(&mut encoded.as_slice(), 1024).await.unwrap(),
             payload
         );
     }
 
-    #[test]
-    fn rejects_oversized_and_truncated_frames() {
+    #[tokio::test]
+    async fn rejects_oversized_and_truncated_frames() {
         let oversized = 10_u32.to_be_bytes();
         assert_eq!(
-            read_frame(&mut Cursor::new(oversized), 4),
+            read_frame(&mut oversized.as_slice(), 4).await,
             Err(FrameError::TooLarge {
                 actual: 10,
                 maximum: 4,
@@ -206,7 +208,7 @@ mod tests {
 
         let truncated = [0, 0, 0, 2, 1];
         assert_eq!(
-            read_frame(&mut Cursor::new(truncated), 4),
+            read_frame(&mut truncated.as_slice(), 4).await,
             Err(FrameError::Truncated)
         );
     }
