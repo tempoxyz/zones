@@ -22,7 +22,7 @@ use tempo_zone_contracts::{
 };
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::MODERATO_ZONE_FACTORY;
+use crate::zone_utils::{MODERATO_ZONE_FACTORY, write_owner_only};
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct CreateZone {
@@ -342,7 +342,7 @@ impl CreateZone {
             "rpcUrl": self.rpc_url,
         });
         let zone_json_path = self.output.join("zone.json");
-        std::fs::write(
+        write_owner_only(
             &zone_json_path,
             serde_json::to_string_pretty(&zone_json).wrap_err("failed encoding zone.json")?,
         )

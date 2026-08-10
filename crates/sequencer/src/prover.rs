@@ -24,7 +24,7 @@ use tempo_zone_contracts::{
 };
 use tokio::sync::mpsc::{self, error::TrySendError};
 use tracing::{debug, error, info};
-use zone_evm::ZoneEvmConfig;
+use zone_chainspec::ZoneChainSpec;
 use zone_l1::TempoStateExt as _;
 use zone_rpc::{ZoneDebugApi, types::TempoStorageRead};
 use zone_spf::{
@@ -45,8 +45,8 @@ type L1Reads = BTreeMap<u64, BTreeMap<Address, BTreeSet<B256>>>;
 pub struct ShadowProverConfig {
     /// Zone identifier bound into SPF public inputs.
     pub zone_id: u32,
-    /// The exact EVM configuration used by the node.
-    pub evm_config: ZoneEvmConfig,
+    /// Chain spec used to configure the SPF.
+    pub chain_spec: Arc<ZoneChainSpec>,
     /// In-process Zone debug API used to generate execution witnesses.
     pub debug_api: Arc<dyn ZoneDebugApi>,
 }
@@ -56,7 +56,7 @@ impl fmt::Debug for ShadowProverConfig {
         formatter
             .debug_struct("ShadowProverConfig")
             .field("zone_id", &self.zone_id)
-            .field("evm_config", &self.evm_config)
+            .field("chain_spec", &self.chain_spec)
             .field("debug_api", &"<in-process>")
             .finish()
     }
@@ -288,7 +288,7 @@ async fn validate_candidate<P: ZoneSequencerProvider>(
         tempo_ancestry_headers: anchor.ancestry_headers,
     };
 
-    let spf_config = SpfConfig::new(context.config.evm_config.chain_spec().clone());
+    let spf_config = SpfConfig::new(context.config.chain_spec.clone(), context.portal);
     let attempt = witness.clone();
     let output = tokio::task::spawn_blocking(move || prove_zone_batch(&spf_config, attempt))
         .await

@@ -97,7 +97,7 @@ async fn spf_batch_execute() -> eyre::Result<()> {
     let tempo_header = TempoHeader::default();
     let tempo_header_rlp = Bytes::from(alloy_rlp::encode(&tempo_header));
     let config = spf_config(&genesis);
-    let parent_header = config.zone_chain_spec.genesis_header().clone();
+    let parent_header = config.chain_spec().genesis_header().clone();
     let parent_hash = parent_header.hash_slow();
     let first_hash = first_built_block.header.hash;
     let expected_hash = second_built_block.header.hash;
@@ -215,7 +215,7 @@ async fn spf_builder_equivalence() -> eyre::Result<()> {
     assert_eq!(state_root, genesis_block.header.state_root);
 
     let config = spf_config(&genesis);
-    let parent_header = config.zone_chain_spec.genesis_header().clone();
+    let parent_header = config.chain_spec().genesis_header().clone();
     let parent_hash = parent_header.hash_slow();
     let expected_hash = built_block.header.hash;
 
@@ -300,7 +300,7 @@ fn funded_zone_genesis() -> Genesis {
 fn spf_config(genesis: &Genesis) -> SpfConfig {
     let chain_spec =
         ZoneChainSpec::from_genesis(genesis.clone()).with_tempo_hardforks_from(DEV.as_ref());
-    SpfConfig::new(Arc::new(chain_spec))
+    SpfConfig::new(Arc::new(chain_spec), Address::ZERO)
 }
 
 /// Convert the complete genesis allocation into the flat witness format consumed by SPF.

@@ -28,7 +28,7 @@ use tracing::{debug, info};
 use tracing_subscriber::EnvFilter;
 use zone_chainspec::ZoneChainSpec;
 use zone_precompiles::tempo_state::slots as tempo_state_slots;
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::constants::{ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT, zone_chain_id};
 use zone_rpc::{
     ZoneProvider, ZoneProviderConfig,
     types::{TempoStorageRead, ZoneExecutionWitness},
@@ -207,7 +207,12 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .parse::<PrivateKeySigner>()
         .context("parse private Zone RPC key")?;
     let (mut discovery, zone_chain_id) = discover(&tempo_provider, &zone_provider).await?;
-    let spf_config = spf_config(discovery.tempo_chain_id, args.tempo_genesis.as_deref()).await?;
+    let spf_config = spf_config(
+        discovery.tempo_chain_id,
+        args.tempo_genesis.as_deref(),
+        discovery.portal,
+    )
+    .await?;
     let private_zone_provider = connect_private_zone(
         &args.zone_private_rpc_url,
         signer,
@@ -254,8 +259,18 @@ async fn generate_input(args: GenerateInputArgs) -> Result<()> {
         .iter()
         .filter(|block| block.has_finalization)
         .count();
-    let expected_withdrawal_batch_index = discovery
-        .portal_withdrawal_batch_index
+    let parent_withdrawal_batch_index = withdrawal_batch_index_at(&zone_provider, parent_number)
+        .await
+        .context("read withdrawal batch index from parent Zone state")?;
+    if args.from_block.is_none()
+        && parent_withdrawal_batch_index != discovery.portal_withdrawal_batch_index
+    {
+        bail!(
+            "parent Zone state has withdrawal batch index {parent_withdrawal_batch_index}, but the Tempo portal reports {}",
+            discovery.portal_withdrawal_batch_index,
+        );
+    }
+    let expected_withdrawal_batch_index = parent_withdrawal_batch_index
         .checked_add(u64::try_from(finalization_count).expect("block count fits u64"))
         .ok_or_else(|| eyre!("withdrawal batch index overflow"))?;
     let (zone_head, tempo_head) = tokio::try_join!(
@@ -834,6 +849,17 @@ async fn initial_tempo_header(
     Ok(header)
 }
 
+async fn withdrawal_batch_index_at(
+    zone: &DynProvider<TempoNetwork>,
+    block_number: u64,
+) -> Result<u64> {
+    let index = zone
+        .get_storage_at(ZONE_OUTBOX_ADDRESS, ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT)
+        .block_id(BlockId::number(block_number))
+        .await?;
+    Ok(index.as_limbs()[0])
+}
+
 async fn tempo_header(tempo: &DynProvider<TempoNetwork>, number: u64) -> Result<TempoHeader> {
     let block = tempo
         .get_block_by_number(BlockNumberOrTag::Number(number))
@@ -1028,7 +1054,11 @@ async fn tempo_anchor(
     ))
 }
 
-async fn spf_config(tempo_chain_id: u64, genesis_source: Option<&str>) -> Result<SpfConfig> {
+async fn spf_config(
+    tempo_chain_id: u64,
+    genesis_source: Option<&str>,
+    portal: Address,
+) -> Result<SpfConfig> {
     let tempo_spec = match genesis_source {
         Some(source) => {
             let raw = read_genesis(source).await?;
@@ -1046,7 +1076,10 @@ async fn spf_config(tempo_chain_id: u64, genesis_source: Option<&str>) -> Result
             eyre!("unsupported Tempo chain ID {tempo_chain_id}; pass --tempo-genesis <PATH_OR_URL>")
         })?,
     };
-    Ok(SpfConfig::new(Arc::new(ZoneChainSpec::from(tempo_spec))))
+
+    let zone_chain_spec =
+        ZoneChainSpec::from(tempo_spec.clone()).with_tempo_hardforks_from(tempo_spec.as_ref());
+    Ok(SpfConfig::new(Arc::new(zone_chain_spec), portal))
 }
 
 async fn read_genesis(source: &str) -> Result<Vec<u8>> {
@@ -1192,12 +1225,16 @@ mod tests {
         ));
         std::fs::write(&path, serde_json::to_vec(&genesis).unwrap()).unwrap();
 
-        let config = spf_config(31_318, path.to_str()).await.unwrap();
-        let mismatch = spf_config(31_319, path.to_str()).await.unwrap_err();
+        let config = spf_config(31_318, path.to_str(), Address::ZERO)
+            .await
+            .unwrap();
+        let mismatch = spf_config(31_319, path.to_str(), Address::ZERO)
+            .await
+            .unwrap_err();
 
         std::fs::remove_file(path).unwrap();
         assert_eq!(
-            config.zone_chain_spec.inner.inner.genesis().config.chain_id,
+            config.chain_spec().inner.inner.genesis().config.chain_id,
             31_318
         );
         assert!(

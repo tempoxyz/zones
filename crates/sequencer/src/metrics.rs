@@ -5,6 +5,14 @@ use reth_metrics::{
     metrics::{Counter, Gauge, Histogram},
 };
 
+/// Metrics emitted for the sequencer account.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "tempo_zone_sequencer")]
+pub(crate) struct SequencerMetrics {
+    /// Current PathUSD balance of the sequencer account on Tempo L1, in base units.
+    pub(crate) pathusd_balance: Gauge,
+}
+
 /// Metrics emitted by the prover.
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_prover")]

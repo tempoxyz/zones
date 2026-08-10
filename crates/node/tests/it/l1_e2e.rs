@@ -371,8 +371,10 @@ async fn test_divergent_follower_does_not_create_quorum() -> eyre::Result<()> {
     // A newly started subscriber initializes its cache from the zone's L1 genesis anchor, not
     // from block zero. Its first non-contiguous coverage update resets the cache, which used to
     // race with the forged entry below and silently erase it. Wait for every member to complete
-    // that initial backfill before choosing a future anchor to corrupt.
-    let covered_l1_block = cluster.l1.provider().get_block_number().await?;
+    // that initial backfill before choosing a future anchor to corrupt. Wait for the block after
+    // the current tip because the current tip may be the genesis anchor, which is below the cache
+    // coverage floor once the first post-genesis block is ingested.
+    let covered_l1_block = cluster.l1.provider().get_block_number().await? + 1;
     for node in &cluster.nodes {
         poll_until(
             L1_TIMEOUT,

@@ -486,6 +486,12 @@ jobs:
       ZONES_BENCH_CPUSET: 14-15,30-31
       ZONES_BENCH_OUTPUT: target/zones-benchmark/neobank-e2e
       ZONES_BENCH_REPORT: target/zones-benchmark/report-neobank-e2e.json
+      ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-input.json
+      ZONES_BENCH_SPF_PROFILE: target/zones-benchmark/spf-profile.json.gz
+      ZONES_BENCH_SPF_PROFILE_URL: target/zones-benchmark/spf-profile-url.txt
+      ZONES_BENCH_SPF_REPORT: target/zones-benchmark/spf-report.txt
+      ZONES_BENCH_SPF_SUMMARY: target/zones-benchmark/spf-summary.md
+      ZONES_BENCH_SPF_RANGE: target/zones-benchmark/spf-range.env
       ZONES_BENCH_TOPOLOGY_ENV: target/zones-benchmark/topology.env
       ZONES_BENCH_TOPOLOGY_DIR: target/zones-benchmark/topology
       TEMPO_ROOT: ${{ github.workspace }}/_benchmark-tempo
@@ -662,7 +668,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo build --target-dir "$ZONES_BENCH_ZONES_TARGET_DIR" \
-            --profile profiling -p tempo-zone -p tempo-xtask
+            --profile profiling -p tempo-zone -p tempo-zone-spf -p tempo-xtask
           nu -c "source '$TEMPO_ROOT/tempo.nu'; build-in-worktree --no-default-features \
             '$TEMPO_ROOT' '$ZONES_BENCH_TEMPO_REF' profiling \
             'jemalloc,asm-keccak,keccak-cache-global,otlp' \
@@ -671,6 +677,7 @@ jobs:
             --manifest-path "$TEMPO_ROOT/Cargo.toml" --profile profiling -p tempo-xtask
           {
             echo "ZONE_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone"
+            echo "SPF_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-zone-spf"
             echo "ZONES_XTASK_BIN=$ZONES_BENCH_ZONES_TARGET_DIR/profiling/tempo-xtask"
             echo "TEMPO_BIN=$TEMPO_ROOT/target/profiling/tempo"
             echo "TEMPO_XTASK_BIN=$ZONES_BENCH_TEMPO_TARGET_DIR/profiling/tempo-xtask"
@@ -741,6 +748,29 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
+      - name: Install Samply profiler
+        run: |
+          set -euo pipefail
+          samply_help="$(samply record --help 2>/dev/null || true)"
+          if ! grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"; then
+            cargo install samply \
+              --git https://github.com/DaniPopes/samply \
+              --branch edge \
+              --locked \
+              --force
+          fi
+          samply_path="$(command -v samply)"
+          "$samply_path" --version
+          samply_help="$(samply record --help)"
+          grep -Eq '^[[:space:]]+--presymbolicate([[:space:]]|$)' <<< "$samply_help"
+          grep -Eq '^[[:space:]]+--share([[:space:]]|$)' <<< "$samply_help"
+          for setting in perf_event_paranoid kptr_restrict; do
+            path="/proc/sys/kernel/$setting"
+            if [[ -r "$path" ]]; then
+              printf 'kernel.%s=%s\n' "$setting" "$(< "$path")"
+            fi
+          done
+
       - name: Provision topology and run neobank workload
         env:
           CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
@@ -757,7 +787,8 @@ jobs:
           set +a
           for name in \
             L1_RPC_URL L1_WS_RPC_URL ZONES_BENCH_L1_QUERY_RPC_URL ZONES_BENCH_L1_SUBMIT_RPC_URLS \
-            ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_REDACTED_RPC_URL L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
+            ZONE_RPC_URL ZONE_WS_RPC_URL ZONE_PRIVATE_RPC_URL ZONE_REDACTED_RPC_URL \
+            ZONES_BENCH_TEMPO_GENESIS L1_PORTAL_ADDRESS ZONES_BENCH_TOKEN \
             ZONES_BENCH_EXPECTED_L1_CHAIN_ID ZONES_BENCH_EXPECTED_ZONE_CHAIN_ID \
             ZONES_BENCH_EXPECTED_ZONE_ID ZONES_BENCH_TARGET_ID \
             ZONES_BENCH_L1_GAS_LIMIT ZONES_BENCH_L1_GENERAL_GAS_LIMIT \
@@ -767,6 +798,82 @@ jobs:
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
           contrib/bench/run-neobank-private-flow.sh
+
+      - name: Generate and validate SPF input
+        run: |
+          set -euo pipefail
+          mkdir -p "$(dirname "$ZONES_BENCH_SPF_OUTPUT")"
+          test -s "$ZONES_BENCH_SPF_RANGE"
+          # shellcheck source=/dev/null
+          source "$ZONES_BENCH_SPF_RANGE"
+          [[ "$ZONES_BENCH_SPF_FROM_BLOCK" =~ ^[0-9]+$ ]]
+          [[ "$ZONES_BENCH_SPF_TO_BLOCK" =~ ^[0-9]+$ ]]
+          (( ZONES_BENCH_SPF_FROM_BLOCK <= ZONES_BENCH_SPF_TO_BLOCK ))
+          private_key="$(cast wallet private-key \
+            --mnemonic "$ZONES_BENCH_MNEMONIC_FILE" \
+            --mnemonic-index 4)"
+          trap 'unset private_key' EXIT
+
+          samply_args=(
+            record
+            --save-only
+            --presymbolicate
+            --share
+            --output "$ZONES_BENCH_SPF_PROFILE"
+          )
+          set +e
+          PRIVATE_KEY="$private_key" samply "${samply_args[@]}" -- \
+            taskset --cpu-list "$ZONES_BENCH_CPUSET" \
+              "$SPF_BIN" generate-input \
+              --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
+              --tempo-genesis "$ZONES_BENCH_TEMPO_GENESIS" \
+              --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
+              --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
+              --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
+              --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
+              --output "$ZONES_BENCH_SPF_OUTPUT" \
+            > "$ZONES_BENCH_SPF_REPORT" \
+            2> target/zones-benchmark/spf.log
+          spf_status=$?
+          set -e
+          if (( spf_status == 0 )) && [[ ! -s "$ZONES_BENCH_SPF_PROFILE" ]]; then
+            echo "Samply did not produce $ZONES_BENCH_SPF_PROFILE" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          fi
+          profile_url="$(sed -n \
+            's#^View it at: \(https://profiler\.firefox\.com/public/[^[:space:]]*\)$#\1#p' \
+            target/zones-benchmark/spf.log | tail -n 1)"
+          if (( spf_status == 0 )) && [[ -z "$profile_url" ]]; then
+            echo "Samply did not return a Firefox Profiler URL" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          elif [[ -n "$profile_url" ]]; then
+            printf '%s\n' "$profile_url" > "$ZONES_BENCH_SPF_PROFILE_URL"
+          fi
+          if (( spf_status == 0 )) &&
+             [[ "$ZONES_BENCH_NEOBANK_PRESET" != encrypted-deposit ]] &&
+             ! grep -Eq '^  User transactions: +[1-9][0-9]*$' "$ZONES_BENCH_SPF_REPORT"
+          then
+            echo "selected SPF range contains no measured Zone user transactions" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          fi
+
+          {
+            echo "## SPF benchmark"
+            echo
+            if (( spf_status == 0 )); then
+              echo "[Open the CPU profile in Firefox Profiler]($profile_url)"
+              echo
+              echo '```text'
+              cat "$ZONES_BENCH_SPF_REPORT"
+              echo '```'
+            else
+              echo "> SPF input generation or local validation failed. See \`spf.log\` in the workflow artifact."
+            fi
+          } > "$ZONES_BENCH_SPF_SUMMARY"
+          exit "$spf_status"
 
       - name: Publish benchmark results
         if: ${{ !cancelled() }}
@@ -825,6 +932,12 @@ jobs:
             echo "- L1 block/general gas limits: \`${ZONES_BENCH_L1_GAS_LIMIT:-unavailable}\` / \`${ZONES_BENCH_L1_GENERAL_GAS_LIMIT:-unavailable}\`"
             echo "- Withdrawal scheduler (batch gas / in-flight / Zone blocks / poll): \`$ZONES_BENCH_WITHDRAWAL_MAX_BATCH_GAS\` / \`$ZONES_BENCH_WITHDRAWAL_MAX_IN_FLIGHT_BATCHES\` / \`$ZONES_BENCH_ZONE_BATCH_INTERVAL_BLOCKS\` / \`${ZONES_BENCH_WITHDRAWAL_POLL_INTERVAL_SECS}s\`"
           } >> "$summary"
+          if [ -s "$ZONES_BENCH_SPF_SUMMARY" ]; then
+            {
+              echo
+              cat "$ZONES_BENCH_SPF_SUMMARY"
+            } >> "$summary"
+          fi
           cat "$summary" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Collect benchmark host metadata
@@ -970,6 +1083,10 @@ jobs:
             target/zones-benchmark/neobank-e2e/
             target/zones-benchmark/*.json
             target/zones-benchmark/*.md
+            target/zones-benchmark/spf-profile*
+            target/zones-benchmark/spf.log
+            target/zones-benchmark/spf-report.txt
+            target/zones-benchmark/spf-range.env
             target/zones-benchmark/topology/neobank-fixtures.json
             target/zones-benchmark/node-logs/
             target/zones-benchmark/invalid-block-diagnostics/

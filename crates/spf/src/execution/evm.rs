@@ -12,7 +12,7 @@ use alloy_evm::{
     block::{BlockExecutionResult, BlockExecutor as _, BlockExecutorFactory, TxResult as _},
     eth::EthBlockExecutionCtx,
 };
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Decodable as _;
 use alloy_sol_types::SolCall as _;
 use reth_chainspec::EthereumHardforks as _;
@@ -32,7 +32,7 @@ use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
 use zone_primitives::constants::zone_chain_id;
 
 use crate::{
-    Error, SpfConfig, ZoneBlock,
+    Error, ZoneBlock,
     execution::database::{TempoWitnessDatabase, WitnessDatabase},
 };
 
@@ -54,7 +54,6 @@ pub(crate) struct BlockReplayContext<'a> {
     pub(crate) parent: &'a TempoHeader,
     pub(crate) block_index: usize,
     pub(crate) zone_id: u32,
-    pub(crate) portal: Address,
 }
 
 /// Execute a complete Zone block in system-then-user order.
@@ -63,9 +62,8 @@ pub(crate) struct BlockReplayContext<'a> {
 /// That call invokes `TempoState.finalizeTempo`, then processes deposits and
 /// enabled tokens. User transactions run only after that system transition.
 pub(crate) fn execute_zone_block(
-    config: &SpfConfig,
     zone_state: &mut ZoneState,
-    tempo_database: &TempoWitnessDatabase,
+    evm_config: ZoneEvmConfig<TempoWitnessDatabase>,
     replay: BlockReplayContext<'_>,
     block: &ZoneBlock,
 ) -> Result<ExecutedZoneBlock, Error> {
@@ -73,7 +71,6 @@ pub(crate) fn execute_zone_block(
         parent,
         block_index: zone_block_index,
         zone_id,
-        portal,
     } = replay;
     let user_transactions = decode_user_transactions(zone_block_index, &block.transactions)?;
     let mut transactions = Vec::with_capacity(
@@ -99,12 +96,6 @@ pub(crate) fn execute_zone_block(
         .block_hashes
         .insert(parent_number, block.parent_hash);
 
-    let evm_config = ZoneEvmConfig::new(
-        config.zone_chain_spec.clone(),
-        config.zone_chain_spec.inner.clone(),
-        tempo_database.clone(),
-        portal,
-    );
     let attributes = next_block_env_attributes(evm_config.chain_spec(), parent, block)?;
     let mut env = evm_config
         .next_evm_env(parent, &attributes)
@@ -117,7 +108,7 @@ pub(crate) fn execute_zone_block(
     let mut executor = BlockExecutorFactory::create_executor(
         &evm_config,
         evm,
-        next_block_execution_context(config.zone_chain_spec.as_ref(), block, block_gas_limit),
+        next_block_execution_context(evm_config.chain_spec().as_ref(), block, block_gas_limit),
     );
 
     executor.apply_pre_execution_changes().map_err(|error| {

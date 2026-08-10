@@ -4,12 +4,15 @@ use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, Bytes, U256};
 use tempo_primitives::TempoHeader;
-use zone_chainspec::ZoneChainSpec;
 
 pub use tempo_zone_contracts::{
     BlockTransition, ChaumPedersenProof, DecryptionData, DepositQueueTransition, DepositType,
     EnabledToken, QueuedDeposit,
 };
+use zone_chainspec::ZoneChainSpec;
+use zone_evm::ZoneEvmConfig;
+use zone_precompiles::L1StorageReader;
+
 /// Trusted network configuration for Zone execution.
 ///
 /// This is deliberately separate from [`BatchWitness`]: it is selected by the
@@ -19,12 +22,29 @@ pub use tempo_zone_contracts::{
 /// Tempo header carried by the witness.
 #[derive(Debug, Clone)]
 pub struct SpfConfig {
-    pub zone_chain_spec: Arc<ZoneChainSpec>,
+    chain_spec: Arc<ZoneChainSpec>,
+    portal: Address,
 }
 
 impl SpfConfig {
-    pub fn new(zone_chain_spec: Arc<ZoneChainSpec>) -> Self {
-        Self { zone_chain_spec }
+    /// Creates a new [`SpfConfig`] with the given composed chainspec and portal address.
+    pub fn new(chain_spec: Arc<ZoneChainSpec>, portal: Address) -> Self {
+        Self { chain_spec, portal }
+    }
+
+    /// Returns a reference to the [`ZoneChainSpec`].
+    pub fn chain_spec(&self) -> &Arc<ZoneChainSpec> {
+        &self.chain_spec
+    }
+
+    /// Returns the portal address.
+    pub fn portal(&self) -> Address {
+        self.portal
+    }
+
+    /// Crates a [`ZoneEvmConfig`] for the given L1 storage reader.
+    pub fn evm_config<L1: L1StorageReader>(&self, l1_provider: L1) -> ZoneEvmConfig<L1> {
+        ZoneEvmConfig::from_composed_chain_spec(self.chain_spec.clone(), l1_provider, self.portal)
     }
 }
 

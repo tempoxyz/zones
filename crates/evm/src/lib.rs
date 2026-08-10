@@ -300,10 +300,13 @@ where
         portal_address: Address,
     ) -> Self {
         let chain_spec = compose_chain_spec(&zone_chain_spec, &tempo_chain_spec);
-        Self::from_chain_spec(chain_spec, l1_provider, portal_address)
+        Self::from_composed_chain_spec(chain_spec, l1_provider, portal_address)
     }
 
-    fn from_chain_spec(
+    /// Creates a Zone EVM config from an already-composed Zone chain specification.
+    ///
+    /// The supplied chain specification must already include the parent Tempo hardfork schedule.
+    pub fn from_composed_chain_spec(
         chain_spec: Arc<ZoneChainSpec>,
         l1_provider: L1,
         portal_address: Address,
@@ -338,7 +341,7 @@ where
         RecordingL1StorageReader<L1>,
     ) {
         let reader = RecordingL1StorageReader::new(self.zone_factory.l1_reader.clone());
-        let config = ZoneEvmConfig::from_chain_spec(
+        let config = ZoneEvmConfig::from_composed_chain_spec(
             self.chain_spec.clone(),
             reader.clone(),
             self.zone_factory.portal_address,
@@ -364,7 +367,7 @@ impl ZoneEvmConfig {
             ..Default::default()
         };
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::from_chain_spec(chain_spec, l1_provider, Address::ZERO)
+        Self::from_composed_chain_spec(chain_spec, l1_provider, Address::ZERO)
     }
 }
 
