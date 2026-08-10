@@ -80,6 +80,15 @@ crate::sol! {
             uint128 amount
         );
 
+        event DepositRejected(
+            bytes32 indexed depositHash,
+            address indexed sender,
+            DepositType depositType,
+            address token,
+            uint128 amount,
+            address tempoRefundRecipient
+        );
+
         event WithdrawalBounceBackProcessed(address indexed zoneFallbackRecipient, address token, uint128 amount);
 
         event WithdrawalBounceBackPending(address indexed zoneFallbackRecipient, address token, uint128 amount);

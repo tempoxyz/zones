@@ -1225,42 +1225,25 @@ async fn test_block_access_control() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Method tier enforcement: restricted → -32005 for all callers,
-/// disabled → -32006 for everyone, unknown → -32601.
+/// Methods outside the redacted RPC allowlist are indistinguishable from unknown methods.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_method_tiers() -> eyre::Result<()> {
+async fn test_unexposed_methods_are_not_found() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let ctx = start_zone_with_redacted_rpc().await?;
     let user_signer = PrivateKeySigner::random();
 
-    // Restricted methods → -32005 for all callers
     for method in [
         "eth_getCode",
         "eth_getStorageAt",
         "eth_getBlockReceipts",
         "debug_traceTransaction",
         "txpool_content",
-    ] {
-        let resp = ctx
-            .call_as_user(method, serde_json::json!([]), &user_signer)
-            .await?;
-        let error = resp
-            .get("error")
-            .unwrap_or_else(|| panic!("{method} should return error"));
-        assert_eq!(
-            error["code"].as_i64().unwrap(),
-            -32005,
-            "{method} should return -32005"
-        );
-    }
-
-    // Disabled methods → -32006 for everyone
-    for method in [
         "eth_subscribe",
         "eth_newPendingTransactionFilter",
         "eth_mining",
         "eth_hashrate",
+        "eth_someNonexistentMethod",
     ] {
         let resp = ctx
             .call_as_user(method, serde_json::json!([]), &user_signer)
@@ -1270,27 +1253,10 @@ async fn test_method_tiers() -> eyre::Result<()> {
             .unwrap_or_else(|| panic!("{method} should return error"));
         assert_eq!(
             error["code"].as_i64().unwrap(),
-            -32006,
-            "{method} should return -32006 (Method disabled)"
+            -32601,
+            "{method} should return -32601"
         );
     }
-
-    // Unknown method → -32601
-    let resp = ctx
-        .call_as_user(
-            "eth_someNonexistentMethod",
-            serde_json::json!([]),
-            &user_signer,
-        )
-        .await?;
-    let error = resp
-        .get("error")
-        .expect("unknown method should return error");
-    assert_eq!(
-        error["code"].as_i64().unwrap(),
-        -32601,
-        "unknown method should return -32601"
-    );
 
     Ok(())
 }

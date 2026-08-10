@@ -175,6 +175,7 @@ revm = { version = "42.0.1", features = [
 
 # alloy
 alloy = { version = "2.3.0", default-features = false }
+alloy-chains = "0.2.36"
 alloy-consensus = { version = "2.3.0", default-features = false }
 alloy-contract = { version = "2.3.0", default-features = false }
 alloy-eips = { version = "2.3.0", default-features = false }
@@ -243,6 +244,8 @@ reqwest = { version = "0.13", default-features = false, features = [
 tokio-tungstenite = "0.28"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+vergen = { version = "10.0.1", features = ["build", "cargo", "emit_and_set"] }
+vergen-git2 = "10.0.1"
 zeroize = "1.9.0"
 
 # Keep Commonware aligned with the revision used by upstream Tempo. Cargo does

@@ -290,6 +290,7 @@ impl DemoSwapAndDeposit {
             PATH_USD_ADDRESS,
             operator,
             operator,
+            operator,
             pathusd_gross_deposit,
         )
         .await
@@ -307,6 +308,7 @@ impl DemoSwapAndDeposit {
             &portal_contract,
             portal,
             alpha,
+            operator,
             operator,
             operator,
             alpha_gross_deposit,
@@ -347,6 +349,7 @@ impl DemoSwapAndDeposit {
         let callback_data = build_router_callback(
             &portal_contract_seq,
             RouterCallbackRequest {
+                sender: router,
                 target_portal: portal,
                 token_out: beta,
                 recipient: operator,
@@ -589,6 +592,7 @@ fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
 }
 
 struct RouterCallbackRequest<'a> {
+    sender: Address,
     target_portal: Address,
     token_out: Address,
     recipient: Address,
@@ -604,6 +608,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
     token: Address,
     recipient: Address,
     tempo_refund_recipient: Address,
+    sender: Address,
     amount: u128,
 ) -> eyre::Result<()> {
     let (key, key_index) = portal
@@ -621,6 +626,7 @@ async fn send_deposit<P: Provider<TempoNetwork>>(
         y_parity,
         recipient,
         B256::ZERO,
+        sender,
         portal_address,
         key_index,
     )
@@ -666,6 +672,7 @@ async fn build_router_callback<P: Provider<TempoNetwork>>(
         y_parity,
         request.recipient,
         request.memo,
+        request.sender,
         request.target_portal,
         key_index,
     )

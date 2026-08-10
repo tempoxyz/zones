@@ -290,12 +290,16 @@ contract ZoneInbox is IZoneInbox {
                 bool valid = proofValid;
                 bytes memory decryptedPlaintext;
                 if (valid) {
-                    // Step 2: Derive AES key from shared secret using HKDF-SHA256
+                    // Step 2: Derive AES key from shared secret and the public deposit sender
+                    // using HKDF-SHA256. Binding the sender prevents a valid encrypted payload
+                    // from being replayed by another account to dust its hidden recipient.
                     // This is done in Solidity using the SHA256 precompile (0x02)
                     bytes32 aesKey = _hkdfSha256(
                         dec.sharedSecret,
                         "ecies-aes-key",
-                        abi.encodePacked(tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX)
+                        abi.encodePacked(
+                            tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX, ed.sender
+                        )
                     );
 
                     // Step 3: Decrypt using AES-256-GCM precompile

@@ -100,6 +100,7 @@ impl Deposit {
             seq_pub_y_parity,
             to,
             self.memo,
+            sender,
             self.portal,
             key_index,
         )

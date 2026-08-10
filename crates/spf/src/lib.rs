@@ -567,6 +567,7 @@ mod tests {
 
     use super::*;
     use alloy_consensus::Header;
+    use alloy_eips::eip2935::{HISTORY_SERVE_WINDOW, HISTORY_STORAGE_ADDRESS};
     use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
     use reth_chainspec::EthChainSpec;
     use reth_evm::ConfigureEvm;
@@ -745,6 +746,24 @@ mod tests {
             database.storage(account, U256::from(3)).unwrap(),
             U256::from(9)
         );
+    }
+
+    #[test]
+    fn resolves_block_hash_from_eip2935_storage_witness() {
+        let number = 42;
+        let hash = B256::repeat_byte(0x42);
+        let slot = U256::from(number % HISTORY_SERVE_WINDOW as u64);
+        let (state_root, witness) = witnessed_account_state(
+            HISTORY_STORAGE_ADDRESS,
+            1,
+            U256::ZERO,
+            alloy_consensus::constants::KECCAK_EMPTY,
+            Vec::new(),
+            Some((slot, U256::from_be_bytes(hash.0))),
+        );
+        let mut database = WitnessDatabase::from_zone_state_witness(witness, state_root).unwrap();
+
+        assert_eq!(database.block_hash(number).unwrap(), hash);
     }
 
     fn next_block_evm_env(

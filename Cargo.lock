@@ -11770,7 +11770,6 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "const-hex",
- "futures",
  "serde",
  "tokio",
  "zone-primitives",
@@ -13697,6 +13696,7 @@ name = "zone-node"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-chains",
  "alloy-consensus",
  "alloy-contract",
  "alloy-eips",
@@ -13769,6 +13769,8 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "vergen",
+ "vergen-git2",
  "zeroize",
  "zone-chainspec",
  "zone-evm",
@@ -13928,6 +13930,7 @@ dependencies = [
 name = "zone-sequencer"
 version = "0.1.0"
 dependencies = [
+ "alloy-chains",
  "alloy-consensus",
  "alloy-eips",
  "alloy-network",
@@ -13948,6 +13951,7 @@ dependencies = [
  "proptest",
  "reth-chain-state",
  "reth-metrics",
+ "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
  "schnellru",
@@ -13960,6 +13964,10 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tokio-util",
  "tracing",
+ "zone-evm",
+ "zone-l1",
+ "zone-rpc",
+ "zone-spf",
 ]
 
 [[package]]
