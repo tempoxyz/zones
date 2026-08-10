@@ -4,8 +4,8 @@
 //! `TempoStateAccess::with_read_only_storage_ctx`, then use these helpers to read the same
 //! generated storage handlers used by protocol execution.
 
-use alloy_primitives::{Address, B256, U256};
-use tempo_precompiles::{error::Result, tip20::TIP20Token};
+use alloy_primitives::{Address, B256};
+use tempo_precompiles::error::Result;
 use tempo_zone_contracts::IZoneOutbox;
 
 use crate::{TempoState, ZoneFeeManager, ZoneInbox, ZoneOutbox};
@@ -38,9 +38,4 @@ impl ZoneStateSnapshot {
             default_fee_token: fee_manager.default_fee_token()?,
         })
     }
-}
-
-/// Reads one TIP-20 total supply through its generated storage handler.
-pub fn tip20_total_supply(token: Address) -> Result<U256> {
-    TIP20Token::from_address(token)?.total_supply()
 }
