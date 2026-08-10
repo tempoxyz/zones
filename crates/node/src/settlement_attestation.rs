@@ -23,6 +23,9 @@ use zone_p2p::P2pCommand;
 use crate::replication::AttestationContext;
 use zone_sequencer::attestation::{SettlementAttestation, SignedSettlementAttestation};
 
+/// Fallback cadence for transient L1 validation failures or dropped P2P settlement proposals.
+const SETTLEMENT_RETRY_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Check the manifest's settlement quorum against `ZonePortal` before any role task starts.
 ///
 /// A quorum node the portal has not registered can never settle, and an unreachable threshold
@@ -385,7 +388,7 @@ pub(crate) async fn collect_leader_settlements<P>(
             .await;
 
     let mut last_scanned = head;
-    let mut retry = tokio::time::interval(Duration::from_secs(5));
+    let mut retry = tokio::time::interval(SETTLEMENT_RETRY_INTERVAL);
     retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
@@ -695,7 +698,7 @@ mod tests {
         store.remove_submitted(2_070);
         let submitted = tokio::time::timeout(Duration::from_millis(100), waiting)
             .await
-            .expect("confirmation should wake the collector without its five-second retry")
+            .expect("confirmation should wake the collector without its fallback retry")
             .expect("submission wait task should not panic")
             .expect("submission notification channel should remain open");
         assert_eq!(submitted, 2_070);
