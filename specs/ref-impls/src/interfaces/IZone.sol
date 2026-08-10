@@ -563,10 +563,11 @@ interface IZonePortal {
     /// @notice Emitted when sequencer updates their encryption key
     /// @param x The X coordinate of the new key
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    /// @param expected The address derived from the new key
     /// @param keyIndex The index of this key in the history array
     /// @param activationBlock The Tempo block when this key becomes active
     event SequencerEncryptionKeyUpdated(
-        bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
+        bytes32 x, uint8 yParity, address expected, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);

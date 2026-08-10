@@ -682,7 +682,9 @@ contract ZonePortal is IZonePortal {
         _encryptionKeys.push(
             EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
         );
-        emit SequencerEncryptionKeyUpdated(x, yParity, _encryptionKeys.length - 1, activationBlock);
+        emit SequencerEncryptionKeyUpdated(
+            x, yParity, expected, _encryptionKeys.length - 1, activationBlock
+        );
     }
 
     /// @notice Get the number of keys in the history

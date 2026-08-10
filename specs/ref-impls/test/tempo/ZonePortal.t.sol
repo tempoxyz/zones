@@ -4419,7 +4419,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 x = bytes32(w.publicKeyX);
         uint8 yParity = w.publicKeyY % 2 == 0 ? 0x02 : 0x03;
         vm.expectEmit(true, true, true, true);
-        emit IZonePortal.SequencerEncryptionKeyUpdated(x, yParity, 0, uint64(block.number));
+        emit IZonePortal.SequencerEncryptionKeyUpdated(x, yParity, w.addr, 0, uint64(block.number));
         // can't use helper since expectEmit must come before the call
         bytes32 message = keccak256(abi.encode(address(portal), x, yParity));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(w.privateKey, message);
