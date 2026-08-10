@@ -77,7 +77,7 @@ use zone_chainspec::ZoneChainSpec;
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, EncryptionKeyRing, EncryptionKeyRotation, L1BlockTracker, L1Subscriber,
-    L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt,
+    L1SubscriberConfig, LeaderTransition, LeadershipSink, TempoStateExt, encryption_key_address,
     state::{EnabledTokenRegistry, L1StateCache, L1StateProvider, L1StateProviderConfig},
 };
 use zone_p2p::{
@@ -1291,6 +1291,7 @@ where
             let rotation = EncryptionKeyRotation {
                 x: entry.x,
                 y_parity: entry.yParity,
+                expected: encryption_key_address(entry.x, entry.yParity)?,
                 key_index,
                 activation_block: entry.activationBlock,
             };

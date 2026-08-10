@@ -108,6 +108,7 @@ crate::sol! {
         event SequencerEncryptionKeyUpdated(
             bytes32 x,
             uint8 yParity,
+            address expected,
             uint256 keyIndex,
             uint64 activationBlock
         );

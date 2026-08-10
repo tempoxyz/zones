@@ -1748,7 +1748,9 @@ interface IZonePortal {
     event SequencerSetUpdated(uint64 indexed nonce, uint8 threshold, address[] sequencers);
     event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
     event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
-    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
+    event SequencerEncryptionKeyUpdated(
+        bytes32 x, uint8 yParity, address expected, uint256 keyIndex, uint64 activationBlock
+    );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
     event MaxTempoGasRateUpdated(uint128 maxTempoGasRate);
     event BouncebackGasUpdated(uint64 bouncebackGas);

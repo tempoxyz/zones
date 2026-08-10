@@ -68,7 +68,7 @@ use tokio_util::sync::CancellationToken;
 use zone_chainspec::ZoneChainSpec;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptionKeyRotation, L1BlockTracker, L1Deposit,
-    L1PortalEvents, L1StateCache, state::EnabledTokenRegistry,
+    L1PortalEvents, L1StateCache, encryption_key_address, state::EnabledTokenRegistry,
 };
 use zone_node::{ZoneNode, ZoneRedactedRpcConfig, ZoneSequencerAddOnsConfig};
 use zone_p2p::{LeadershipSchedule, LeadershipState, P2pConfig, P2pPeerId, Role};
@@ -1405,6 +1405,10 @@ impl ZoneTestNode {
             deposit_decryption_keys.apply_rotation(&EncryptionKeyRotation {
                 x: B256::from_slice(encoded.x().expect("compressed fixture key has x")),
                 y_parity: encoded.as_bytes()[0],
+                expected: encryption_key_address(
+                    B256::from_slice(encoded.x().expect("compressed fixture key has x")),
+                    encoded.as_bytes()[0],
+                )?,
                 key_index: U256::ZERO,
                 activation_block: 0,
             })?;
