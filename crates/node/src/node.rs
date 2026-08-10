@@ -698,11 +698,6 @@ where
         }
 
         let chain_id = ctx.node.provider().chain_spec().genesis().config.chain_id;
-        let prover_settings = self
-            .sequencer_config
-            .as_ref()
-            .filter(|config| config.enable_prover)
-            .map(|config| (config.zone_id, ctx.node.evm_config().clone()));
         let provider = ctx.node.provider().clone();
         let zone_provider = provider.clone();
         let pool = ctx.node.pool().clone();
@@ -735,11 +730,15 @@ where
                 Ok(())
             })
             .await?;
-        let prover_config = prover_settings.map(|(zone_id, evm_config)| ShadowProverConfig {
-            zone_id,
-            evm_config,
-            debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
-        });
+        let prover_config = self
+            .sequencer_config
+            .as_ref()
+            .filter(|config| config.enable_prover)
+            .map(|config| ShadowProverConfig {
+                zone_id: config.zone_id,
+                chain_spec: provider.chain_spec(),
+                debug_api: Arc::new(NodeZoneDebugApi::new(handle.eth_handlers().api.clone())),
+            });
 
         Self::launch_redacted_rpc(
             self.redacted_rpc_config,

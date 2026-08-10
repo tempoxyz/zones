@@ -32,7 +32,7 @@ use zone_evm::{L1OverlayDB, ZoneBlockExecutor, ZoneEvmConfig};
 use zone_primitives::constants::zone_chain_id;
 
 use crate::{
-    Error, SpfConfig, ZoneBlock,
+    Error, ZoneBlock,
     execution::database::{TempoWitnessDatabase, WitnessDatabase},
 };
 
@@ -62,9 +62,8 @@ pub(crate) struct BlockReplayContext<'a> {
 /// That call invokes `TempoState.finalizeTempo`, then processes deposits and
 /// enabled tokens. User transactions run only after that system transition.
 pub(crate) fn execute_zone_block(
-    config: &SpfConfig,
     zone_state: &mut ZoneState,
-    evm_config: &ZoneEvmConfig<TempoWitnessDatabase>,
+    evm_config: ZoneEvmConfig<TempoWitnessDatabase>,
     replay: BlockReplayContext<'_>,
     block: &ZoneBlock,
 ) -> Result<ExecutedZoneBlock, Error> {
@@ -105,11 +104,11 @@ pub(crate) fn execute_zone_block(
     env.cfg_env.chain_id = zone_chain_id(zone_id);
     let assembly_env = env.clone();
     let block_gas_limit = env.block_env.inner.gas_limit;
-    let evm = BlockExecutorFactory::evm_factory(evm_config).create_evm(&mut *zone_state, env);
+    let evm = BlockExecutorFactory::evm_factory(&evm_config).create_evm(&mut *zone_state, env);
     let mut executor = BlockExecutorFactory::create_executor(
-        evm_config,
+        &evm_config,
         evm,
-        next_block_execution_context(config.zone_chain_spec.as_ref(), block, block_gas_limit),
+        next_block_execution_context(evm_config.chain_spec().as_ref(), block, block_gas_limit),
     );
 
     executor.apply_pre_execution_changes().map_err(|error| {

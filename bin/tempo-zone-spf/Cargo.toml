@@ -11,12 +11,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-zone-primitives.workspace = true
+tempo-zone-contracts = { workspace = true, features = ["std"] }
 zone-chainspec.workspace = true
+zone-evm.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
+zone-primitives.workspace = true
 zone-rpc.workspace = true
 zone-spf.workspace = true
-tempo-zone-contracts = { workspace = true, features = ["std"] }
 
 tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
