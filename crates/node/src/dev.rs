@@ -385,9 +385,9 @@ mod command {
                 "zoneFactory": format!("{}", provisioned.factory),
                 "rpcUrl": format!("http://{}:{}", self.http_addr, self.http_port),
             });
-            std::fs::write(
-                self.datadir.join("zone.json"),
-                serde_json::to_string_pretty(&zone_json)?,
+            super::write_owner_only(
+                &self.datadir.join("zone.json"),
+                serde_json::to_string_pretty(&zone_json)?.as_bytes(),
             )?;
 
             println!("Zone provisioned!");
@@ -518,5 +518,28 @@ mod command {
         fn ensure_ws_url_rejects_non_websocket_schemes() {
             assert!(ensure_ws_url("http://localhost:8545").is_err());
         }
+    }
+}
+
+fn write_owner_only(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::{
+            fs::{OpenOptions, Permissions},
+            io::Write as _,
+            os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _},
+        };
+
+        let mut options = OpenOptions::new();
+        options.write(true).create(true).mode(0o600);
+        let mut file = options.open(path)?;
+        file.set_permissions(Permissions::from_mode(0o600))?;
+        file.set_len(0)?;
+        file.write_all(contents)
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, contents)
     }
 }

@@ -36,6 +36,19 @@ impl GenerateP2pKey {
         let mut file = options.open(&self.output).map_err(|err| {
             eyre::eyre!("failed writing P2P key `{}`: {err}", self.output.display())
         })?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed restricting P2P key permissions `{}`: {err}",
+                        self.output.display()
+                    )
+                })?;
+        }
+
         writeln!(
             file,
             "{}",
