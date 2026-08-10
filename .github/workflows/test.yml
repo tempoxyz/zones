@@ -104,7 +104,7 @@ jobs:
           compression-level: 0
 
   test:
-    name: test (${{ matrix.partition }}/2)
+    name: test (${{ matrix.partition }}/4)
     runs-on: depot-ubuntu-latest-16
     needs: build-test-artifacts
     timeout-minutes: 20
@@ -113,7 +113,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        partition: [1, 2]
+        partition: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -140,7 +140,7 @@ jobs:
             --archive-file nextest-archive.tar.zst \
             --workspace-remap "$GITHUB_WORKSPACE" \
             --profile ci \
-            --partition hash:${{ matrix.partition }}/2
+            --partition hash:${{ matrix.partition }}/4
 
   test-success:
     name: test success
