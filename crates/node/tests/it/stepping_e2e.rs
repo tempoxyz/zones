@@ -216,9 +216,10 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     })
     .await?;
 
-    // --- Step 2: Capture the pre-portal anchor, then deploy the zone portal ---
-    let genesis_block = l1.provider().get_block_number().await?;
+    // --- Step 2: Deploy zone portal ---
     let portal_address = l1.deploy_zone().await?;
+
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     let target_block = genesis_block + EXTENDED_GAP_BLOCKS;
 
@@ -327,8 +328,8 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
     })
     .await?;
 
-    let genesis_block = l1.provider().get_block_number().await?;
     let portal_address = l1.deploy_zone().await?;
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     let target_block = genesis_block + SHORT_EXTENDED_GAP_BLOCKS;
 
@@ -424,8 +425,8 @@ async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyr
     })
     .await?;
 
-    let genesis_block = l1.provider().get_block_number().await?;
     let portal_address = l1.deploy_zone().await?;
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     let target_block = genesis_block + SHORT_MULTI_BOUNDARY_GAP_BLOCKS;
 
@@ -569,8 +570,8 @@ async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<
     })
     .await?;
 
-    let genesis_block = l1.provider().get_block_number().await?;
     let portal_address = l1.deploy_zone().await?;
+    let genesis_block = l1.provider().get_block_number().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     let target_block = genesis_block + SHORT_EXTENDED_GAP_BLOCKS;
 
