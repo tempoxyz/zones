@@ -1149,7 +1149,20 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
     }
 
-    function test_setLeader_revertsForNonSequencerCaller() public {
+    function test_setLeader_allowsAdminCaller() public {
+        address[] memory signers = _activateSequencerSet(2);
+        uint64 epoch = portal.leaderEpoch();
+
+        vm.roll(block.number + 1);
+        vm.prank(admin);
+        portal.setLeader(signers[1], epoch);
+
+        assertEq(portal.leader(), signers[1]);
+        assertEq(portal.leaderEpoch(), epoch + 1);
+        assertEq(portal.leaderActivationTempoBlock(), uint64(block.number));
+    }
+
+    function test_setLeader_revertsForUnauthorizedCaller() public {
         address[] memory signers = _activateSequencerSet(2);
         uint64 epoch = portal.leaderEpoch();
 

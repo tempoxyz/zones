@@ -276,6 +276,11 @@ contract ZonePortal is IZonePortal {
         _;
     }
 
+    modifier onlySequencerOrAdmin() {
+        if (msg.sender != admin && !isSequencer[msg.sender]) revert NotSequencer();
+        _;
+    }
+
     modifier onlyAdmin() {
         if (msg.sender != admin) revert NotAdmin();
         _;
@@ -368,7 +373,7 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @inheritdoc IZonePortal
-    function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencer {
+    function setLeader(address newLeader, uint64 expectedEpoch) external onlySequencerOrAdmin {
         if (!isSequencer[newLeader]) revert InvalidLeader();
         // Idempotent fanout: every node relays the same target, only the first call transitions.
         if (newLeader == leader) return;

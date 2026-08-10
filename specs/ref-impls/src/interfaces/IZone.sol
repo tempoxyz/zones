@@ -774,8 +774,8 @@ interface IZonePortal {
     function leaderActivationTempoBlock() external view returns (uint64);
 
     /// @notice Transfer block-production leadership to another sequencer-set member.
-    /// @dev Only callable by an active sequencer. A call naming the already-active leader is a
-    ///      successful no-op so operators can fan the same request out to every node.
+    /// @dev Only callable by the admin or an active sequencer. A call naming the already-active
+    ///      leader is a successful no-op so operators can fan the same request out to every node.
     /// @param newLeader The individual sequencer address of the new leader.
     /// @param expectedEpoch The finalized leaderEpoch the caller observed (compare-and-set).
     function setLeader(address newLeader, uint64 expectedEpoch) external;
