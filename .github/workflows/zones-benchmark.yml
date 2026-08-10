@@ -481,6 +481,7 @@ jobs:
       ZONES_BENCH_OUTPUT: target/zones-benchmark/neobank-e2e
       ZONES_BENCH_REPORT: target/zones-benchmark/report-neobank-e2e.json
       ZONES_BENCH_SPF_OUTPUT: target/zones-benchmark/spf-input.json
+      ZONES_BENCH_SPF_PROFILE: target/zones-benchmark/spf-profile.json.gz
       ZONES_BENCH_SPF_REPORT: target/zones-benchmark/spf-report.txt
       ZONES_BENCH_SPF_SUMMARY: target/zones-benchmark/spf-summary.md
       ZONES_BENCH_SPF_RANGE: target/zones-benchmark/spf-range.env
@@ -734,6 +735,29 @@ jobs:
           echo "ZONES_BENCH_TUNED=1" >> "$GITHUB_ENV"
           nu -c "source '$TEMPO_ROOT/tempo.nu'; apply-system-tuning | ignore"
 
+      - name: Check Samply profiling support
+        run: |
+          set -euo pipefail
+          if ! samply_path="$(command -v samply)"; then
+            echo "Samply is not installed on this benchmark runner" >&2
+            exit 1
+          fi
+          "$samply_path" --version
+          if samply record --help | grep -q -- '--presymbolicate'; then
+            echo "ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG=--presymbolicate" >> "$GITHUB_ENV"
+          elif samply record --help | grep -q -- '--unstable-presymbolicate'; then
+            echo "ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG=--unstable-presymbolicate" >> "$GITHUB_ENV"
+          else
+            echo "Samply does not support presymbolication" >&2
+            exit 1
+          fi
+          for setting in perf_event_paranoid kptr_restrict; do
+            path="/proc/sys/kernel/$setting"
+            if [[ -r "$path" ]]; then
+              printf 'kernel.%s=%s\n' "$setting" "$(< "$path")"
+            fi
+          done
+
       - name: Provision topology and run neobank workload
         env:
           CLICKHOUSE_URL: ${{ secrets.CLICKHOUSE_URL }}
@@ -777,20 +801,32 @@ jobs:
             --mnemonic-index 4)"
           trap 'unset private_key' EXIT
 
+          samply_args=(
+            record
+            --save-only
+            "$ZONES_BENCH_SAMPLY_PRESYMBOLICATE_FLAG"
+            --output "$ZONES_BENCH_SPF_PROFILE"
+          )
           set +e
-          PRIVATE_KEY="$private_key" taskset --cpu-list "$ZONES_BENCH_CPUSET" \
-            "$SPF_BIN" generate-input \
-            --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
-            --tempo-genesis "$ZONES_BENCH_TEMPO_GENESIS" \
-            --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
-            --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
-            --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
-            --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
-            --output "$ZONES_BENCH_SPF_OUTPUT" \
+          PRIVATE_KEY="$private_key" samply "${samply_args[@]}" -- \
+            taskset --cpu-list "$ZONES_BENCH_CPUSET" \
+              "$SPF_BIN" generate-input \
+              --tempo-rpc-url "$ZONES_BENCH_L1_QUERY_RPC_URL" \
+              --tempo-genesis "$ZONES_BENCH_TEMPO_GENESIS" \
+              --zone-private-rpc-url "$ZONE_PRIVATE_RPC_URL" \
+              --zone-unrestricted-rpc-url "$ZONE_RPC_URL" \
+              --from-block "$ZONES_BENCH_SPF_FROM_BLOCK" \
+              --to-block "$ZONES_BENCH_SPF_TO_BLOCK" \
+              --output "$ZONES_BENCH_SPF_OUTPUT" \
             > "$ZONES_BENCH_SPF_REPORT" \
             2> target/zones-benchmark/spf.log
           spf_status=$?
           set -e
+          if (( spf_status == 0 )) && [[ ! -s "$ZONES_BENCH_SPF_PROFILE" ]]; then
+            echo "Samply did not produce $ZONES_BENCH_SPF_PROFILE" \
+              >> target/zones-benchmark/spf.log
+            spf_status=1
+          fi
           if (( spf_status == 0 )) &&
              [[ "$ZONES_BENCH_NEOBANK_PRESET" != encrypted-deposit ]] &&
              ! grep -Eq '^  User transactions: +[1-9][0-9]*$' "$ZONES_BENCH_SPF_REPORT"
@@ -1021,6 +1057,7 @@ jobs:
             target/zones-benchmark/neobank-e2e/
             target/zones-benchmark/*.json
             target/zones-benchmark/*.md
+            target/zones-benchmark/spf-profile*
             target/zones-benchmark/spf.log
             target/zones-benchmark/spf-report.txt
             target/zones-benchmark/spf-range.env
