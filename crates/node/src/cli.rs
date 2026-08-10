@@ -363,7 +363,7 @@ pub struct ZoneArgs {
     )]
     pub sequencer_manifest: Option<PathBuf>,
 
-    /// Path to this node's hex-encoded Ed25519 P2P identity key.
+    /// Path to a file or FIFO containing this node's hex-encoded Ed25519 P2P identity key.
     #[arg(
         long = "p2p.key",
         env = "P2P_KEY",
@@ -372,7 +372,7 @@ pub struct ZoneArgs {
     )]
     pub p2p_key: Option<PathBuf>,
 
-    /// Path to this node's hex-encoded individual secp256k1 private key.
+    /// Path to a file or FIFO containing this node's hex-encoded individual secp256k1 private key.
     #[arg(
         long = "secp256k1.key",
         env = "SECP256K1_KEY",

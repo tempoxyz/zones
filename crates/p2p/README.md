@@ -178,6 +178,8 @@ Add these arguments to the node's normal command:
 
 Use each node's own key files and listener address. Quorum followers use their individual
 secp256k1 keys to sign settlement attestations after importing and validating blocks.
+The paths supplied through `--p2p.key`, `--secp256k1.key`, and `--sequencer-key-file` may point
+to either regular files or FIFOs.
 
 An rpc-follower is started with **neither** key: it omits `--secp256k1.key` (it never signs an
 attestation) and `--sequencer-key`/`--sequencer-key-file` (it never produces a block). The shared
