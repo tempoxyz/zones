@@ -141,10 +141,12 @@ The manifest loader validates that:
 - the manifest's `zone_id` matches `--zone.id`; and
 - both local private keys correspond to the same manifest member.
 
-At startup, once the portal is deployed, the node also checks the manifest against `ZonePortal`
-and refuses to start unless every quorum node's `secp256k1_address` is a registered portal sequencer
-and `sequencerThreshold()` is nonzero and reachable by the manifest quorum. Both would otherwise
-surface as stalled settlement at the next batch boundary.
+At P2P startup, the node requires the configured `ZonePortal` to be deployed at the current L1 tip,
+then checks the manifest against it. The persisted Zone genesis anchor may still precede portal
+deployment so the creation block can be replayed. The node refuses to start unless every quorum
+node's `secp256k1_address` is a registered portal sequencer and `sequencerThreshold()` is nonzero
+and reachable by the manifest quorum. These failures would otherwise surface as stalled settlement
+at the next batch boundary.
 
 Registered sequencers the manifest does not list only warn — a demoted standby whose key was never
 deregistered holds a share of the threshold nobody signs for, but failing on it would make every
