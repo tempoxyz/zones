@@ -102,10 +102,16 @@ where
     ) -> TempoEvm<L1OverlayDB<DB, L1>, I> {
         let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new());
         let cfg = evm.ctx().cfg.clone();
+        let current_sequencer = evm.ctx().block.beneficiary;
         let actions = StorageActions::disabled();
         let non_creditable_slots = evm.non_creditable_slots();
         let (_, _, precompiles) = evm.components_mut();
-        let env = ZonePrecompileEnv::new(&cfg, actions, non_creditable_slots);
+        let env = ZonePrecompileEnv::new(
+            &cfg,
+            actions.clone(),
+            non_creditable_slots.clone(),
+            current_sequencer,
+        );
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
             Some(TempoState::create(l1.clone(), &env))
         });
@@ -139,8 +145,6 @@ where
             Some(create_tip403_precompile(&tip403_env))
         });
         let tip20_l1 = l1.clone();
-        let nonce_l1 = l1.clone();
-        let account_keychain_l1 = l1.clone();
         let storage_credits_l1 = l1.clone();
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
@@ -148,12 +152,9 @@ where
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                Some(create_nonce_manager_precompile(&env, nonce_l1.clone()))
+                Some(create_nonce_manager_precompile(&env))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                Some(create_account_keychain_precompile(
-                    &env,
-                    account_keychain_l1.clone(),
-                ))
+                Some(create_account_keychain_precompile(&env))
             } else if *address == RECEIVE_POLICY_GUARD_ADDRESS {
                 Some(create_receive_policy_guard_precompile(&env))
             } else if *address == STORAGE_CREDITS_ADDRESS {

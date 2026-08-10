@@ -62,6 +62,7 @@ pub(crate) fn test_env(ctx: &TestContext) -> ZonePrecompileEnv {
         &ctx.cfg,
         StorageActions::disabled(),
         Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        ctx.block.beneficiary,
     )
 }
 

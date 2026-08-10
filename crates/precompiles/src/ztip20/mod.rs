@@ -43,11 +43,15 @@ pub(crate) const TIP20_FIXED_GAS_SELECTORS: &[[u8; 4]] = &[
 #[derive(Clone)]
 pub(crate) struct TIP20Rules<P> {
     l1: L1State<P>,
+    current_sequencer: Address,
 }
 
 impl<P> TIP20Rules<P> {
-    pub(crate) fn new(l1: L1State<P>) -> Self {
-        Self { l1 }
+    pub(crate) fn new(l1: L1State<P>, current_sequencer: Address) -> Self {
+        Self {
+            l1,
+            current_sequencer,
+        }
     }
 }
 
@@ -69,7 +73,13 @@ impl<P: L1StorageReader> CallRules for TIP20Rules<P> {
                     check_caller_or_sequencer(&self.l1, caller, &[call.owner, call.spender])
                 }
                 ITIP20::ITIP20Calls::nonces(call) => {
-                    check_caller_or_sequencer(&self.l1, caller, &[call.owner])
+                    if self.current_sequencer != Address::ZERO && caller == self.current_sequencer {
+                        CallCheck::Continue
+                    } else if caller == call.owner {
+                        CallCheck::Continue
+                    } else {
+                        CallCheck::Revert(Unauthorized {}.abi_encode().into())
+                    }
                 }
                 // Inbox/outbox call TIP20 internally; public mint/burn entry points stay disabled.
                 ITIP20::ITIP20Calls::mint(_)
@@ -173,7 +183,10 @@ mod tests {
     const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
 
     fn rules() -> TIP20Rules<MockL1Reader> {
-        TIP20Rules::new(L1State::new(MockL1Reader::default(), PORTAL_ADDRESS))
+        TIP20Rules::new(
+            L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
+            Address::ZERO,
+        )
     }
 
     fn assert_allowed(rules: &TIP20Rules<MockL1Reader>, call: impl SolCall, caller: Address) {
@@ -234,6 +247,7 @@ mod tests {
                 })?;
             }
 
+            ctx.block.beneficiary = sequencer;
             let env = test_env(&ctx);
             let precompile = crate::create_tip20_precompile(token, &env, l1);
 
@@ -293,7 +307,7 @@ mod tests {
         let outsider = Address::repeat_byte(0x44);
         let reader = MockL1Reader::default();
         reader.seed_active_sequencer(PORTAL_ADDRESS, 0, sequencer);
-        let rules = TIP20Rules::new(L1State::new(reader, PORTAL_ADDRESS));
+        let rules = TIP20Rules::new(L1State::new(reader, PORTAL_ADDRESS), sequencer);
         let mut ctx = test_context();
         let mut storage = test_storage_provider(&mut ctx, u64::MAX, false);
 
@@ -313,7 +327,32 @@ mod tests {
             assert_allowed(&rules, nonce.clone(), owner);
             assert_allowed(&rules, nonce.clone(), sequencer);
             assert_unauthorized(&rules, nonce, outsider);
+            let role = IRolesAuth::hasRoleCall {
+                account: owner,
+                role: *ISSUER_ROLE,
+            };
+            assert_allowed(&rules, role.clone(), owner);
+            assert_allowed(&rules, role.clone(), sequencer);
+            assert_unauthorized(&rules, role, outsider);
         });
+    }
+
+    #[test]
+    fn nonce_privacy_does_not_depend_on_unverified_l1_sequencer_state() {
+        let owner = Address::repeat_byte(0x11);
+        let l1_only_sequencer = Address::repeat_byte(0x22);
+        let current_sequencer = Address::repeat_byte(0x33);
+        let reader = MockL1Reader::default();
+        reader.seed_active_sequencer(PORTAL_ADDRESS, 0, l1_only_sequencer);
+        let rules = TIP20Rules::new(
+            L1State::new(reader.clone(), PORTAL_ADDRESS),
+            current_sequencer,
+        );
+        let nonce = ITIP20::noncesCall { owner };
+
+        assert_allowed(&rules, nonce.clone(), current_sequencer);
+        assert_unauthorized(&rules, nonce, l1_only_sequencer);
+        assert!(reader.storage_requests().is_empty());
     }
 
     #[test]

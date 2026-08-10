@@ -1,202 +1,163 @@
-//! Zone read-privacy rules for the upstream Tempo AccountKeychain precompile.
+//! Zone privacy rules for the upstream Tempo account-keychain precompile.
 
 use alloy_primitives::Address;
-use alloy_sol_types::SolInterface;
-use tempo_contracts::precompiles::IAccountKeychain;
-
-use crate::{
-    execution::{CallCheck, CallRules},
-    privacy::check_caller_or_sequencer,
-    storage::{L1State, L1StorageReader},
+use alloy_sol_types::SolCall;
+use tempo_precompiles::{
+    Precompile as _,
+    account_keychain::{
+        AccountKeychain, IAccountKeychain, getAllowedCallsCall, getKeyCall, getRemainingLimitCall,
+        getRemainingLimitWithPeriodCall, isKeyAuthorizationWitnessBurnedCall,
+    },
+    dispatch::selector_from_calldata,
 };
 
-/// Zone-specific rules applied before forwarding to upstream `AccountKeychain`.
+use crate::{
+    account_privacy::AccountPrivacy,
+    execution::{CallCheck, CallRules},
+};
+
 #[derive(Clone)]
-pub(crate) struct AccountKeychainRules<P> {
-    l1: L1State<P>,
+pub(crate) struct AccountKeychainRules {
+    privacy: AccountPrivacy,
 }
 
-impl<P> AccountKeychainRules<P> {
-    pub(crate) fn new(l1: L1State<P>) -> Self {
-        Self { l1 }
-    }
-}
-
-impl<P: L1StorageReader> CallRules for AccountKeychainRules<P> {
-    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
-        let Ok(call) = IAccountKeychain::IAccountKeychainCalls::abi_decode(data) else {
-            // Preserve the upstream error and gas behavior for malformed or unknown calldata.
-            return CallCheck::Continue;
-        };
-
-        // Intentionally exhaustive: an upstream ABI addition must be classified here.
-        match call {
-            IAccountKeychain::IAccountKeychainCalls::getKey(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
-            IAccountKeychain::IAccountKeychainCalls::getRemainingLimit(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
-            IAccountKeychain::IAccountKeychainCalls::getRemainingLimitWithPeriod(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
-            IAccountKeychain::IAccountKeychainCalls::getAllowedCalls(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
-            IAccountKeychain::IAccountKeychainCalls::isKeyAuthorizationWitnessBurned(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
-            IAccountKeychain::IAccountKeychainCalls::isAdminKey(call) => {
-                check_caller_or_sequencer(&self.l1, caller, &[call.account])
-            }
-            IAccountKeychain::IAccountKeychainCalls::authorizeKey_0(_)
-            | IAccountKeychain::IAccountKeychainCalls::authorizeKey_1(_)
-            | IAccountKeychain::IAccountKeychainCalls::authorizeKey_2(_)
-            | IAccountKeychain::IAccountKeychainCalls::authorizeAdminKey(_)
-            | IAccountKeychain::IAccountKeychainCalls::burnKeyAuthorizationWitness(_)
-            | IAccountKeychain::IAccountKeychainCalls::revokeKey(_)
-            | IAccountKeychain::IAccountKeychainCalls::updateSpendingLimit(_)
-            | IAccountKeychain::IAccountKeychainCalls::setAllowedCalls(_)
-            | IAccountKeychain::IAccountKeychainCalls::removeAllowedCalls(_)
-            | IAccountKeychain::IAccountKeychainCalls::getTransactionKey(_) => CallCheck::Continue,
+impl AccountKeychainRules {
+    pub(crate) fn new(current_sequencer: Address) -> Self {
+        Self {
+            privacy: AccountPrivacy::new(current_sequencer),
         }
     }
+}
+
+fn account_from<C: SolCall>(args: &[u8], account: impl FnOnce(C) -> Address) -> Option<Address> {
+    C::abi_decode_raw(args).ok().map(account)
+}
+
+impl CallRules for AccountKeychainRules {
+    fn admit(&self, data: &[u8], caller: Address) -> CallCheck {
+        let Some(selector) = selector_from_calldata(data) else {
+            return CallCheck::Continue;
+        };
+        let args = &data[4..];
+        let account = match selector {
+            getKeyCall::SELECTOR => account_from::<getKeyCall>(args, |call| call.account),
+            getRemainingLimitCall::SELECTOR => {
+                account_from::<getRemainingLimitCall>(args, |call| call.account)
+            }
+            getRemainingLimitWithPeriodCall::SELECTOR => {
+                account_from::<getRemainingLimitWithPeriodCall>(args, |call| call.account)
+            }
+            getAllowedCallsCall::SELECTOR => {
+                account_from::<getAllowedCallsCall>(args, |call| call.account)
+            }
+            isKeyAuthorizationWitnessBurnedCall::SELECTOR => {
+                account_from::<isKeyAuthorizationWitnessBurnedCall>(args, |call| call.account)
+            }
+            IAccountKeychain::isAdminKeyCall::SELECTOR => {
+                account_from::<IAccountKeychain::isAdminKeyCall>(args, |call| call.account)
+            }
+            _ => return CallCheck::Continue,
+        };
+
+        account.map_or(CallCheck::Continue, |account| {
+            self.privacy.authorize(caller, &[account])
+        })
+    }
+}
+
+pub(crate) fn execute(data: &[u8], caller: Address) -> revm::precompile::PrecompileResult {
+    AccountKeychain::new().call(data, caller)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, B256, address};
-    use alloy_sol_types::{SolCall, SolError};
+    use alloy_primitives::B256;
+    use alloy_sol_types::SolError;
     use tempo_zone_contracts::Unauthorized;
 
-    use crate::{
-        storage::StorageCtx,
-        test_utils::{MockL1Reader, test_context, test_storage_provider},
-    };
-
-    const PORTAL_ADDRESS: Address = address!("0x0000000000000000000000000000000000000b01");
-
-    fn assert_account_scoped<C: SolCall + Clone>(
-        rules: &AccountKeychainRules<MockL1Reader>,
-        call: C,
-        owner: Address,
-        sequencer: Address,
-        outsider: Address,
-    ) {
-        for caller in [owner, sequencer] {
-            assert!(matches!(
-                rules.admit(&call.clone().abi_encode(), caller),
-                CallCheck::Continue
-            ));
-        }
+    fn assert_allowed(rules: &AccountKeychainRules, call: impl SolCall, caller: Address) {
         assert!(matches!(
-            rules.admit(&call.abi_encode(), outsider),
-            CallCheck::Revert(data) if data == Unauthorized {}.abi_encode()
+            rules.admit(&call.abi_encode(), caller),
+            CallCheck::Continue
         ));
     }
 
-    #[test]
-    fn account_indexed_getters_allow_owner_and_sequencer_only() {
-        let owner = Address::repeat_byte(0x11);
-        let key_id = Address::repeat_byte(0x12);
-        let token = Address::repeat_byte(0x13);
-        let sequencer = Address::repeat_byte(0x22);
-        let outsider = Address::repeat_byte(0x33);
-        let reader = MockL1Reader::default();
-        reader.seed_active_sequencer(PORTAL_ADDRESS, 0, sequencer);
-        let rules = AccountKeychainRules::new(L1State::new(reader, PORTAL_ADDRESS));
-        let mut ctx = test_context();
-        let mut storage = test_storage_provider(&mut ctx, u64::MAX, true);
+    fn assert_unauthorized(rules: &AccountKeychainRules, call: impl SolCall, caller: Address) {
+        let CallCheck::Revert(bytes) = rules.admit(&call.abi_encode(), caller) else {
+            panic!("private account read must revert")
+        };
+        assert_eq!(bytes, Unauthorized {}.abi_encode());
+    }
 
-        StorageCtx::enter(&mut storage, || {
-            assert_account_scoped(
-                &rules,
-                IAccountKeychain::getKeyCall {
-                    account: owner,
-                    keyId: key_id,
-                },
-                owner,
-                sequencer,
-                outsider,
-            );
-            assert_account_scoped(
-                &rules,
-                IAccountKeychain::getRemainingLimitCall {
-                    account: owner,
-                    keyId: key_id,
-                    token,
-                },
-                owner,
-                sequencer,
-                outsider,
-            );
-            assert_account_scoped(
-                &rules,
-                IAccountKeychain::getRemainingLimitWithPeriodCall {
-                    account: owner,
-                    keyId: key_id,
-                    token,
-                },
-                owner,
-                sequencer,
-                outsider,
-            );
-            assert_account_scoped(
-                &rules,
-                IAccountKeychain::getAllowedCallsCall {
-                    account: owner,
-                    keyId: key_id,
-                },
-                owner,
-                sequencer,
-                outsider,
-            );
-            assert_account_scoped(
-                &rules,
-                IAccountKeychain::isKeyAuthorizationWitnessBurnedCall {
-                    account: owner,
-                    witness: B256::repeat_byte(0x55),
-                },
-                owner,
-                sequencer,
-                outsider,
-            );
-            assert_account_scoped(
-                &rules,
-                IAccountKeychain::isAdminKeyCall {
-                    account: owner,
-                    keyId: key_id,
-                },
-                owner,
-                sequencer,
-                outsider,
-            );
+    #[test]
+    fn account_getters_allow_only_owner_or_sequencer() {
+        let owner = Address::repeat_byte(0x11);
+        let outsider = Address::repeat_byte(0x22);
+        let sequencer = Address::repeat_byte(0x33);
+        let key = Address::repeat_byte(0x44);
+        let rules = AccountKeychainRules::new(sequencer);
+
+        macro_rules! check {
+            ($call:expr) => {{
+                let call = $call;
+                assert_allowed(&rules, call.clone(), owner);
+                assert_allowed(&rules, call.clone(), sequencer);
+                assert_unauthorized(&rules, call, outsider);
+            }};
+        }
+
+        check!(getKeyCall {
+            account: owner,
+            keyId: key
+        });
+        check!(getRemainingLimitCall {
+            account: owner,
+            keyId: key,
+            token: Address::repeat_byte(0x66),
+        });
+        check!(getRemainingLimitWithPeriodCall {
+            account: owner,
+            keyId: key,
+            token: Address::repeat_byte(0x66),
+        });
+        check!(getAllowedCallsCall {
+            account: owner,
+            keyId: key
+        });
+        check!(isKeyAuthorizationWitnessBurnedCall {
+            account: owner,
+            witness: B256::repeat_byte(0x77),
+        });
+        check!(IAccountKeychain::isAdminKeyCall {
+            account: owner,
+            keyId: key
         });
     }
 
     #[test]
-    fn caller_scoped_and_mutating_methods_remain_upstream_authorized() {
-        let caller = Address::repeat_byte(0x11);
-        let rules =
-            AccountKeychainRules::new(L1State::new(MockL1Reader::default(), PORTAL_ADDRESS));
-
+    fn non_account_getter_is_unchanged() {
+        let rules = AccountKeychainRules::new(Address::ZERO);
         assert!(matches!(
             rules.admit(
                 &IAccountKeychain::getTransactionKeyCall {}.abi_encode(),
-                caller
+                Address::repeat_byte(0x11)
             ),
             CallCheck::Continue
         ));
-        assert!(matches!(
-            rules.admit(
-                &IAccountKeychain::revokeKeyCall {
-                    keyId: Address::repeat_byte(0x22),
-                }
-                .abi_encode(),
-                caller
-            ),
-            CallCheck::Continue
-        ));
+    }
+
+    #[test]
+    fn zero_beneficiary_does_not_authorize_zero_caller() {
+        let owner = Address::repeat_byte(0x11);
+        let rules = AccountKeychainRules::new(Address::ZERO);
+        assert_unauthorized(
+            &rules,
+            getKeyCall {
+                account: owner,
+                keyId: Address::repeat_byte(0x22),
+            },
+            Address::ZERO,
+        );
     }
 }

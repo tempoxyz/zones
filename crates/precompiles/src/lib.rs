@@ -32,6 +32,8 @@
 
 extern crate alloc;
 
+mod account_keychain;
+mod account_privacy;
 pub mod error;
 pub use error::{Result, ZonePrecompileError, ZoneResult};
 
@@ -51,7 +53,6 @@ pub mod dispatch {
 mod execution;
 mod privacy;
 pub use execution::ZonePrecompileEnv;
-mod account_keychain;
 pub mod inbox;
 mod nonce;
 pub mod receive_policy_guard;
@@ -79,8 +80,6 @@ use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 use tempo_precompiles::{
     Precompile as _,
-    account_keychain::AccountKeychain,
-    nonce::NonceManager,
     receive_policy_guard::ReceivePolicyGuard as TempoReceivePolicyGuard,
     storage_credits::StorageCredits,
     tip20::{ITIP20::InsufficientBalance as TIP20InsufficientBalance, TIP20Token},
@@ -136,31 +135,22 @@ pub fn create_receive_policy_guard_precompile(env: &ZonePrecompileEnv) -> DynPre
 }
 
 /// Creates upstream NonceManager execution with Zone account-scoped read rules.
-pub fn create_nonce_manager_precompile<P>(env: &ZonePrecompileEnv, l1: L1State<P>) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_nonce_manager_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
         "NonceManager",
         env,
-        nonce::NonceRules::new(l1),
-        |data, caller| NonceManager::new().call(data, caller),
+        nonce::NonceRules::new(env.current_sequencer()),
+        nonce::execute,
     )
 }
 
 /// Creates upstream AccountKeychain execution with Zone account-scoped read rules.
-pub fn create_account_keychain_precompile<P>(
-    env: &ZonePrecompileEnv,
-    l1: L1State<P>,
-) -> DynPrecompile
-where
-    P: L1StorageReader,
-{
+pub fn create_account_keychain_precompile(env: &ZonePrecompileEnv) -> DynPrecompile {
     execution::create_precompile(
         "AccountKeychain",
         env,
-        account_keychain::AccountKeychainRules::new(l1),
-        |data, caller| AccountKeychain::new().call(data, caller),
+        account_keychain::AccountKeychainRules::new(env.current_sequencer()),
+        account_keychain::execute,
     )
 }
 
@@ -200,7 +190,7 @@ where
     execution::create_precompile(
         "TIP20Token",
         env,
-        ztip20::TIP20Rules::new(l1),
+        ztip20::TIP20Rules::new(l1, env.current_sequencer()),
         move |data, caller| {
             TIP20Token::from_address_unchecked(address)
                 .call(data, caller)

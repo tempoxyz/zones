@@ -28,7 +28,7 @@ use std::{collections::HashSet, time::Duration};
 use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TEMPO_T1_BASE_FEE};
 use tempo_contracts::precompiles::{
     IAccountKeychain, INonce, IStorageCredits, ITIP20 as ContractTip20,
-    account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
+    account_keychain::IAccountKeychain::{SignatureType as KeyInfoSignatureType, getKeyCall},
 };
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS, STORAGE_CREDITS_ADDRESS,
@@ -825,6 +825,111 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
         U256::from(allowance_amount)
     );
 
+    Ok(())
+}
+
+/// Every remaining ZONE-97 account-indexed getter is enforced during execution, including
+/// contract-forwarded calls that bypass the RPC request's outer `from` field.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_account_indexed_system_getters_are_private() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+    let owner_signer = PrivateKeySigner::random();
+    let owner = owner_signer.address();
+    let outsider_signer = PrivateKeySigner::random();
+    let key = Address::repeat_byte(0x44);
+    let private_reads = [
+        (
+            ACCOUNT_KEYCHAIN_ADDRESS,
+            getKeyCall {
+                account: owner,
+                keyId: key,
+            }
+            .abi_encode(),
+            "AccountKeychain.getKey",
+        ),
+        (
+            NONCE_PRECOMPILE_ADDRESS,
+            INonce::getNonceCall {
+                account: owner,
+                nonceKey: U256::from(1),
+            }
+            .abi_encode(),
+            "NonceManager.getNonce",
+        ),
+        (
+            PATH_USD_ADDRESS,
+            PrecompileTip20::noncesCall { owner }.abi_encode(),
+            "TIP20.nonces",
+        ),
+    ];
+
+    for (target, data, label) in &private_reads {
+        let outsider = ctx
+            .call_as_user(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("{target:#x}"),
+                        "data": format!("0x{}", hex::encode(data)),
+                    },
+                    "latest"
+                ]),
+                &outsider_signer,
+            )
+            .await?;
+        assert!(
+            outsider.get("result").is_none() && outsider.get("error").is_some(),
+            "{label} must reject a caller reading another account: {outsider}"
+        );
+
+        let owner_result = ctx
+            .call_as_user(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("{target:#x}"),
+                        "data": format!("0x{}", hex::encode(data)),
+                    },
+                    "latest"
+                ]),
+                &owner_signer,
+            )
+            .await?;
+        assert!(
+            owner_result.get("result").is_some() && owner_result.get("error").is_none(),
+            "{label} must retain the owner's read access: {owner_result}"
+        );
+    }
+
+    // Exercise each target in its own aggregate. A single aggregate containing every target would
+    // stop at the first revert and leave later enforcement paths untested.
+    for (target, data, label) in &private_reads {
+        let multicall = IMulticall3::aggregateCall {
+            calls: vec![IMulticall3::Call {
+                target: *target,
+                callData: data.clone().into(),
+            }],
+        };
+        let forwarded = ctx
+            .call_as_user(
+                "eth_call",
+                json!([
+                    {
+                        "to": format!("{:#x}", alloy_provider::MULTICALL3_ADDRESS),
+                        "data": format!("0x{}", hex::encode(multicall.abi_encode())),
+                    },
+                    "latest"
+                ]),
+                &outsider_signer,
+            )
+            .await?;
+        assert!(
+            forwarded.get("result").is_none() && forwarded.get("error").is_some(),
+            "Multicall3 must not expose {label}: {forwarded}"
+        );
+    }
     Ok(())
 }
 
