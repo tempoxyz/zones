@@ -24,18 +24,25 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
           submodules: recursive
+      - name: Mint read-only Earn token
+        id: earn-token
+        uses: tempoxyz/gh-actions/actions/github-sts@main
+        with:
+          scope: tempoxyz/earn
+          policy: zones-read
       - name: Check out Earn contracts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
           ref: main
           path: earn
-          ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
+          token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
           submodules: true
       - uses: tempoxyz/gh-actions/actions/setup-rust-build@98b1081dcf34361b576aca2ab3041772708582ef

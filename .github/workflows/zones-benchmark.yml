@@ -437,6 +437,9 @@ jobs:
     needs: authorize
     runs-on: [self-hosted, Linux, X64, bare-metal-dual-schelk]
     timeout-minutes: 300
+    permissions:
+      contents: read
+      id-token: write
     env:
       ZONES_BENCH_PHASE: neobank-e2e
       ZONES_BENCH_NEOBANK_PRESET: ${{ needs.authorize.outputs.neobank-preset }}
@@ -489,13 +492,19 @@ jobs:
           persist-credentials: false
           submodules: recursive
 
+      - name: Mint read-only Earn token
+        id: earn-token
+        uses: tempoxyz/gh-actions/actions/github-sts@main
+        with:
+          scope: tempoxyz/earn
+          policy: zones-read
       - name: Check out Earn contracts
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: tempoxyz/earn
           ref: main
           path: earn
-          ssh-key: ${{ secrets.EARN_DEPLOY_KEY }}
+          token: ${{ steps.earn-token.outputs.token }}
           persist-credentials: false
           submodules: true
 
