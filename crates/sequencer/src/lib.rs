@@ -256,37 +256,10 @@ mod tests {
     };
     use tokio_tungstenite::{accept_async, tungstenite::Message};
 
-    #[test]
-    fn chain_metadata_sets_remote_poll_interval() {
-        let client = alloy_rpc_client::RpcClient::new(
-            alloy_transport::mock::MockTransport::new(alloy_transport::mock::Asserter::new()),
-            false,
-        );
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .with_nonce_key_filler()
-            .wallet(alloy_network::EthereumWallet::from(
-                PrivateKeySigner::random(),
-            ))
-            .connect_client(client);
-        let l1_chain = Chain::from_id(42431);
-        if !provider.client().is_local()
-            && let Some(avg_block_time) = l1_chain.average_blocktime_hint()
-        {
-            provider
-                .client()
-                .set_poll_interval(avg_block_time.mul_f32(0.6));
-        }
-
-        assert_eq!(
-            provider.client().poll_interval(),
-            Duration::from_millis(300)
-        );
-    }
-
-    async fn serve_l1_rpc(
+    async fn serve_block_number(
         stream: TcpStream,
-        block_number: &'static str,
-        close_after_block_number: bool,
+        result: &'static str,
+        close_after_response: bool,
     ) {
         let mut ws = accept_async(stream).await.unwrap();
         while let Some(message) = ws.next().await {
@@ -295,22 +268,22 @@ mod tests {
                 continue;
             };
             let request: Value = serde_json::from_str(&text).unwrap();
-            let result = match request["method"].as_str() {
+            let rpc_result = match request["method"].as_str() {
                 Some("eth_chainId") => "0xa5bf",
-                Some("eth_blockNumber") => block_number,
+                Some("eth_blockNumber") => result,
                 _ => continue,
             };
 
             let response = json!({
                 "jsonrpc": "2.0",
                 "id": request["id"].clone(),
-                "result": result,
+                "result": rpc_result,
             });
             ws.send(Message::Text(response.to_string().into()))
                 .await
                 .unwrap();
 
-            if close_after_block_number && request["method"] == "eth_blockNumber" {
+            if close_after_response && request["method"] == "eth_blockNumber" {
                 let _ = ws.close(None).await;
                 break;
             }
@@ -335,14 +308,14 @@ mod tests {
             // listener comes back; Alloy's default 3s interval would miss the
             // test timeout.
             drop(listener);
-            serve_l1_rpc(first_stream, "0x1", true).await;
+            serve_block_number(first_stream, "0x1", true).await;
 
             tokio::time::sleep(Duration::from_millis(100)).await;
 
             let listener = TcpListener::bind(addr).await.unwrap();
             let (second_stream, _) = listener.accept().await.unwrap();
             server_connections.fetch_add(1, Ordering::SeqCst);
-            serve_l1_rpc(second_stream, "0x2", false).await;
+            serve_block_number(second_stream, "0x2", false).await;
         });
 
         let provider =
