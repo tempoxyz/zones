@@ -20,7 +20,7 @@ use alloc::vec::Vec;
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256};
-use alloy_sol_types::{SolCall, SolValue};
+use alloy_sol_types::{SolCall, SolType, SolValue};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
     error::TempoPrecompileError,
@@ -347,14 +347,23 @@ impl TryFrom<QueuedDeposit> for DecodedQueuedDeposit {
     fn try_from(queued: QueuedDeposit) -> Result<Self, Self::Error> {
         match queued.depositType {
             DepositType::WithdrawalBounceBack => {
-                WithdrawalBounceBackDeposit::abi_decode(&queued.depositData)
-                    .map(Self::WithdrawalBounceBack)
+                decode_canonical(&queued.depositData).map(Self::WithdrawalBounceBack)
             }
-            DepositType::Deposit => Deposit::abi_decode(&queued.depositData).map(Self::Deposit),
+            DepositType::Deposit => decode_canonical(&queued.depositData).map(Self::Deposit),
             _ => return Err(ZonePrecompileError::MalformedCalldata),
         }
         .map_err(|_| ZonePrecompileError::MalformedCalldata)
     }
+}
+
+fn decode_canonical<T>(encoded: &[u8]) -> alloy_sol_types::Result<T>
+where
+    T: SolValue + From<<T::SolType as SolType>::RustType>,
+{
+    let value = T::abi_decode(encoded)?;
+    (value.abi_encode().as_slice() == encoded)
+        .then_some(value)
+        .ok_or(alloy_sol_types::Error::ReserMismatch)
 }
 
 fn decode_deposits(deposits: Vec<QueuedDeposit>) -> ZoneResult<Vec<DecodedQueuedDeposit>> {

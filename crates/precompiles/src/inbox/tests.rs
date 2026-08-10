@@ -578,6 +578,42 @@ fn malformed_nested_deposit_reverts_before_l1_reads() -> eyre::Result<()> {
 }
 
 #[test]
+fn non_canonical_encrypted_deposit_is_rejected() {
+    let deposit = Deposit {
+        token: Address::ZERO,
+        sender: Address::ZERO,
+        amount: 0,
+        tempoRefundRecipient: Address::ZERO,
+        keyIndex: U256::ZERO,
+        encrypted: tempo_zone_contracts::DepositPayload {
+            ephemeralPubkeyX: B256::ZERO,
+            ephemeralPubkeyYParity: 0,
+            ciphertext: Bytes::new(),
+            nonce: [0; 12].into(),
+            tag: [0; 16].into(),
+        },
+    };
+    let canonical = deposit.abi_encode();
+    let mut non_canonical = canonical.clone();
+    non_canonical.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+
+    assert!(
+        decode_deposits(vec![QueuedDeposit {
+            depositType: DepositType::Deposit,
+            depositData: canonical.into(),
+        }])
+        .is_ok()
+    );
+    assert!(
+        decode_deposits(vec![QueuedDeposit {
+            depositType: DepositType::Deposit,
+            depositData: non_canonical.into(),
+        }])
+        .is_err()
+    );
+}
+
+#[test]
 fn deposit_uses_child_anchor_key_and_mints_plaintext_recipient() -> eyre::Result<()> {
     let mut harness = Harness::new()?;
     let fixture = EncryptedDepositFixture::new();
