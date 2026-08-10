@@ -126,6 +126,7 @@ url = "2"
 
 [features]
 default = []
+asm-keccak = ["alloy-primitives/asm-keccak"]
 cli = [
   "dep:clap",
   "dep:reth-consensus",
@@ -136,6 +137,7 @@ cli = [
   "zone-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]
+keccak-cache-global = ["alloy-primitives/keccak-cache-global"]
 test-utils = [
   "reth-chainspec/test-utils",
   "reth-ethereum?/test-utils",
