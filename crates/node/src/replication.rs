@@ -383,10 +383,6 @@ fn encoded_block_number(encoded: &[u8]) -> eyre::Result<u64> {
     Ok(block.header.number())
 }
 
-fn persisted_backfill_tip(provider: &impl BlockNumReader) -> eyre::Result<u64> {
-    Ok(provider.last_block_number()?)
-}
-
 fn serve_backfill_page<P>(
     provider: &P,
     commands: &mpsc::Sender<BackfillCommand>,
@@ -400,7 +396,7 @@ where
         + HeaderProvider<Header = TempoHeader>
         + StateProviderFactory,
 {
-    let tip = persisted_backfill_tip(provider)?;
+    let tip = provider.last_block_number()?;
     let end = tip.min(start.saturating_add(BACKFILL_PAGE_SIZE.saturating_sub(1)));
     for number in start..=end {
         let block = provider.block_by_number(number)?.ok_or_else(|| {
@@ -1235,13 +1231,11 @@ mod tests {
 
     use alloy_eips::NumHash;
     use futures::{StreamExt as _, stream};
-    use reth_chainspec::ChainInfo;
-    use reth_storage_api::{BlockHashReader, BlockNumReader, errors::provider::ProviderResult};
 
     use super::{
         AdvanceTempoPortalInputs, BackfillProgress, EncodedPersistedBlock, MAX_PENDING_BLOCKS,
         PersistedBlockSource, PersistedTip, broadcast_persisted_blocks, buffer_pending_block,
-        persisted_backfill_tip, validate_live_block_sender, wait_for_validated_peer_anchor,
+        validate_live_block_sender, wait_for_validated_peer_anchor,
     };
     use alloy_primitives::B256;
     use zone_l1::{L1BlockTracker, L1PortalEvents};
@@ -1275,71 +1269,6 @@ mod tests {
                 encoded: vec![number as u8],
             })
         }
-    }
-
-    #[derive(Clone)]
-    struct DemotionSource {
-        encoded_reads: Arc<AtomicUsize>,
-        persisted: u64,
-    }
-
-    impl PersistedBlockSource for DemotionSource {
-        fn last_block_number(&self) -> eyre::Result<u64> {
-            Ok(self.persisted)
-        }
-
-        fn persisted_block_stream(&self) -> futures::stream::BoxStream<'static, PersistedTip> {
-            stream::pending().boxed()
-        }
-
-        fn encoded_block_by_number(&self, number: u64) -> eyre::Result<EncodedPersistedBlock> {
-            self.encoded_reads.fetch_add(1, Ordering::SeqCst);
-            eyre::bail!("stop flush tried to read unpersisted block {number}")
-        }
-    }
-
-    struct DivergentHeads {
-        best: u64,
-        persisted: u64,
-    }
-
-    impl BlockHashReader for DivergentHeads {
-        fn block_hash(&self, _number: u64) -> ProviderResult<Option<B256>> {
-            unreachable!("backfill tip selection must not read a block hash")
-        }
-
-        fn canonical_hashes_range(&self, _start: u64, _end: u64) -> ProviderResult<Vec<B256>> {
-            unreachable!("backfill tip selection must not read block hashes")
-        }
-    }
-
-    impl BlockNumReader for DivergentHeads {
-        fn chain_info(&self) -> ProviderResult<ChainInfo> {
-            unreachable!("backfill tip selection must not read chain info")
-        }
-
-        fn best_block_number(&self) -> ProviderResult<u64> {
-            Ok(self.best)
-        }
-
-        fn last_block_number(&self) -> ProviderResult<u64> {
-            Ok(self.persisted)
-        }
-
-        fn block_number(&self, _hash: B256) -> ProviderResult<Option<u64>> {
-            unreachable!("backfill tip selection must not resolve block numbers")
-        }
-    }
-
-    #[test]
-    fn backfill_tip_uses_the_persisted_head() {
-        let provider = DivergentHeads {
-            best: 3,
-            persisted: 2,
-        };
-
-        assert_eq!(provider.best_block_number().unwrap(), 3);
-        assert_eq!(persisted_backfill_tip(&provider).unwrap(), 2);
     }
 
     #[test]
@@ -1679,23 +1608,6 @@ mod tests {
             command_rx.recv().await,
             Some(P2pCommand::BroadcastBlock(vec![1]))
         );
-        assert_eq!(command_rx.recv().await, None);
-    }
-
-    #[tokio::test]
-    async fn demotion_flush_stops_at_the_persisted_head() {
-        let encoded_reads = Arc::new(AtomicUsize::new(0));
-        let source = DemotionSource {
-            encoded_reads: encoded_reads.clone(),
-            persisted: 1,
-        };
-        let (commands, mut command_rx) = tokio::sync::mpsc::channel(1);
-        let stop = tokio_util::sync::CancellationToken::new();
-        stop.cancel();
-
-        broadcast_persisted_blocks(source, commands, stop).await;
-
-        assert_eq!(encoded_reads.load(Ordering::SeqCst), 0);
         assert_eq!(command_rx.recv().await, None);
     }
 

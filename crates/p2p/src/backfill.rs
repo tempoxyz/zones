@@ -117,6 +117,7 @@ impl BackfillJob {
         kind: RequestKind,
         now: Instant,
     ) -> Option<(u64, Vec<PublicKey>)> {
+        self.behind_until.retain(|_, until| now < *until);
         let request_peers = peers
             .iter()
             .filter(|peer| {
