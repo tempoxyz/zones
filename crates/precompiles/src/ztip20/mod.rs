@@ -567,7 +567,7 @@ mod tests {
     fn uninitialized_token_rejects_before_policy_read() -> eyre::Result<()> {
         let token = address!("20C0000000000000000000000000000000000999");
         let caller = address!("0x00000000000000000000000000000000000000a2");
-        let to = address!("0x00000000000000000000000000000000000000a3");
+        let spender = address!("0x00000000000000000000000000000000000000a3");
         let mut ctx = test_context();
         let env = test_env(&ctx);
         let precompile = crate::create_tip20_precompile(
@@ -575,8 +575,8 @@ mod tests {
             &env,
             L1State::new(MockL1Reader::default(), PORTAL_ADDRESS),
         );
-        let calldata: Bytes = ITIP20::transferCall {
-            to,
+        let calldata: Bytes = ITIP20::approveCall {
+            spender,
             amount: U256::from(1u64),
         }
         .abi_encode()
@@ -679,6 +679,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "TODO: re-enable once zones allow user transfers"]
     fn transfer_from_insufficient_balance_does_not_reveal_the_source_balance() -> eyre::Result<()> {
         let mut harness = PrecompileHarness::new()?;
         // Craft a successful allowance return whose first four bytes collide with the upstream
