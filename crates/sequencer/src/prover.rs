@@ -151,7 +151,7 @@ pub(crate) fn spawn_shadow_prover<P: ZoneSequencerProvider>(
                         prev_block_hash = %job.batch.prev_block_hash,
                         next_block_hash = %job.batch.next_block_hash,
                         elapsed_ms = started.elapsed().as_millis(),
-                        error = %err,
+                        error = ?err,
                         "Shadow prover failed to validate finalized batch candidate"
                     );
                 }
@@ -562,12 +562,11 @@ async fn tempo_state_witness(
         .collect::<Vec<_>>();
     let proofs = stream::iter(requests)
         .map(|(block, account, slots)| async move {
-            let proof = provider
+            provider
                 .get_proof(account, slots)
                 .block_id(BlockId::number(block))
                 .await
-                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))?;
-            Ok::<_, eyre::Report>(proof)
+                .wrap_err_with(|| format!("eth_getProof for {account} at Tempo block {block}"))
         })
         .buffer_unordered(RPC_CONCURRENCY)
         .try_collect::<Vec<_>>()
