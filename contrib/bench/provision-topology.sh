@@ -954,7 +954,7 @@ provision_up() {
         --http --http.addr 127.0.0.1 --http.port 8546 \
         --http.api all \
         --ws --ws.addr 127.0.0.1 --ws.port 8546 \
-        --ws.api eth,net,web3,txpool \
+        --ws.api all \
         --metrics 127.0.0.1:9201 \
         --redacted-rpc.port 8544 \
         --zone.batch-interval-blocks "$zone_batch_interval_blocks" \
